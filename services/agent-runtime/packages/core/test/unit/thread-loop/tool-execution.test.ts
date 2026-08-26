@@ -600,7 +600,7 @@ describe("ThreadLoop", () => {
 			targetPodUid: session.identity.targetPodUid,
 		};
 		expect(session.state.enqueueAcceptedInput(reviewerInput)).toBe("applied");
-		expect(session.state.threadTurnReduction().action).toEqual({
+		expect(session.state.threadTurnReduction().nextStep).toEqual({
 			action: "commit_accepted_input",
 			runtimeInputId: reviewerInput.runtimeInputId,
 		});

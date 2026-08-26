@@ -1401,12 +1401,12 @@ export function layer(
 					threadEntry.status = "idle";
 					recordHotStateMetrics();
 					const reviewerRun = runSlot.reviewerExecutionToken !== undefined;
-					const latestActionNeedsRun = ThreadLoop.threadTurnActionNeedsRun(
-						threadEntry.runtimeThread.state.threadTurnReduction().action,
+					const latestNextStepNeedsRun = ThreadLoop.threadTurnNextStepNeedsRun(
+						threadEntry.runtimeThread.state.threadTurnReduction().nextStep,
 					);
 					if (
 						(!reviewerRun || !runSlot.stopping) &&
-						latestActionNeedsRun &&
+						latestNextStepNeedsRun &&
 						sessionEntry.threads.get(threadEntry.sessionThreadId) ===
 							threadEntry
 					) {
@@ -1561,9 +1561,9 @@ export function layer(
 									runSlot === undefined &&
 									(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 										undefined ||
-										ThreadLoop.threadTurnActionNeedsRun(
+										ThreadLoop.threadTurnNextStepNeedsRun(
 											threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-												.action,
+												.nextStep,
 										))
 										? yield* startThreadRun(
 												threadResult.sessionEntry,
@@ -1639,7 +1639,6 @@ export function layer(
 			): Effect.Effect<InterruptControlResult> =>
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
-					const declaration = { inputKind: "interrupt" as const };
 					const openRequest =
 						threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request;
 					if (openRequest !== undefined && openRequest.requestEnd === undefined) {
@@ -1726,15 +1725,23 @@ export function layer(
 							idleInterrupt: false,
 						} as const;
 					}
-					const committed = yield* Effect.promise(() => commitInput(declaration));
-					if (!committed.ok) {
+					const settlement = yield* threadLoop.settleIdleInterrupt(
+						threadEntry.runtimeThread,
+						interruptStateCommand(command),
+						commitInput,
+					);
+					if (settlement.type === "failed") {
+						markReloadRequired();
 						return {
 							ok: false,
 							sessionId,
 							reason: "context_load_failed",
 						} as const;
 					}
-					if ("stale" in committed || "joined" in committed) {
+					if (settlement.type === "conflict") {
+						return { ok: false, sessionId, reason: "control_busy" } as const;
+					}
+					if (settlement.type === "duplicate") {
 						return {
 							ok: true,
 							sessionId,
@@ -1742,96 +1749,9 @@ export function layer(
 							interrupted: false,
 							idleInterrupt: true,
 							duplicate: true,
-							...("stale" in committed ? { stale: true as const } : {}),
+							...(settlement.stale === true ? { stale: true as const } : {}),
 						} as const;
 					}
-					const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
-						interruptStateCommand(command),
-						async () => committed,
-					);
-					if (admitted === "conflict") {
-						return { ok: false, sessionId, reason: "control_busy" } as const;
-					}
-					if (admitted === "applied") {
-						threadEntry.runtimeThread.state.discardQueuedAcceptedInputsForInterrupt(
-							command.origin === "user",
-						);
-					}
-					const application = yield* Effect.promise(() =>
-						threadEntry.runtimeThread.state.commitUserInterruptInput(
-							declaration,
-						),
-					);
-					if ("type" in application.result) {
-						try {
-							const pendingTools = [
-								...threadEntry.runtimeThread.state.pendingApprovalToolJobs(),
-								...threadEntry.runtimeThread.state.resolvedToolRouteJobs(),
-								...threadEntry.runtimeThread.state.pendingSandboxExecutionJobs(),
-							];
-							threadEntry.runtimeThread.state.contextManager.appendInterruptToolResults(
-								pendingTools.map((pending) => ({
-									toolUseEventId: pending.toolUseEventId,
-									assistantMessageSequence: pending.assistantMessageSequence,
-									modelToolCallId: pending.toolPart.modelToolCallId,
-								})),
-								application.result.interruptToolResults,
-							);
-							threadEntry.runtimeThread.state.addPendingAttachments(
-								application.result.pendingAttachments,
-							);
-							threadEntry.runtimeThread.state.applyThreadTurnFact({
-								fact: "interrupt_committed",
-								eventId: command.runtimeInputId,
-							});
-							for (const cancellation of application.result.interruptToolResults) {
-								if (
-									threadEntry.runtimeThread.state
-										.pendingApprovalToolJobs()
-										.some(
-											(pending) =>
-												pending.toolUseEventId === cancellation.toolUseEventId,
-										)
-								) {
-									threadEntry.runtimeThread.state.removePendingApprovalToolJob(
-										cancellation.toolUseEventId,
-									);
-									metrics.addPendingApprovals(-1);
-								}
-								threadEntry.runtimeThread.state.clearThreadToolRoute(
-									cancellation.toolUseEventId,
-								);
-								threadEntry.runtimeThread.state.removeResolvedToolRouteJob(
-									cancellation.toolUseEventId,
-								);
-							}
-							for (const toolUseEventId of application.result.interruptToolResults.map(
-								(result) => result.toolUseEventId,
-							)) {
-								threadEntry.runtimeThread.state.removePendingSandboxExecutionJob(
-									toolUseEventId,
-								);
-								threadEntry.runtimeThread.state.clearThreadToolRoute(
-									toolUseEventId,
-								);
-							}
-						} catch {
-							markReloadRequired();
-							return {
-								ok: false,
-								sessionId,
-								reason: "context_load_failed",
-							} as const;
-						}
-					}
-					threadEntry.runtimeThread.state.completeUserInterrupt(
-						command.runtimeInputId,
-					);
-					// An idle interrupt has no owner Fiber whose run finalizer can reopen
-					// reducer admission. Release that local fence only after the durable
-					// interrupt result has been applied, so a later accepted input can
-					// become the sole follow-up run without racing the control commit.
-					threadEntry.runtimeThread.state.finishThreadRunProjection();
 					return {
 						ok: true,
 						sessionId,
@@ -2044,14 +1964,12 @@ export function layer(
 							{},
 							(threadResult) =>
 								Effect.gen(function* () {
-									const existingConfirmation =
-										threadResult.threadEntry.runtimeThread.state.toolConfirmation(
-											command.toolUseEventId,
-										);
-									if (
-										existingConfirmation?.runtimeInputId ===
-										command.runtimeInputId
-									) {
+									const settlement = yield* threadLoop.settleToolConfirmation(
+										threadResult.threadEntry.runtimeThread,
+										command,
+										commit,
+									);
+									if (settlement.type === "duplicate") {
 										return {
 											ok: true,
 											sessionId,
@@ -2059,76 +1977,7 @@ export function layer(
 											applied: false,
 										} as const;
 									}
-									const pendingTool =
-										threadResult.threadEntry.runtimeThread.state
-											.pendingApprovalToolJobs()
-											.find(
-												(pending) =>
-													pending.toolUseEventId === command.toolUseEventId,
-											);
-									if (pendingTool === undefined) {
-										const replay = yield* Effect.promise(() =>
-											commit({ inputKind: "tool_confirmation" }),
-										);
-										if (!replay.ok) {
-											return {
-												ok: false,
-												sessionId,
-												reason: "context_load_failed",
-											} as const;
-										}
-										if ("stale" in replay) {
-											staleTarget = threadResult;
-											return {
-												ok: true,
-												sessionId,
-												created: threadResult.sessionCreated,
-												applied: false,
-												stale: true,
-											} as const;
-										}
-										if (
-											"type" in replay &&
-											replay.assignedContextSequences.length > 0 &&
-											replay.assignedContextSequences.every(
-												(sequence) =>
-													threadResult.threadEntry.runtimeThread.state.contextManager.entry(
-														sequence,
-													) !== undefined,
-											)
-										) {
-											return {
-												ok: true,
-												sessionId,
-												created: threadResult.sessionCreated,
-												applied: false,
-											} as const;
-										}
-										return {
-											ok: false,
-											sessionId,
-											reason: "context_load_failed",
-										} as const;
-									}
-									const draft = ThreadLoop.toolConfirmationContext({
-										toolUseEventId: command.toolUseEventId,
-										pendingTool,
-										decision: command.decision,
-										...(command.denyMessage === undefined
-											? {}
-											: { denyMessage: command.denyMessage }),
-									});
-									const committed = yield* Effect.promise(() =>
-										commit({ inputKind: "tool_confirmation" }),
-									);
-									if (!committed.ok) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "context_load_failed",
-										} as const;
-									}
-									if ("stale" in committed) {
+									if (settlement.type === "stale") {
 										staleTarget = threadResult;
 										return {
 											ok: true,
@@ -2138,70 +1987,15 @@ export function layer(
 											stale: true,
 										} as const;
 									}
-									if (!("type" in committed)) {
+									if (settlement.type === "failed") {
 										return {
 											ok: false,
 											sessionId,
-											reason: "control_conflict",
+											reason: settlement.reason,
 										} as const;
 									}
-									const message = ThreadLoop.applyAcceptedInputResult(
-										[draft],
-										committed.assignedContextSequences,
-									)[0];
-									if (message === undefined) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									const existingEntry =
-										threadResult.threadEntry.runtimeThread.state.contextManager.entry(
-											message.messageSequence,
-										);
-									if (existingEntry === undefined) {
-										threadResult.threadEntry.runtimeThread.state.contextManager.appendEntry(
-											message,
-										);
-									} else if (
-										JSON.stringify(existingEntry) !== JSON.stringify(message)
-									) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									threadResult.threadEntry.runtimeThread.state.addPendingAttachments(
-										committed.pendingAttachments,
-									);
-									threadResult.threadEntry.runtimeThread.state.applyThreadTurnFact(
-										{
-											fact: "inputs_committed",
-											eventId: command.runtimeInputId,
-											contextSequences: [message.messageSequence],
-										},
-									);
 									threadResult.threadEntry.bridgeScope = command;
-									const confirmation =
-										threadResult.threadEntry.controlQueue.resolveToolConfirmation(
-											command,
-										);
-									if (confirmation === "conflict") {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									if (
-										threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
-									) {
-										threadResult.threadEntry.runtimeThread.state.recordThreadToolRoute(
-											command.toolUseEventId,
-											"resume_approval_settlement",
-										);
+									if (settlement.wakeThread) {
 										const runSlot = threadResult.threadEntry.runSlot;
 										if (runSlot === undefined) {
 											yield* startThreadRun(
@@ -2214,7 +2008,7 @@ export function layer(
 										ok: true,
 										sessionId,
 										created: threadResult.sessionCreated,
-										applied: confirmation === "applied",
+										applied: settlement.applied,
 									} as const;
 								}),
 							(reason) =>
@@ -2685,9 +2479,9 @@ export function layer(
 						startPendingWork &&
 						(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 							undefined ||
-							ThreadLoop.threadTurnActionNeedsRun(
+							ThreadLoop.threadTurnNextStepNeedsRun(
 								threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-									.action,
+									.nextStep,
 							))
 					) {
 						yield* startThreadRun(
@@ -2846,9 +2640,9 @@ export function layer(
 										installation.startPendingWork &&
 										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 											undefined ||
-											ThreadLoop.threadTurnActionNeedsRun(
+											ThreadLoop.threadTurnNextStepNeedsRun(
 												threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-													.action,
+													.nextStep,
 											))
 									) {
 										yield* startThreadRun(

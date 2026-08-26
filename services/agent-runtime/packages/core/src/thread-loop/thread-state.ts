@@ -67,13 +67,11 @@ import type {
 import type {
 	ThreadActiveInputView,
 	ThreadTurnFact,
-	ThreadTurnReduction,
+	ThreadTurnTransition,
 } from "./thread-turn-reducer.js";
 import {
-	consumeThreadTurnEdge,
-	deriveThreadTurnDecision,
-	initializeThreadTurnReduction,
-	reconcileThreadTurnSeal,
+	deriveThreadTurnSnapshot,
+	initializeThreadTurnTransition,
 	reduceThreadTurn,
 } from "./thread-turn-reducer.js";
 
@@ -375,7 +373,7 @@ export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
 
 /** Sole resident owner of one Thread's derived current-Turn checkpoint and Tool routes. */
 export class ThreadProcessor {
-	#reduction: ThreadTurnReduction;
+	#checkpoint: ThreadTurnCheckpoint;
 	#toolRoutes: ThreadToolRouteView;
 	#activeInputView: ThreadActiveInputView;
 	#acceptedInputs: RuntimeAcceptedInputState[] = [];
@@ -389,34 +387,43 @@ export class ThreadProcessor {
 	) {
 		this.#toolRoutes = toolRoutes;
 		this.#activeInputView = activeInputView;
-		this.#reduction = initializeThreadTurnReduction(
+		this.#checkpoint = initializeThreadTurnTransition(
 			checkpoint,
 			toolRoutes,
 			[],
 			activeInputView,
-		);
+		).checkpoint;
 	}
 
 	get checkpoint(): ThreadTurnCheckpoint {
-		return this.#reduction.checkpoint;
+		return this.#checkpoint;
 	}
 	get toolRoutes(): ThreadToolRouteView {
 		return this.#toolRoutes;
 	}
-	reduction(): ThreadTurnReduction {
-		return this.#reduction;
+	transition(): ThreadTurnTransition {
+		return {
+			checkpoint: this.#checkpoint,
+			...deriveThreadTurnSnapshot(
+				this.#checkpoint,
+				this.#toolRoutes,
+				this.acceptedInputIds(),
+				this.#activeInputView,
+			),
+		};
 	}
 
-	apply(fact: ThreadTurnFact): ThreadTurnReduction {
-		this.#reduction = reduceThreadTurn(
-			this.#reduction,
+	apply(fact: ThreadTurnFact): ThreadTurnTransition {
+		const transition = reduceThreadTurn(
+			this.transition(),
 			fact,
 			this.#toolRoutes,
 			this.acceptedInputIds(),
 			this.#activeInputView,
 		);
+		this.#checkpoint = transition.checkpoint;
 		const currentToolUseEventIds = new Set(
-			this.#reduction.checkpoint.request?.toolMembers.flatMap((member) =>
+			this.#checkpoint.request?.toolMembers.flatMap((member) =>
 				member.memberKind === "public_tool_use" ? [member.toolUseEventId] : [],
 			) ?? [],
 		);
@@ -425,27 +432,7 @@ export class ThreadProcessor {
 				currentToolUseEventIds.has(route.toolUseEventId),
 			),
 		};
-		return this.#reduction;
-	}
-
-	reconcileSeal(): ThreadTurnReduction {
-		this.#reduction = reconcileThreadTurnSeal(
-			this.#reduction,
-			this.#toolRoutes,
-			this.acceptedInputIds(),
-			this.#activeInputView,
-		);
-		return this.#reduction;
-	}
-
-	consumeEdge(): ThreadTurnReduction {
-		this.#reduction = consumeThreadTurnEdge(
-			this.#reduction,
-			this.#toolRoutes,
-			this.acceptedInputIds(),
-			this.#activeInputView,
-		);
-		return this.#reduction;
+		return transition;
 	}
 
 	setActiveInputView(activeInputView: ThreadActiveInputView): void {
@@ -572,15 +559,12 @@ export class ThreadProcessor {
 	}
 
 	private refreshDecision(): void {
-		this.#reduction = {
-			...this.#reduction,
-			...deriveThreadTurnDecision(
-				this.#reduction.checkpoint,
-				this.#toolRoutes,
-				this.acceptedInputIds(),
-				this.#activeInputView,
-			),
-		};
+		deriveThreadTurnSnapshot(
+			this.#checkpoint,
+			this.#toolRoutes,
+			this.acceptedInputIds(),
+			this.#activeInputView,
+		);
 	}
 }
 
@@ -656,26 +640,16 @@ export class ThreadState {
 		);
 	}
 
-	threadTurnReduction(): ThreadTurnReduction {
+	threadTurnReduction(): ThreadTurnTransition {
 		if (this.#threadProcessor === undefined) {
 			this.installThreadTurn(undefined, undefined);
 		}
-		return this.#threadProcessor!.reduction();
+		return this.#threadProcessor!.transition();
 	}
 
-	applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnReduction {
+	applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnTransition {
 		this.threadTurnReduction();
 		return this.#threadProcessor!.apply(fact);
-	}
-
-	reconcileThreadTurnSeal(): ThreadTurnReduction {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.reconcileSeal();
-	}
-
-	consumeThreadTurnEdge(): ThreadTurnReduction {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.consumeEdge();
 	}
 
 	recordThreadToolRoute(

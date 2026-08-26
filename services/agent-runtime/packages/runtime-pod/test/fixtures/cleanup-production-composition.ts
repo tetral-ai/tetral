@@ -25,8 +25,10 @@ const threadLoopLayer = Layer.succeed(
   ThreadLoop.Service.of({
     run: () => Effect.succeed({ type: "completed", modelMessageCount: 0 }),
     closeFailedRun: () => Effect.succeed({ type: "landed", disposition: "continuation" }),
-    closeRecoveredOpenRequestForInterrupt: () => Effect.succeed({ type: "interrupted" }),
-    seedRuntimeModel: () => undefined,
+		closeRecoveredOpenRequestForInterrupt: () => Effect.succeed({ type: "interrupted" }),
+		settleIdleInterrupt: () => Effect.succeed({ type: "applied" }),
+		settleToolConfirmation: () => Effect.succeed({ type: "duplicate" }),
+		seedRuntimeModel: () => undefined,
     installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
     installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
   }),

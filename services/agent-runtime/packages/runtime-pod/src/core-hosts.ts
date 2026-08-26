@@ -42,7 +42,7 @@ import {
 	extractThreadTurnCheckpoint,
 	projectFailedRequestsProviderContext,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodLogger } from "./logger.js";
@@ -659,7 +659,7 @@ export function validateClosedThreadResumeCheckpoint(
 	pendingSandboxExecutions: readonly unknown[],
 	hasPendingAttachments: boolean,
 ): void {
-	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
+	const decision = deriveThreadTurnSnapshot(checkpoint, routeView, [], {
 		hasPendingAttachments,
 	});
 	const incompleteToolUse =
@@ -679,7 +679,7 @@ export function validateClosedThreadResumeCheckpoint(
 		pendingSandboxExecutions.length !== 0 ||
 		routeView.routes.length !== 0 ||
 		decision.state.state !== "idle" ||
-		decision.action.action !== "await_input"
+		decision.nextStep.action !== "await_input"
 	) {
 		throw new Error(
 			"closed Thread resume requires a quiescent durable checkpoint",

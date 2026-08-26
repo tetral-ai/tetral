@@ -24,7 +24,7 @@ import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";

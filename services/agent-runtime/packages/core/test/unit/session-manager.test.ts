@@ -311,6 +311,8 @@ function threadLoopService(
 			Effect.succeed({ type: "landed", disposition: "terminal" }),
 		closeRecoveredOpenRequestForInterrupt: () =>
 			Effect.succeed({ type: "interrupted" }),
+		settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+		settleToolConfirmation: ThreadLoop.settleToolConfirmation,
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
@@ -2024,7 +2026,7 @@ describe("SessionManager", () => {
 				expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
 				expect(session.state.threadTurnReduction()).toMatchObject({
 					state: { state: "idle" },
-					action: { action: "await_input" },
+					nextStep: { action: "await_input" },
 				});
 				expect(idleInterruptCommits).toBe(1);
 				expect(session.state.contextManager.entries()).toHaveLength(2);
@@ -2940,7 +2942,7 @@ describe("SessionManager", () => {
 					{
 						checkpoint: { pendingInputContextSequences: [] },
 						state: { state: "ready_to_request" },
-						action: { action: "prepare_next_request" },
+						nextStep: { action: "prepare_next_request" },
 					},
 				);
 				threadLoop.runs[0]?.release();

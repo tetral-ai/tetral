@@ -37,7 +37,7 @@ import {
 	MaxProviderAttachments,
 	ThreadState,
 } from "../../../src/thread-loop/thread-state.js";
-import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
+import type { ThreadTurnNextStep } from "../../../src/thread-loop/thread-turn-reducer.js";
 import type {
 	PackageJson,
 	TestContextLoader,
@@ -64,12 +64,9 @@ import {
 } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
-	test("the ThreadLoop action interpreter exhaustively classifies the closed action union", () => {
-		const activeActions: ThreadTurnAction[] = [
+	test("the ThreadLoop next-step interpreter exhaustively classifies the closed union", () => {
+		const activeNextSteps: ThreadTurnNextStep[] = [
 			{ action: "prepare_next_request" },
-			{ action: "start_provider_request", modelRequestId: "mrq_start" },
-			{ action: "dispatch_tool_use", toolUseEventId: "sevt_tool" },
-			{ action: "reconcile_request_seal", modelRequestId: "mrq_seal" },
 			{
 				action: "resume_tool_routes",
 				modelRequestId: "mrq_resume",
@@ -86,8 +83,7 @@ describe("ThreadLoop", () => {
 			{ action: "close_interrupted" },
 			{ action: "close_failed" },
 		];
-		const passiveActions: ThreadTurnAction[] = [
-			{ action: "none" },
+		const passiveNextSteps: ThreadTurnNextStep[] = [
 			{ action: "await_input" },
 			{ action: "await_request_end", modelRequestId: "mrq_open" },
 			{
@@ -97,15 +93,17 @@ describe("ThreadLoop", () => {
 			},
 		];
 		expect(
-			activeActions.map(
-				(action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition,
+			activeNextSteps.map(
+				(nextStep) =>
+					ThreadLoop.interpretThreadTurnNextStep(nextStep).runDisposition,
 			),
-		).toEqual(activeActions.map(() => "active"));
+		).toEqual(activeNextSteps.map(() => "active"));
 		expect(
-			passiveActions.map(
-				(action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition,
+			passiveNextSteps.map(
+				(nextStep) =>
+					ThreadLoop.interpretThreadTurnNextStep(nextStep).runDisposition,
 			),
-		).toEqual(passiveActions.map(() => "passive"));
+		).toEqual(passiveNextSteps.map(() => "passive"));
 	});
 	test("pins effect to the approved beta version in package metadata", async () => {
 		const packageJson = JSON.parse(
@@ -880,7 +878,7 @@ describe("ThreadLoop", () => {
 			appended.filter((event) => event.type === "span.model_request_start"),
 		).toHaveLength(1);
 	});
-	test("cold interrupt closeout consumes the typed action before releasing the run", async () => {
+	test("cold interrupt closeout follows the typed next step before releasing the run", async () => {
 		const session = new ThreadRuntime("sesn_cold_interrupt_closeout");
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
@@ -928,7 +926,7 @@ describe("ThreadLoop", () => {
 				},
 			},
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("a cold open request fails closed before accepting a later input", async () => {
@@ -983,7 +981,7 @@ describe("ThreadLoop", () => {
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("cold committed reschedule reopens exactly one provider request", async () => {
@@ -1103,7 +1101,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(session.state.threadTurnReduction()).toMatchObject({
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("accepted input without a resolvable runtime model settles an explicit exhausted error", async () => {
@@ -1894,7 +1892,7 @@ describe("ThreadState", () => {
 				fact: "inputs_committed",
 				eventId: "sevt_attachment_committed",
 				contextSequences: [],
-			}).action,
+			}).nextStep,
 		).toEqual({
 			action: "commit_accepted_input",
 			runtimeInputId: "rin_sibling_hot",
@@ -1919,7 +1917,7 @@ describe("ThreadState", () => {
 				pendingInputContextSequences: [],
 			},
 			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
+			nextStep: { action: "prepare_next_request" },
 		});
 	});
 
@@ -2214,7 +2212,7 @@ describe("ThreadState", () => {
 				filename: "image.png",
 			},
 		]);
-		expect(state.threadTurnReduction().action).toEqual({
+		expect(state.threadTurnReduction().nextStep).toEqual({
 			action: "prepare_next_request",
 		});
 		state.clear();
@@ -2222,7 +2220,7 @@ describe("ThreadState", () => {
 		expect(state.pendingAttachments()).toEqual([]);
 		expect(state.threadTurnReduction()).toMatchObject({
 			state: { state: "ready_to_finish" },
-			action: { action: "finish_idle" },
+			nextStep: { action: "finish_idle" },
 		});
 	});
 

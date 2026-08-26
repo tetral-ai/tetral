@@ -3,1518 +3,467 @@ import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
 } from "../../../src/thread-loop/thread-turn-checkpoint.js";
-import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
 import {
-	deriveThreadTurnDecision as deriveThreadTurnDecisionWithActiveInput,
-	initializeThreadTurnReduction as initializeThreadTurnReductionWithActiveInput,
-	reconcileThreadTurnSeal as reconcileThreadTurnSealWithActiveInput,
-	reduceThreadTurn as reduceThreadTurnWithActiveInput,
+	deriveThreadTurnSnapshot,
+	initializeThreadTurnTransition,
+	reduceThreadTurn,
 	ThreadTurnContractError,
+	type ThreadActiveInputView,
+	type ThreadTurnFact,
+	type ThreadTurnTransition,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
-type ActiveInputView = Parameters<
-	typeof deriveThreadTurnDecisionWithActiveInput
->[3];
-const noPendingAttachments: ActiveInputView = { hasPendingAttachments: false };
-
-const deriveThreadTurnDecision = (
-	activeInputView: ActiveInputView,
-	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	deriveThreadTurnDecisionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		activeInputView,
-	);
-const initializeThreadTurnReduction = (
-	activeInputView: ActiveInputView,
-	checkpoint: Parameters<
-		typeof initializeThreadTurnReductionWithActiveInput
-	>[0],
-	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	initializeThreadTurnReductionWithActiveInput(
-		checkpoint,
-		routes,
-		acceptedInputIds,
-		activeInputView,
-	);
-const reduceThreadTurn = (
-	activeInputView: ActiveInputView,
-	current: Parameters<typeof reduceThreadTurnWithActiveInput>[0],
-	fact: Parameters<typeof reduceThreadTurnWithActiveInput>[1],
-	routes: Parameters<typeof reduceThreadTurnWithActiveInput>[2],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	reduceThreadTurnWithActiveInput(
-		current,
-		fact,
-		routes,
-		acceptedInputIds,
-		activeInputView,
-	);
-const reconcileThreadTurnSeal = (
-	activeInputView: ActiveInputView,
-	current: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[0],
-	routes: Parameters<typeof reconcileThreadTurnSealWithActiveInput>[1],
-	acceptedInputIds: readonly string[] = [],
-) =>
-	reconcileThreadTurnSealWithActiveInput(
-		current,
-		routes,
-		acceptedInputIds,
-		activeInputView,
-	);
+const noAttachments: ThreadActiveInputView = {
+	hasPendingAttachments: false,
+};
 
 describe("Thread-turn reducer", () => {
-	test("derives idle and plural committed-input readiness", () => {
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments, { pendingInputContextSequences: [] }, noRoutes),
-		).toEqual({
-			state: { state: "idle" },
-			action: { action: "await_input" },
+	test("folds an ordinary run directly through its stable closeout", () => {
+		let transition = emptyTransition();
+		transition = apply(transition, {
+			fact: "run_opened",
+			eventId: "event_run",
 		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				{
-					pendingInputContextSequences: [1, 2],
-				},
-				noRoutes,
-			),
-		).toEqual({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
+		transition = apply(transition, {
+			fact: "inputs_committed",
+			eventId: "event_inputs",
+			contextSequences: [1],
 		});
-	});
-
-	test("retains accepted input behind active work and selects one exact commit at a safe boundary", () => {
-		const oneOutstandingTool = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_waiting",
-				toolUseEventId: "event_tool_waiting",
-				toolName: "Read",
-			},
-		]);
-		const multipleOutstandingTools = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_waiting_1",
-				toolUseEventId: "event_tool_waiting_1",
-				toolName: "Read",
-			},
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_waiting_2",
-				toolUseEventId: "event_tool_waiting_2",
-				toolName: "Read",
-			},
-		]);
-		const cases: readonly {
-			readonly name: string;
-			readonly checkpoint: ThreadTurnCheckpoint;
-			readonly routes: ThreadToolRouteView;
-			readonly expectedAction: ThreadTurnAction["action"];
-		}[] = [
-			{
-				name: "idle",
-				checkpoint: { pendingInputContextSequences: [] },
-				routes: noRoutes,
-				expectedAction: "commit_accepted_input",
-			},
-			{
-				name: "open request",
-				checkpoint: openRequest().checkpoint,
-				routes: noRoutes,
-				expectedAction: "await_request_end",
-			},
-			{
-				name: "one outstanding Tool Result",
-				checkpoint: oneOutstandingTool,
-				routes: {
-					routes: [
-						{
-							toolUseEventId: "event_tool_waiting",
-							disposition: "hot_execution",
-						},
-					],
-				},
-				expectedAction: "await_tool_results",
-			},
-			{
-				name: "multiple outstanding Tool Results",
-				checkpoint: multipleOutstandingTools,
-				routes: {
-					routes: [
-						{
-							toolUseEventId: "event_tool_waiting_1",
-							disposition: "hot_execution",
-						},
-						{
-							toolUseEventId: "event_tool_waiting_2",
-							disposition: "hot_execution",
-						},
-					],
-				},
-				expectedAction: "await_tool_results",
-			},
-			{
-				name: "interrupt",
-				checkpoint: {
-					...sealedCheckpoint([]),
-					interruptEventId: "event_interrupt",
-				},
-				routes: noRoutes,
-				expectedAction: "close_interrupted",
-			},
-			{
-				name: "terminal closeout",
-				checkpoint: {
-					...sealedCheckpoint([]),
-					terminalCloseout: {
-						failureEventId: "event_failure",
-						closeoutEventId: "event_closeout",
-						disposition: "terminated",
-					},
-				},
-				routes: noRoutes,
-				expectedAction: "await_input",
-			},
-			{
-				name: "retry-exhausted closeout retains continuation custody",
-				checkpoint: {
-					...sealedCheckpoint([]),
-					terminalCloseout: {
-						failureEventId: "event_failure",
-						closeoutEventId: "event_closeout",
-						disposition: "retries_exhausted",
-					},
-				},
-				routes: noRoutes,
-				expectedAction: "commit_accepted_input",
-			},
-			{
-				name: "sealed safe boundary",
-				checkpoint: sealedCheckpoint([]),
-				routes: noRoutes,
-				expectedAction: "commit_accepted_input",
-			},
-		];
-
-		for (const testCase of cases) {
-			const decision = deriveThreadTurnDecision(noPendingAttachments,
-				testCase.checkpoint,
-				testCase.routes,
-				["rin_first", "rin_second"],
-			);
-			expect(decision.action.action, testCase.name).toBe(
-				testCase.expectedAction,
-			);
-			if (decision.action.action === "commit_accepted_input") {
-				expect(decision.action.runtimeInputId, testCase.name).toBe("rin_first");
-			}
-		}
-	});
-
-	test("a committed-input result advances the same reducer to request preparation", () => {
-		const selected = initializeThreadTurnReduction(noPendingAttachments,
-			{ executionRunId: "run_input", pendingInputContextSequences: [] },
-			noRoutes,
-			["rin_input"],
-		);
-		expect(selected.action).toEqual({
-			action: "commit_accepted_input",
-			runtimeInputId: "rin_input",
+		const started = apply(transition, {
+			fact: "request_started",
+			eventId: "event_start",
+			modelRequestId: "request_1",
+			requestKind: "agent_provider_request",
+			contextThroughMessageSequence: 1,
+			consumedInputContextSequences: [1],
 		});
-
-		const applied = reduceThreadTurn(noPendingAttachments,
-			selected,
-			{
-				fact: "inputs_committed",
-				eventId: "event_input_committed",
-				contextSequences: [1],
-			},
-			noRoutes,
-		);
-		expect(applied).toMatchObject({
-			checkpoint: { pendingInputContextSequences: [1] },
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("an attachment-only input advances without inventing a context sequence", () => {
-		const selected = initializeThreadTurnReduction(noPendingAttachments,
-			{ executionRunId: "run_attachment", pendingInputContextSequences: [] },
-			noRoutes,
-			["rin_attachment"],
-		);
-
-		const applied = reduceThreadTurnWithActiveInput(
-			selected,
-			{
-				fact: "inputs_committed",
-				eventId: "event_attachment_committed",
-				contextSequences: [],
-			},
-			noRoutes,
-			[],
-			{ hasPendingAttachments: true },
-		);
-
-		expect(applied).toMatchObject({
-			checkpoint: { pendingInputContextSequences: [] },
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("a sibling accepted input is committed before an attachment-only request advances", () => {
-		const selected = initializeThreadTurnReduction(noPendingAttachments,
-			{ executionRunId: "run_siblings", pendingInputContextSequences: [] },
-			noRoutes,
-			["rin_attachment", "rin_text"],
-		);
-
-		const applied = reduceThreadTurnWithActiveInput(
-			selected,
-			{
-				fact: "inputs_committed",
-				eventId: "event_attachment_committed",
-				contextSequences: [],
-			},
-			noRoutes,
-			["rin_text"],
-			{ hasPendingAttachments: true },
-		);
-
-		expect(applied).toMatchObject({
-			checkpoint: { pendingInputContextSequences: [] },
-			action: {
-				action: "commit_accepted_input",
-				runtimeInputId: "rin_text",
-			},
-		});
-	});
-
-	test("a cold attachment-only run prepares a request from its active-input view", () => {
-		const recovered = initializeThreadTurnReductionWithActiveInput(
-			{ executionRunId: "run_recovered", pendingInputContextSequences: [] },
-			noRoutes,
-			[],
-			{ hasPendingAttachments: true },
-		);
-
-		expect(recovered).toMatchObject({
-			checkpoint: { pendingInputContextSequences: [] },
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("a replayed committed-input result preserves one pending durable context sequence", () => {
-		const cold = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				executionRunId: "run_reloaded",
-				pendingInputContextSequences: [1],
-			},
-			noRoutes,
-		);
-
-		const replayed = reduceThreadTurn(noPendingAttachments,
-			cold,
-			{
-				fact: "inputs_committed",
-				eventId: "event_commit_replayed",
-				contextSequences: [1],
-			},
-			noRoutes,
-		);
-
-		expect(replayed).toMatchObject({
-			checkpoint: { pendingInputContextSequences: [1] },
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("a durable run-open fact clears a prior final closeout before new input is committed", () => {
-		const closed = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				pendingInputContextSequences: [],
-				request: {
-					modelRequestId: "request_closed",
-					requestStartEventId: "event_start_closed",
-					requestKind: "agent_provider_request",
-					contextThroughMessageSequence: 1,
-					requestEnd: {
-						eventId: "event_end_closed",
-						isError: true,
-			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
-						errorKind: "provider_stream_error",
-					},
-					toolMembers: [],
-				},
-				terminalCloseout: {
-					failureEventId: "event_failure_closed",
-					closeoutEventId: "event_idle_closed",
-					disposition: "retries_exhausted",
-				},
-				idleCloseout: {
-					eventId: "event_idle_closed",
-					stopReason: "retries_exhausted",
-				},
-			},
-			noRoutes,
-		);
-		const opened = reduceThreadTurn(noPendingAttachments,
-			closed,
-			{
-				fact: "run_opened",
-				eventId: "event_running_new",
-			},
-			noRoutes,
-		);
-		expect(opened.checkpoint).toEqual({
-			executionRunId: "event_running_new",
-			pendingInputContextSequences: [],
-		});
-		expect(
-			reduceThreadTurn(noPendingAttachments,
-				opened,
-				{
-					fact: "inputs_committed",
-					eventId: "event_input_new",
-					contextSequences: [1],
-				},
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("a duplicate run-open fact preserves the action already derived for that run", () => {
-		const initial = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				pendingInputContextSequences: [],
-			},
-			noRoutes,
-		);
-		const opened = reduceThreadTurn(noPendingAttachments,
-			initial,
-			{
-				fact: "run_opened",
-				eventId: "event_running_replayed",
-			},
-			noRoutes,
-		);
-		expect(opened).toMatchObject({
-			state: { state: "ready_to_finish" },
-			action: { action: "finish_idle", stopReason: { type: "end_turn" } },
-		});
-
-		const replayed = reduceThreadTurn(noPendingAttachments,
-			opened,
-			{
-				fact: "run_opened",
-				eventId: "event_running_replayed",
-			},
-			noRoutes,
-		);
-		expect(replayed).toMatchObject({
-			state: { state: "ready_to_finish" },
-			action: { action: "finish_idle", stopReason: { type: "end_turn" } },
-		});
-
-		expect(
-			reduceThreadTurn(noPendingAttachments,
-				replayed,
-				{
-					fact: "finish_idle_committed",
-					eventId: "event_idle_replayed",
-					stopReason: { type: "end_turn" },
-				},
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "idle" },
-			action: { action: "await_input" },
-		});
-	});
-
-	test("a confirmation run-open preserves the sealed requires-action request", () => {
-		const waiting = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				...sealedCheckpoint([
-					{
-						memberKind: "public_tool_use",
-						modelToolCallId: "call_approval",
-						toolUseEventId: "event_tool_approval",
-						toolName: "Write",
-					},
-				]),
-				idleCloseout: {
-					eventId: "event_idle_approval",
-					stopReason: "requires_action",
-				},
-			},
-			{
-				routes: [
-					{
-						toolUseEventId: "event_tool_approval",
-						disposition: "requires_user_action",
-					},
-				],
-			},
-		);
-		const opened = reduceThreadTurn(noPendingAttachments,
-			waiting,
-			{
-				fact: "run_opened",
-				eventId: "event_running_confirmation",
-			},
-			{
-				routes: [
-					{
-						toolUseEventId: "event_tool_approval",
-						disposition: "requires_user_action",
-					},
-				],
-			},
-		);
-		expect(opened.checkpoint).toMatchObject({
-			executionRunId: "event_running_confirmation",
-			request: { modelRequestId: "request_1" },
-		});
-		expect(opened.checkpoint.idleCloseout).toBeUndefined();
-	});
-
-	test("a recovery run-open preserves any sealed request with an outstanding durable member", () => {
-		const routes = {
-			routes: [
-				{
-					toolUseEventId: "event_tool_recovery",
-					disposition: "resume_sandbox_execution" as const,
-				},
-			],
-		};
-		const waiting = initializeThreadTurnReduction(noPendingAttachments,
-			sealedCheckpoint([
-				{
-					memberKind: "public_tool_use",
-					modelToolCallId: "call_recovery",
-					toolUseEventId: "event_tool_recovery",
-					toolName: "Bash",
-				},
-			]),
-			routes,
-		);
-		const opened = reduceThreadTurn(noPendingAttachments,
-			waiting,
-			{
-				fact: "run_opened",
-				eventId: "event_running_recovery",
-			},
-			routes,
-		);
-		expect(opened.checkpoint).toMatchObject({
-			executionRunId: "event_running_recovery",
-			request: { modelRequestId: "request_1" },
-		});
-		expect(opened).toMatchObject({
-			state: { state: "waiting_for_tool_results" },
-			action: {
-				action: "resume_tool_routes",
-				toolUseEventIds: ["event_tool_recovery"],
-			},
-		});
-	});
-
-	test("a recovery run-open preserves a sealed request whose tool results are ready to continue", () => {
-		const { executionRunId: _closedRun, ...recoveredCheckpoint } =
-			sealedCheckpoint([
-				{
-					memberKind: "public_tool_use",
-					modelToolCallId: "call_completed",
-					toolUseEventId: "event_tool_completed",
-					toolName: "Read",
-					terminalResult: { outcome: "success" },
-				},
-			]);
-		const ready = initializeThreadTurnReduction(noPendingAttachments, recoveredCheckpoint, noRoutes);
-		expect(ready).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-
-		const opened = reduceThreadTurn(noPendingAttachments,
-			ready,
-			{
-				fact: "run_opened",
-				eventId: "event_running_continuation",
-			},
-			noRoutes,
-		);
-		expect(opened).toMatchObject({
-			checkpoint: {
-				executionRunId: "event_running_continuation",
-				request: { modelRequestId: "request_1" },
-			},
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("starts one prepared provider request only on first local Request Start ACK application", () => {
-		const initial = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				executionRunId: "run_1",
-				pendingInputContextSequences: [1, 2],
-			},
-			noRoutes,
-		);
-		const started = reduceThreadTurn(noPendingAttachments,
-			initial,
-			{
-				fact: "request_started",
-				eventId: "event_start",
-				modelRequestId: "request_1",
-				requestKind: "agent_provider_request",
-				contextThroughMessageSequence: 2,
-				consumedInputContextSequences: [1, 2],
-			},
-			noRoutes,
-		);
-
 		expect(started).toMatchObject({
+			state: { state: "request_open", modelRequestId: "request_1" },
+			nextStep: { action: "await_request_end", modelRequestId: "request_1" },
+			dispatch: {
+				dispatch: "start_provider_request",
+				modelRequestId: "request_1",
+			},
+		});
+
+		transition = apply(started, requestEnded("event_end", "request_1"));
+		expect(transition).toMatchObject({
+			state: { state: "ready_to_finish" },
+			nextStep: { action: "finish_idle", stopReason: { type: "end_turn" } },
+		});
+		expect(transition.dispatch).toBeUndefined();
+
+		transition = apply(transition, {
+			fact: "finish_idle_committed",
+			eventId: "event_idle",
+			stopReason: { type: "end_turn" },
+		});
+		expect(transition).toMatchObject({
 			checkpoint: {
 				pendingInputContextSequences: [],
-				request: { modelRequestId: "request_1" },
+				idleCloseout: { eventId: "event_idle", stopReason: "end_turn" },
 			},
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "start_provider_request", modelRequestId: "request_1" },
-		});
-
-		expect(
-			reduceThreadTurn(noPendingAttachments,
-				started,
-				{
-					fact: "request_started",
-					eventId: "event_start",
-					modelRequestId: "request_1",
-					requestKind: "agent_provider_request",
-					contextThroughMessageSequence: 2,
-					consumedInputContextSequences: [1, 2],
-				},
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "none" },
+			state: { state: "idle" },
+			nextStep: { action: "await_input" },
 		});
 	});
 
-	test("keeps streaming Tool Use and early Tool Result inside an open request", () => {
-		const opened = openRequest();
-		const toolUse = reduceThreadTurn(noPendingAttachments,
-			opened,
-			{
-				fact: "tool_use_committed",
-				eventId: "event_tool_1",
-				modelRequestId: "request_1",
-				modelToolCallId: "call_1",
-				toolName: "Read",
-			},
-			noRoutes,
+	test("routes two Tools once and accepts reverse-order terminal results", () => {
+		let transition = startedRequest();
+		const firstTool = apply(transition, toolUse("event_tool_1", "call_1", "Read"));
+		expect(firstTool.dispatch).toEqual({
+			dispatch: "route_tool_use",
+			toolUseEventId: "event_tool_1",
+		});
+		expect(firstTool.nextStep).toEqual({
+			action: "await_request_end",
+			modelRequestId: "request_1",
+		});
+
+		const secondTool = apply(
+			firstTool,
+			toolUse("event_tool_2", "call_2", "Grep"),
 		);
-		expect(toolUse).toMatchObject({
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "dispatch_tool_use", toolUseEventId: "event_tool_1" },
+		expect(secondTool.dispatch).toEqual({
+			dispatch: "route_tool_use",
+			toolUseEventId: "event_tool_2",
 		});
 
-		const result = reduceThreadTurn(noPendingAttachments,
-			toolUse,
-			{
-				fact: "tool_result_committed",
-				toolUseEventId: "event_tool_1",
-				outcome: "success",
-			},
-			noRoutes,
-		);
-		expect(result).toMatchObject({
-			checkpoint: {
-				request: {
-					toolMembers: [{ terminalResult: { outcome: "success" } }],
-				},
-			},
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "await_request_end", modelRequestId: "request_1" },
-		});
-
-		const replayedResult = reduceThreadTurn(noPendingAttachments,
-			result,
-			{
-				fact: "tool_result_committed",
-				toolUseEventId: "event_tool_1",
-				outcome: "success",
-			},
-			noRoutes,
-		);
-		expect(replayedResult).toEqual({ ...result, action: { action: "none" } });
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				result,
-				{
-					fact: "tool_result_committed",
-					toolUseEventId: "event_tool_1",
-					outcome: "error",
-				},
-				noRoutes,
-			),
-		).toThrow("conflicting terminal Tool Result");
-
-		expect(
-			reduceThreadTurn(noPendingAttachments,
-				toolUse,
-				{
-					fact: "tool_use_committed",
-					eventId: "event_tool_1",
-					modelRequestId: "request_1",
-					modelToolCallId: "call_1",
-					toolName: "Read",
-				},
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "none" },
-		});
-	});
-
-	test("makes Request End an explicit seal before continuing", () => {
-		const withTerminalTool = terminalToolRequest();
-		const sealed = reduceThreadTurn(noPendingAttachments,
-			withTerminalTool,
-			{
-				fact: "request_ended",
-				eventId: "event_end",
-				modelRequestId: "request_1",
-				isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-			},
-			noRoutes,
-		);
-
-		expect(sealed).toMatchObject({
-			state: { state: "request_sealed", modelRequestId: "request_1" },
-			action: { action: "reconcile_request_seal", modelRequestId: "request_1" },
-		});
-		expect(reconcileThreadTurnSeal(noPendingAttachments, sealed, noRoutes)).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("waits for the whole sealed tool set and continues exactly after the last terminal result", () => {
-		let reduction = sealRequestWithTools([
-			["event_tool_1", "call_1"],
-			["event_tool_2", "call_2"],
-			["event_tool_3", "call_3"],
-			["event_tool_4", "call_4"],
-		]);
 		const routes: ThreadToolRouteView = {
 			routes: [
 				{ toolUseEventId: "event_tool_1", disposition: "hot_execution" },
 				{ toolUseEventId: "event_tool_2", disposition: "hot_execution" },
-				{ toolUseEventId: "event_tool_3", disposition: "hot_execution" },
-				{ toolUseEventId: "event_tool_4", disposition: "hot_execution" },
 			],
 		};
-		reduction = reconcileThreadTurnSeal(noPendingAttachments, reduction, routes);
-		expect(reduction).toMatchObject({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "await_tool_results",
-				toolUseEventIds: [
-					"event_tool_1",
-					"event_tool_2",
-					"event_tool_3",
-					"event_tool_4",
-				],
-			},
-		});
-
-		for (const [index, toolUseEventId] of [
-			"event_tool_1",
-			"event_tool_2",
-			"event_tool_3",
-		].entries()) {
-			reduction = reduceThreadTurn(noPendingAttachments,
-				reduction,
-				{
-					fact: "tool_result_committed",
-					toolUseEventId,
-					outcome: "success",
-				},
-				routesForOutstanding(routes, toolUseEventId),
-			);
-			expect(reduction.state.state).toBe("waiting_for_tool_results");
-			expect(reduction.action.action).toBe("await_tool_results");
-		}
-
-		reduction = reduceThreadTurn(noPendingAttachments,
-			reduction,
-			{
-				fact: "tool_result_committed",
-				toolUseEventId: "event_tool_4",
-				outcome: "error",
-			},
-			noRoutes,
-		);
-		expect(reduction).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("distinguishes empty-seal completion from later committed input", () => {
-		const emptySeal = sealedCheckpoint([]);
-		expect(deriveThreadTurnDecision(noPendingAttachments, emptySeal, noRoutes)).toEqual({
-			state: { state: "ready_to_finish" },
-			action: { action: "finish_idle", stopReason: { type: "end_turn" } },
-		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				{
-					...emptySeal,
-					pendingInputContextSequences: [3],
-				},
-				noRoutes,
-			),
-		).toEqual({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-
-		const readyToFinish = initializeThreadTurnReduction(noPendingAttachments, emptySeal, noRoutes);
-		const finished = reduceThreadTurn(noPendingAttachments,
-			readyToFinish,
-			{
-				fact: "finish_idle_committed",
-				eventId: "event_idle",
-				stopReason: { type: "end_turn" },
-			},
-			noRoutes,
-		);
-		expect(finished).toMatchObject({
-			checkpoint: {
-				idleCloseout: { eventId: "event_idle", stopReason: "end_turn" },
-			},
-			state: { state: "idle" },
-			action: { action: "await_input" },
-		});
-		expect(finished.checkpoint.request).toBeUndefined();
-	});
-
-	test("a final idle closeout keeps pre-request committed input dormant until a later run opens", () => {
-		const closed = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				pendingInputContextSequences: [1],
-				idleCloseout: {
-					eventId: "event_idle_interrupted",
-					stopReason: "end_turn",
-				},
-			},
-			noRoutes,
-		);
-		expect(closed).toMatchObject({
-			state: { state: "idle" },
-			action: { action: "await_input" },
-		});
-
-		const reopened = reduceThreadTurn(noPendingAttachments,
-			closed,
-			{
-				fact: "run_opened",
-				eventId: "event_running_after_explicit_input",
-			},
-			noRoutes,
-		);
-		expect(reopened).toMatchObject({
-			checkpoint: {
-				executionRunId: "event_running_after_explicit_input",
-				pendingInputContextSequences: [1],
-			},
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("a later run discards the request closed by an idle interruption", () => {
-		const interrupted = initializeThreadTurnReduction(noPendingAttachments,
-			{
-				pendingInputContextSequences: [1],
-				interruptEventId: "event_interrupt_idle",
-				request: {
-					modelRequestId: "model_request_interrupted_idle",
-					requestStartEventId: "event_start_interrupted_idle",
-					requestKind: "agent_provider_request",
-					contextThroughMessageSequence: 0,
-					requestEnd: {
-						eventId: "event_end_interrupted_idle",
-						isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-					},
-					toolMembers: [
-						{
-							memberKind: "public_tool_use",
-							modelToolCallId: "tool_call_interrupted_idle",
-							toolUseEventId: "event_tool_interrupted_idle",
-							toolName: "Write",
-						},
-					],
-				},
-			},
-			noRoutes,
-		);
-		expect(interrupted).toMatchObject({
-			state: { state: "idle" },
-			action: { action: "await_input" },
-		});
-
-		const reopened = reduceThreadTurn(noPendingAttachments,
-			interrupted,
-			{
-				fact: "run_opened",
-				eventId: "event_running_after_idle_interrupt",
-			},
-			noRoutes,
-		);
-		expect(reopened).toMatchObject({
-			checkpoint: {
-				executionRunId: "event_running_after_idle_interrupt",
-				pendingInputContextSequences: [1],
-			},
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-		expect(reopened.checkpoint.request).toBeUndefined();
-		expect(reopened.checkpoint.interruptEventId).toBeUndefined();
-	});
-
-	test("rejects end-turn closeout while a sealed tool continuation is ready", () => {
-		const ready = initializeThreadTurnReduction(noPendingAttachments,
-			sealedCheckpoint([
-				{
-					memberKind: "public_tool_use",
-					modelToolCallId: "call_completed",
-					toolUseEventId: "event_tool_completed",
-					toolName: "Read",
-					terminalResult: { outcome: "success" },
-				},
-			]),
-			noRoutes,
-		);
-		expect(ready).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				ready,
-				{
-					fact: "finish_idle_committed",
-					eventId: "event_idle_illegal",
-					stopReason: { type: "end_turn" },
-				},
-				noRoutes,
-			),
-		).toThrow("cannot finish end_turn from ready_to_request");
-	});
-
-	test("treats internal invalid-tool repair as a terminal synthetic member", () => {
-		const repaired = reduceThreadTurn(noPendingAttachments,
-			openRequest(),
-			{
-				fact: "internal_tool_repair_committed",
-				eventId: "event_repair",
-				modelRequestId: "request_1",
-				modelToolCallId: "call_invalid",
-				toolName: "missing_tool",
-			},
-			noRoutes,
-		);
-		expect(repaired).toMatchObject({
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "await_request_end", modelRequestId: "request_1" },
-		});
-
-		const sealed = reduceThreadTurn(noPendingAttachments,
-			repaired,
-			{
-				fact: "request_ended",
-				eventId: "event_end",
-				modelRequestId: "request_1",
-				isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-			},
-			noRoutes,
-		);
-		expect(reconcileThreadTurnSeal(noPendingAttachments, sealed, noRoutes)).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
-		});
-	});
-
-	test("emits a bounded cold resume action before converging to the stable wait", () => {
-		const checkpoint = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_1",
-				toolUseEventId: "event_tool_1",
-				toolName: "Bash",
-			},
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_2",
-				toolUseEventId: "event_tool_2",
-				toolName: "Write",
-			},
-		]);
-		const coldRoutes: ThreadToolRouteView = {
-			routes: [
-				{
-					toolUseEventId: "event_tool_1",
-					disposition: "resume_sandbox_execution",
-				},
-				{
-					toolUseEventId: "event_tool_2",
-					disposition: "resume_approval_settlement",
-				},
-			],
-		};
-		expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, coldRoutes)).toEqual({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "resume_tool_routes",
-				modelRequestId: "request_1",
-				toolUseEventIds: ["event_tool_1", "event_tool_2"],
-			},
-		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments, checkpoint, {
-				routes: [
-					{ toolUseEventId: "event_tool_1", disposition: "hot_execution" },
-					{ toolUseEventId: "event_tool_2", disposition: "hot_execution" },
-				],
-			}),
-		).toEqual({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "await_tool_results",
-				modelRequestId: "request_1",
-				toolUseEventIds: ["event_tool_1", "event_tool_2"],
-			},
-		});
-	});
-
-	test("preserves sealed approval wait across FinishIdle requires_action", () => {
-		const checkpoint = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_1",
-				toolUseEventId: "event_tool_1",
-				toolName: "Write",
-			},
-		]);
-		const routes: ThreadToolRouteView = {
-			routes: [
-				{ toolUseEventId: "event_tool_1", disposition: "requires_user_action" },
-			],
-		};
-		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
-		expect(waiting).toMatchObject({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "finish_idle",
-				stopReason: { type: "requires_action", eventIds: ["event_tool_1"] },
-			},
-		});
-
-		const idleReceipt = reduceThreadTurn(noPendingAttachments,
-			waiting,
-			{
-				fact: "finish_idle_committed",
-				eventId: "event_idle",
-				stopReason: { type: "requires_action", eventIds: ["event_tool_1"] },
-			},
+		transition = apply(
+			secondTool,
+			requestEnded("event_end", "request_1"),
 			routes,
 		);
-		expect(idleReceipt).toMatchObject({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "await_tool_results",
-				toolUseEventIds: ["event_tool_1"],
-			},
+		expect(transition.nextStep).toEqual({
+			action: "await_tool_results",
+			modelRequestId: "request_1",
+			toolUseEventIds: ["event_tool_1", "event_tool_2"],
 		});
-		expect(idleReceipt.checkpoint.executionRunId).toBeUndefined();
+
+		transition = apply(
+			transition,
+			{
+				fact: "tool_result_committed",
+				toolUseEventId: "event_tool_2",
+				outcome: "error",
+			},
+			{ routes: [routes.routes[0]!] },
+		);
+		expect(transition.nextStep).toMatchObject({
+			action: "await_tool_results",
+			toolUseEventIds: ["event_tool_1"],
+		});
+
+		transition = apply(transition, {
+			fact: "tool_result_committed",
+			toolUseEventId: "event_tool_1",
+			outcome: "success",
+		});
+		expect(transition).toMatchObject({
+			state: { state: "ready_to_request" },
+			nextStep: { action: "prepare_next_request" },
+		});
+		expect(
+			transition.checkpoint.request?.toolMembers.map((member) =>
+				member.memberKind === "public_tool_use"
+					? [member.toolUseEventId, member.terminalResult?.outcome]
+					: [],
+			),
+		).toEqual([
+			["event_tool_1", "success"],
+			["event_tool_2", "error"],
+		]);
 	});
 
-	test("does not finish requires_action while another sealed tool is still executing", () => {
-		const checkpoint = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_running",
-				toolUseEventId: "event_tool_running",
-				toolName: "Read",
-			},
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_approval",
-				toolUseEventId: "event_tool_approval",
-				toolName: "Write",
-			},
-		]);
-		const routes: ThreadToolRouteView = {
+	test("keeps approval and reschedule ownership behind unresolved Tools", () => {
+		const approvalTool = apply(
+			startedRequest(),
+			toolUse("event_approval", "call_approval", "Write"),
+		);
+		const approvalRoutes: ThreadToolRouteView = {
 			routes: [
-				{ toolUseEventId: "event_tool_running", disposition: "hot_execution" },
 				{
-					toolUseEventId: "event_tool_approval",
+					toolUseEventId: "event_approval",
 					disposition: "requires_user_action",
 				},
 			],
 		};
-		expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, routes)).toEqual({
-			state: { state: "waiting_for_tool_results", modelRequestId: "request_1" },
-			action: {
-				action: "await_tool_results",
-				modelRequestId: "request_1",
-				toolUseEventIds: ["event_tool_running", "event_tool_approval"],
+		let approval = apply(
+			approvalTool,
+			requestEnded("event_approval_end", "request_1"),
+			approvalRoutes,
+		);
+		expect(approval.nextStep).toEqual({
+			action: "finish_idle",
+			stopReason: {
+				type: "requires_action",
+				eventIds: ["event_approval"],
 			},
 		});
-		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				waiting,
-				{
-					fact: "finish_idle_committed",
-					eventId: "event_idle",
-					stopReason: {
-						type: "requires_action",
-						eventIds: ["event_tool_approval"],
-					},
-				},
-				routes,
-			),
-		).toThrow(
-			"requires_action ACK does not match the current FinishIdle action",
-		);
-	});
-
-	test("rejects a requires-action ACK whose event set differs from the declared closeout", () => {
-		const checkpoint = sealedCheckpoint([
-			{
-				memberKind: "public_tool_use",
-				modelToolCallId: "call_1",
-				toolUseEventId: "event_tool_1",
-				toolName: "Write",
-			},
-		]);
-		const routes: ThreadToolRouteView = {
-			routes: [
-				{ toolUseEventId: "event_tool_1", disposition: "requires_user_action" },
-			],
-		};
-		const waiting = initializeThreadTurnReduction(noPendingAttachments, checkpoint, routes);
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				waiting,
-				{
-					fact: "finish_idle_committed",
-					eventId: "event_idle",
-					stopReason: { type: "requires_action", eventIds: ["event_other"] },
-				},
-				routes,
-			),
-		).toThrow(
-			"requires_action ACK event IDs do not match the declared closeout",
-		);
-	});
-
-	test("records an interrupt-prioritized Tool Use ACK without dispatching its side effect", () => {
-		const interrupted = reduceThreadTurn(noPendingAttachments,
-			openRequest(),
-			{
-				fact: "interrupt_committed",
-				eventId: "event_interrupt",
-			},
-			noRoutes,
-		);
-		const lateToolUse = reduceThreadTurn(noPendingAttachments,
-			interrupted,
-			{
-				fact: "tool_use_committed",
-				eventId: "event_tool_1",
-				modelRequestId: "request_1",
-				modelToolCallId: "call_1",
-				toolName: "Bash",
-			},
-			noRoutes,
-		);
-
-		expect(lateToolUse.checkpoint.request?.toolMembers).toHaveLength(1);
-		expect(lateToolUse).toMatchObject({
-			state: { state: "request_open", modelRequestId: "request_1" },
-			action: { action: "close_interrupted", modelRequestId: "request_1" },
-		});
-	});
-
-	test("makes retries-exhausted FinishIdle hot reduction reconstructible", () => {
-		const sealed = reduceThreadTurn(noPendingAttachments,
-			openRequest(),
-			{
-				fact: "request_ended",
-				eventId: "event_end",
-				modelRequestId: "request_1",
-				isError: true,
-			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
-				errorKind: "provider_stream_error",
-			},
-			noRoutes,
-		);
-		const finished = reduceThreadTurn(noPendingAttachments,
-			sealed,
+		approval = apply(
+			approval,
 			{
 				fact: "finish_idle_committed",
-				eventId: "event_idle",
+				eventId: "event_approval_idle",
 				stopReason: {
-					type: "retries_exhausted",
-					failureEventId: "event_error",
+					type: "requires_action",
+					eventIds: ["event_approval"],
 				},
 			},
-			noRoutes,
+			approvalRoutes,
 		);
+		expect(approval.nextStep).toMatchObject({
+			action: "await_tool_results",
+			toolUseEventIds: ["event_approval"],
+		});
 
-		expect(finished.checkpoint).toMatchObject({
-			terminalCloseout: {
-				failureEventId: "event_error",
-				closeoutEventId: "event_idle",
-				disposition: "retries_exhausted",
-			},
-		});
-		expect(finished.checkpoint.executionRunId).toBeUndefined();
-		expect(finished.checkpoint.request).toBeUndefined();
-		expect(deriveThreadTurnDecision(noPendingAttachments, finished.checkpoint, noRoutes)).toEqual({
-			state: finished.state,
-			action: finished.action,
-		});
-	});
-
-	test("routes compaction, reviewer, retry, interrupt, and terminal closeout before ordinary continuation", () => {
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				sealedCheckpoint([], "compaction_summary"),
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "ready_to_request" },
-			action: {
-				action: "continue_after_compaction",
-				modelRequestId: "request_1",
-			},
-		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				sealedCheckpoint([], "approval_reviewer"),
-				noRoutes,
-			),
-		).toMatchObject({
-			state: { state: "request_sealed", modelRequestId: "request_1" },
-			action: { action: "complete_reviewer", modelRequestId: "request_1" },
-		});
-		for (const requestKind of [
-			"compaction_summary",
-			"approval_reviewer",
-		] as const) {
-			expect(
-				deriveThreadTurnDecision(noPendingAttachments,
-					sealedCheckpoint([], requestKind, {
-						isError: true,
-			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
-						errorKind: "provider_stream_error",
-					}),
-					noRoutes,
-				),
-			).toMatchObject({
-				state: { state: "request_sealed", modelRequestId: "request_1" },
-				action: {
-					action: "apply_request_retry_or_reschedule",
-					modelRequestId: "request_1",
-				},
-			});
-		}
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				sealedCheckpoint([], "agent_provider_request", {
-					isError: true,
-			providerContextRetention: { disposition: "failed", toolUseEventIds: [], repairEventIds: [] },
-					reschedule: {
-						attempt: 1,
-						effectiveDeadline: "2026-08-15T00:00:00.000Z",
-						providerAttempts: 1,
-						compactionAttempts: 0,
-					},
-					errorKind: "provider_unavailable",
-				}),
-				noRoutes,
-			),
-		).toMatchObject({
-			action: {
-				action: "apply_request_retry_or_reschedule",
-				modelRequestId: "request_1",
-			},
-		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				{
-					...sealedCheckpoint([]),
-					interruptEventId: "event_interrupt",
-				},
-				noRoutes,
-			),
-		).toEqual({
-			state: { state: "request_sealed", modelRequestId: "request_1" },
-			action: { action: "close_interrupted", modelRequestId: "request_1" },
-		});
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				{
-					...sealedCheckpoint([]),
-					terminalCloseout: {
-						failureEventId: "event_error",
-						closeoutEventId: "event_terminated",
-						disposition: "terminated",
-					},
-				},
-				noRoutes,
-			),
-		).toEqual({
-			state: { state: "idle" },
-			action: { action: "await_input" },
-		});
-	});
-
-	test("approval reviewer settles terminal members and later input before completing the review", () => {
-		const terminalPublicMember: NonNullable<
-			ThreadTurnCheckpoint["request"]
-		>["toolMembers"][number] = {
-			memberKind: "public_tool_use",
-			modelToolCallId: "call_public",
-			toolUseEventId: "event_tool_public",
-			toolName: "Read",
-			terminalResult: { outcome: "success" },
+		const rescheduleTool = apply(
+			startedRequest(),
+			toolUse("event_retry_tool", "call_retry_tool", "Read"),
+		);
+		const retryRoutes: ThreadToolRouteView = {
+			routes: [
+				{ toolUseEventId: "event_retry_tool", disposition: "hot_execution" },
+			],
 		};
-		const terminalInternalRepair: NonNullable<
-			ThreadTurnCheckpoint["request"]
-		>["toolMembers"][number] = {
-			memberKind: "internal_tool_repair",
-			modelToolCallId: "call_repair",
-			toolName: "MissingTool",
-			repairEventId: "event_repair",
-			outcome: "error",
-		};
-		for (const checkpoint of [
-			sealedCheckpoint([terminalPublicMember], "approval_reviewer"),
-			sealedCheckpoint([terminalInternalRepair], "approval_reviewer"),
+		let retry = apply(
+			rescheduleTool,
 			{
-				...sealedCheckpoint([], "approval_reviewer"),
-				pendingInputContextSequences: [1],
+				...requestEnded("event_retry_end", "request_1", true),
+				reschedule: {
+					attempt: 1,
+					effectiveDeadline: "2026-08-26T00:00:00.000Z",
+					providerAttempts: 1,
+					compactionAttempts: 0,
+				},
 			},
-		]) {
-			expect(deriveThreadTurnDecision(noPendingAttachments, checkpoint, noRoutes)).toEqual({
-				state: { state: "ready_to_request" },
-				action: { action: "prepare_next_request" },
-			});
-		}
-		expect(
-			deriveThreadTurnDecision(noPendingAttachments,
-				sealedCheckpoint([], "approval_reviewer"),
-				noRoutes,
-			),
-		).toEqual({
-			state: { state: "request_sealed", modelRequestId: "request_1" },
-			action: { action: "complete_reviewer", modelRequestId: "request_1" },
+			retryRoutes,
+		);
+		expect(retry.nextStep).toMatchObject({
+			action: "await_tool_results",
+			toolUseEventIds: ["event_retry_tool"],
+		});
+		retry = apply(retry, {
+			fact: "tool_result_committed",
+			toolUseEventId: "event_retry_tool",
+			outcome: "success",
+		});
+		expect(retry.nextStep).toEqual({
+			action: "apply_request_retry_or_reschedule",
+			modelRequestId: "request_1",
 		});
 	});
 
-	test("fails closed for orphan results, post-seal Tool Uses, and missing sealed routes", () => {
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				openRequest(),
-				{
-					fact: "tool_result_committed",
-					toolUseEventId: "event_missing",
-					outcome: "success",
-				},
-				noRoutes,
-			),
-		).toThrow(ThreadTurnContractError);
+	test("folds repair, interrupt, Request End, and terminal closeout facts", () => {
+		let transition = apply(startedRequest(), {
+			fact: "internal_tool_repair_committed",
+			eventId: "event_repair",
+			modelRequestId: "request_1",
+			modelToolCallId: "call_repair",
+			toolName: "UnavailableTool",
+		});
+		expect(transition.checkpoint.request?.toolMembers).toHaveLength(1);
+		expect(transition.dispatch).toBeUndefined();
 
-		const sealed = initializeThreadTurnReduction(noPendingAttachments,
-			sealedCheckpoint([]),
-			noRoutes,
+		transition = apply(transition, {
+			fact: "interrupt_committed",
+			eventId: "event_interrupt",
+		});
+		expect(transition.nextStep).toEqual({
+			action: "close_interrupted",
+			modelRequestId: "request_1",
+		});
+
+		transition = apply(
+			transition,
+			requestEnded("event_interrupted_end", "request_1"),
 		);
-		expect(() =>
-			reduceThreadTurn(noPendingAttachments,
-				sealed,
-				{
-					fact: "tool_use_committed",
-					eventId: "event_tool",
-					modelRequestId: "request_1",
-					modelToolCallId: "call_1",
-					toolName: "Read",
-				},
-				noRoutes,
-			),
-		).toThrow("cannot append Tool Use after Request End");
+		expect(transition.nextStep).toEqual({
+			action: "close_interrupted",
+			modelRequestId: "request_1",
+		});
+		expect(transition.dispatch).toBeUndefined();
 
-		expect(() =>
-			deriveThreadTurnDecision(noPendingAttachments,
-				sealedCheckpoint([
-					{
-						memberKind: "public_tool_use",
-						modelToolCallId: "call_1",
-						toolUseEventId: "event_tool_1",
-						toolName: "Read",
-					},
-				]),
-				noRoutes,
+		transition = apply(transition, {
+			fact: "terminal_closeout_committed",
+			eventId: "event_terminal",
+			failureEventId: "event_failure",
+			disposition: "terminated",
+		});
+		expect(transition).toMatchObject({
+			checkpoint: {
+				terminalCloseout: {
+					failureEventId: "event_failure",
+					closeoutEventId: "event_terminal",
+					disposition: "terminated",
+				},
+			},
+			state: { state: "idle" },
+			nextStep: { action: "await_input" },
+		});
+	});
+
+	test("keeps dispatch stack-local across view refresh and duplicate replay", () => {
+		const ready = apply(
+			apply(emptyTransition(), {
+				fact: "run_opened",
+				eventId: "event_run",
+			}),
+			{
+				fact: "inputs_committed",
+				eventId: "event_inputs",
+				contextSequences: [1],
+			},
+		);
+		const started = apply(ready, {
+			fact: "request_started",
+			eventId: "event_start",
+			modelRequestId: "request_1",
+			requestKind: "agent_provider_request",
+			contextThroughMessageSequence: 1,
+			consumedInputContextSequences: [1],
+		});
+		expect(started.dispatch).toEqual({
+			dispatch: "start_provider_request",
+			modelRequestId: "request_1",
+		});
+
+		const refreshed = deriveThreadTurnSnapshot(
+			started.checkpoint,
+			noRoutes,
+			["runtime_input_later"],
+			noAttachments,
+		);
+		expect(refreshed).toEqual({
+			state: { state: "request_open", modelRequestId: "request_1" },
+			nextStep: { action: "await_request_end", modelRequestId: "request_1" },
+		});
+		expect(started.dispatch).toEqual({
+			dispatch: "start_provider_request",
+			modelRequestId: "request_1",
+		});
+
+		const duplicate = apply(started, {
+			fact: "request_started",
+			eventId: "event_start",
+			modelRequestId: "request_1",
+			requestKind: "agent_provider_request",
+			contextThroughMessageSequence: 1,
+			consumedInputContextSequences: [1],
+		});
+		expect(duplicate.dispatch).toBeUndefined();
+		expect(duplicate.nextStep).toEqual(refreshed.nextStep);
+	});
+
+	test("hot transitions and cold snapshots share stable state", () => {
+		const hotCases = [
+			startedRequest(),
+			apply(
+				apply(
+					startedRequest(),
+					toolUse("event_tool", "call_tool", "Read"),
+				),
+				requestEnded("event_end", "request_1"),
+				{
+					routes: [
+						{ toolUseEventId: "event_tool", disposition: "hot_execution" },
+					],
+				},
 			),
-		).toThrow("sealed non-terminal Tool Use has no route");
+			apply(startedRequest(), {
+				fact: "interrupt_committed",
+				eventId: "event_interrupt",
+			}),
+		] as const;
+
+		for (const hot of hotCases) {
+			const routes = coldRoutesFor(hot.checkpoint);
+			const cold = deriveThreadTurnSnapshot(
+				hot.checkpoint,
+				routes,
+				[],
+				noAttachments,
+			);
+			expect(cold).toEqual({ state: hot.state, nextStep: hot.nextStep });
+		}
+	});
+
+	test("rejects conflicting durable identities", () => {
+		const started = startedRequest();
+		expect(() =>
+			apply(started, {
+				fact: "request_ended",
+				eventId: "event_end",
+				modelRequestId: "different_request",
+				isError: false,
+				providerContextRetention: retention("completed"),
+			}),
+		).toThrow(ThreadTurnContractError);
 	});
 });
 
-function openRequest() {
-	return initializeThreadTurnReduction(noPendingAttachments,
-		{
-			executionRunId: "run_1",
-			pendingInputContextSequences: [],
-			request: {
-				modelRequestId: "request_1",
-				requestStartEventId: "event_start",
-				requestKind: "agent_provider_request",
-				contextThroughMessageSequence: 1,
-				toolMembers: [],
-			},
-		},
+function emptyTransition(): ThreadTurnTransition {
+	return initializeThreadTurnTransition(
+		{ pendingInputContextSequences: [] },
 		noRoutes,
+		[],
+		noAttachments,
 	);
 }
 
-function terminalToolRequest() {
-	const withTool = reduceThreadTurn(noPendingAttachments,
-		openRequest(),
-		{
-			fact: "tool_use_committed",
-			eventId: "event_tool_1",
-			modelRequestId: "request_1",
-			modelToolCallId: "call_1",
-			toolName: "Read",
-		},
-		noRoutes,
-	);
-	return reduceThreadTurn(noPendingAttachments,
-		withTool,
-		{
-			fact: "tool_result_committed",
-			toolUseEventId: "event_tool_1",
-			outcome: "success",
-		},
-		noRoutes,
+function startedRequest(): ThreadTurnTransition {
+	let transition = emptyTransition();
+	transition = apply(transition, {
+		fact: "run_opened",
+		eventId: "event_run",
+	});
+	transition = apply(transition, {
+		fact: "inputs_committed",
+		eventId: "event_inputs",
+		contextSequences: [1],
+	});
+	return apply(transition, {
+		fact: "request_started",
+		eventId: "event_start",
+		modelRequestId: "request_1",
+		requestKind: "agent_provider_request",
+		contextThroughMessageSequence: 1,
+		consumedInputContextSequences: [1],
+	});
+}
+
+function apply(
+	current: ThreadTurnTransition,
+	fact: ThreadTurnFact,
+	routes: ThreadToolRouteView = noRoutes,
+	acceptedInputIds: readonly string[] = [],
+): ThreadTurnTransition {
+	return reduceThreadTurn(
+		current,
+		fact,
+		routes,
+		acceptedInputIds,
+		noAttachments,
 	);
 }
 
-function sealRequestWithTools(tools: readonly (readonly [string, string])[]) {
-	let reduction = openRequest();
-	for (const [toolUseEventId, modelToolCallId] of tools) {
-		reduction = reduceThreadTurn(noPendingAttachments,
-			reduction,
-			{
-				fact: "tool_use_committed",
-				eventId: toolUseEventId,
-				modelRequestId: "request_1",
-				modelToolCallId,
-				toolName: "Read",
-			},
-			noRoutes,
-		);
-	}
-	return reduceThreadTurn(noPendingAttachments,
-		reduction,
-		{
-			fact: "request_ended",
-			eventId: "event_end",
-			modelRequestId: "request_1",
-			isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-		},
-		noRoutes,
-	);
-}
-
-function sealedCheckpoint(
-	toolMembers: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"],
-	requestKind: NonNullable<
-		ThreadTurnCheckpoint["request"]
-	>["requestKind"] = "agent_provider_request",
-	requestEnd: {
-		readonly isError: boolean;
-		readonly providerContextRetention: NonNullable<
-			NonNullable<ThreadTurnCheckpoint["request"]>["requestEnd"]
-		>["providerContextRetention"];
-		readonly reschedule?: {
-			readonly attempt: number;
-			readonly effectiveDeadline: string;
-			readonly providerAttempts: number;
-			readonly compactionAttempts: number;
-		};
-		readonly errorKind?: string;
-	} = {
-		isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-	},
-): ThreadTurnCheckpoint {
+function toolUse(
+	eventId: string,
+	modelToolCallId: string,
+	toolName: string,
+): ThreadTurnFact {
 	return {
-		executionRunId: "run_1",
-		pendingInputContextSequences: [],
-		request: {
-			modelRequestId: "request_1",
-			requestStartEventId: "event_start",
-			requestKind,
-			contextThroughMessageSequence: 1,
-			requestEnd: {
-				eventId: "event_end",
-				...requestEnd,
-			},
-			toolMembers,
-		},
+		fact: "tool_use_committed",
+		eventId,
+		modelRequestId: "request_1",
+		modelToolCallId,
+		toolName,
 	};
 }
 
-function routesForOutstanding(
-	routes: ThreadToolRouteView,
-	settledToolUseEventId: string,
-): ThreadToolRouteView {
+function requestEnded(
+	eventId: string,
+	modelRequestId: string,
+	isError = false,
+): Extract<ThreadTurnFact, { readonly fact: "request_ended" }> {
 	return {
-		routes: routes.routes.filter(
-			(route) => route.toolUseEventId !== settledToolUseEventId,
-		),
+		fact: "request_ended",
+		eventId,
+		modelRequestId,
+		isError,
+		providerContextRetention: retention(isError ? "failed" : "completed"),
+	};
+}
+
+function retention(
+	disposition: "completed" | "failed",
+): Extract<
+	ThreadTurnFact,
+	{ readonly fact: "request_ended" }
+>["providerContextRetention"] {
+	return { disposition, toolUseEventIds: [], repairEventIds: [] };
+}
+
+function coldRoutesFor(checkpoint: ThreadTurnCheckpoint): ThreadToolRouteView {
+	return {
+		routes:
+			checkpoint.request?.toolMembers.flatMap((member) =>
+				member.memberKind === "public_tool_use" &&
+				member.terminalResult === undefined
+					? [
+							{
+								toolUseEventId: member.toolUseEventId,
+								disposition: "hot_execution" as const,
+							},
+						]
+					: [],
+			) ?? [],
 	};
 }

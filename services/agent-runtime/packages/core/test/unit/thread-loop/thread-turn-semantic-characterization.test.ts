@@ -4,39 +4,39 @@ import type {
 	ThreadTurnCheckpoint,
 } from "../../../src/thread-loop/thread-turn-checkpoint.js";
 import {
-	deriveThreadTurnDecision as deriveThreadTurnDecisionWithActiveInput,
-	initializeThreadTurnReduction as initializeThreadTurnReductionWithActiveInput,
+	deriveThreadTurnSnapshot as deriveThreadTurnSnapshotWithActiveInput,
+	initializeThreadTurnTransition as initializeThreadTurnTransitionWithActiveInput,
 	reduceThreadTurn as reduceThreadTurnWithActiveInput,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 import { toGatewayProviderContext } from "../../../src/runtime/context-projection.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
 type ActiveInputView = Parameters<
-	typeof deriveThreadTurnDecisionWithActiveInput
+	typeof deriveThreadTurnSnapshotWithActiveInput
 >[3];
 const noPendingAttachments: ActiveInputView = { hasPendingAttachments: false };
 
-const deriveThreadTurnDecision = (
+const deriveThreadTurnSnapshot = (
 	activeInputView: ActiveInputView,
-	checkpoint: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[0],
-	routes: Parameters<typeof deriveThreadTurnDecisionWithActiveInput>[1],
+	checkpoint: Parameters<typeof deriveThreadTurnSnapshotWithActiveInput>[0],
+	routes: Parameters<typeof deriveThreadTurnSnapshotWithActiveInput>[1],
 	acceptedInputIds: readonly string[] = [],
 ) =>
-	deriveThreadTurnDecisionWithActiveInput(
+	deriveThreadTurnSnapshotWithActiveInput(
 		checkpoint,
 		routes,
 		acceptedInputIds,
 		activeInputView,
 	);
-const initializeThreadTurnReduction = (
+const initializeThreadTurnTransition = (
 	activeInputView: ActiveInputView,
 	checkpoint: Parameters<
-		typeof initializeThreadTurnReductionWithActiveInput
+		typeof initializeThreadTurnTransitionWithActiveInput
 	>[0],
-	routes: Parameters<typeof initializeThreadTurnReductionWithActiveInput>[1],
+	routes: Parameters<typeof initializeThreadTurnTransitionWithActiveInput>[1],
 	acceptedInputIds: readonly string[] = [],
 ) =>
-	initializeThreadTurnReductionWithActiveInput(
+	initializeThreadTurnTransitionWithActiveInput(
 		checkpoint,
 		routes,
 		acceptedInputIds,
@@ -70,13 +70,13 @@ describe("Thread-turn semantic characterization", () => {
 			}],
 		}])).toMatchObject({ ok: true });
 
-		const pending = initializeThreadTurnReduction(noPendingAttachments,
+		const pending = initializeThreadTurnTransition(noPendingAttachments,
 			sealedRequest([pendingTool("tool_pending", "call_pending", "Read")]),
 			{ routes: [{ toolUseEventId: "tool_pending", disposition: "hot_execution" }] },
 		);
 		expect(pending).toMatchObject({
 			state: { state: "waiting_for_tool_results" },
-			action: { action: "await_tool_results", toolUseEventIds: ["tool_pending"] },
+			nextStep: { action: "await_tool_results", toolUseEventIds: ["tool_pending"] },
 		});
 
 		const terminal = reduceThreadTurn(noPendingAttachments,
@@ -86,7 +86,7 @@ describe("Thread-turn semantic characterization", () => {
 		);
 		expect(terminal).toMatchObject({
 			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
+			nextStep: { action: "prepare_next_request" },
 		});
 	});
 
@@ -109,14 +109,14 @@ describe("Thread-turn semantic characterization", () => {
 			readonly checkpoint: ThreadTurnCheckpoint;
 			readonly routes?: ThreadToolRouteView;
 			readonly acceptedInputIds?: readonly string[];
-			readonly expected: ReturnType<typeof deriveThreadTurnDecision>;
+			readonly expected: ReturnType<typeof deriveThreadTurnSnapshot>;
 		}[] = [
 			{
 				name: "empty thread",
 				checkpoint: { pendingInputContextSequences: [] },
 				expected: {
 					state: { state: "idle" },
-					action: { action: "await_input" },
+					nextStep: { action: "await_input" },
 				},
 			},
 			{
@@ -124,7 +124,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: { pendingInputContextSequences: [1] },
 				expected: {
 					state: { state: "ready_to_request" },
-					action: { action: "prepare_next_request" },
+					nextStep: { action: "prepare_next_request" },
 				},
 			},
 			{
@@ -133,7 +133,7 @@ describe("Thread-turn semantic characterization", () => {
 				acceptedInputIds: ["runtime_input_wake"],
 				expected: {
 					state: { state: "idle" },
-					action: {
+					nextStep: {
 						action: "commit_accepted_input",
 						runtimeInputId: "runtime_input_wake",
 					},
@@ -144,7 +144,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: openRequest(),
 				expected: {
 					state: { state: "request_open", modelRequestId: "request" },
-					action: { action: "await_request_end", modelRequestId: "request" },
+					nextStep: { action: "await_request_end", modelRequestId: "request" },
 				},
 			},
 			{
@@ -152,7 +152,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: sealedRequest([]),
 				expected: {
 					state: { state: "ready_to_finish" },
-					action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+					nextStep: { action: "finish_idle", stopReason: { type: "end_turn" } },
 				},
 			},
 			{
@@ -170,7 +170,7 @@ describe("Thread-turn semantic characterization", () => {
 						state: "waiting_for_tool_results",
 						modelRequestId: "request",
 					},
-					action: {
+					nextStep: {
 						action: "await_tool_results",
 						modelRequestId: "request",
 						toolUseEventIds: ["tool_pending"],
@@ -193,7 +193,7 @@ describe("Thread-turn semantic characterization", () => {
 						state: "waiting_for_tool_results",
 						modelRequestId: "request",
 					},
-					action: {
+					nextStep: {
 						action: "finish_idle",
 						stopReason: {
 							type: "requires_action",
@@ -218,7 +218,7 @@ describe("Thread-turn semantic characterization", () => {
 						state: "waiting_for_tool_results",
 						modelRequestId: "request",
 					},
-					action: {
+					nextStep: {
 						action: "resume_tool_routes",
 						modelRequestId: "request",
 						toolUseEventIds: ["tool_approval"],
@@ -230,7 +230,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: reviewerDecision,
 				expected: {
 					state: { state: "request_sealed", modelRequestId: "request" },
-					action: { action: "complete_reviewer", modelRequestId: "request" },
+					nextStep: { action: "complete_reviewer", modelRequestId: "request" },
 				},
 			},
 			{
@@ -238,7 +238,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: reviewerFailure,
 				expected: {
 					state: { state: "request_sealed", modelRequestId: "request" },
-					action: {
+					nextStep: {
 						action: "apply_request_retry_or_reschedule",
 						modelRequestId: "request",
 					},
@@ -249,7 +249,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: reviewerCancelled,
 				expected: {
 					state: { state: "request_sealed", modelRequestId: "request" },
-					action: { action: "close_interrupted", modelRequestId: "request" },
+					nextStep: { action: "close_interrupted", modelRequestId: "request" },
 				},
 			},
 			{
@@ -257,7 +257,7 @@ describe("Thread-turn semantic characterization", () => {
 				checkpoint: sealedRequest([], "compaction_summary"),
 				expected: {
 					state: { state: "ready_to_request" },
-					action: {
+					nextStep: {
 						action: "continue_after_compaction",
 						modelRequestId: "request",
 					},
@@ -275,14 +275,14 @@ describe("Thread-turn semantic characterization", () => {
 				},
 				expected: {
 					state: { state: "idle" },
-					action: { action: "await_input" },
+					nextStep: { action: "await_input" },
 				},
 			},
 		];
 
 		for (const scenario of cases) {
 			expect(
-				deriveThreadTurnDecision(noPendingAttachments,
+				deriveThreadTurnSnapshot(noPendingAttachments,
 					scenario.checkpoint,
 					scenario.routes ?? noRoutes,
 					scenario.acceptedInputIds ?? [],
@@ -299,7 +299,7 @@ describe("Thread-turn semantic characterization", () => {
 				{ toolUseEventId: "tool_b", disposition: "hot_execution" },
 			],
 		};
-		const initial = initializeThreadTurnReduction(noPendingAttachments,
+		const initial = initializeThreadTurnTransition(noPendingAttachments,
 			sealedRequest([
 				pendingTool("tool_a", "call_a", "Read"),
 				pendingTool("tool_b", "call_b", "Grep"),
@@ -318,7 +318,7 @@ describe("Thread-turn semantic characterization", () => {
 		);
 		expect(settledSecond).toMatchObject({
 			state: { state: "waiting_for_tool_results", modelRequestId: "request" },
-			action: {
+			nextStep: {
 				action: "await_tool_results",
 				modelRequestId: "request",
 				toolUseEventIds: ["tool_a"],
@@ -334,7 +334,7 @@ describe("Thread-turn semantic characterization", () => {
 			{ routes: [routes.routes[0]!] },
 		);
 		expect(interruptedBeforeLastSettlement).toMatchObject({
-			action: { action: "close_interrupted", modelRequestId: "request" },
+			nextStep: { action: "close_interrupted", modelRequestId: "request" },
 		});
 
 		const lastSettlementAfterInterrupt = reduceThreadTurn(noPendingAttachments,
@@ -348,7 +348,7 @@ describe("Thread-turn semantic characterization", () => {
 		);
 		expect(lastSettlementAfterInterrupt).toMatchObject({
 			state: { state: "request_sealed", modelRequestId: "request" },
-			action: { action: "close_interrupted", modelRequestId: "request" },
+			nextStep: { action: "close_interrupted", modelRequestId: "request" },
 		});
 
 		const allSettledBeforeInterrupt = reduceThreadTurn(noPendingAttachments,
@@ -362,7 +362,7 @@ describe("Thread-turn semantic characterization", () => {
 		);
 		expect(allSettledBeforeInterrupt).toMatchObject({
 			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
+			nextStep: { action: "prepare_next_request" },
 		});
 		expect(
 			reduceThreadTurn(noPendingAttachments,
@@ -374,7 +374,7 @@ describe("Thread-turn semantic characterization", () => {
 				noRoutes,
 			),
 		).toMatchObject({
-			action: { action: "close_interrupted", modelRequestId: "request" },
+			nextStep: { action: "close_interrupted", modelRequestId: "request" },
 		});
 	});
 });

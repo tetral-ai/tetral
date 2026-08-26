@@ -296,12 +296,12 @@ export async function appendIdleEvent(
 	if (!validated.ok) {
 		return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
 	}
-	const currentAction = session.state.threadTurnReduction().action;
+	const currentNextStep = session.state.threadTurnReduction().nextStep;
 	const committedRequiresActionTargets =
 		stopReason.type === "requires_action" &&
-		currentAction.action === "finish_idle" &&
-		currentAction.stopReason.type === "requires_action"
-			? currentAction.stopReason.eventIds
+		currentNextStep.action === "finish_idle" &&
+		currentNextStep.stopReason.type === "requires_action"
+			? currentNextStep.stopReason.eventIds
 			: undefined;
 	session.state.applyThreadTurnFact({
 		fact: "finish_idle_committed",

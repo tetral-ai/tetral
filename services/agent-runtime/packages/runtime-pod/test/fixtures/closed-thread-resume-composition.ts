@@ -11,7 +11,7 @@ import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
@@ -213,7 +213,7 @@ try {
 		pendingToolUses: loaded.pendingToolUses ?? [],
 		pendingSandboxExecutions: loaded.pendingSandboxExecutions ?? [],
 	});
-	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
+	const decision = deriveThreadTurnSnapshot(checkpoint, routeView, [], {
 		hasPendingAttachments: (loaded.pendingAttachments?.length ?? 0) > 0,
 	});
 	const entry = lookupToolEntry(

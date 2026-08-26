@@ -12,7 +12,7 @@ import {
 	extractThreadTurnCheckpoint,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import {
-	deriveThreadTurnDecision,
+	deriveThreadTurnSnapshot,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
@@ -166,12 +166,12 @@ if (input.hotScenario !== undefined) {
 	hot = {
 		checkpoint: hotCheckpoint,
 		toolRouteView: hotRoutes,
-		reducerAction: deriveThreadTurnDecision(
+		reducerAction: deriveThreadTurnSnapshot(
 			hotCheckpoint,
 			hotRoutes,
 			[],
 			hotActiveInputView,
-		).action,
+		).nextStep,
 		...(toolPart === undefined ? {} : { toolPart }),
 		...(input.providerComposition === true
 			? {
@@ -188,12 +188,12 @@ process.stdout.write(
 	JSON.stringify({
 		checkpoint,
 		toolRouteView,
-		reducerAction: deriveThreadTurnDecision(
+		reducerAction: deriveThreadTurnSnapshot(
 			checkpoint,
 			toolRouteView,
 			[],
 			coldActiveInputView,
-		).action,
+		).nextStep,
 		derivedRepairKeys: (checkpoint.request?.toolMembers ?? []).flatMap(
 			(member) =>
 				member.memberKind === "internal_tool_repair"

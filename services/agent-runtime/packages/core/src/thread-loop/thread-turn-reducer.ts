@@ -18,20 +18,10 @@ export type ThreadTurnState =
 	  }
 	| { readonly state: "ready_to_finish" };
 
-export type ThreadTurnAction =
-	| { readonly action: "none" }
+export type ThreadTurnNextStep =
 	| { readonly action: "await_input" }
 	| { readonly action: "prepare_next_request" }
-	| {
-			readonly action: "start_provider_request";
-			readonly modelRequestId: string;
-	  }
 	| { readonly action: "await_request_end"; readonly modelRequestId: string }
-	| { readonly action: "dispatch_tool_use"; readonly toolUseEventId: string }
-	| {
-			readonly action: "reconcile_request_seal";
-			readonly modelRequestId: string;
-	  }
 	| {
 			readonly action: "resume_tool_routes";
 			readonly modelRequestId: string;
@@ -68,13 +58,21 @@ export type ThreadTurnAction =
 	| { readonly action: "close_interrupted"; readonly modelRequestId?: string }
 	| { readonly action: "close_failed"; readonly modelRequestId?: string };
 
-export interface ThreadTurnDecision {
+export type ThreadTurnDispatch =
+	| {
+			readonly dispatch: "start_provider_request";
+			readonly modelRequestId: string;
+	  }
+	| { readonly dispatch: "route_tool_use"; readonly toolUseEventId: string };
+
+export interface ThreadTurnSnapshot {
 	readonly state: ThreadTurnState;
-	readonly action: ThreadTurnAction;
+	readonly nextStep: ThreadTurnNextStep;
 }
 
-export interface ThreadTurnReduction extends ThreadTurnDecision {
+export interface ThreadTurnTransition extends ThreadTurnSnapshot {
 	readonly checkpoint: ThreadTurnCheckpoint;
+	readonly dispatch?: ThreadTurnDispatch | undefined;
 }
 
 /** Decision-only projection of active input that is not Message context. */
@@ -175,12 +173,12 @@ export type ThreadTurnFact =
 			readonly disposition: "retries_exhausted" | "terminated";
 	  };
 
-export function deriveThreadTurnDecision(
+export function deriveThreadTurnSnapshot(
 	checkpointInput: ThreadTurnCheckpoint,
 	routeViewInput: ThreadToolRouteView,
 	acceptedInputIds: readonly string[],
 	activeInputView: ThreadActiveInputView,
-): ThreadTurnDecision {
+): ThreadTurnSnapshot {
 	const checkpoint = parseThreadTurnCheckpoint(checkpointInput);
 	const routeView = parseThreadToolRouteView(routeViewInput);
 	const modelRequestId = checkpoint.request?.modelRequestId;
@@ -194,11 +192,11 @@ export function deriveThreadTurnDecision(
 			if (acceptedInput !== undefined) {
 				return acceptedInput;
 			}
-			return { state: { state: "idle" }, action: { action: "await_input" } };
+			return { state: { state: "idle" }, nextStep: { action: "await_input" } };
 		}
 		return {
 			state: controlState(checkpoint),
-			action: optionalModelRequestAction("close_interrupted", modelRequestId),
+			nextStep: optionalModelRequestAction("close_interrupted", modelRequestId),
 		};
 	}
 	if (checkpoint.terminalCloseout !== undefined) {
@@ -211,7 +209,7 @@ export function deriveThreadTurnDecision(
 				return acceptedInput;
 			}
 		}
-		return { state: { state: "idle" }, action: { action: "await_input" } };
+		return { state: { state: "idle" }, nextStep: { action: "await_input" } };
 	}
 
 	const request = checkpoint.request;
@@ -224,7 +222,7 @@ export function deriveThreadTurnDecision(
 			return acceptedInput;
 		}
 		if (checkpoint.idleCloseout?.stopReason === "end_turn") {
-			return { state: { state: "idle" }, action: { action: "await_input" } };
+			return { state: { state: "idle" }, nextStep: { action: "await_input" } };
 		}
 		if (
 			checkpoint.pendingInputContextSequences.length > 0 ||
@@ -235,43 +233,22 @@ export function deriveThreadTurnDecision(
 		if (checkpoint.executionRunId !== undefined) {
 			return {
 				state: { state: "ready_to_finish" },
-				action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+				nextStep: { action: "finish_idle", stopReason: { type: "end_turn" } },
 			};
 		}
-		return { state: { state: "idle" }, action: { action: "await_input" } };
+		return { state: { state: "idle" }, nextStep: { action: "await_input" } };
 	}
 
 	if (request.requestEnd === undefined) {
 		return {
 			state: { state: "request_open", modelRequestId: request.modelRequestId },
-			action: {
+			nextStep: {
 				action: "await_request_end",
 				modelRequestId: request.modelRequestId,
 			},
 		};
 	}
 
-	if (request.requestEnd.isError || request.requestEnd.reschedule !== undefined) {
-		return {
-			state: {
-				state: "request_sealed",
-				modelRequestId: request.modelRequestId,
-			},
-			action: {
-				action: "apply_request_retry_or_reschedule",
-				modelRequestId: request.modelRequestId,
-			},
-		};
-	}
-	if (request.requestKind === "compaction_summary") {
-		return {
-			state: { state: "ready_to_request" },
-			action: {
-				action: "continue_after_compaction",
-				modelRequestId: request.modelRequestId,
-			},
-		};
-	}
 	const publicMembers = request.toolMembers.filter(
 		(member) => member.memberKind === "public_tool_use",
 	);
@@ -296,7 +273,7 @@ export function deriveThreadTurnDecision(
 					state: "waiting_for_tool_results",
 					modelRequestId: request.modelRequestId,
 				},
-				action: {
+				nextStep: {
 					action: "resume_tool_routes",
 					modelRequestId: request.modelRequestId,
 					toolUseEventIds: resumeToolUseEventIds,
@@ -314,7 +291,7 @@ export function deriveThreadTurnDecision(
 					state: "waiting_for_tool_results",
 					modelRequestId: request.modelRequestId,
 				},
-				action: {
+				nextStep: {
 					action: "await_tool_results",
 					modelRequestId: request.modelRequestId,
 					toolUseEventIds: incompleteMembers.map(
@@ -340,7 +317,7 @@ export function deriveThreadTurnDecision(
 					state: "waiting_for_tool_results",
 					modelRequestId: request.modelRequestId,
 				},
-				action: {
+				nextStep: {
 					action: "finish_idle",
 					stopReason: {
 						type: "requires_action",
@@ -355,12 +332,34 @@ export function deriveThreadTurnDecision(
 				state: "waiting_for_tool_results",
 				modelRequestId: request.modelRequestId,
 			},
-			action: {
+			nextStep: {
 				action: "await_tool_results",
 				modelRequestId: request.modelRequestId,
 				toolUseEventIds: incompleteMembers.map(
 					(member) => member.toolUseEventId,
 				),
+			},
+		};
+	}
+
+	if (request.requestEnd.isError || request.requestEnd.reschedule !== undefined) {
+		return {
+			state: {
+				state: "request_sealed",
+				modelRequestId: request.modelRequestId,
+			},
+			nextStep: {
+				action: "apply_request_retry_or_reschedule",
+				modelRequestId: request.modelRequestId,
+			},
+		};
+	}
+	if (request.requestKind === "compaction_summary") {
+		return {
+			state: { state: "ready_to_request" },
+			nextStep: {
+				action: "continue_after_compaction",
+				modelRequestId: request.modelRequestId,
 			},
 		};
 	}
@@ -394,7 +393,7 @@ export function deriveThreadTurnDecision(
 				state: "request_sealed",
 				modelRequestId: request.modelRequestId,
 			},
-			action: {
+			nextStep: {
 				action: "complete_reviewer",
 				modelRequestId: request.modelRequestId,
 			},
@@ -402,24 +401,24 @@ export function deriveThreadTurnDecision(
 	}
 
 	if (checkpoint.idleCloseout?.stopReason === "end_turn") {
-		return { state: { state: "idle" }, action: { action: "await_input" } };
+		return { state: { state: "idle" }, nextStep: { action: "await_input" } };
 	}
 	return {
 		state: { state: "ready_to_finish" },
-		action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+		nextStep: { action: "finish_idle", stopReason: { type: "end_turn" } },
 	};
 }
 
-export function initializeThreadTurnReduction(
+export function initializeThreadTurnTransition(
 	checkpointInput: ThreadTurnCheckpoint,
 	routeView: ThreadToolRouteView,
 	acceptedInputIds: readonly string[],
 	activeInputView: ThreadActiveInputView,
-): ThreadTurnReduction {
+): ThreadTurnTransition {
 	const checkpoint = parseThreadTurnCheckpoint(checkpointInput);
 	return {
 		checkpoint,
-		...deriveThreadTurnDecision(
+		...deriveThreadTurnSnapshot(
 			checkpoint,
 			routeView,
 			acceptedInputIds,
@@ -429,12 +428,12 @@ export function initializeThreadTurnReduction(
 }
 
 export function reduceThreadTurn(
-	current: ThreadTurnReduction,
+	current: ThreadTurnTransition,
 	fact: ThreadTurnFact,
 	routeView: ThreadToolRouteView,
 	acceptedInputIds: readonly string[],
 	activeInputView: ThreadActiveInputView,
-): ThreadTurnReduction {
+): ThreadTurnTransition {
 	const eventId =
 		fact.fact === "tool_result_committed" ? undefined : fact.eventId;
 	if (eventId !== undefined) {
@@ -443,7 +442,7 @@ export function reduceThreadTurn(
 	switch (fact.fact) {
 		case "run_opened": {
 			if (current.checkpoint.executionRunId === fact.eventId) {
-				return stableReduction(
+				return stableTransition(
 					current.checkpoint,
 					routeView,
 					acceptedInputIds,
@@ -460,16 +459,16 @@ export function reduceThreadTurn(
 						member.memberKind === "public_tool_use" &&
 						member.terminalResult === undefined,
 				) ||
-					current.action.action === "prepare_next_request" ||
-					current.action.action === "continue_after_compaction" ||
-					current.action.action === "complete_reviewer");
+					current.nextStep.action === "prepare_next_request" ||
+					current.nextStep.action === "continue_after_compaction" ||
+					current.nextStep.action === "complete_reviewer");
 			const checkpoint = parseThreadTurnCheckpoint({
 				executionRunId: fact.eventId,
 				pendingInputContextSequences:
 					current.checkpoint.pendingInputContextSequences,
 				...(preserveActiveRequest && request !== undefined ? { request } : {}),
 			});
-			return stableReduction(
+			return stableTransition(
 				checkpoint,
 				routeView,
 				acceptedInputIds,
@@ -478,7 +477,7 @@ export function reduceThreadTurn(
 		}
 		case "inputs_committed": {
 			if (fact.contextSequences.length === 0) {
-				return stableReduction(
+				return stableTransition(
 					current.checkpoint,
 					routeView,
 					acceptedInputIds,
@@ -490,7 +489,7 @@ export function reduceThreadTurn(
 					current.checkpoint.pendingInputContextSequences.includes(sequence),
 				)
 			) {
-				return stableReduction(
+				return stableTransition(
 					current.checkpoint,
 					routeView,
 					acceptedInputIds,
@@ -501,7 +500,7 @@ export function reduceThreadTurn(
 				current.checkpoint,
 				fact.contextSequences,
 			);
-			return stableReduction(
+			return stableTransition(
 				checkpoint,
 				routeView,
 				acceptedInputIds,
@@ -510,11 +509,16 @@ export function reduceThreadTurn(
 		}
 		case "request_started": {
 			if (current.checkpoint.request?.requestStartEventId === fact.eventId) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			const startAuthorized =
 				current.state.state === "ready_to_request" ||
-				current.action.action === "apply_request_retry_or_reschedule";
+				current.nextStep.action === "apply_request_retry_or_reschedule";
 			if (!startAuthorized) {
 				throw new ThreadTurnContractError(
 					`cannot start Request from ${current.state.state}`,
@@ -560,14 +564,16 @@ export function reduceThreadTurn(
 					toolMembers: [],
 				},
 			});
-			return {
+			return transitionWithDispatch(
 				checkpoint,
-				state: { state: "request_open", modelRequestId: fact.modelRequestId },
-				action: {
-					action: "start_provider_request",
+				routeView,
+				acceptedInputIds,
+				activeInputView,
+				{
+					dispatch: "start_provider_request",
 					modelRequestId: fact.modelRequestId,
 				},
-			};
+			);
 		}
 		case "tool_use_committed": {
 			const request = currentRequest(current.checkpoint, fact.modelRequestId);
@@ -578,7 +584,12 @@ export function reduceThreadTurn(
 						member.toolUseEventId === fact.eventId,
 				)
 			) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			if (request.requestEnd !== undefined) {
 				throw new ThreadTurnContractError(
@@ -612,16 +623,15 @@ export function reduceThreadTurn(
 				checkpoint.interruptEventId !== undefined ||
 				checkpoint.terminalCloseout !== undefined
 			) {
-				return stableReduction(checkpoint, routeView, [], activeInputView);
+				return stableTransition(checkpoint, routeView, [], activeInputView);
 			}
-			return {
+			return transitionWithDispatch(
 				checkpoint,
-				state: {
-					state: "request_open",
-					modelRequestId: request.modelRequestId,
-				},
-				action: { action: "dispatch_tool_use", toolUseEventId: fact.eventId },
-			};
+				routeView,
+				acceptedInputIds,
+				activeInputView,
+				{ dispatch: "route_tool_use", toolUseEventId: fact.eventId },
+			);
 		}
 		case "internal_tool_repair_committed": {
 			const request = currentRequest(current.checkpoint, fact.modelRequestId);
@@ -632,7 +642,12 @@ export function reduceThreadTurn(
 						member.repairEventId === fact.eventId,
 				)
 			) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			if (request.requestEnd !== undefined) {
 				throw new ThreadTurnContractError(
@@ -661,7 +676,7 @@ export function reduceThreadTurn(
 					},
 				],
 			});
-			return stableReduction(
+			return stableTransition(
 				checkpoint,
 				routeView,
 				acceptedInputIds,
@@ -705,7 +720,12 @@ export function reduceThreadTurn(
 				);
 			}
 			if (replayed) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			const activeCheckpoint =
 				current.checkpoint.idleCloseout === undefined
@@ -714,7 +734,7 @@ export function reduceThreadTurn(
 							...current.checkpoint,
 							idleCloseout: undefined,
 						});
-			return stableReduction(
+			return stableTransition(
 				replaceRequest(activeCheckpoint, { ...request, toolMembers }),
 				routeView,
 				acceptedInputIds,
@@ -725,7 +745,12 @@ export function reduceThreadTurn(
 			const request = currentRequest(current.checkpoint, fact.modelRequestId);
 			if (request.requestEnd !== undefined) {
 				if (request.requestEnd.eventId === fact.eventId) {
-					return { ...current, action: { action: "none" } };
+					return stableTransition(
+						current.checkpoint,
+						routeView,
+						acceptedInputIds,
+						activeInputView,
+					);
 				}
 				throw new ThreadTurnContractError("Request already has a durable End");
 			}
@@ -743,24 +768,24 @@ export function reduceThreadTurn(
 						: {}),
 				},
 			});
-			return {
+			return stableTransition(
 				checkpoint,
-				state: {
-					state: "request_sealed",
-					modelRequestId: request.modelRequestId,
-				},
-				action: {
-					action: "reconcile_request_seal",
-					modelRequestId: request.modelRequestId,
-				},
-			};
+				routeView,
+				acceptedInputIds,
+				activeInputView,
+			);
 		}
 		case "finish_idle_committed": {
 			if (
 				current.checkpoint.idleCloseout?.eventId === fact.eventId ||
 				current.checkpoint.terminalCloseout?.closeoutEventId === fact.eventId
 			) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			if (fact.stopReason.type === "requires_action") {
 				if (current.state.state !== "waiting_for_tool_results") {
@@ -769,8 +794,8 @@ export function reduceThreadTurn(
 					);
 				}
 				if (
-					current.action.action !== "finish_idle" ||
-					current.action.stopReason.type !== "requires_action"
+					current.nextStep.action !== "finish_idle" ||
+					current.nextStep.stopReason.type !== "requires_action"
 				) {
 					throw new ThreadTurnContractError(
 						"requires_action ACK does not match the current FinishIdle action",
@@ -779,7 +804,7 @@ export function reduceThreadTurn(
 				if (
 					!sameIdentitySet(
 						fact.stopReason.eventIds,
-						current.action.stopReason.eventIds,
+						current.nextStep.stopReason.eventIds,
 					)
 				) {
 					throw new ThreadTurnContractError(
@@ -799,26 +824,12 @@ export function reduceThreadTurn(
 						"requires_action closeout has no request",
 					);
 				}
-				return {
+				return stableTransition(
 					checkpoint,
-					state: {
-						state: "waiting_for_tool_results",
-						modelRequestId: request.modelRequestId,
-					},
-					action: {
-						action: "await_tool_results",
-						modelRequestId: request.modelRequestId,
-						toolUseEventIds: request.toolMembers.flatMap((member) => {
-							if (
-								member.memberKind !== "public_tool_use" ||
-								member.terminalResult !== undefined
-							) {
-								return [];
-							}
-							return [member.toolUseEventId];
-						}),
-					},
-				};
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			if (fact.stopReason.type === "retries_exhausted") {
 				if (
@@ -843,7 +854,7 @@ export function reduceThreadTurn(
 						stopReason: "retries_exhausted",
 					},
 				});
-				return stableReduction(
+				return stableTransition(
 					checkpoint,
 					routeView,
 					acceptedInputIds,
@@ -851,13 +862,13 @@ export function reduceThreadTurn(
 				);
 			}
 			const closesCurrentAction =
-				(current.action.action === "finish_idle" &&
-					current.action.stopReason.type === "end_turn") ||
-				current.action.action === "complete_reviewer" ||
-				current.action.action === "close_interrupted" ||
-				current.action.action === "apply_request_retry_or_reschedule" ||
+				(current.nextStep.action === "finish_idle" &&
+					current.nextStep.stopReason.type === "end_turn") ||
+				current.nextStep.action === "complete_reviewer" ||
+				current.nextStep.action === "close_interrupted" ||
+				current.nextStep.action === "apply_request_retry_or_reschedule" ||
 				(current.state.state === "idle" &&
-					current.action.action === "await_input") ||
+					current.nextStep.action === "await_input") ||
 				fact.stopReason.failedRun === true;
 			if (!closesCurrentAction) {
 				throw new ThreadTurnContractError(
@@ -875,18 +886,23 @@ export function reduceThreadTurn(
 			return {
 				checkpoint,
 				state: { state: "idle" },
-				action: { action: "await_input" },
+				nextStep: { action: "await_input" },
 			};
 		}
 		case "interrupt_committed": {
 			if (current.checkpoint.interruptEventId === fact.eventId) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			const checkpoint = parseThreadTurnCheckpoint({
 				...current.checkpoint,
 				interruptEventId: fact.eventId,
 			});
-			return stableReduction(
+			return stableTransition(
 				checkpoint,
 				routeView,
 				acceptedInputIds,
@@ -897,7 +913,12 @@ export function reduceThreadTurn(
 			if (
 				current.checkpoint.terminalCloseout?.closeoutEventId === fact.eventId
 			) {
-				return { ...current, action: { action: "none" } };
+				return stableTransition(
+					current.checkpoint,
+					routeView,
+					acceptedInputIds,
+					activeInputView,
+				);
 			}
 			const checkpoint = parseThreadTurnCheckpoint({
 				pendingInputContextSequences:
@@ -908,65 +929,20 @@ export function reduceThreadTurn(
 					disposition: fact.disposition,
 				},
 			});
-			return stableReduction(checkpoint, routeView, [], activeInputView);
+			return stableTransition(checkpoint, routeView, [], activeInputView);
 		}
 	}
 }
 
-export function reconcileThreadTurnSeal(
-	current: ThreadTurnReduction,
-	routeView: ThreadToolRouteView,
-	acceptedInputIds: readonly string[],
-	activeInputView: ThreadActiveInputView,
-): ThreadTurnReduction {
-	if (
-		current.state.state !== "request_sealed" ||
-		current.action.action !== "reconcile_request_seal"
-	) {
-		throw new ThreadTurnContractError(
-			"only a newly sealed request can be reconciled",
-		);
-	}
-	return stableReduction(
-		current.checkpoint,
-		routeView,
-		acceptedInputIds,
-		activeInputView,
-	);
-}
-
-/** Consumes a one-shot hot dispatch edge and exposes its durable stable action. */
-export function consumeThreadTurnEdge(
-	current: ThreadTurnReduction,
-	routeView: ThreadToolRouteView,
-	acceptedInputIds: readonly string[],
-	activeInputView: ThreadActiveInputView,
-): ThreadTurnReduction {
-	if (
-		current.action.action !== "start_provider_request" &&
-		current.action.action !== "dispatch_tool_use"
-	) {
-		throw new ThreadTurnContractError(
-			"only a one-shot Thread-turn edge can be consumed",
-		);
-	}
-	return stableReduction(
-		current.checkpoint,
-		routeView,
-		acceptedInputIds,
-		activeInputView,
-	);
-}
-
-function stableReduction(
+function stableTransition(
 	checkpoint: ThreadTurnCheckpoint,
 	routeView: ThreadToolRouteView,
 	acceptedInputIds: readonly string[],
 	activeInputView: ThreadActiveInputView,
-): ThreadTurnReduction {
+): ThreadTurnTransition {
 	return {
 		checkpoint,
-		...deriveThreadTurnDecision(
+		...deriveThreadTurnSnapshot(
 			checkpoint,
 			routeView,
 			acceptedInputIds,
@@ -975,10 +951,28 @@ function stableReduction(
 	};
 }
 
+function transitionWithDispatch(
+	checkpoint: ThreadTurnCheckpoint,
+	routeView: ThreadToolRouteView,
+	acceptedInputIds: readonly string[],
+	activeInputView: ThreadActiveInputView,
+	dispatch: ThreadTurnDispatch,
+): ThreadTurnTransition {
+	return {
+		...stableTransition(
+			checkpoint,
+			routeView,
+			acceptedInputIds,
+			activeInputView,
+		),
+		dispatch,
+	};
+}
+
 function commitAcceptedInputDecision(
 	checkpoint: ThreadTurnCheckpoint,
 	acceptedInputIds: readonly string[],
-): ThreadTurnDecision | undefined {
+): ThreadTurnSnapshot | undefined {
 	const runtimeInputId = acceptedInputIds[0];
 	if (runtimeInputId === undefined) {
 		return undefined;
@@ -986,7 +980,7 @@ function commitAcceptedInputDecision(
 	assertDurableIdentity(runtimeInputId, "runtimeInputId");
 	return {
 		state: controlState(checkpoint),
-		action: { action: "commit_accepted_input", runtimeInputId },
+		nextStep: { action: "commit_accepted_input", runtimeInputId },
 	};
 }
 
@@ -1109,10 +1103,10 @@ function routeDisposition(
 	return route.disposition;
 }
 
-function readyToRequest(): ThreadTurnDecision {
+function readyToRequest(): ThreadTurnSnapshot {
 	return {
 		state: { state: "ready_to_request" },
-		action: { action: "prepare_next_request" },
+		nextStep: { action: "prepare_next_request" },
 	};
 }
 
@@ -1130,7 +1124,7 @@ function controlState(checkpoint: ThreadTurnCheckpoint): ThreadTurnState {
 function optionalModelRequestAction(
 	action: "close_interrupted" | "close_failed",
 	modelRequestId: string | undefined,
-): ThreadTurnAction {
+): ThreadTurnNextStep {
 	return modelRequestId === undefined ? { action } : { action, modelRequestId };
 }
 
