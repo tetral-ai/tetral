@@ -1807,6 +1807,51 @@ describe("SessionManager", () => {
 					stale: true,
 				});
 				expect(commits).toBe(2);
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: false });
+			},
+		);
+	});
+
+	test("joined idle interrupt replay preserves its resident thread", async () => {
+		const sessionId = "sesn_joined_idle_interrupt";
+		const threadId = "thrd_joined_idle_interrupt";
+		await withSessionManager(
+			sessionManagerLayer(makeInterruptRecordingThreadLoop()),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.preloadThread({
+							...threadControl(sessionId, "rin_preload_joined", threadId),
+							runtimeBindingToken: "runtime-binding-token",
+							contextEntries: [],
+						}),
+					),
+				).toMatchObject({ ok: true, applied: true });
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_idle_interrupt", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(sessionId, interrupt, async () => ({
+							ok: true,
+							joined: true,
+						})),
+					),
+				).toMatchObject({
+					ok: true,
+					duplicate: true,
+					idleInterrupt: true,
+				});
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: true, status: "idle" });
 			},
 		);
 	});
@@ -1968,6 +2013,17 @@ describe("SessionManager", () => {
 					},
 				);
 				let idleInterruptCommits = 0;
+				const interruptAttachment = {
+					transient: {
+						attachmentRef: "att_idle_interrupt",
+						sourcePath: "mcp:github/interrupt.png",
+						pageRange: "",
+						detail: "auto" as const,
+					},
+					fileBacked: undefined,
+					mime: "image/png",
+					filename: "interrupt.png",
+				};
 				const idleInterrupt = {
 					...threadControl("sesn_1"),
 					runtimeInputId: "rin_idle_interrupt",
@@ -1987,6 +2043,7 @@ describe("SessionManager", () => {
 								if (!result.ok) return result;
 								return {
 									...result,
+									pendingAttachments: [interruptAttachment],
 									interruptToolResults: [
 										{
 											toolUseEventId: "sevt_idle_interrupt_tool",
@@ -2043,6 +2100,9 @@ describe("SessionManager", () => {
 				]);
 				expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
 				expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
+				expect(session.state.pendingAttachments()).toEqual([
+					interruptAttachment,
+				]);
 				expect(session.state.threadTurnTransition()).toMatchObject({
 					state: { state: "idle" },
 					nextStep: { action: "await_input" },
@@ -2204,26 +2264,56 @@ describe("SessionManager", () => {
 	});
 
 	test("retryable idle interrupt replay retries the frozen declaration", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
+		const threadLoop = makeControlledCrashThreadLoop("die", {
+			closeFailedRun: () =>
+				Effect.succeed({
+					type: "unrepairable" as const,
+					error: normalizeSessionEventWriterError({
+						code: "unrepairable",
+					}),
+				}),
+		});
+		let contextLoads = 0;
 		await withSessionManager(
-			sessionManagerLayer(threadLoop),
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (command) => {
+					contextLoads += 1;
+					return {
+						...command,
+						runtimeBindingToken: "runtime-binding-token",
+						contextEntries: [],
+					};
+				},
+			}),
 			async (manager) => {
 				const sessionId = "sesn_retryable_idle_interrupt";
 				const threadId = "thrd_retryable_idle_interrupt";
-				const preload = threadControl(
-					sessionId,
-					"rin_preload_retryable_idle_interrupt",
-					threadId,
-				);
 				expect(
 					await Effect.runPromise(
-						manager.preloadThread({
-							...preload,
-							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
-						}),
+						manager.acceptInput(
+							acceptedInput(
+								sessionId,
+								"rin_retryable_idle_owner",
+								threadId,
+							),
+						),
 					),
-				).toMatchObject({ ok: true, applied: true });
+				).toMatchObject({ ok: true, started: true });
+				await waitForCrashRuns(threadLoop, 1);
+				threadLoop.runs[0]?.releaseCrash();
+				await waitForCondition(async () => {
+					const snapshot = await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					);
+					return snapshot.ok && snapshot.observed;
+				}, "unrepairable accepted custody");
+				const resident = threadLoop.runs[0]?.session;
+				if (resident === undefined) throw new Error("expected resident thread");
+				const checkpointBefore =
+					resident.state.threadTurnTransition().checkpoint;
+				const acceptedBefore = resident.state.acceptedInputSnapshot();
+				const loadsBeforeInterrupt = contextLoads;
+				expect(acceptedBefore).toHaveLength(1);
 
 				const interrupt = {
 					...threadControl(sessionId, "rin_retryable_idle_interrupt", threadId),
@@ -2250,7 +2340,19 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId,
 					reason: "context_load_failed",
+					retryable: true,
+					errorCode: "bridge_token_unavailable",
 				});
+				expect(contextLoads).toBe(loadsBeforeInterrupt);
+				expect(resident.state.acceptedInputSnapshot()).toEqual(acceptedBefore);
+				expect(resident.state.threadTurnTransition().checkpoint).toEqual(
+					checkpointBefore,
+				);
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: true });
 				expect(
 					await Effect.runPromise(
 						manager.interruptControl(sessionId, interrupt, commit),
@@ -2262,6 +2364,7 @@ describe("SessionManager", () => {
 					interrupted: false,
 					idleInterrupt: true,
 				});
+				expect(contextLoads).toBe(loadsBeforeInterrupt);
 				expect(declarations).toHaveLength(2);
 				expect(declarations[1]).toEqual(declarations[0]);
 			},

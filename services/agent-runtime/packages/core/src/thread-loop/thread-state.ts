@@ -731,6 +731,12 @@ export class ThreadState {
 			return false;
 		}
 		interrupt.declaration = declaration;
+		if (!result.ok && result.retryable) {
+			interrupt.commitResult = undefined;
+			interrupt.commitPromise = undefined;
+			interrupt.inputCommitApplied = false;
+			return true;
+		}
 		interrupt.commitResult = result;
 		interrupt.commitPromise = Promise.resolve({ declaration, result });
 		interrupt.inputCommitApplied = result.ok && "joined" in result;

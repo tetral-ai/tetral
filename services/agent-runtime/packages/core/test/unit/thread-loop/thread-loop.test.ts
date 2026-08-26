@@ -1856,6 +1856,93 @@ describe("ThreadLoop", () => {
 const timestamp = "2026-01-01T00:00:00.000Z";
 
 describe("ThreadState", () => {
+	test("joined interrupt replay releases only its matching local fence", async () => {
+		const session = new ThreadRuntime("sesn_joined_interrupt_replay");
+		const input = acceptedInput(
+			"rin_after_joined_interrupt",
+			"sesn_joined_interrupt_replay",
+		);
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_joined_interrupt_replay",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_joined_interrupt_replay",
+			origin: "user" as const,
+		};
+		let closeouts = 0;
+		session.state.enqueueAcceptedInput(input);
+		expect(
+			session.state.beginUserInterrupt(
+				command,
+				async () => ({ ok: true, joined: true }),
+				() => {
+					closeouts += 1;
+				},
+			),
+		).toBe("applied");
+		expect(
+			session.state.recordJoinedUserInterruptResult(command.runtimeInputId),
+		).toBe(true);
+
+		expect(
+			await Effect.runPromise(
+				ThreadLoop.settleIdleInterrupt(
+					session,
+					command,
+					async () => ({ ok: true, joined: true }),
+				),
+			),
+		).toEqual({ type: "duplicate" });
+		expect(closeouts).toBe(1);
+		expect(session.state.userInterruptRequested()).toBe(false);
+		expect(session.state.acceptedInputSnapshot()).toEqual([input]);
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: input.runtimeInputId,
+		});
+	});
+
+	test("joined recording never caches a retryable interrupt failure", async () => {
+		const state = new ThreadState("sesn_retryable_joined_recording");
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_retryable_joined_recording",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_retryable_joined_recording",
+			origin: "user" as const,
+		};
+		let commitCalls = 0;
+		state.beginUserInterrupt(command, async () => {
+			commitCalls += 1;
+			return {
+				ok: true as const,
+				type: "committed" as const,
+				assignedContextSequences: [],
+				pendingAttachments: [],
+				interruptToolResults: [],
+			};
+		});
+		expect(
+			state.recordJoinedUserInterruptResult(command.runtimeInputId, {
+				ok: false,
+				retryable: true,
+				errorCode: "bridge_unavailable",
+			}),
+		).toBe(true);
+		expect(state.userInterruptCommitResult(command.runtimeInputId)).toBeUndefined();
+
+		expect(
+			(await state.commitUserInterruptInput({ inputKind: "interrupt" })).result,
+		).toMatchObject({ ok: true, type: "committed" });
+		expect(commitCalls).toBe(1);
+	});
+
 	test("successful request hints stay paired and an actual model change invalidates both", () => {
 		const state = new ThreadState("sesn_compaction_hints");
 		state.updateCurrentModel({ providerId: "openai", modelId: "gpt-5.5" });

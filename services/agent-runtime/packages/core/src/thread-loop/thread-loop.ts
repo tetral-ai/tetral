@@ -377,9 +377,15 @@ export type ThreadLoopSessionReleaseReason =
 /** Result of applying one committed idle-interrupt receipt inside the ThreadLoop owner. */
 export type IdleInterruptSettlementResult =
 	| { readonly type: "applied"; readonly wakeThread: boolean }
-	| { readonly type: "duplicate"; readonly stale?: true }
+	| { readonly type: "duplicate" }
+	| { readonly type: "stale" }
 	| { readonly type: "conflict" }
-	| { readonly type: "failed" };
+	| {
+			readonly type: "commit_failed";
+			readonly retryable: boolean;
+			readonly errorCode: string | number;
+	  }
+	| { readonly type: "projection_failed" };
 
 /** Result of applying one Tool-confirmation receipt before SessionManager consumes its wake intent. */
 export type ToolConfirmationSettlementResult =
@@ -1091,13 +1097,24 @@ export function settleIdleInterrupt(
 			commitInput({ inputKind: "interrupt" }),
 		);
 		if (!committed.ok) {
-			return { type: "failed" as const };
-		}
-		if ("stale" in committed || "joined" in committed) {
 			return {
-				type: "duplicate" as const,
-				...("stale" in committed ? { stale: true as const } : {}),
+				type: "commit_failed" as const,
+				retryable: committed.retryable,
+				errorCode: committed.errorCode,
 			};
+		}
+		if ("stale" in committed) {
+			return { type: "stale" as const };
+		}
+		if ("joined" in committed) {
+			if (
+				session.state.userInterruptCommand()?.runtimeInputId ===
+				command.runtimeInputId
+			) {
+				session.state.completeUserInterrupt(command.runtimeInputId);
+				session.state.finishThreadRunProjection();
+			}
+			return { type: "duplicate" as const };
 		}
 
 		const admitted = session.state.beginUserInterrupt(
@@ -1116,8 +1133,20 @@ export function settleIdleInterrupt(
 		const application = yield* Effect.promise(() =>
 			session.state.commitUserInterruptInput({ inputKind: "interrupt" }),
 		);
-		if (!("type" in application.result)) {
-			return { type: "failed" as const };
+		if (!application.result.ok) {
+			return {
+				type: "commit_failed" as const,
+				retryable: application.result.retryable,
+				errorCode: application.result.errorCode,
+			};
+		}
+		if ("stale" in application.result) {
+			return { type: "stale" as const };
+		}
+		if ("joined" in application.result) {
+			session.state.completeUserInterrupt(command.runtimeInputId);
+			session.state.finishThreadRunProjection();
+			return { type: "duplicate" as const };
 		}
 
 		try {
@@ -1160,7 +1189,7 @@ export function settleIdleInterrupt(
 				);
 			}
 		} catch {
-			return { type: "failed" as const };
+			return { type: "projection_failed" as const };
 		}
 
 		session.state.completeUserInterrupt(command.runtimeInputId);

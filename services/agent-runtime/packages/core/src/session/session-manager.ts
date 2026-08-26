@@ -1732,7 +1732,16 @@ export function layer(
 						interruptStateCommand(command),
 						commitInput,
 					);
-					if (settlement.type === "failed") {
+					if (settlement.type === "commit_failed") {
+						return {
+							ok: false,
+							sessionId,
+							reason: "context_load_failed",
+							retryable: settlement.retryable,
+							errorCode: settlement.errorCode,
+						} as const;
+					}
+					if (settlement.type === "projection_failed") {
 						markReloadRequired();
 						return {
 							ok: false,
@@ -1743,6 +1752,17 @@ export function layer(
 					if (settlement.type === "conflict") {
 						return { ok: false, sessionId, reason: "control_busy" } as const;
 					}
+					if (settlement.type === "stale") {
+						return {
+							ok: true,
+							sessionId,
+							created: false,
+							interrupted: false,
+							idleInterrupt: true,
+							duplicate: true,
+							stale: true,
+						} as const;
+					}
 					if (settlement.type === "duplicate") {
 						return {
 							ok: true,
@@ -1751,7 +1771,6 @@ export function layer(
 							interrupted: false,
 							idleInterrupt: true,
 							duplicate: true,
-							...(settlement.stale === true ? { stale: true as const } : {}),
 						} as const;
 					}
 					if (

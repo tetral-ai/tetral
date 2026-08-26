@@ -1,5 +1,6 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
+import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { Effect, Stream } from "effect";
@@ -30,6 +31,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly closePath: string;
 	readonly fastThreadText?: string;
 	readonly fastAfterFirstProviderCall?: boolean;
+	readonly failFirstFinishIdle?: boolean;
 };
 
 const metadataFactory = async () => new Metadata();
@@ -43,6 +45,24 @@ const writer = new BridgeAPIEventWriter({
 	tokenPath: "/unused/service-account-token",
 	metadataFactory,
 });
+let finishIdleInvocations = 0;
+if (input.failFirstFinishIdle === true) {
+	const finishIdle = writer.finishIdle.bind(writer);
+	writer.finishIdle = async (envelope) => {
+		finishIdleInvocations += 1;
+		if (finishIdleInvocations === 1) {
+			return {
+				ok: false,
+				error: normalizeSessionEventWriterError({
+					code: "schema_mismatch",
+					sessionId: envelope.sessionId,
+					writeId: envelope.durableTurnId,
+				}),
+			};
+		}
+		return await finishIdle(envelope);
+	};
+}
 const controlInputCommitter = new BridgeAPIControlInputCommitter({
 	address: input.bridgeAddress,
 	tokenPath: "/unused/service-account-token",
@@ -52,6 +72,8 @@ let nextId = 0;
 let providerInvocations = 0;
 let durableOperationCompletions = 0;
 let interruptResult: unknown;
+const interruptResults: unknown[] = [];
+let threadSnapshot: unknown;
 const runtimeSleep = async (durationMs: number, signal: AbortSignal): Promise<boolean> => {
 	if (signal.aborted) return false;
 	return await new Promise<boolean>((resolve) => {
@@ -170,6 +192,8 @@ const service = new RuntimeControlService({
 		handleInterruptControl: async (...args) => {
 			const result = await hosts.commandRunHost.handleInterruptControl(...args);
 			interruptResult = result;
+			interruptResults.push(result);
+			threadSnapshot = await hosts.subAgentRunHost.inspectThread(args[1]);
 			return result;
 		},
 	},
@@ -193,6 +217,9 @@ try {
 	}
 	process.stdout.write(JSON.stringify({
 		interruptResult,
+		interruptResults,
+		threadSnapshot,
+		finishIdleInvocations,
 		providerInvocations,
 		durableOperationCompletions,
 	}));
