@@ -76,6 +76,7 @@ import {
 	providerToolDeclarationRejectedLogRecord,
 	runtimeCloseoutLogRecord,
 	runtimeMCPManifestUpdateLogRecord,
+	runtimeTerminalSettlementLogRecord,
 	startupFailureLogRecord,
 } from "./logger.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -318,6 +319,13 @@ export async function buildRuntimePodCommandDependencies(input: {
 			},
 			recordAcceptedInputCommit: (event) => {
 				input.logger.info(acceptedInputCommitLogRecord(event));
+			},
+			recordRuntimeTerminalSettlement: (event) => {
+				try {
+					input.logger.error(runtimeTerminalSettlementLogRecord(event));
+				} catch {
+					// Terminal settlement cannot depend on a logging sink.
+				}
 			},
 			providerCallRuntime: {
 				...DefaultProviderCallRuntimeConfig,

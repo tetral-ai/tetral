@@ -1337,6 +1337,9 @@ function runtimeThreadLoopLayer(
 		readonly recordAcceptedInputCommit?: Parameters<
 			typeof ThreadLoop.layer
 		>[0]["recordAcceptedInputCommit"];
+		readonly recordRuntimeTerminalSettlement?: Parameters<
+			typeof ThreadLoop.layer
+		>[0]["recordRuntimeTerminalSettlement"];
 		readonly refreshRuntimeBindingToken?: Parameters<
 			typeof ThreadLoop.layer
 		>[0]["refreshRuntimeBindingToken"];
@@ -1438,6 +1441,12 @@ function runtimeThreadLoopLayer(
 			: {}),
 		...(options.recordAcceptedInputCommit !== undefined
 			? { recordAcceptedInputCommit: options.recordAcceptedInputCommit }
+			: {}),
+		...(options.recordRuntimeTerminalSettlement !== undefined
+			? {
+					recordRuntimeTerminalSettlement:
+						options.recordRuntimeTerminalSettlement,
+				}
 			: {}),
 		...(options.refreshRuntimeBindingToken !== undefined
 			? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken }

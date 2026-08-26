@@ -156,6 +156,8 @@ export async function closeFailedThreadRun(
 	const pendingTools = unfinishedToolUseEventIds(session).map(
 		(toolUseEventId) => ({ toolUseEventId }),
 	);
+	const modelRequestId =
+		session.state.threadTurnTransition().checkpoint.request?.modelRequestId;
 	const termination = await commitRuntimeTerminationWithRetry(options, {
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.identity.sessionId,
@@ -177,6 +179,13 @@ export async function closeFailedThreadRun(
 		session.state.clearAfterCustodyHandoff();
 		return { type: "interrupted", discardHotState: true };
 	}
+	observeRuntimeTerminalSettlement(
+		options,
+		session,
+		failure,
+		modelRequestId,
+		termination.type,
+	);
 	session.state.applyThreadTurnFact({
 		fact: "terminal_closeout_committed",
 		eventId: termination.closeoutEventId,
@@ -395,6 +404,8 @@ export async function closeFailedRunDurably(
 			const pendingTools = unfinishedToolUseEventIds(session).map(
 				(toolUseEventId) => ({ toolUseEventId }),
 			);
+			const modelRequestId =
+				session.state.threadTurnTransition().checkpoint.request?.modelRequestId;
 			const termination = await commitRuntimeTerminationWithRetry(options, {
 				workspaceId: session.identity.workspaceId,
 				sessionId: session.identity.sessionId,
@@ -418,6 +429,13 @@ export async function closeFailedRunDurably(
 					}),
 				};
 			}
+			observeRuntimeTerminalSettlement(
+				options,
+				session,
+				failure,
+				modelRequestId,
+				termination.type,
+			);
 			session.state.applyThreadTurnFact({
 				fact: "terminal_closeout_committed",
 				eventId: termination.closeoutEventId,
@@ -525,6 +543,34 @@ export async function closeFailedRunDurably(
 		return { type: "landed", disposition: "continuation" };
 	} finally {
 		observationController?.abort();
+	}
+}
+
+function observeRuntimeTerminalSettlement(
+	options: ThreadLoopRuntimeOptions,
+	session: ThreadRuntime,
+	failure: RuntimeFailure,
+	modelRequestId: string | undefined,
+	settlementOutcome: "committed" | "duplicate",
+): void {
+	if (
+		failure.type !== "runtime" ||
+		failure.code !== "runtime_invalid_sequence" ||
+		failure.reason !== "runtime_contract_validation" ||
+		failure.retryStatus?.type !== "terminal"
+	) {
+		return;
+	}
+	try {
+		options.recordRuntimeTerminalSettlement?.({
+			workspaceId: session.identity.workspaceId,
+			sessionId: session.identity.sessionId,
+			sessionThreadId: session.identity.sessionThreadId,
+			...(modelRequestId !== undefined ? { modelRequestId } : {}),
+			settlementOutcome,
+		});
+	} catch {
+		// Observability cannot participate in terminal settlement custody.
 	}
 }
 

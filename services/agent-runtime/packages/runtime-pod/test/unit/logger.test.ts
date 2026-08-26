@@ -6,6 +6,7 @@ import {
 	providerRescheduleSelectedLogRecord,
 	providerToolDeclarationRejectedLogRecord,
 	runtimeCloseoutLogRecord,
+	runtimeTerminalSettlementLogRecord,
 	shutdownFailureLogRecord,
 	startupFailureLogRecord,
 	workloadStartedLogRecord,
@@ -289,5 +290,55 @@ describe("Runtime Pod JSON logger", () => {
 				"error.message_safe": "runtime_closeout_unrepairable",
 			}),
 		);
+	});
+
+	test("terminal Runtime settlement serializes only the approved operator record", () => {
+		const lines: string[] = [];
+		const logger = createJsonLogger({
+			write: (line) => lines.push(line),
+			serviceName: "agent-runtime",
+			deploymentEnvironment: "test",
+			serviceVersion: "unit",
+			clock: () => new Date("2026-08-25T12:34:56.789Z"),
+		});
+
+		logger.error(
+			runtimeTerminalSettlementLogRecord({
+				workspaceId: "wksp_terminal",
+				sessionId: "sesn_terminal",
+				sessionThreadId: "thrd_terminal",
+				modelRequestId: "mreq_terminal",
+				settlementOutcome: "duplicate",
+			}),
+		);
+
+		const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+		expect(record).toEqual({
+			time: "2026-08-25T12:34:56.789Z",
+			level: "error",
+			"service.name": "agent-runtime",
+			"service.version": "unit",
+			"deployment.environment": "test",
+			event: "runtime_terminal_settlement",
+			"event.kind": "runtime_terminal_settlement",
+			operation: "commit_runtime_termination",
+			component: "agent-runtime",
+			message: "runtime contract validation terminated the Thread",
+			"workspace.id": "wksp_terminal",
+			"session.id": "sesn_terminal",
+			"thread.id": "thrd_terminal",
+			"model_request.id": "mreq_terminal",
+			terminal: true,
+			"terminal.disposition": "terminated",
+			"retry.status": "terminal",
+			"settlement.outcome": "duplicate",
+			"error.class": "runtime_contract_validation",
+			"error.code": "runtime_semantic_error",
+			"error.message_safe": "runtime contract validation failed",
+		});
+		expect(JSON.stringify(record)).not.toContain("PROMPT_CANARY");
+		expect(JSON.stringify(record)).not.toContain("TOOL_OUTPUT_CANARY");
+		expect(JSON.stringify(record)).not.toContain("PROVIDER_BODY_CANARY");
+		expect(JSON.stringify(record)).not.toContain("RAW_ERROR_CANARY");
 	});
 });

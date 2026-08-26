@@ -166,6 +166,79 @@ describe("Runtime Pod command entrypoint", () => {
 		}
 	});
 
+	test("production terminal settlement observability is error-level and fail-open", async () => {
+		let capturedOptions: RuntimeCoreHostsOptions | undefined;
+		const logged: Array<Record<string, unknown>> = [];
+		const dependencies = await buildRuntimePodCommandDependencies({
+			config: validConfig(),
+			logger: {
+				info: () => undefined,
+				error: (record) => logged.push(record),
+			},
+			builderOptions: {
+				coreHostsFactory: async (options) => {
+					capturedOptions = options;
+					return fakeDependencies([]).coreHosts;
+				},
+			},
+		});
+		try {
+			const hostileObservation = {
+				workspaceId: "wksp_terminal",
+				sessionId: "sesn_terminal",
+				sessionThreadId: "thrd_terminal",
+				settlementOutcome: "committed",
+				userText: "PROMPT_CANARY",
+				toolOutput: "TOOL_OUTPUT_CANARY",
+				providerBody: "PROVIDER_BODY_CANARY",
+				rawError: "RAW_ERROR_CANARY",
+			} as const;
+			capturedOptions?.threadLoop.recordRuntimeTerminalSettlement?.(
+				hostileObservation,
+			);
+			expect(logged).toEqual([
+				expect.objectContaining({
+					event: "runtime_terminal_settlement",
+					"settlement.outcome": "committed",
+				}),
+			]);
+			expect(JSON.stringify(logged)).not.toContain("PROMPT_CANARY");
+			expect(JSON.stringify(logged)).not.toContain("TOOL_OUTPUT_CANARY");
+			expect(JSON.stringify(logged)).not.toContain("PROVIDER_BODY_CANARY");
+			expect(JSON.stringify(logged)).not.toContain("RAW_ERROR_CANARY");
+		} finally {
+			await dependencies.coreHosts.close();
+		}
+
+		const throwing = await buildRuntimePodCommandDependencies({
+			config: validConfig(),
+			logger: {
+				info: () => undefined,
+				error: () => {
+					throw new Error("terminal sink failed");
+				},
+			},
+			builderOptions: {
+				coreHostsFactory: async (options) => {
+					capturedOptions = options;
+					return fakeDependencies([]).coreHosts;
+				},
+			},
+		});
+		try {
+			expect(() =>
+				capturedOptions?.threadLoop.recordRuntimeTerminalSettlement?.({
+					workspaceId: "wksp_terminal",
+					sessionId: "sesn_terminal",
+					sessionThreadId: "thrd_terminal",
+					settlementOutcome: "duplicate",
+				}),
+			).not.toThrow();
+		} finally {
+			await throwing.coreHosts.close();
+		}
+	});
+
 	test("production manifest observability reports effective eligibility for applied and stale generations", async () => {
 		let capturedOptions: RuntimeCoreHostsOptions | undefined;
 		const logged: Array<Record<string, unknown>> = [];

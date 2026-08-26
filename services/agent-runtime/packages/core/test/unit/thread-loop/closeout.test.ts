@@ -163,12 +163,20 @@ describe("ThreadLoop", () => {
 			{
 				executionRunId: "evt_failed_closeout_accepted_running",
 				pendingInputContextSequences: [],
+				request: {
+					modelRequestId: "mreq_failed_closeout_accepted",
+					requestStartEventId: "sevt_failed_closeout_accepted_start",
+					requestKind: "agent_provider_request",
+					contextThroughMessageSequence: 1,
+					toolMembers: [],
+				},
 			},
 			{ routes: [] },
 		);
 		session.state.enqueueAcceptedInput(unresolved);
 		const appended: SessionEvent[] = [];
 		const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appended.push(envelope.event);
 			return {
@@ -181,7 +189,19 @@ describe("ThreadLoop", () => {
 			...baseWriter,
 			commitRuntimeTermination: async (envelope) => {
 				terminations.push(envelope);
-				return await baseWriter.commitRuntimeTermination!(envelope);
+				if (terminations.length === 1) {
+					return {
+						ok: false,
+						error: normalizeSessionEventWriterError({
+							code: "unavailable",
+							sessionId: envelope.sessionId,
+							writeId: envelope.writeId,
+						}),
+					};
+				}
+				const result = await baseWriter.commitRuntimeTermination!(envelope);
+				if (!result.ok || result.type === "stale") return result;
+				return { ...result, type: "duplicate" };
 			},
 		};
 		const result = await Effect.runPromise(
@@ -197,7 +217,18 @@ describe("ThreadLoop", () => {
 						new RecordingContextLoader([], { type: "empty" }),
 						{
 							writer,
-							runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted },
+							runtime: {
+								...threadLoopRuntime(),
+								sleep: async (durationMs, signal) =>
+									durationMs ===
+									SessionEventWriterRetryPolicy.timeoutPerAttemptMs
+										? await sleepUntilAborted(durationMs, signal)
+										: true,
+							},
+							recordRuntimeTerminalSettlement: (event) => {
+								observations.push(event);
+								throw new Error("logging sink failed");
+							},
 						},
 					),
 				),
@@ -206,7 +237,16 @@ describe("ThreadLoop", () => {
 
 		expect(result).toEqual({ type: "landed", disposition: "terminal" });
 		expect(appended).toEqual([]);
-		expect(terminations).toHaveLength(1);
+		expect(terminations).toHaveLength(2);
+		expect(observations).toEqual([
+			{
+				workspaceId: "workspace-test",
+				sessionId: "sesn_failed_closeout_accepted",
+				sessionThreadId: "thread-test",
+				modelRequestId: "mreq_failed_closeout_accepted",
+				settlementOutcome: "duplicate",
+			},
+		]);
 		expect(terminations[0]).toMatchObject({
 			writeId: "evt_failed_closeout_accepted_running",
 			failure: {
@@ -222,6 +262,78 @@ describe("ThreadLoop", () => {
 			nextStep: { action: "await_input" },
 		});
 		expect(session.state.acceptedInputSnapshot()).toEqual([unresolved]);
+	});
+	test("terminal settlement observation excludes stale and failed durable outcomes", async () => {
+		for (const outcome of ["stale", "failed"] as const) {
+			const session = new ThreadRuntime(`sesn_terminal_observation_${outcome}`);
+			session.state.installThreadTurn(
+				{
+					executionRunId: `evt_terminal_observation_${outcome}`,
+					pendingInputContextSequences: [],
+					request: {
+						modelRequestId: `mreq_terminal_observation_${outcome}`,
+						requestStartEventId: `sevt_terminal_observation_${outcome}`,
+						requestKind: "agent_provider_request",
+						contextThroughMessageSequence: 1,
+						toolMembers: [],
+					},
+				},
+				{ routes: [] },
+			);
+			session.state.enqueueAcceptedInput(
+				acceptedInput(`rin_terminal_observation_${outcome}`, session.sessionId),
+			);
+			const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
+			const baseWriter = writerFrom((envelope) => ({
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			}));
+			const writer: SessionEventWriter = {
+				...baseWriter,
+				commitRuntimeTermination: async (envelope) =>
+					outcome === "stale"
+						? { ok: true, type: "stale" }
+						: {
+								ok: false,
+								error: normalizeSessionEventWriterError({
+									code: "ack_mismatch",
+									sessionId: envelope.sessionId,
+									writeId: envelope.writeId,
+								}),
+							},
+			};
+
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* ThreadLoop.Service).closeFailedRun(
+						session,
+						new Error("failed run"),
+						testRunCustody(),
+					);
+				}).pipe(
+					Effect.provide(
+						runtimeThreadLoopLayer(
+							new RecordingContextLoader([], { type: "empty" }),
+							{
+								writer,
+								runtime: {
+									...threadLoopRuntime(),
+									sleep: sleepUntilAborted,
+								},
+								recordRuntimeTerminalSettlement: (event) =>
+									observations.push(event),
+							},
+						),
+					),
+				),
+			);
+
+			expect(result.type).toBe(
+				outcome === "stale" ? "superseded" : "unrepairable",
+			);
+			expect(observations).toEqual([]);
+		}
 	});
 	test("failed-run closeout observes one in-flight step across timeout windows and memoizes success", async () => {
 		const errorResult = deferred<SessionEventWriterAppendResult>();
@@ -2711,6 +2823,7 @@ describe("ThreadLoop", () => {
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
 		const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
 		const closeoutOrder: string[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appended.push(envelope.event);
 			return {
@@ -2750,6 +2863,8 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
+						recordRuntimeTerminalSettlement: (event) =>
+							observations.push(event),
 						events: [
 							{ type: "text-start", id: "terminal-text" },
 							{
@@ -2770,6 +2885,7 @@ describe("ThreadLoop", () => {
 			releaseSession: { reason: "terminated" },
 		});
 		expect(terminations).toHaveLength(1);
+		expect(observations).toEqual([]);
 		expect(terminations[0]?.writeId).toMatch(/^bridge-stid_/);
 		expect(terminations[0]).toMatchObject({
 			sessionId: "sesn_1",
@@ -2984,6 +3100,7 @@ describe("ThreadLoop", () => {
 			entries: [userMessage("user-1", 0, "hello")],
 		});
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => ({
 			ok: true,
 			eventId: `bridge-${envelope.writeId}`,
@@ -3004,6 +3121,8 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
+						recordRuntimeTerminalSettlement: (event) =>
+							observations.push(event),
 						events: [
 							{ type: "text-start", id: "processor-failure-text" },
 							{
@@ -3029,6 +3148,7 @@ describe("ThreadLoop", () => {
 											retryable: false,
 											fatal: true,
 											reason: "runtime_contract_validation",
+											retryStatus: { type: "terminal" },
 										},
 									};
 								}
@@ -3041,6 +3161,15 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toMatchObject({ type: "failed" });
+		expect(observations).toEqual([
+			{
+				workspaceId: "workspace-test",
+				sessionId: "sesn_1",
+				sessionThreadId: "thread-test",
+				modelRequestId: expect.any(String),
+				settlementOutcome: "committed",
+			},
+		]);
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,

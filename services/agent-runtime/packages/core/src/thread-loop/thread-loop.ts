@@ -581,6 +581,10 @@ export interface ThreadLoopRuntimeOptions {
 	readonly recordAcceptedInputCommit?:
 		| ((event: RuntimeAcceptedInputCommitObservation) => void)
 		| undefined;
+	/** Bounded observation emitted only after a terminal Runtime settlement lands durably. */
+	readonly recordRuntimeTerminalSettlement?:
+		| ((event: RuntimeTerminalSettlementObservation) => void)
+		| undefined;
 	readonly refreshRuntimeBindingToken?: (
 		identity: ThreadRuntime["identity"],
 		options?: { readonly force?: boolean | undefined },
@@ -637,6 +641,15 @@ export interface RuntimeAcceptedInputCommitObservation {
 		| "task_notification_message_invalid"
 		| "task_notification_payload_mismatch"
 		| undefined;
+}
+
+/** Stable identity and durable outcome for one terminal Runtime settlement. */
+export interface RuntimeTerminalSettlementObservation {
+	readonly workspaceId: string;
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly modelRequestId?: string | undefined;
+	readonly settlementOutcome: "committed" | "duplicate";
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
