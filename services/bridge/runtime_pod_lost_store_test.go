@@ -830,7 +830,10 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				Namespace: "tetral-agent-runtime", PodName: "runtime-recovery-" + suffix,
 				PodUID: "pod-recovery-" + suffix, PodIP: "127.0.0.1",
 			}
-			runtimeProcess := startProviderRecoveryRuntime(t, bridgeAddress, sessionID, threadID, replacement.PodUID, time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC))
+			runtimeProcess := startProviderRecoveryRuntime(
+				t, bridgeAddress, sessionID, threadID, replacement.PodUID,
+				time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC), false,
+			)
 			deliveryStore.RuntimeGRPCPort = runtimeProcess.port
 			deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})

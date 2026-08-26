@@ -801,7 +801,12 @@ func (c *responseLosingRecoveryCommandClient) RecoverThread(
 	return response, err
 }
 
-func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, threadID, podUID string, now time.Time) *providerRecoveryProcess {
+func startProviderRecoveryRuntime(
+	t *testing.T,
+	bridgeAddress, sessionID, threadID, podUID string,
+	now time.Time,
+	waitForSandboxObservation bool,
+) *providerRecoveryProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -815,6 +820,7 @@ func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, thread
 		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID,
 		"now": now.Format(time.RFC3339Nano), "readyPath": readyPath,
 		"recoveryResultPath": process.resultPath, "closePath": process.closePath,
+		"waitForSandboxObservation": waitForSandboxObservation,
 	})
 	if err != nil {
 		t.Fatalf("encode serving recovery composition: %v", err)
@@ -1225,7 +1231,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		_ = listener.Close()
 	})
 	runtimeProcess := startProviderRecoveryRuntime(
-		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(250*time.Millisecond),
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(250*time.Millisecond), true,
 	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	replacement := enginekubernetes.BindingCandidate{
@@ -1479,7 +1485,9 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		  AND type='session.status_rescheduled' ORDER BY sequence DESC LIMIT 1`, sessionID, threadID).Scan(&rescheduleEventID); err != nil {
 		t.Fatalf("read subagent reschedule recovery root: %v", err)
 	}
-	runtimeProcess := startProviderRecoveryRuntime(t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond))
+	runtimeProcess := startProviderRecoveryRuntime(
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond), false,
+	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
@@ -1503,26 +1511,18 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID || preloaded.ResultType != "preloaded" {
 		t.Fatalf("subagent recovery preload = %+v; want exact Queue-owned recovery", preloaded)
 	}
-	runtimeProcess.close(t)
-	newBindingID := preloaded.Command.BindingID
-	newBindingGeneration := preloaded.Command.BindingGeneration
 	captureSettled := make(chan error, 1)
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, durableTurnID, 1, "staged")
 	}()
-	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": listener.Addr().String(),
-		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
-		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
-	})
+	result := runtimeProcess.close(t)
 	if err := <-captureSettled; err != nil {
 		t.Fatalf("stage subagent reschedule closeout capture: %v", err)
 	}
 	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
 		t.Fatalf("replacement Runtime subagent recovery = %+v", result)
 	}
-	recoveredSnapshot := string(result.LastSnapshot)
+	recoveredSnapshot := string(preloaded.LastSnapshot)
 	if strings.Count(recoveredSnapshot, `"toolName":"spawn_agent"`) != 1 ||
 		strings.Count(recoveredSnapshot, `task_name: recovery-worker`) != 1 ||
 		!strings.Contains(recoveredSnapshot, childID) {

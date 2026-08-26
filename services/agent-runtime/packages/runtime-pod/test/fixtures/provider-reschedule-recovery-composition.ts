@@ -46,6 +46,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly readyPath?: string;
 	readonly recoveryResultPath?: string;
 	readonly closePath?: string;
+	readonly waitForSandboxObservation?: boolean;
 };
 const command = {
 	workspaceId: input.workspaceId,
@@ -185,7 +186,9 @@ if (input.serveRecovery === true) {
 			...hosts.commandRunHost,
 			handleRecoverThread: async (recoveryCommand) => {
 				const result = await hosts.commandRunHost.handleRecoverThread!(recoveryCommand);
-				await sandboxObservationStarted;
+				if (input.waitForSandboxObservation === true) {
+					await sandboxObservationStarted;
+				}
 				const snapshot = await hosts.subAgentRunHost.inspectThread(recoveryCommand);
 				await writeFile(input.recoveryResultPath!, JSON.stringify({
 					resultType: "preloaded",
