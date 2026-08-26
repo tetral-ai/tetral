@@ -51,9 +51,9 @@ type closedThreadResumeCompositionResult struct {
 		State struct {
 			State string `json:"state"`
 		} `json:"state"`
-		Action struct {
+		NextStep struct {
 			Action string `json:"action"`
-		} `json:"action"`
+		} `json:"nextStep"`
 	} `json:"decision"`
 	ContextEntries   []bridgeRuntimeContextEntry `json:"contextEntries"`
 	TurnFacts        bridgeLoadContextTurnFacts  `json:"turnFacts"`
@@ -223,7 +223,7 @@ func assertQuiescentClosedThreadResume(t *testing.T, result closedThreadResumeCo
 	t.Helper()
 	if result.Result.Type != "completed" || !result.Inspected.OK || !result.Inspected.Observed ||
 		result.Inspected.Status != "idle" || len(result.Checkpoint.PendingInputSequences) != 0 ||
-		result.Decision.State.State != "idle" || result.Decision.Action.Action != "await_input" ||
+		result.Decision.State.State != "idle" || result.Decision.NextStep.Action != "await_input" ||
 		result.ProviderRequests != 0 || result.RuntimeEvents != 0 {
 		t.Fatalf("closed Thread resume = %s; want completed idle/await_input with no pending input, Provider request, or Runtime write", result.Raw)
 	}
