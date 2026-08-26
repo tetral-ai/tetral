@@ -264,10 +264,24 @@ describe("Thread-turn reducer", () => {
 			action: "await_tool_results",
 			toolUseEventIds: ["event_retry_tool"],
 		});
+		retry = apply(
+			retry,
+			{
+				fact: "tool_result_committed",
+				toolUseEventId: "event_retry_tool",
+				outcome: "success",
+			},
+			noRoutes,
+			["runtime_input_after_tool"],
+		);
+		expect(retry.nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "runtime_input_after_tool",
+		});
 		retry = apply(retry, {
-			fact: "tool_result_committed",
-			toolUseEventId: "event_retry_tool",
-			outcome: "success",
+			fact: "inputs_committed",
+			eventId: "runtime_input_after_tool",
+			contextSequences: [2],
 		});
 		expect(retry.nextStep).toEqual({
 			action: "apply_request_retry_or_reschedule",

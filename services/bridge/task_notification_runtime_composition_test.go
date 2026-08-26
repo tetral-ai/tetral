@@ -476,7 +476,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	}
 
 	var inboxStatus, queueStatus, storedMessageText string
-	var eventCount, messageCount int
+	var eventCount, messageCount, requestStartCount, requestEndCount int
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
 		WHERE workspace_id='default' AND runtime_input_id=$1`, inputID).Scan(&inboxStatus); err != nil {
 		t.Fatalf("read Inbox disposition: %v", err)
@@ -498,9 +498,20 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		WHERE workspace_id='default' AND session_id=$1 AND kind='runtime_notification'`, sessionID).Scan(&storedMessageText); err != nil {
 		t.Fatalf("read stored notification Message text: %v", err)
 	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		count(*) FILTER (WHERE type='span.model_request_start'),
+		count(*) FILTER (WHERE type='span.model_request_end')
+		FROM session_events WHERE workspace_id='default' AND session_id=$1`, sessionID).
+		Scan(&requestStartCount, &requestEndCount); err != nil {
+		t.Fatalf("count parked notification request lifecycle: %v", err)
+	}
 	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || eventCount != 1 || messageCount != 1 || storedMessageText != runtimeRequest.GetNotificationJson() {
 		t.Fatalf("durable settlement = Inbox:%s Queue:%s Events:%d Messages:%d text-match:%t",
 			inboxStatus, queueStatus, eventCount, messageCount, storedMessageText == runtimeRequest.GetNotificationJson())
+	}
+	if composed.ProviderInvocations != 1 || composed.RequestEndCount != 1 || requestStartCount != 1 || requestEndCount != 1 {
+		t.Fatalf("parked notification wake lifecycle = providers:%d runtime-ends:%d starts:%d durable-ends:%d; want 1/1/1/1",
+			composed.ProviderInvocations, composed.RequestEndCount, requestStartCount, requestEndCount)
 	}
 }
 

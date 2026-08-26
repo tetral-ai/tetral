@@ -935,39 +935,64 @@ Previous anchored summary.
 					modelLimits: { contextWindowTokens: 320, outputTokenLimit: 120 },
 				},
 			],
+			[
+				{ type: "text-start", id: "later-answer-text" },
+				{
+					type: "text-delta",
+					id: "later-answer-text",
+					text_delta: "answer to later input",
+				},
+				{ type: "text-end", id: "later-answer-text" },
+				{
+					type: "finish",
+					finishReason: "stop",
+					usage: {
+						inputTokens: 7,
+						outputTokens: 4,
+						reasoningTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+					},
+					modelLimits: { contextWindowTokens: 320, outputTokenLimit: 120 },
+				},
+			],
 		];
 		let streamIndex = 0;
 		const durableSequence = { eventSequence: 0, messageSequence: 0 };
+		const compactionStartHeld = deferred<void>();
+		const releaseCompactionStart = deferred<void>();
+		let heldCompactionStart = false;
 		const llm: LLMServiceInterface = {
 			stream(request) {
 				requests.push(request);
-				if (
-					request.requestKind ===
-					ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY
-				) {
-					session.state.contextManager.appendEntry(
-						userMessage("user-later", 3, "later ACKed input"),
-					);
-					durableSequence.messageSequence = 3;
-				}
 				const events = eventBatches[streamIndex] ?? [];
 				streamIndex += 1;
 				return Stream.fromIterable(events);
 			},
 		};
 		const baseWriter = writerFrom(
-			(envelope) => ({
-				ok: true,
-				eventId: `bridge-${envelope.writeId}`,
-				type: "committed",
-				eventSequence: 1,
-			}),
+			async (envelope) => {
+				if (
+					!heldCompactionStart &&
+					envelope.event.type === "span.model_request_start" &&
+					envelope.requestKind === "compaction_summary"
+				) {
+					heldCompactionStart = true;
+					compactionStartHeld.resolve();
+					await releaseCompactionStart.promise;
+				}
+				return {
+					ok: true,
+					eventId: `bridge-${envelope.writeId}`,
+					type: "committed",
+				};
+			},
 			undefined,
 			[],
 			durableSequence,
 		);
 		const writer = baseWriter;
-		const result = await Effect.runPromise(
+		const run = Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
 				return yield* threadLoop.run(session, testRunCustody());
@@ -989,12 +1014,40 @@ Previous anchored summary.
 				),
 			),
 		);
-		expect(result).toMatchObject({ type: "completed", modelMessageCount: 2 });
-		expect(requests[1]?.context).toHaveLength(2);
+		await compactionStartHeld.promise;
+		expect(
+			session.state.enqueueAcceptedInput(
+				{
+					...acceptedInput("rin_during_compaction_start", session.sessionId),
+					contentJson: JSON.stringify({
+						messages: [
+							userMessage("user-later", 3, "later ACKed input"),
+						],
+					}),
+				},
+			),
+		).toBe("applied");
+		releaseCompactionStart.resolve();
+		const result = await run;
+		expect(result).toMatchObject({ type: "completed", modelMessageCount: 3 });
+		expect(requests).toHaveLength(3);
+		expect(JSON.stringify(requests[0]?.context)).not.toContain(
+			"later ACKed input",
+		);
+		expect(
+			requests.filter(
+				(request) =>
+					request.requestKind ===
+					ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY,
+			),
+		).toHaveLength(1);
 		expect(JSON.stringify(requests[1]?.context[0])).toContain(
 			"<conversation-checkpoint>",
 		);
-		expect(JSON.stringify(requests[1]?.context[1])).toContain(
+		expect(JSON.stringify(requests[1]?.context)).not.toContain(
+			"later ACKed input",
+		);
+		expect(JSON.stringify(requests[2]?.context)).toContain(
 			"later ACKed input",
 		);
 		expect(
@@ -1002,7 +1055,7 @@ Previous anchored summary.
 				.entries()
 				.map((message) => message.messageSequence),
 		).toContain(3);
-		expect(session.state.lastRequestContextAnchorSequence()).toBe(4);
+		expect(session.state.lastRequestContextAnchorSequence()).toBe(5);
 	});
 	test("task notification arriving during reactive compaction joins the preserved agent request", async () => {
 		const session = new ThreadRuntime("sesn_task_during_compaction");

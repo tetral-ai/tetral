@@ -1,7 +1,8 @@
 import {
 	describe,
 	expect,
-	test } from "bun:test";
+	test,
+} from "bun:test";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import {
 	ProviderContextRole,
@@ -9,8 +10,7 @@ import {
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Effect,
-	Stream } from "effect";
+import { Effect, Stream } from "effect";
 import {
 	runtimeModelForThread,
 	runtimeToolPolicyFromPatchPayloads,
@@ -2056,22 +2056,56 @@ describe("ThreadLoop", () => {
 			entries: [userMessage("user-1", 0, "hello")],
 		});
 		const attempts: SessionEventWriterRequestEndEnvelope[] = [];
-		const writer = writerFrom(
-			(envelope) => ({
-				ok: true,
-				eventId: `bridge-${envelope.writeId}`,
-				type: "committed",
-				eventSequence: 1,
-			}),
-			async (envelope) => {
+		const appended: SessionEvent[] = [];
+		let providerCalls = 0;
+		let requestEndFacts = 0;
+		const applyThreadTurnFact = session.state.applyThreadTurnFact.bind(
+			session.state,
+		);
+		session.state.applyThreadTurnFact = (fact) => {
+			if (fact.fact === "request_ended") requestEndFacts += 1;
+			const transition = applyThreadTurnFact(fact);
+			return transition;
+		};
+		const durableSequence = { eventSequence: 0, messageSequence: 0 };
+		let lostRequestEndReceipt:
+			| Extract<
+					Awaited<ReturnType<SessionEventWriter["writeRequestEnd"]>>,
+					{ readonly ok: true; readonly type: "committed" | "duplicate" }
+			  >
+			| undefined;
+		const baseWriter = writerFrom(
+			(envelope) => {
+				appended.push(envelope.event);
+				return {
+					ok: true,
+					eventId: `bridge-${envelope.writeId}`,
+					type: "committed",
+				};
+			},
+			undefined,
+			[],
+			durableSequence,
+		);
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) => {
 				attempts.push(structuredClone(envelope));
-				expect(
-					session.state.contextManager
-						.entries()
-						.flatMap((message) => message.parts)
-						.some((part) => part.type === "reasoning"),
-				).toBe(false);
 				if (attempts.length === 1) {
+					const durableResult = await baseWriter.writeRequestEnd(envelope);
+					expect(durableResult).toMatchObject({
+						ok: true,
+						type: "committed",
+					});
+					if (!durableResult.ok || durableResult.type === "stale") {
+						throw new Error("request-end response-loss setup did not commit");
+					}
+					lostRequestEndReceipt = durableResult;
+					expect(
+					session.state.enqueueAcceptedInput(
+						acceptedInput("rin_during_request_end_replay", session.sessionId),
+					),
+				).toBe("applied");
 					return {
 						ok: false,
 						error: {
@@ -2084,9 +2118,15 @@ describe("ThreadLoop", () => {
 						},
 					};
 				}
-				return requestEndResultForTest(envelope);
+				if (attempts.length === 2) {
+					if (lostRequestEndReceipt === undefined) {
+						throw new Error("request-end duplicate replay is missing its receipt");
+					}
+					return { ...lostRequestEndReceipt, type: "duplicate" };
+				}
+				return baseWriter.writeRequestEnd(envelope);
 			},
-		);
+		};
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
@@ -2095,6 +2135,9 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
+						onStream: () => {
+							providerCalls += 1;
+						},
 						events: [
 							{ type: "reasoning-start", id: "retry-reasoning-1" },
 							{
@@ -2117,8 +2160,22 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toMatchObject({ type: "completed" });
-		expect(attempts).toHaveLength(2);
+		const residentSequences = session.state.contextManager
+			.entries()
+			.map((entry) => entry.messageSequence);
+		expect(new Set(residentSequences).size).toBe(residentSequences.length);
+		expect(attempts).toHaveLength(3);
 		expect(attempts[1]).toEqual(attempts[0]);
+		expect(attempts[2]?.writeId).not.toBe(attempts[0]?.writeId);
+		expect(providerCalls).toBe(2);
+		expect(requestEndFacts).toBe(2);
+		expect(loader.commitCalls).toHaveLength(2);
+		expect(loader.commitCalls.at(-1)?.runtimeInputId).toBe(
+			"rin_during_request_end_replay",
+		);
+		expect(
+			appended.filter((event) => event.type === "span.model_request_start"),
+		).toHaveLength(2);
 		expect(
 			attempts[0]?.trailingContextAppend?.parts.flatMap((part) =>
 				part.type === "reasoning" ? [part.text] : [],
@@ -2790,16 +2847,6 @@ describe("ThreadLoop", () => {
 				{ type: "text-end", id: "current-answer" },
 				{ type: "finish", finishReason: "stop" },
 			],
-			[
-				{ type: "text-start", id: "task-answer" },
-				{
-					type: "text-delta",
-					id: "task-answer",
-					text_delta: "task acknowledged",
-				},
-				{ type: "text-end", id: "task-answer" },
-				{ type: "finish", finishReason: "stop" },
-			],
 		];
 		let streamIndex = 0;
 		const llm: LLMServiceInterface = {
@@ -2859,12 +2906,9 @@ describe("ThreadLoop", () => {
 		);
 		expect(currentTurn).toMatchObject({ type: "completed" });
 		expect(commitCalls).toBe(1);
-		expect(requests).toHaveLength(3);
-		expect(JSON.stringify(requests[1]?.context)).not.toContain(
-			"task result after the retried request",
-		);
+		expect(requests).toHaveLength(2);
 		expect(
-			JSON.stringify(requests[2]?.context).match(
+			JSON.stringify(requests[1]?.context).match(
 				/task result after the retried request/g,
 			),
 		).toHaveLength(1);

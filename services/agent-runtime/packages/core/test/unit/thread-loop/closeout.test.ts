@@ -16,6 +16,7 @@ import type {
 	SessionEvent,
 	SessionEventWriter,
 	SessionEventWriterAppendResult,
+	SessionEventWriterFinishIdleEnvelope,
 	SessionEventWriterRequestEndEnvelope,
 	SessionEventWriterRuntimeTerminationEnvelope,
 } from "../../../src/contracts/runtime.js";
@@ -717,26 +718,53 @@ describe("ThreadLoop", () => {
 			{ routes: [] },
 		);
 		const finishIdleWriteIds: string[] = [];
+		const finishIdleEnvelopes: SessionEventWriterFinishIdleEnvelope[] = [];
 		const statesBeforeFinishIdleReceipts: string[] = [];
-		const writer: SessionEventWriter = {
-			settleToolResult: async () => ({
-				ok: true,
-				result: { type: "committed" },
-			}),
-			append: async (envelope) => ({
-				ok: true,
-				eventId: `bridge-${envelope.writeId}`,
-				type: "committed",
-			}),
-			writeRequestEnd: async () => {
-				throw new Error("idle-only test must not close a provider request");
+		const appended: SessionEvent[] = [];
+		let providerCalls = 0;
+		const durableSequence = { eventSequence: 0, messageSequence: 0 };
+		let lostFinishIdleReceipt:
+			| Extract<
+					Awaited<ReturnType<NonNullable<SessionEventWriter["finishIdle"]>>>,
+					{ readonly ok: true; readonly type: "committed" | "duplicate" }
+			  >
+			| undefined;
+		const baseWriter = writerFrom(
+			(envelope) => {
+				appended.push(envelope.event);
+				return {
+					ok: true,
+					eventId: `bridge-${envelope.writeId}`,
+					type: "committed",
+				};
 			},
+			undefined,
+			[],
+			durableSequence,
+		);
+		const writer: SessionEventWriter = {
+			...baseWriter,
 			finishIdle: async (envelope) => {
 				finishIdleWriteIds.push(envelope.durableTurnId);
+				finishIdleEnvelopes.push(envelope);
 				statesBeforeFinishIdleReceipts.push(
 					session.state.threadTurnTransition().state.state,
 				);
 				if (finishIdleWriteIds.length === 1) {
+					const durableResult = await baseWriter.finishIdle!(envelope);
+					expect(durableResult).toMatchObject({
+						ok: true,
+						type: "committed",
+					});
+					if (!durableResult.ok || durableResult.type === "stale") {
+						throw new Error("FinishIdle response-loss setup did not commit");
+					}
+					lostFinishIdleReceipt = durableResult;
+					expect(
+						session.state.enqueueAcceptedInput(
+							acceptedInput("rin_during_finish_idle_replay", session.sessionId),
+						),
+					).toBe("applied");
 					return {
 						ok: false,
 						error: {
@@ -750,36 +778,53 @@ describe("ThreadLoop", () => {
 						},
 					};
 				}
-				return withFinishIdleResultForTest(envelope, {
-					ok: true,
-					eventId: `bridge-${envelope.durableTurnId}`,
-					type: "committed",
-				});
+				if (finishIdleWriteIds.length === 2) {
+					if (lostFinishIdleReceipt === undefined) {
+						throw new Error("FinishIdle duplicate replay is missing its receipt");
+					}
+					return { ...lostFinishIdleReceipt, type: "duplicate" };
+				}
+				return baseWriter.finishIdle!(envelope);
 			},
 		};
-		const result = await Effect.runPromise(
+		const results = await Effect.runPromise(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
-				return yield* threadLoop.run(session, testRunCustody());
+				const closeout = yield* threadLoop.run(session, testRunCustody());
+				const successor = yield* threadLoop.run(session, testRunCustody());
+				return { closeout, successor };
 			}).pipe(
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						installLoaderState: false,
-						runtimeModel: () => undefined,
 						writer,
+						onStream: () => {
+							providerCalls += 1;
+						},
 					}),
 				),
 			),
 		);
-		expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
-		expect(finishIdleWriteIds).toEqual([
-			"evt_open_idle_retry",
-			"evt_open_idle_retry",
-		]);
+		expect(results.closeout).toMatchObject({
+			type: "completed",
+			modelMessageCount: 0,
+		});
+		expect(results.successor).toMatchObject({ type: "completed" });
+		expect(finishIdleWriteIds).toHaveLength(3);
+		expect(finishIdleWriteIds[0]).toBe("evt_open_idle_retry");
+		expect(finishIdleWriteIds[1]).toBe("evt_open_idle_retry");
+		expect(finishIdleWriteIds[2]).not.toBe("evt_open_idle_retry");
+		expect(finishIdleEnvelopes[1]).toEqual(finishIdleEnvelopes[0]);
 		expect(statesBeforeFinishIdleReceipts).toEqual([
 			"ready_to_finish",
+			"idle",
 			"ready_to_finish",
 		]);
+		expect(providerCalls).toBe(1);
+		expect(loader.commitCalls).toHaveLength(1);
+		expect(
+			appended.filter((event) => event.type === "span.model_request_start"),
+		).toHaveLength(1);
 		expect(session.state.threadTurnTransition().state).toEqual({
 			state: "idle",
 		});

@@ -1,5 +1,4 @@
-import {
-	expect } from "bun:test";
+import { expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
 	ProviderContextRole,
@@ -53,8 +52,10 @@ import {
 	RuntimeInternalToolRepairStore,
 	SessionEventWriterRetryPolicy,
 } from "../../../src/contracts/runtime.js";
-import type { LLMEvent,
-	RuntimeUsage } from "../../../src/llm/llm-event.js";
+import type {
+	LLMEvent,
+	RuntimeUsage,
+} from "../../../src/llm/llm-event.js";
 import {
 	LLMEventSchema,
 	runtimeFailureFromProviderError,
@@ -819,8 +820,10 @@ function requestEndResultFromAppend(
 	}
 	let sealedMessageSequence: number | undefined;
 	if (envelope.trailingContextAppend !== undefined) {
-		if (sequence.messageSequence === 0) sequence.messageSequence = 1;
-		sealedMessageSequence = sequence.messageSequence;
+		sealedMessageSequence = assistantMessageSequence(
+			sequence,
+			envelope.modelRequestId,
+		);
 	}
 	return {
 		ok: true,

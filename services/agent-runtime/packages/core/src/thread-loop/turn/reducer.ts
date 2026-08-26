@@ -194,6 +194,15 @@ export function deriveThreadTurnSnapshot(
 		};
 	}
 
+	if (request.requestEnd.reschedule !== undefined) {
+		const acceptedInput = commitAcceptedInputDecision(
+			checkpoint,
+			acceptedInputIds,
+		);
+		if (acceptedInput !== undefined) {
+			return acceptedInput;
+		}
+	}
 	if (request.requestEnd.isError || request.requestEnd.reschedule !== undefined) {
 		return {
 			state: {
@@ -737,11 +746,12 @@ export function reduceThreadTurn(
 					stopReason: fact.stopReason.type,
 				},
 			});
-			return {
+			return stableTransition(
 				checkpoint,
-				state: { state: "idle" },
-				nextStep: { action: "await_input" },
-			};
+				routeView,
+				acceptedInputIds,
+				activeInputView,
+			);
 		}
 		case "interrupt_committed": {
 			if (current.checkpoint.interruptEventId === fact.eventId) {

@@ -125,7 +125,7 @@ const bridgeLoader = new BridgeAPIContextLoader({
 		} as unknown as AgentRuntimeBridgeServiceClient),
 });
 const productionWriter =
-	input.bridgeAddress !== undefined && input.requestStartRace === true
+	input.bridgeAddress !== undefined
 		? new BridgeAPIEventWriter({
 				address: input.bridgeAddress,
 				tokenPath: "/unused/token",
@@ -140,12 +140,13 @@ const sessionEventWriter: SessionEventWriter =
 				append: productionWriter.append.bind(productionWriter),
 				settleToolResult:
 					productionWriter.settleToolResult.bind(productionWriter),
-				writeRequestEnd: async (envelope) => {
-					const result = await productionWriter.writeRequestEnd(envelope);
-					if (result.ok && result.type !== "stale") {
-						requestEndCount += 1;
-						if (requestEndCount >= 2) resolveLifecycleCompleted?.();
-					}
+			writeRequestEnd: async (envelope) => {
+				const result = await productionWriter.writeRequestEnd(envelope);
+				if (result.ok && result.type !== "stale") {
+					requestEndCount += 1;
+					const expectedEnds = input.requestStartRace === true ? 2 : 1;
+					if (requestEndCount >= expectedEnds) resolveLifecycleCompleted?.();
+				}
 					return result;
 				},
 				finishIdle: productionWriter.finishIdle.bind(productionWriter),
@@ -154,9 +155,8 @@ const sessionEventWriter: SessionEventWriter =
 			};
 const contextLoader = {
 	loadThreadContext:
-		input.bridgeAddress === undefined || input.requestStartRace === true
-			? bridgeLoader.loadThreadContext.bind(bridgeLoader)
-			: async () => ({
+		input.bridgeAddress === undefined
+			? async () => ({
 					contextEntries: [],
 					turnFacts: { events: [], internalRepairs: [] },
 					thread: {
@@ -166,7 +166,8 @@ const contextLoader = {
 						status: "idle" as const,
 					},
 					runtimeBindingToken: "runtime-binding-token-composition",
-				}),
+				})
+			: bridgeLoader.loadThreadContext.bind(bridgeLoader),
 	commitAcceptedInput: async (
 		...args: Parameters<typeof bridgeLoader.commitAcceptedInput>
 	) => {
@@ -209,7 +210,6 @@ const hosts = await buildRuntimeCoreHosts({
 		},
 		llmService: {
 			stream: (request) => {
-				if (input.requestStartRace !== true) return Stream.never;
 				providerInvocations += 1;
 				providerRequests.push(request);
 				const id = `task-notification-race-${providerInvocations}`;
@@ -312,7 +312,7 @@ try {
 	const [commitResult] = await Promise.all([
 		committedInput,
 		acceptedRequest,
-		...(input.requestStartRace === true ? [lifecycleCompleted] : []),
+		...(input.bridgeAddress === undefined ? [] : [lifecycleCompleted]),
 	]);
 	if (declaration === undefined && input.bridgeAddress === undefined) {
 		throw new Error(

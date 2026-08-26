@@ -1,6 +1,7 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
+import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
@@ -91,37 +92,66 @@ const hosts = await buildRuntimeCoreHosts({
 			recoveredTurnEventIds = loaded.turnFacts.events.map((event) => event.eventId);
 			return loaded;
 		},
+		commitAcceptedInput: (acceptedInput, options) =>
+			loader.commitAcceptedInput(acceptedInput, options),
 		refreshRuntimeBindingToken: async (identity) => identity.runtimeBindingToken,
 	},
 	threadLoop: {
 		internalToolRepairStore: {} as never,
 		sessionEventWriter: writer,
 		runtime: {
-					now: () => input.now,
-					monotonicMs: () => 0,
-					createId: (prefix) => `${prefix}_reschedule_recovery_${++nextID}`,
-					sleep: async (delayMs, signal) => {
-						if (signal.aborted) return false;
-						waitedMs.push(delayMs);
-						return true;
-					},
-				},
-		llmService: {
-					stream: (request) => {
-						providerInvocations += 1;
-						providerRequests.push(request);
-						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "recovered-text" },
-							{
-								type: "text-delta" as const,
-								id: "recovered-text",
-								text_delta: "recovered",
+			now: () => input.now,
+			monotonicMs: () => 0,
+			createId: (prefix) => `${prefix}_reschedule_recovery_${++nextID}`,
+			sleep: async (delayMs, signal) => {
+				if (signal.aborted) return false;
+				waitedMs.push(delayMs);
+				if (delayMs === SessionEventWriterRetryPolicy.timeoutPerAttemptMs) {
+					return await new Promise<boolean>((resolve) => {
+						const timeout = setTimeout(() => resolve(true), delayMs);
+						signal.addEventListener(
+							"abort",
+							() => {
+								clearTimeout(timeout);
+								resolve(false);
 							},
-							{ type: "text-end" as const, id: "recovered-text" },
-							{ type: "finish" as const, finishReason: "stop" as const },
-						]);
+							{ once: true },
+						);
+					});
+				}
+				return true;
+			},
+		},
+		llmService: {
+			stream: (request) => {
+				providerInvocations += 1;
+				providerRequests.push(request);
+				if (providerInvocations === 1) {
+					return Stream.fail({
+						type: "llm-service" as const,
+						error: {
+							type: "runtime" as const,
+							code: "gateway_stream_error" as const,
+							message:
+								"Gateway provider stream did not complete within its bounded allowance.",
+							retryable: true,
+							fatal: false,
+							reason: "gateway_transport_completion_deadline" as const,
+						},
+					});
+				}
+				return Stream.fromIterable([
+					{ type: "text-start" as const, id: "recovered-text" },
+					{
+						type: "text-delta" as const,
+						id: "recovered-text",
+						text_delta: "recovered",
 					},
-				},
+					{ type: "text-end" as const, id: "recovered-text" },
+					{ type: "finish" as const, finishReason: "stop" as const },
+				]);
+			},
+		},
 		storeOperationTimeoutMs: 5_000,
 		approvalMode: "full_access",
 		providerCallRuntime: {
@@ -130,7 +160,10 @@ const hosts = await buildRuntimeCoreHosts({
 			timeoutMs: 5_000,
 		},
 		runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-		runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
+		runtimePolicy: () => ({
+			toolCatalog: createToolCatalog({ family: "claude" }),
+			providerRescheduleBudget: 1,
+		}),
 		acceptSandboxExecution: async () => {
 			sandboxAcceptanceInvocations += 1;
 			return { type: "accepted" as const };
@@ -141,21 +174,23 @@ const hosts = await buildRuntimeCoreHosts({
 			return await toolRunner.awaitSandboxExecution(request);
 		},
 		runTool: async (request) => {
-					executorInvocations += 1;
-					if (input.serveRecovery === true) {
-						await new Promise<void>((resolve) => {
-							if (request.abortSignal.aborted) {
-								resolve();
-								return;
-							}
-							request.abortSignal.addEventListener("abort", () => resolve(), { once: true });
-						});
-						return { type: "cancelled" };
+			executorInvocations += 1;
+			if (input.serveRecovery === true) {
+				await new Promise<void>((resolve) => {
+					if (request.abortSignal.aborted) {
+						resolve();
+						return;
 					}
-					return {
-						type: "completed",
-						output: { text: "unexpected replay", truncated: false },
-					};
+					request.abortSignal.addEventListener("abort", () => resolve(), {
+						once: true,
+					});
+				});
+				return { type: "cancelled" };
+			}
+			return {
+				type: "completed",
+				output: { text: "unexpected replay", truncated: false },
+			};
 		},
 	},
 });

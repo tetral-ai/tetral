@@ -11,9 +11,9 @@
 import type {
 	CallOptions,
 	Metadata,
-	ServiceError } from "@grpc/grpc-js";
-import { credentials,
-	status } from "@grpc/grpc-js";
+	ServiceError,
+} from "@grpc/grpc-js";
+import { credentials, status } from "@grpc/grpc-js";
 import type {
 	AcceptedInputCommitResult,
 	ContextLoader,
@@ -59,8 +59,6 @@ import type { ThreadContextPrefix } from "@tetral/agent-runtime-core/src/session
 import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
-} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
-import type {
 	RuntimeAcceptedThreadMetadataState,
 	RuntimeThreadAddressState,
 } from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";

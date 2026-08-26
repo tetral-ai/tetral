@@ -16,9 +16,7 @@
  * hot close, and durable review writes, and calls the injected thread creator
  * for Bridge-owned child-thread creation and closure.
  */
-import {
-	createHash,
-	randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type {
 	RuntimeContextEntry,
@@ -33,8 +31,6 @@ import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/sess
 import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
 	RuntimeAcceptedInputState,
-} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
-import type {
 	RuntimeThreadAddressState,
 } from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type {

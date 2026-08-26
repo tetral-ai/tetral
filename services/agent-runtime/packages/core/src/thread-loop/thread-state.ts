@@ -209,6 +209,31 @@ export class ThreadState {
 		return this.applyThreadTurnFactFrom(owner, fact);
 	}
 
+	applyFinishIdleFact(
+		owner: ThreadTurnTransition,
+		fact: Extract<ThreadTurnFact, { readonly fact: "finish_idle_committed" }>,
+	): ThreadTurnTransition {
+		const current = this.threadTurnTransition();
+		if (
+			owner.checkpoint.executionRunId !== current.checkpoint.executionRunId ||
+			owner.checkpoint.request?.modelRequestId !==
+				current.checkpoint.request?.modelRequestId
+		) {
+			throw new ThreadTurnContractError(
+				"Thread turn changed while FinishIdle was in flight",
+			);
+		}
+		const settlementOwner =
+			fact.stopReason.type === "requires_action"
+				? current
+				: {
+						checkpoint: current.checkpoint,
+						state: owner.state,
+						nextStep: owner.nextStep,
+					};
+		return this.applyThreadTurnFactFrom(settlementOwner, fact);
+	}
+
 	recordThreadToolRoute(
 		toolUseEventId: string,
 		disposition: ThreadToolRouteView["routes"][number]["disposition"],

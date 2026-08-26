@@ -7,8 +7,7 @@
  * @packageDocumentation
  */
 
-import {
-	Effect } from "effect";
+import { Effect } from "effect";
 import type * as ContextLoader from "../context/context-loader.js";
 import type {
 	RuntimeAssistantDraftPart,
@@ -43,15 +42,16 @@ import type {
 	AutoApprovalReviewerManager,
 	ParentTranscriptView,
 } from "../session/approval-reviewer-manager.js";
-import type { ToolCatalog,
-	ToolEntry } from "../tools/tool-catalog.js";
+import type {
+	ToolCatalog,
+	ToolEntry,
+} from "../tools/tool-catalog.js";
 import {
 	effectivePermissionPolicy,
 	lookupToolEntry,
 } from "../tools/tool-catalog.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
-import type { ToolJob } from "../tools/tool-scheduler.js";
-import type { ToolScheduler } from "../tools/tool-scheduler.js";
+import type { ToolJob, ToolScheduler } from "../tools/tool-scheduler.js";
 import { inferToolRunPolicy } from "../tools/tool-scheduler.js";
 import type { ThreadRuntime } from "./thread-runtime.js";
 import type {

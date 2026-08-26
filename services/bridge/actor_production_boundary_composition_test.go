@@ -209,7 +209,7 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 
 	coldRuntime := startAttachmentRecoveryRuntime(t, result.BridgeAddress, "complete", sessionID, childID, bindingID, 1, podUID)
-	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, "runtime-pod-0", podUID)
 	providerStart := coldRuntime.providerStart(t)
 	providerWire := string(providerStart.ProviderRequest)
 	prefixOffset := strings.Index(providerWire, "start a worker")

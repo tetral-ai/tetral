@@ -252,6 +252,7 @@ export async function appendIdleEvent(
 			}),
 		};
 	}
+	const transitionOwner = session.state.threadTurnTransition();
 	let result: SessionEventWriterFinishIdleResult;
 	let declaredCompletionMail: string | undefined;
 	try {
@@ -312,7 +313,7 @@ export async function appendIdleEvent(
 		currentNextStep.stopReason.type === "requires_action"
 			? currentNextStep.stopReason.eventIds
 			: undefined;
-	session.state.applyThreadTurnFact({
+	session.state.applyFinishIdleFact(transitionOwner, {
 		fact: "finish_idle_committed",
 		eventId: validated.eventId,
 		stopReason:

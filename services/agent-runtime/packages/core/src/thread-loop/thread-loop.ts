@@ -29,8 +29,7 @@
  * Gateway transport or the provider-visible message list in ContextManager.
  */
 
-import type {
-	ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
 	Cause,
@@ -143,8 +142,7 @@ import type {
 import { evaluateTurnRetryBudget } from "../runtime/turn-retry-budget.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
 import type { RequestExecutionSnapshot } from "../session/session-configuration.js";
-import type { ToolCatalog,
-	ToolEntry } from "../tools/tool-catalog.js";
+import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
 import {
 	effectivePermissionPolicy,
 	lookupToolEntry,
@@ -152,8 +150,7 @@ import {
 import type { ToolApprovalMode } from "../tools/tool-gate.js";
 import { evaluateToolGate } from "../tools/tool-gate.js";
 import type { ToolJob } from "../tools/tool-scheduler.js";
-import { inferToolRunPolicy,
-	ToolScheduler } from "../tools/tool-scheduler.js";
+import { inferToolRunPolicy, ToolScheduler } from "../tools/tool-scheduler.js";
 import type { FailedRunCloseoutResult } from "./closeout.js";
 import {
 	appendIdleEvent,
@@ -1383,8 +1380,8 @@ function runThreadLoopEffect(
 				) ?? false;
 			if (
 				recoveredNextStep.action === "apply_request_retry_or_reschedule" ||
-				((recoveredRequest?.requestEnd?.isError === true ||
-					reschedule !== undefined) &&
+				reschedule !== undefined ||
+				(recoveredRequest?.requestEnd?.isError === true &&
 					hasIncompleteTool)
 			) {
 				if (
@@ -1448,10 +1445,7 @@ function runThreadLoopEffect(
 					);
 				}
 				const acceptedInputCut =
-					pendingProviderRequestReschedule ||
-					selectedAcceptedInput === undefined
-						? []
-						: [selectedAcceptedInput];
+					selectedAcceptedInput === undefined ? [] : [selectedAcceptedInput];
 				const committedContextEntries: RuntimeContextEntry[] = [];
 				const committedRequestInputEntries: RuntimeContextEntry[] = [];
 				for (const acceptedInput of acceptedInputCut) {
@@ -1766,6 +1760,13 @@ function runThreadLoopEffect(
 				if (pendingApprovalResume.type === "resumed") {
 					statusRunningAlreadyAppended = true;
 					pendingInput = { type: "empty" };
+				}
+				const postToolNextStep = interpretThreadTurnNextStep(
+					session.state.threadTurnTransition().nextStep,
+				).nextStep;
+				if (postToolNextStep.action === "commit_accepted_input") {
+					pendingInput = { type: "empty" };
+					continue;
 				}
 				if (
 					pendingProviderRequestReschedule &&
@@ -3755,14 +3756,14 @@ function coordinateProviderTurnEffect(
 		const requestStartReduction = session.state.applyRequestStartFact(
 			requestStartOwner,
 			{
-			fact: "request_started",
-			eventId: spanStartAppend.eventId,
-			modelRequestId: request.modelRequestId,
-			requestKind: runtimeProviderStreamKindFromRequest(request),
-			contextThroughMessageSequence: requestContextAnchorSequence,
-			consumedInputContextSequences:
-				session.state.threadTurnTransition().checkpoint
-					.pendingInputContextSequences,
+				fact: "request_started",
+				eventId: spanStartAppend.eventId,
+				modelRequestId: request.modelRequestId,
+				requestKind: runtimeProviderStreamKindFromRequest(request),
+				contextThroughMessageSequence: requestContextAnchorSequence,
+				consumedInputContextSequences:
+					session.state.threadTurnTransition().checkpoint
+						.pendingInputContextSequences,
 			},
 		);
 		const requestStartDispatch = requestStartReduction.dispatch;
