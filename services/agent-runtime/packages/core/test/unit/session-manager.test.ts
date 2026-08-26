@@ -1,5 +1,13 @@
-import { describe, expect, test } from "bun:test";
-import { Context, Effect, Exit, Fiber, Layer, Scope } from "effect";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
+import { Context,
+	Effect,
+	Exit,
+	Fiber,
+	Layer,
+	Scope } from "effect";
 import {
 	normalizeRuntimeFailure,
 	normalizeSessionEventWriterError,
@@ -15,10 +23,16 @@ import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeAcceptedThreadMetadataState,
-	RuntimeConfigPatchState,
+} from "../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputDeclaration,
-} from "../../src/thread-loop/thread-state.js";
+} from "../../src/thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+} from "../../src/thread-loop/input/preload.js";
 
 const timestamp = "2026-06-14T00:00:00.000Z";
 
@@ -2024,7 +2038,7 @@ describe("SessionManager", () => {
 				]);
 				expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
 				expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
-				expect(session.state.threadTurnReduction()).toMatchObject({
+				expect(session.state.threadTurnTransition()).toMatchObject({
 					state: { state: "idle" },
 					nextStep: { action: "await_input" },
 				});
@@ -2938,7 +2952,7 @@ describe("SessionManager", () => {
 				expect(threadLoop.runs[0]?.session.state.pendingAttachments()).toEqual(
 					pendingAttachments,
 				);
-				expect(threadLoop.runs[0]?.session.state.threadTurnReduction()).toMatchObject(
+				expect(threadLoop.runs[0]?.session.state.threadTurnTransition()).toMatchObject(
 					{
 						checkpoint: { pendingInputContextSequences: [] },
 						state: { state: "ready_to_request" },
@@ -3731,7 +3745,7 @@ describe("SessionManager", () => {
 					.at(-1);
 				expect(confirmationMessage).toBeDefined();
 				expect(
-					session?.state.threadTurnReduction().checkpoint
+					session?.state.threadTurnTransition().checkpoint
 						.pendingInputContextSequences,
 				).toEqual([confirmationMessage!.messageSequence]);
 				expect(threadLoop.runs).toHaveLength(1);

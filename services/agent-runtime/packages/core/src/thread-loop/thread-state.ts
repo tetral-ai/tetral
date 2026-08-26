@@ -1,80 +1,52 @@
 /**
  * @packageDocumentation
- * Thread-local hot ThreadState for one ThreadEntry: the in-pod working state a
- * ThreadRun mutates. Not the source of truth; recoverable from durable state.
- * SessionManager, ThreadLoop, and tool execution call it; it delegates hot message
- * list changes to ContextManager, performs ordinary in-memory transitions, and owns
- * the injected interrupt-input commit state and hot agent-mail delivery dedupe.
- *
- * OWNS (hot, per-thread):
- *   - accepted-input queue and the in-flight commit marker;
- *   - tool confirmations, pending-approval ToolJobs, task notifications, background
- *     tool handles;
- *   - runtime config patch and installed MCP manifest patches;
- *   - pending file-backed user media and tool-result transient attachments plus the
- *     single active ride;
- *   - the last-request usage hint and held route-effective model limits;
- *   - interrupt / cooperative-cancel / runtime-shutdown controllers.
- *
- * STATE MACHINE (provider attachment ride):
- *   | state   | meaning                              | writer                      | legal transitions         |
- *   | ------- | ------------------------------------ | --------------------------- | ------------------------- |
- *   | pending | media queued for the next request    | addPendingAttachments       | pending -> riding         |
- *   | riding  | media attached to the active request | beginPendingAttachmentRide  | riding -> settled;        |
- *   |         |                                      |                             | riding retained on retry  |
- *   | riding  | file media commits at Request Start  | consumeFileBackedAttachmentRide | transient remains |
- *   | settled | transient consumed by request-end    | settlePendingAttachmentRide | terminal for that media   |
- *   A durable Request Start consumes only the exact file-backed pairs before Provider
- *   dispatch. Error request-ends retain transient media for retry. Attachments admitted
- *   during a ride remain queued separately for the next request.
- *
- * INVARIANTS:
- *   - One-ride media: file-backed user media becomes at-most-once at durable Request
- *     Start, while tool-result transient media remains on the ride until successful
- *     Request End. Rejected origins stay excluded from same-turn reassembly. Later
- *     turns keep only durable context projection (context-projection.ts).
- *   - The approval-reviewer model is platform runtime config: clients never choose it,
- *     Runtime Core sets it on the provider invocation, and Gateway injects credentials but
- *     never chooses or replaces it.
- *   - Hot state is not the source of truth and stays recoverable from durable state.
- *
- * UPDATE-WITH: services/agent-runtime/packages/core/src/runtime/context-projection.ts,
- *              services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts,
- *              services/agent-runtime/packages/core/src/session/session-manager.ts
+ * Reconstructible hot data for one resident Thread. ThreadState owns the
+ * canonical turn checkpoint, read-only input/route/media views, pending Tool
+ * work and cancellation controllers. ContextManager separately owns the
+ * provider-visible message view. Cold preload installs durable projections;
+ * ThreadLoop applies committed facts and captures any resulting dispatch.
+ * ThreadState never persists or replays a dispatch and is not durable truth.
  */
 
 import type {
 	RuntimeAssistantDraftPart,
 	RuntimeContextEntry,
 	RuntimeFailure,
-	RuntimeInterruptToolResult,
-	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 	RuntimeProcessorSource,
 	RuntimeProviderAttachment,
 	RuntimeUsage,
 } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
-import type { ThreadContextPrefix } from "../session/context-manager.js";
 import { ContextManager } from "../session/context-manager.js";
-import type { RuntimeConfigurationPatch } from "../session/session-configuration.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
 import type { ToolJob } from "../tools/tool-scheduler.js";
 import type {
+	RuntimeAcceptedInputState,
+	RuntimeTaskNotificationState,
+} from "./input/accepted-input.js";
+import type {
+	RuntimeControlInputCommit,
+	RuntimeControlInputCommitApplication,
+	RuntimeControlInputCommitResult,
+	RuntimeControlInputDeclaration,
+	RuntimeInterruptCommandState,
+	RuntimeToolConfirmationState,
+} from "./input/control-input.js";
+import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "./thread-turn-checkpoint.js";
+} from "./turn/checkpoint.js";
 import type {
 	ThreadActiveInputView,
-	ThreadTurnFact,
 	ThreadTurnTransition,
-} from "./thread-turn-reducer.js";
+} from "./turn/types.js";
+import type { ThreadTurnFact } from "./turn/facts.js";
 import {
 	deriveThreadTurnSnapshot,
 	initializeThreadTurnTransition,
 	reduceThreadTurn,
-	ThreadTurnContractError,
-} from "./thread-turn-reducer.js";
+} from "./turn/reducer.js";
+import { ThreadTurnContractError } from "./turn/types.js";
 
 /** Combined cap for file-backed and transient attachments on one provider request. */
 export const MaxProviderAttachments = 32;
@@ -83,66 +55,6 @@ export const MaxProviderAttachments = 32;
 export interface SessionCurrentModel {
 	readonly providerId: string;
 	readonly modelId: string;
-}
-
-/** Identity and binding fence shared by every command that addresses hot thread state. */
-export interface RuntimeThreadAddressState {
-	readonly workspaceId: string;
-	readonly sessionId: string;
-	readonly sessionThreadId: string;
-	readonly bindingId: string;
-	readonly bindingGeneration: number;
-	readonly targetPodUid: string;
-}
-
-/** Method-specific Runtime Pod input identity with its sole interrupt-order fact. */
-export interface RuntimeAcceptedInputScopeState
-	extends RuntimeThreadAddressState {
-	readonly runtimeInputId: string;
-	readonly inputOrder: number;
-}
-
-/** Method-specific control input identity; control commands are not queued accepted inputs. */
-export interface RuntimeControlInputState extends RuntimeThreadAddressState {
-	readonly runtimeInputId: string;
-}
-
-/** Interrupt identity retained by hot control state without Queue transport authority. */
-export interface RuntimeInterruptCommandState extends RuntimeControlInputState {
-	readonly origin: "user" | "agent";
-}
-
-export interface RuntimeControlInputDeclaration {
-	readonly inputKind: "interrupt" | "tool_confirmation";
-}
-
-export type RuntimeControlInputCommitResult =
-	| {
-			readonly ok: true;
-			readonly stale: true;
-			readonly barrierStale?: true | undefined;
-	  }
-	| { readonly ok: true; readonly joined: true }
-	| {
-			readonly ok: true;
-			readonly type: "committed";
-			readonly assignedContextSequences: readonly number[];
-			readonly pendingAttachments: readonly RuntimeProviderAttachment[];
-			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
-	  }
-	| {
-			readonly ok: false;
-			readonly retryable: boolean;
-			readonly errorCode: string | number;
-	  };
-
-export type RuntimeControlInputCommit = (
-	declaration: RuntimeControlInputDeclaration,
-) => Promise<RuntimeControlInputCommitResult>;
-
-export interface RuntimeControlInputCommitApplication {
-	readonly declaration: RuntimeControlInputDeclaration;
-	readonly result: RuntimeControlInputCommitResult;
 }
 
 interface RuntimeUserInterruptState {
@@ -154,153 +66,6 @@ interface RuntimeUserInterruptState {
 	declaration?: RuntimeControlInputDeclaration | undefined;
 	commitPromise?: Promise<RuntimeControlInputCommitApplication> | undefined;
 	commitResult?: RuntimeControlInputCommitResult | undefined;
-}
-
-export type RuntimeThreadRoleState = "main" | "subagent" | "approval_reviewer";
-export type RuntimeThreadVisibilityState = "public" | "internal";
-// Runtime-side thread lifecycle. These transitions are the source Bridge commits as
-// the public session.status_* and session.thread_status_* events; the runtime enum is
-// wider than the public one and is projected at the durable boundary:
-//   | RuntimeThreadStatusState | public projection                        |
-//   | ------------------------ | ---------------------------------------- |
-//   | idle                     | idle                                     |
-//   | running                  | running                                  |
-//   | rescheduling             | rescheduled                              |
-//   | requires_action          | idle (projected at the durable boundary) |
-//   | closed_for_runtime       | idle                                     |
-//   | terminated               | terminated                               |
-//   | failed                   | terminated                               |
-// UPDATE-WITH: services/agent-runtime/packages/core/src/session/session-manager.ts,
-//              services/agent-runtime/packages/core/src/runtime/session-event-writer.ts
-export type RuntimeThreadStatusState =
-	| "idle"
-	| "running"
-	| "requires_action"
-	| "closed_for_runtime"
-	| "rescheduling"
-	| "terminated"
-	| "failed";
-export type RuntimeSubAgentTypeState = "general" | "research" | "worker";
-
-/** Durable thread metadata accepted when a command first makes a thread resident. */
-export interface RuntimeAcceptedThreadMetadataState {
-	readonly parentThreadId?: string | undefined;
-	readonly parentTaskName?: string | undefined;
-	readonly role?: RuntimeThreadRoleState | undefined;
-	readonly visibility?: RuntimeThreadVisibilityState | undefined;
-	readonly taskName?: string | undefined;
-	readonly agentType?:
-		| RuntimeSubAgentTypeState
-		| "approval_reviewer"
-		| undefined;
-	readonly status?: RuntimeThreadStatusState | undefined;
-}
-
-/** User-message input delivered as an opaque Bridge-classified payload. */
-export interface RuntimeCommittedContextAcceptedInputState
-	extends RuntimeAcceptedInputScopeState {
-	readonly kind: "messages";
-	readonly contentJson: string;
-}
-
-/** Fenced inter-agent delivery carrying its durably sourced user-message draft. */
-export interface RuntimeInterAgentAcceptedInputState
-	extends RuntimeControlInputState {
-	readonly kind: "inter_agent_message";
-	readonly deliveryId: string;
-	readonly content: string;
-	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
-}
-
-/** Internal reviewer input carrying the target case, transcript feed, and output schema. */
-export interface RuntimeApprovalReviewAcceptedInputState
-	extends RuntimeAcceptedInputScopeState {
-	readonly kind: "approval_review";
-	readonly reviewId: string;
-	readonly parentThreadId: string;
-	readonly targetModelToolCallId: string;
-	readonly targetToolName: string;
-	readonly promptText: readonly string[];
-	readonly outputSchemaJson: string;
-	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
-}
-
-/** Bounded fact authorizing the loop to replace an undeliverable input with one rejection projection. */
-export interface RuntimeRejectionAcceptedInputState
-	extends RuntimeAcceptedInputScopeState {
-	readonly kind: "rejection";
-	readonly reasonCode:
-		| "runtime_command_payload_too_large"
-		| "runtime_command_rejected";
-}
-
-/** Accepted input variants queued for one thread without merging their durable identities. */
-export type RuntimeAcceptedInputState =
-	| RuntimeCommittedContextAcceptedInputState
-	| RuntimeInterAgentAcceptedInputState
-	| RuntimeApprovalReviewAcceptedInputState
-	| RuntimeRejectionAcceptedInputState
-	| RuntimeTaskNotificationAcceptedInputState;
-
-/** Exact durable identities represented by one cold baseline. */
-/** Cold thread state loaded before a resident thread is allowed to serve commands. */
-export interface RuntimeThreadPreloadState extends RuntimeThreadAddressState {
-	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
-	readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
-	readonly turnToolRouteView?: ThreadToolRouteView | undefined;
-	readonly threadContextPrefix?: ThreadContextPrefix | undefined;
-	readonly runtimeBindingToken: string;
-	readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
-	readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
-	readonly pendingToolUses?:
-		| readonly RuntimePreloadedPendingToolUseState[]
-		| undefined;
-	readonly pendingSandboxExecutions?:
-		| readonly RuntimePreloadedSandboxExecutionState[]
-		| undefined;
-	readonly pendingAttachments?:
-		| readonly RuntimeProviderAttachment[]
-		| undefined;
-	readonly pendingAgentMail?:
-		| readonly RuntimeInterAgentAcceptedInputState[]
-		| undefined;
-}
-
-/** Durable pending tool state restored before a cold thread may resume execution. */
-export interface RuntimePreloadedPendingToolUseState {
-	readonly toolUseEventId: string;
-	readonly modelRequestId: string;
-	readonly modelToolCallId: string;
-	readonly toolName: string;
-	readonly input: RuntimeJsonValue;
-	readonly decision?: "allow" | "deny" | undefined;
-	readonly denyMessage?: string | undefined;
-	readonly status: "pending" | "resolving";
-}
-
-/** Durable accepted Sandbox execution restored before its Tool Result exists. */
-export interface RuntimePreloadedSandboxExecutionState {
-	readonly toolUseEventId: string;
-	readonly modelRequestId: string;
-	readonly modelToolCallId: string;
-	readonly toolName: string;
-	readonly input: RuntimeJsonValue;
-	readonly executionState:
-		| "pending"
-		| "preparing"
-		| "running"
-		| "waiting_activation"
-		| "waiting_materialization"
-		| "terminal_unconsumed";
-}
-
-/** Recorded user decision applied to one durable pending tool use. */
-export interface RuntimeToolConfirmationState extends RuntimeControlInputState {
-	readonly toolUseEventId: string;
-	readonly decision: "allow" | "deny";
-	readonly denyMessage?: string | undefined;
 }
 
 export interface RuntimePendingApprovalToolJobState {
@@ -340,247 +105,6 @@ export interface RuntimePendingSandboxExecutionJobState {
 	readonly entry: ToolEntry;
 	readonly currentModel?: SessionCurrentModel | undefined;
 }
-
-/** Terminal background-task command before its durable declaration has committed context. */
-export interface RuntimeTaskNotificationCommandState
-	extends RuntimeAcceptedInputScopeState {
-	readonly taskId: string;
-	readonly sourceToolUseEventId: string;
-	readonly status: "completed" | "failed" | "cancelled" | "expired";
-	readonly notificationJson: string;
-}
-
-/** Terminal task fact waiting for the next serialized semantic turn. */
-export interface RuntimeTaskNotificationAcceptedInputState
-	extends RuntimeTaskNotificationCommandState {
-	readonly kind: "task_notification";
-}
-
-/** Terminal background-task fact and its committed context entry installed together in hot state. */
-export interface RuntimeTaskNotificationState
-	extends RuntimeTaskNotificationCommandState {
-	readonly committedEntry: RuntimeContextEntry;
-}
-
-/** Generation-fenced runtime or per-server MCP configuration patch. */
-export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
-	readonly workspaceId: string;
-	readonly sessionId: string;
-	readonly bindingId: string;
-	readonly bindingGeneration: number;
-	readonly targetPodUid: string;
-	readonly configIdentity: string;
-}
-
-/** Sole resident owner of one Thread's derived current-Turn checkpoint and Tool routes. */
-export class ThreadProcessor {
-	#checkpoint: ThreadTurnCheckpoint;
-	#toolRoutes: ThreadToolRouteView;
-	#activeInputView: ThreadActiveInputView;
-	#acceptedInputs: RuntimeAcceptedInputState[] = [];
-	#committingAcceptedInputId: string | undefined;
-	#acceptedInputBlockedUntilRunExit = false;
-
-	constructor(
-		checkpoint: ThreadTurnCheckpoint,
-		toolRoutes: ThreadToolRouteView,
-		activeInputView: ThreadActiveInputView,
-	) {
-		this.#toolRoutes = toolRoutes;
-		this.#activeInputView = activeInputView;
-		this.#checkpoint = initializeThreadTurnTransition(
-			checkpoint,
-			toolRoutes,
-			[],
-			activeInputView,
-		).checkpoint;
-	}
-
-	get checkpoint(): ThreadTurnCheckpoint {
-		return this.#checkpoint;
-	}
-	get toolRoutes(): ThreadToolRouteView {
-		return this.#toolRoutes;
-	}
-	transition(): ThreadTurnTransition {
-		return {
-			checkpoint: this.#checkpoint,
-			...deriveThreadTurnSnapshot(
-				this.#checkpoint,
-				this.#toolRoutes,
-				this.acceptedInputIds(),
-				this.#activeInputView,
-			),
-		};
-	}
-
-	apply(fact: ThreadTurnFact): ThreadTurnTransition {
-		return this.applyFrom(this.transition(), fact);
-	}
-
-	applyFrom(
-		owner: ThreadTurnTransition,
-		fact: ThreadTurnFact,
-	): ThreadTurnTransition {
-		if (owner.checkpoint !== this.#checkpoint) {
-			throw new ThreadTurnContractError(
-				"Thread turn changed while a stack-local transition owner was active",
-			);
-		}
-		const transition = reduceThreadTurn(
-			owner,
-			fact,
-			this.#toolRoutes,
-			this.acceptedInputIds(),
-			this.#activeInputView,
-		);
-		this.#checkpoint = transition.checkpoint;
-		const currentToolUseEventIds = new Set(
-			this.#checkpoint.request?.toolMembers.flatMap((member) =>
-				member.memberKind === "public_tool_use" ? [member.toolUseEventId] : [],
-			) ?? [],
-		);
-		this.#toolRoutes = {
-			routes: this.#toolRoutes.routes.filter((route) =>
-				currentToolUseEventIds.has(route.toolUseEventId),
-			),
-		};
-		return transition;
-	}
-
-	setActiveInputView(activeInputView: ThreadActiveInputView): void {
-		this.#activeInputView = activeInputView;
-		this.refreshDecision();
-	}
-
-	recordRoute(
-		toolUseEventId: string,
-		disposition: ThreadToolRouteView["routes"][number]["disposition"],
-	): void {
-		this.#toolRoutes = {
-			routes: [
-				...this.#toolRoutes.routes.filter(
-					(route) => route.toolUseEventId !== toolUseEventId,
-				),
-				{ toolUseEventId, disposition },
-			],
-		};
-	}
-
-	clearRoute(toolUseEventId: string): void {
-		this.#toolRoutes = {
-			routes: this.#toolRoutes.routes.filter(
-				(route) => route.toolUseEventId !== toolUseEventId,
-			),
-		};
-	}
-
-	/**
-	 * Installs one accepted command into the same projection the reducer consumes.
-	 * Admission is the Runtime-command success boundary; the typed durable commit result
-	 * is the only operation that removes the fact or advances request readiness.
-	 */
-	admitAcceptedInput(
-		state: RuntimeAcceptedInputState,
-	): "applied" | "duplicate" | "conflict" {
-		const existing = this.#acceptedInputs.find(
-			(input) => input.runtimeInputId === state.runtimeInputId,
-		);
-		if (existing !== undefined) {
-			return sameAcceptedInput(existing, state) ? "duplicate" : "conflict";
-		}
-		this.#acceptedInputs.push(state);
-		this.refreshDecision();
-		return "applied";
-	}
-
-	peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
-		return this.#acceptedInputs[0];
-	}
-
-	acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
-		return [...this.#acceptedInputs];
-	}
-
-	acknowledgeAcceptedInput(runtimeInputId: string): void {
-		if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
-			this.#acceptedInputs.shift();
-		} else {
-			this.#acceptedInputs = this.#acceptedInputs.filter(
-				(input) => input.runtimeInputId !== runtimeInputId,
-			);
-		}
-		this.refreshDecision();
-	}
-
-	discardApprovalReview(reviewId: string): void {
-		this.#acceptedInputs = this.#acceptedInputs.filter(
-			(input) =>
-				input.kind !== "approval_review" || input.reviewId !== reviewId,
-		);
-		this.refreshDecision();
-	}
-
-	beginAcceptedInputCommit(runtimeInputId: string): void {
-		this.#committingAcceptedInputId = runtimeInputId;
-	}
-
-	finishAcceptedInputCommit(runtimeInputId: string): void {
-		if (this.#committingAcceptedInputId === runtimeInputId) {
-			this.#committingAcceptedInputId = undefined;
-		}
-	}
-
-	blockAcceptedInputUntilRunExit(): void {
-		this.#acceptedInputBlockedUntilRunExit = true;
-		this.refreshDecision();
-	}
-
-	finishRunBoundary(): void {
-		if (this.#acceptedInputBlockedUntilRunExit) {
-			this.#acceptedInputBlockedUntilRunExit = false;
-			this.refreshDecision();
-		}
-	}
-
-	discardAcceptedInputsForInterrupt(
-		preserveTaskNotifications: boolean,
-	): void {
-		this.#acceptedInputs = this.#acceptedInputs.filter(
-			(input) =>
-				input.kind === "inter_agent_message" ||
-				(preserveTaskNotifications && input.kind === "task_notification") ||
-				input.runtimeInputId === this.#committingAcceptedInputId,
-		);
-		this.refreshDecision();
-	}
-
-	acceptedInputCount(): number {
-		return this.#acceptedInputs.length;
-	}
-
-	clearAcceptedInputs(): void {
-		this.#acceptedInputs = [];
-		this.#committingAcceptedInputId = undefined;
-		this.refreshDecision();
-	}
-
-	private acceptedInputIds(): readonly string[] {
-		return this.#acceptedInputBlockedUntilRunExit
-			? []
-			: this.#acceptedInputs.map((input) => input.runtimeInputId);
-	}
-
-	private refreshDecision(): void {
-		deriveThreadTurnSnapshot(
-			this.#checkpoint,
-			this.#toolRoutes,
-			this.acceptedInputIds(),
-			this.#activeInputView,
-		);
-	}
-}
-
 /** Recoverable thread-local working state for input, tools, config, media, and cancellation. */
 export class ThreadState {
 	readonly contextManager: ContextManager;
@@ -615,7 +139,13 @@ export class ThreadState {
 	#activeAttachmentRide: RuntimeProviderAttachment[] | undefined;
 	#fileBackedRideConsumed = false;
 	#pendingAttachments: RuntimeProviderAttachment[] = [];
-	#threadProcessor: ThreadProcessor | undefined;
+	#threadTurnCheckpoint: ThreadTurnCheckpoint = {
+		pendingInputContextSequences: [],
+	};
+	#threadToolRoutes: ThreadToolRouteView = { routes: [] };
+	#acceptedInputs: RuntimeAcceptedInputState[] = [];
+	#committingAcceptedInputId: string | undefined;
+	#acceptedInputBlockedUntilRunExit = false;
 	#lastRequestUsage: RuntimeUsage | undefined;
 	#lastRequestModelLimits: RuntimeModelLimits | undefined;
 	#lastRequestContextAnchorSequence: number | undefined;
@@ -646,44 +176,59 @@ export class ThreadState {
 		checkpoint: ThreadTurnCheckpoint | undefined,
 		routeView: ThreadToolRouteView | undefined,
 	): void {
-		this.#threadProcessor = new ThreadProcessor(
+		const initialized = initializeThreadTurnTransition(
 			checkpoint ?? { pendingInputContextSequences: [] },
 			routeView ?? { routes: [] },
+			this.acceptedInputIds(),
 			this.activeInputView(),
 		);
+		this.#threadTurnCheckpoint = initialized.checkpoint;
+		this.#threadToolRoutes = routeView ?? { routes: [] };
 	}
 
-	threadTurnReduction(): ThreadTurnTransition {
-		if (this.#threadProcessor === undefined) {
-			this.installThreadTurn(undefined, undefined);
-		}
-		return this.#threadProcessor!.transition();
+	threadTurnTransition(): ThreadTurnTransition {
+		return {
+			checkpoint: this.#threadTurnCheckpoint,
+			...deriveThreadTurnSnapshot(
+				this.#threadTurnCheckpoint,
+				this.#threadToolRoutes,
+				this.acceptedInputIds(),
+				this.activeInputView(),
+			),
+		};
 	}
 
 	applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnTransition {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.apply(fact);
+		return this.applyThreadTurnFactFrom(this.threadTurnTransition(), fact);
 	}
 
 	applyRequestStartFact(
 		owner: ThreadTurnTransition,
 		fact: Extract<ThreadTurnFact, { readonly fact: "request_started" }>,
 	): ThreadTurnTransition {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.applyFrom(owner, fact);
+		return this.applyThreadTurnFactFrom(owner, fact);
 	}
 
 	recordThreadToolRoute(
 		toolUseEventId: string,
 		disposition: ThreadToolRouteView["routes"][number]["disposition"],
 	): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.recordRoute(toolUseEventId, disposition);
+		this.#threadToolRoutes = {
+			routes: [
+				...this.#threadToolRoutes.routes.filter(
+					(route) => route.toolUseEventId !== toolUseEventId,
+				),
+				{ toolUseEventId, disposition },
+			],
+		};
 	}
 
 	clearThreadToolRoute(toolUseEventId: string): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.clearRoute(toolUseEventId);
+		this.#threadToolRoutes = {
+			routes: this.#threadToolRoutes.routes.filter(
+				(route) => route.toolUseEventId !== toolUseEventId,
+			),
+		};
 	}
 
 	currentModel(): SessionCurrentModel | undefined {
@@ -704,52 +249,102 @@ export class ThreadState {
 	enqueueAcceptedInput(
 		state: RuntimeAcceptedInputState,
 	): "applied" | "duplicate" | "conflict" {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.admitAcceptedInput(state);
+		const existing = this.#acceptedInputs.find(
+			(input) => input.runtimeInputId === state.runtimeInputId,
+		);
+		if (existing !== undefined) {
+			return sameAcceptedInput(existing, state) ? "duplicate" : "conflict";
+		}
+		this.#acceptedInputs.push(state);
+		return "applied";
 	}
 
 	peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.peekAcceptedInput();
+		return this.#acceptedInputs[0];
 	}
 
 	acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.acceptedInputSnapshot();
+		return [...this.#acceptedInputs];
 	}
 
 	acknowledgeAcceptedInput(runtimeInputId: string): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.acknowledgeAcceptedInput(runtimeInputId);
+		if (this.#acceptedInputs[0]?.runtimeInputId === runtimeInputId) {
+			this.#acceptedInputs.shift();
+			return;
+		}
+		this.#acceptedInputs = this.#acceptedInputs.filter(
+			(input) => input.runtimeInputId !== runtimeInputId,
+		);
 	}
 
 	discardQueuedApprovalReview(reviewId: string): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.discardApprovalReview(reviewId);
+		this.#acceptedInputs = this.#acceptedInputs.filter(
+			(input) =>
+				input.kind !== "approval_review" || input.reviewId !== reviewId,
+		);
 	}
 
 	beginAcceptedInputCommit(runtimeInputId: string): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.beginAcceptedInputCommit(runtimeInputId);
+		this.#committingAcceptedInputId = runtimeInputId;
 	}
 
 	finishAcceptedInputCommit(runtimeInputId: string): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.finishAcceptedInputCommit(runtimeInputId);
+		if (this.#committingAcceptedInputId === runtimeInputId) {
+			this.#committingAcceptedInputId = undefined;
+		}
 	}
 
 	discardQueuedAcceptedInputsForInterrupt(
 		preserveTaskNotifications: boolean,
 	): void {
-		this.threadTurnReduction();
-		this.#threadProcessor!.discardAcceptedInputsForInterrupt(
-			preserveTaskNotifications,
+		this.#acceptedInputs = this.#acceptedInputs.filter(
+			(input) =>
+				input.kind === "inter_agent_message" ||
+				(preserveTaskNotifications && input.kind === "task_notification") ||
+				input.runtimeInputId === this.#committingAcceptedInputId,
 		);
 	}
 
 	acceptedInputCount(): number {
-		this.threadTurnReduction();
-		return this.#threadProcessor!.acceptedInputCount();
+		return this.#acceptedInputs.length;
+	}
+
+	private applyThreadTurnFactFrom(
+		owner: ThreadTurnTransition,
+		fact: ThreadTurnFact,
+	): ThreadTurnTransition {
+		if (owner.checkpoint !== this.#threadTurnCheckpoint) {
+			throw new ThreadTurnContractError(
+				"Thread turn changed while a stack-local transition owner was active",
+			);
+		}
+		const transition = reduceThreadTurn(
+			owner,
+			fact,
+			this.#threadToolRoutes,
+			this.acceptedInputIds(),
+			this.activeInputView(),
+		);
+		this.#threadTurnCheckpoint = transition.checkpoint;
+		const currentToolUseEventIds = new Set(
+			this.#threadTurnCheckpoint.request?.toolMembers.flatMap((member) =>
+				member.memberKind === "public_tool_use"
+					? [member.toolUseEventId]
+					: [],
+			) ?? [],
+		);
+		this.#threadToolRoutes = {
+			routes: this.#threadToolRoutes.routes.filter((route) =>
+				currentToolUseEventIds.has(route.toolUseEventId),
+			),
+		};
+		return transition;
+	}
+
+	private acceptedInputIds(): readonly string[] {
+		return this.#acceptedInputBlockedUntilRunExit
+			? []
+			: this.#acceptedInputs.map((input) => input.runtimeInputId);
 	}
 
 	resolveToolConfirmation(
@@ -871,7 +466,6 @@ export class ThreadState {
 	addPendingAttachments(
 		attachments: readonly RuntimeProviderAttachment[],
 	): void {
-		const hadPendingAttachments = this.hasPendingAttachments();
 		const existing = new Set(
 			[
 				...(this.#activeAttachmentRide ?? []),
@@ -891,7 +485,6 @@ export class ThreadState {
 		this.#pendingAttachments.push(
 			...additions.slice(0, available).map(cloneRuntimeProviderAttachment),
 		);
-		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	pendingAttachments(): readonly RuntimeProviderAttachment[] {
@@ -927,17 +520,13 @@ export class ThreadState {
 	}
 
 	settlePendingAttachmentRide(): void {
-		const hadPendingAttachments =
-			this.hasPendingAttachments() || this.#fileBackedRideConsumed;
 		this.#activeAttachmentRide = undefined;
 		this.#fileBackedRideConsumed = false;
-		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	replacePendingAttachments(
 		attachments: readonly RuntimeProviderAttachment[],
 	): void {
-		const hadPendingAttachments = this.hasPendingAttachments();
 		this.#activeAttachmentRide = undefined;
 		this.#fileBackedRideConsumed = false;
 		this.#pendingAttachments = [];
@@ -947,7 +536,6 @@ export class ThreadState {
 				.slice(0, available)
 				.map(cloneRuntimeProviderAttachment),
 		);
-		this.refreshActiveInputViewIfChanged(hadPendingAttachments);
 	}
 
 	private hasPendingAttachments(): boolean {
@@ -959,16 +547,6 @@ export class ThreadState {
 
 	private activeInputView(): ThreadActiveInputView {
 		return { hasPendingAttachments: this.hasPendingAttachments() };
-	}
-
-	private refreshActiveInputViewIfChanged(previous: boolean): void {
-		if (previous !== this.hasPendingAttachments()) {
-			this.refreshActiveInputView();
-		}
-	}
-
-	private refreshActiveInputView(): void {
-		this.#threadProcessor?.setActiveInputView(this.activeInputView());
 	}
 
 	recordLastRequestCompletion(
@@ -1054,16 +632,16 @@ export class ThreadState {
 			closeoutEligible: false,
 			inputCommitApplied: false,
 		};
-		this.#threadProcessor?.blockAcceptedInputUntilRunExit();
+		this.#acceptedInputBlockedUntilRunExit = true;
 		return "applied";
 	}
 
 	finishThreadRunProjection(): void {
-		this.#threadProcessor?.finishRunBoundary();
+		this.#acceptedInputBlockedUntilRunExit = false;
 	}
 
 	blockAcceptedInputUntilRunExit(): void {
-		this.#threadProcessor?.blockAcceptedInputUntilRunExit();
+		this.#acceptedInputBlockedUntilRunExit = true;
 	}
 
 	userInterruptRequested(): boolean {
@@ -1183,19 +761,23 @@ export class ThreadState {
 		if (this.acceptedInputCount() > 0) {
 			return;
 		}
-		const activeLifecycle = this.#threadProcessor;
+		const checkpoint = this.#threadTurnCheckpoint;
+		const routes = this.#threadToolRoutes;
 		this.clearAfterCustodyHandoff();
 		// Generic hot-state cleanup precedes failed-run closeout. Preserve the
 		// reducer checkpoint as the sole active-turn owner until that durable
 		// closeout lands; the Session owner performs the final custody clear.
-		this.#threadProcessor = activeLifecycle;
+		this.#threadTurnCheckpoint = checkpoint;
+		this.#threadToolRoutes = routes;
 	}
 
 	clearAfterCustodyHandoff(): void {
 		this.contextManager.clear();
 		this.#persistentContextLoaded = false;
 		this.#currentModel = undefined;
-		this.#threadProcessor?.clearAcceptedInputs();
+		this.#acceptedInputs = [];
+		this.#committingAcceptedInputId = undefined;
+		this.#acceptedInputBlockedUntilRunExit = false;
 		this.#toolConfirmations = Object.create(null) as Record<
 			string,
 			RuntimeToolConfirmationState | undefined
@@ -1215,8 +797,8 @@ export class ThreadState {
 		this.#activeAttachmentRide = undefined;
 		this.#fileBackedRideConsumed = false;
 		this.#pendingAttachments = [];
-		this.refreshActiveInputView();
-		this.#threadProcessor = undefined;
+		this.#threadTurnCheckpoint = { pendingInputContextSequences: [] };
+		this.#threadToolRoutes = { routes: [] };
 		this.#lastRequestUsage = undefined;
 		this.#lastRequestModelLimits = undefined;
 		this.#lastRequestContextAnchorSequence = undefined;

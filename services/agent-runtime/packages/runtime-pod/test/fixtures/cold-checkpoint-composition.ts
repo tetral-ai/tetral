@@ -10,10 +10,10 @@ import { assembleProviderCallRequest } from "@tetral/agent-runtime-core/src/thre
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import {
 	deriveThreadTurnSnapshot,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
 import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/src/rules/index.js";
@@ -141,7 +141,7 @@ if (input.hotScenario !== undefined) {
 		throw new Error(`Tool settlement hot receipt failed: ${applied.type}`);
 	}
 	const hotEntries = runtime.state.contextManager.entries();
-	const hotCheckpoint = runtime.state.threadTurnReduction().checkpoint;
+	const hotCheckpoint = runtime.state.threadTurnTransition().checkpoint;
 	const hotRoutes = extractColdThreadToolRouteView({
 		checkpoint: hotCheckpoint,
 		pendingToolUses: (scenario.pendingToolUses ??

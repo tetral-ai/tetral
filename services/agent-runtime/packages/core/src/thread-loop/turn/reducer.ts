@@ -1,177 +1,29 @@
+/**
+ * @packageDocumentation
+ * Pure deterministic Thread-turn rules. The Reducer accepts one checkpoint,
+ * read-only views and optionally one committed Fact, then returns an immutable
+ * transition. It owns no mutable data, I/O, timers, clients or dispatch
+ * execution; ThreadLoop owns Fact application and any returned dispatch.
+ */
+
 import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "./thread-turn-checkpoint.js";
+} from "./checkpoint.js";
 import {
 	parseThreadToolRouteView,
 	parseThreadTurnCheckpoint,
-} from "./thread-turn-checkpoint.js";
-
-export type ThreadTurnState =
-	| { readonly state: "idle" }
-	| { readonly state: "ready_to_request" }
-	| { readonly state: "request_open"; readonly modelRequestId: string }
-	| { readonly state: "request_sealed"; readonly modelRequestId: string }
-	| {
-			readonly state: "waiting_for_tool_results";
-			readonly modelRequestId: string;
-	  }
-	| { readonly state: "ready_to_finish" };
-
-export type ThreadTurnNextStep =
-	| { readonly action: "await_input" }
-	| { readonly action: "prepare_next_request" }
-	| { readonly action: "await_request_end"; readonly modelRequestId: string }
-	| {
-			readonly action: "resume_tool_routes";
-			readonly modelRequestId: string;
-			readonly toolUseEventIds: readonly string[];
-	  }
-	| {
-			readonly action: "await_tool_results";
-			readonly modelRequestId: string;
-			readonly toolUseEventIds: readonly string[];
-	  }
-	| {
-			readonly action: "finish_idle";
-			readonly stopReason:
-				| { readonly type: "end_turn" }
-				| {
-						readonly type: "requires_action";
-						readonly eventIds: readonly string[];
-				  }
-				| { readonly type: "retries_exhausted" };
-	  }
-	| {
-			readonly action: "continue_after_compaction";
-			readonly modelRequestId: string;
-	  }
-	| { readonly action: "complete_reviewer"; readonly modelRequestId: string }
-	| {
-			readonly action: "apply_request_retry_or_reschedule";
-			readonly modelRequestId: string;
-	  }
-	| {
-			readonly action: "commit_accepted_input";
-			readonly runtimeInputId: string;
-	  }
-	| { readonly action: "close_interrupted"; readonly modelRequestId?: string }
-	| { readonly action: "close_failed"; readonly modelRequestId?: string };
-
-export type ThreadTurnDispatch =
-	| {
-			readonly dispatch: "start_provider_request";
-			readonly modelRequestId: string;
-	  }
-	| { readonly dispatch: "route_tool_use"; readonly toolUseEventId: string };
-
-export interface ThreadTurnSnapshot {
-	readonly state: ThreadTurnState;
-	readonly nextStep: ThreadTurnNextStep;
-}
-
-export interface ThreadTurnTransition extends ThreadTurnSnapshot {
-	readonly checkpoint: ThreadTurnCheckpoint;
-	readonly dispatch?: ThreadTurnDispatch | undefined;
-}
-
-/** Decision-only projection of active input that is not Message context. */
-export interface ThreadActiveInputView {
-	readonly hasPendingAttachments: boolean;
-}
-
-/** Identifies an impossible durable fact or Thread-turn transition. */
-export class ThreadTurnContractError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "ThreadTurnContractError";
-	}
-}
-
-export type ThreadTurnFact =
-	| {
-			readonly fact: "run_opened";
-			readonly eventId: string;
-	  }
-	| {
-			readonly fact: "inputs_committed";
-			readonly eventId: string;
-			readonly contextSequences: readonly number[];
-	  }
-	| {
-			readonly fact: "request_started";
-			readonly eventId: string;
-			readonly modelRequestId: string;
-			readonly requestKind: NonNullable<
-				ThreadTurnCheckpoint["request"]
-			>["requestKind"];
-			readonly contextThroughMessageSequence: number;
-			readonly consumedInputContextSequences: readonly number[];
-	  }
-	| {
-			readonly fact: "tool_use_committed";
-			readonly eventId: string;
-			readonly modelRequestId: string;
-			readonly modelToolCallId: string;
-			readonly toolName: string;
-	  }
-	| {
-			readonly fact: "internal_tool_repair_committed";
-			readonly eventId: string;
-			readonly modelRequestId: string;
-			readonly modelToolCallId: string;
-			readonly toolName: string;
-	  }
-	| {
-			readonly fact: "tool_result_committed";
-			readonly toolUseEventId: string;
-			readonly outcome: "success" | "error" | "cancelled" | "unknown";
-	  }
-	| {
-			readonly fact: "request_ended";
-			readonly eventId: string;
-			readonly modelRequestId: string;
-			readonly isError: boolean;
-			readonly errorKind?: string;
-			readonly providerContextRetention: NonNullable<
-				ThreadTurnCheckpoint["request"]
-			>["requestEnd"] extends infer T
-				? T extends { readonly providerContextRetention: infer R }
-					? R
-					: never
-				: never;
-			readonly reschedule?: {
-				readonly attempt: number;
-				readonly effectiveDeadline: string;
-				readonly providerAttempts: number;
-				readonly compactionAttempts: number;
-			};
-	  }
-	| {
-			readonly fact: "finish_idle_committed";
-			readonly eventId: string;
-			readonly stopReason:
-				| { readonly type: "end_turn"; readonly failedRun?: true }
-				| {
-						readonly type: "requires_action";
-						readonly eventIds: readonly string[];
-				  }
-				| {
-						readonly type: "retries_exhausted";
-						readonly failureEventId: string;
-						readonly failedRun?: true;
-				  };
-	  }
-	| {
-			readonly fact: "interrupt_committed";
-			readonly eventId: string;
-	  }
-	| {
-			readonly fact: "terminal_closeout_committed";
-			readonly eventId: string;
-			readonly failureEventId: string;
-			readonly disposition: "retries_exhausted" | "terminated";
-	  };
+} from "./checkpoint.js";
+import type { ThreadTurnFact } from "./facts.js";
+import type {
+	ThreadActiveInputView,
+	ThreadTurnDispatch,
+	ThreadTurnNextStep,
+	ThreadTurnSnapshot,
+	ThreadTurnState,
+	ThreadTurnTransition,
+} from "./types.js";
+import { ThreadTurnContractError } from "./types.js";
 
 export function deriveThreadTurnSnapshot(
 	checkpointInput: ThreadTurnCheckpoint,

@@ -6,7 +6,9 @@ import type { AcceptedInputCommitResult } from "@tetral/agent-runtime-core/src/c
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
-import type { RuntimeAcceptedInputState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type { AcceptInputRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { Effect } from "effect";

@@ -29,20 +29,24 @@ import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeApprovalReviewAcceptedInputState,
 	RuntimeThreadAddressState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeThreadPreloadState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/preload.js";
 import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/checkpoint.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-	projectFailedRequestsProviderContext,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
+import { projectFailedRequestsProviderContext } from "@tetral/agent-runtime-core/src/thread-loop/turn/provider-context.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodLogger } from "./logger.js";

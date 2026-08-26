@@ -1,6 +1,6 @@
 /**
  * Accumulates one provider request's uncommitted stream members. Durable
- * current-Turn state belongs to ThreadState's ThreadProcessor; this request-
+ * current-Turn state belongs to ThreadState; this request-
  * local accumulator only freezes provider order and applies operation-specific Bridge results.
  */
 import { createHash } from "node:crypto";

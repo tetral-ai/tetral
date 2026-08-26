@@ -10,8 +10,8 @@ import { Stream } from "effect";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,

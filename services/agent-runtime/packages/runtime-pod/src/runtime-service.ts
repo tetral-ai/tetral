@@ -6,7 +6,8 @@
  * universal response envelope crosses the boundary.
  */
 
-import type { Metadata } from "@grpc/grpc-js";
+import type {
+	Metadata } from "@grpc/grpc-js";
 import { status } from "@grpc/grpc-js";
 import type {
 	RuntimeInterruptToolResult,
@@ -16,8 +17,10 @@ import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/
 import { NoopRuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type {
 	RuntimeControlInputCommitResult,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/control-input.js";
+import type {
 	RuntimeControlInputDeclaration,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/control-input.js";
 import {
 	validateAcceptAgentMailRequest,
 	validateAcceptInputRequest,

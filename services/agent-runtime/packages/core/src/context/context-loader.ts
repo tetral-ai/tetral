@@ -6,7 +6,9 @@
  * residency. SessionManager calls the cold loader once per ThreadEntry;
  * ThreadLoop calls the declaration writer and binding-token adapter.
  */
-import { Context, Layer } from "effect";
+import {
+	Context,
+	Layer } from "effect";
 import type {
 	RuntimeContextEntry,
 	RuntimeInterruptToolResult,
@@ -18,12 +20,16 @@ import type { ThreadContextPrefix } from "../session/context-manager.js";
 import type { RuntimeThreadIdentity } from "../thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
 	RuntimeAcceptedThreadMetadataState,
+	RuntimeThreadAddressState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
 	RuntimeConfigPatchState,
 	RuntimePreloadedSandboxExecutionState,
-	RuntimeThreadAddressState,
-} from "../thread-loop/thread-state.js";
-import type { ThreadTurnLoadFacts } from "../thread-loop/thread-turn-checkpoint.js";
+} from "../thread-loop/input/preload.js";
+import type { ThreadTurnLoadFacts } from "../thread-loop/turn/load.js";
 
 /** Operations through which session orchestration cold-loads and commits thread state. */
 export interface ContextLoader {

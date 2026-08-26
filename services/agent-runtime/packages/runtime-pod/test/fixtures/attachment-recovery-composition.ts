@@ -3,7 +3,7 @@ import { Metadata } from "@grpc/grpc-js";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
-import { extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import { extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,

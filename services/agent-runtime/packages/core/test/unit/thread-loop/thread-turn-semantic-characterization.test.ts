@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "../../../src/thread-loop/thread-turn-checkpoint.js";
+} from "../../../src/thread-loop/turn/checkpoint.js";
 import {
 	deriveThreadTurnSnapshot as deriveThreadTurnSnapshotWithActiveInput,
 	initializeThreadTurnTransition as initializeThreadTurnTransitionWithActiveInput,
 	reduceThreadTurn as reduceThreadTurnWithActiveInput,
-} from "../../../src/thread-loop/thread-turn-reducer.js";
+} from "../../../src/thread-loop/turn/reducer.js";
 import { toGatewayProviderContext } from "../../../src/runtime/context-projection.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };

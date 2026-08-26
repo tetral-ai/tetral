@@ -16,14 +16,16 @@
  * Provider Gateway for web tools; MCP Connector for MCP tools; and
  * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
-import { createHash } from "node:crypto";
+import {
+	createHash } from "node:crypto";
 import type {
 	CallOptions,
 	ClientUnaryCall,
 	Metadata,
 	ServiceError,
 } from "@grpc/grpc-js";
-import { credentials, status } from "@grpc/grpc-js";
+import { credentials,
+	status } from "@grpc/grpc-js";
 import type {
 	RuntimeBoundedText,
 	RuntimeJsonValue,
@@ -36,9 +38,11 @@ import {
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeThreadAddressState,
 	RuntimeThreadStatusState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type {
 	RuntimeSandboxExecutionAcceptanceResult,
 	RuntimeSandboxExecutionRequest,

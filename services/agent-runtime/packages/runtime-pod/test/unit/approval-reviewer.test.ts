@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import type {
 	RuntimeContextEntry,
 	RuntimeContextPart,
@@ -10,9 +13,13 @@ import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/sess
 import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeThreadAddressState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeThreadPreloadState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/preload.js";
 import type {
 	RuntimeApprovalReviewRequest,
 	RuntimeApprovalReviewResult,

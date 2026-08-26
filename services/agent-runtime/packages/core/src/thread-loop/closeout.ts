@@ -114,7 +114,7 @@ export async function closeFailedThreadRun(
 			? result.error
 			: runtimeFailureFromProviderError(result.error);
 	const reviewerRequest =
-		session.state.threadTurnReduction().checkpoint.request?.requestKind ===
+		session.state.threadTurnTransition().checkpoint.request?.requestKind ===
 		"approval_reviewer";
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
 		if (!reviewerRequest) {
@@ -296,7 +296,7 @@ export async function appendIdleEvent(
 	if (!validated.ok) {
 		return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
 	}
-	const currentNextStep = session.state.threadTurnReduction().nextStep;
+	const currentNextStep = session.state.threadTurnTransition().nextStep;
 	const committedRequiresActionTargets =
 		stopReason.type === "requires_action" &&
 		currentNextStep.action === "finish_idle" &&
@@ -377,7 +377,7 @@ export async function closeFailedRunDurably(
 			}
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
-				const checkpoint = session.state.threadTurnReduction().checkpoint;
+				const checkpoint = session.state.threadTurnTransition().checkpoint;
 				if (checkpoint.terminalCloseout !== undefined) {
 					return { type: "landed", disposition: "terminal" };
 				}
@@ -513,7 +513,7 @@ export async function closeFailedRunDurably(
 			return failedRunCloseoutFailure(validatedIdle.error);
 		}
 		if (
-			session.state.threadTurnReduction().checkpoint.idleCloseout?.eventId !==
+			session.state.threadTurnTransition().checkpoint.idleCloseout?.eventId !==
 			validatedIdle.eventId
 		) {
 			session.state.applyThreadTurnFact({
@@ -888,7 +888,7 @@ function finalAssistantText(entries: readonly RuntimeContextEntry[]): string {
 function unfinishedToolUseEventIds(runtimeThread: ThreadRuntime): string[] {
 	return (
 		runtimeThread.state
-			.threadTurnReduction()
+			.threadTurnTransition()
 			.checkpoint.request?.toolMembers.flatMap((member) =>
 				member.memberKind === "public_tool_use" &&
 				member.terminalResult === undefined

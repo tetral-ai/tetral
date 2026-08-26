@@ -20,7 +20,9 @@ import {
 	internalToolRepairContext,
 	sealAssistantDraft,
 } from "../../src/runtime/runtime-declaration.js";
-import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "../../src/thread-loop/input/accepted-input.js";
 
 function messageInput(
 	contentJson: string,

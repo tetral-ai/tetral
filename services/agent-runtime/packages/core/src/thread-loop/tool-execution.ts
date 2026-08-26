@@ -7,7 +7,8 @@
  * @packageDocumentation
  */
 
-import { Effect } from "effect";
+import {
+	Effect } from "effect";
 import type * as ContextLoader from "../context/context-loader.js";
 import type {
 	RuntimeAssistantDraftPart,
@@ -42,7 +43,8 @@ import type {
 	AutoApprovalReviewerManager,
 	ParentTranscriptView,
 } from "../session/approval-reviewer-manager.js";
-import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
+import type { ToolCatalog,
+	ToolEntry } from "../tools/tool-catalog.js";
 import {
 	effectivePermissionPolicy,
 	lookupToolEntry,
@@ -55,10 +57,12 @@ import type { ThreadRuntime } from "./thread-runtime.js";
 import type {
 	RuntimePendingApprovalToolJobState,
 	RuntimePendingSandboxExecutionJobState,
-	RuntimePreloadedPendingToolUseState,
-	RuntimePreloadedSandboxExecutionState,
 	RuntimeResolvedToolRouteJobState,
 } from "./thread-state.js";
+import type {
+	RuntimePreloadedPendingToolUseState,
+	RuntimePreloadedSandboxExecutionState,
+} from "./input/preload.js";
 
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =

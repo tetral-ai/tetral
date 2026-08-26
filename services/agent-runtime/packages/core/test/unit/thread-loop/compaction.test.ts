@@ -20,7 +20,9 @@ import { compactionBoundaryMessageSequence } from "../../../src/thread-loop/comp
 import { assembleProviderCallRequest } from "../../../src/thread-loop/provider-request.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
-import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
 import {
 	acceptedInput,
 	acceptedInputCommitResult,
@@ -245,7 +247,7 @@ Previous anchored summary.
 				requestStartCount += 1;
 				if (requestStartCount === 2) {
 					pendingBeforeAgentRequest =
-						session.state.threadTurnReduction().checkpoint
+						session.state.threadTurnTransition().checkpoint
 							.pendingInputContextSequences;
 				}
 			}

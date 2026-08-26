@@ -36,7 +36,9 @@ import { appendIdleEvent } from "../../../src/thread-loop/closeout.js";
 import { assembleProviderCallRequest } from "../../../src/thread-loop/provider-request.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
-import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 import {
 	acceptedInput,
@@ -145,7 +147,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(writeIds[0]).not.toBe(writeIds[1]);
 		expect(JSON.stringify(appended)).not.toContain(defectCanary);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
@@ -214,7 +216,7 @@ describe("ThreadLoop", () => {
 				retryStatus: { type: "terminal" },
 			},
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
@@ -620,7 +622,7 @@ describe("ThreadLoop", () => {
 			finishIdle: async (envelope) => {
 				finishIdleWriteIds.push(envelope.durableTurnId);
 				statesBeforeFinishIdleReceipts.push(
-					session.state.threadTurnReduction().state.state,
+					session.state.threadTurnTransition().state.state,
 				);
 				if (finishIdleWriteIds.length === 1) {
 					return {
@@ -666,7 +668,7 @@ describe("ThreadLoop", () => {
 			"ready_to_finish",
 			"ready_to_finish",
 		]);
-		expect(session.state.threadTurnReduction().state).toEqual({
+		expect(session.state.threadTurnTransition().state).toEqual({
 			state: "idle",
 		});
 	});
@@ -2117,7 +2119,7 @@ describe("ThreadLoop", () => {
 			ok: true,
 			eventId: "sevt_partial_requires_action_idle",
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				idleCloseout: {
 					eventId: "sevt_partial_requires_action_idle",
@@ -2130,7 +2132,7 @@ describe("ThreadLoop", () => {
 			},
 		});
 		expect(
-			session.state.threadTurnReduction().checkpoint.executionRunId,
+			session.state.threadTurnTransition().checkpoint.executionRunId,
 		).toBeUndefined();
 	});
 	test("interrupt closeout joins an in-flight pre-fence CommitInputs before atomic Request End", async () => {
@@ -2793,7 +2795,7 @@ describe("ThreadLoop", () => {
 			"agent.message",
 			"span.model_request_end",
 		]);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				terminalCloseout: {
 					failureEventId: expect.any(String),
@@ -2881,7 +2883,7 @@ describe("ThreadLoop", () => {
 		expect(appended.map((event) => event.type)).toContain(
 			"session.status_idle",
 		);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
@@ -3112,7 +3114,7 @@ describe("ThreadLoop", () => {
 			stop_reason: { type: "retries_exhausted" },
 		});
 		expect(failureEventId).toBeDefined();
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
 			checkpoint: {

@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeContextEntry } from "../../../src/contracts/runtime.js";
-import type { ThreadTurnLoadFacts } from "../../../src/thread-loop/thread-turn-checkpoint.js";
+import type { ThreadTurnLoadFacts } from "../../../src/thread-loop/turn/load.js";
+import { parseThreadTurnCheckpoint } from "../../../src/thread-loop/turn/checkpoint.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-	parseThreadTurnCheckpoint,
+
+} from "../../../src/thread-loop/turn/load.js";
+import {
 	projectFailedRequestProviderContext,
 	projectFailedRequestsProviderContext,
-} from "../../../src/thread-loop/thread-turn-checkpoint.js";
+} from "../../../src/thread-loop/turn/provider-context.js";
 
 function entry(
 	messageSequence: number,

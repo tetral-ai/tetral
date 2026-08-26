@@ -3,11 +3,13 @@ import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
-import type { RuntimeAcceptedInputState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import type { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { Effect } from "effect";
 import type { TestContextLoader } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";

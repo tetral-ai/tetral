@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
 	ProviderContextRole,
@@ -6,7 +9,9 @@ import {
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Effect, Layer, Stream } from "effect";
+import { Effect,
+	Layer,
+	Stream } from "effect";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import type {
 	PendingInputResult,
@@ -31,13 +36,15 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeTaskNotificationState,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/accepted-input.js";
 import {
 	MaxProviderAttachments,
 	ThreadState,
 } from "../../../src/thread-loop/thread-state.js";
-import type { ThreadTurnNextStep } from "../../../src/thread-loop/thread-turn-reducer.js";
+import type { ThreadTurnNextStep } from "../../../src/thread-loop/turn/types.js";
 import type {
 	PackageJson,
 	TestContextLoader,
@@ -886,7 +893,7 @@ describe("ThreadLoop", () => {
 			replayedInput.runtimeInputId,
 		]);
 		expect(
-			session.state.threadTurnReduction().checkpoint
+			session.state.threadTurnTransition().checkpoint
 				.pendingInputContextSequences,
 		).toEqual([]);
 		expect(requests).toHaveLength(1);
@@ -1009,7 +1016,7 @@ describe("ThreadLoop", () => {
 		expect(appended).toEqual([
 			{ type: "session.status_idle", stop_reason: { type: "end_turn" } },
 		]);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				idleCloseout: {
 					eventId: expect.any(String),
@@ -1069,7 +1076,7 @@ describe("ThreadLoop", () => {
 		});
 		expect(loader.commitCalls ?? []).toEqual([]);
 		expect(providerCalls).toBe(0);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
@@ -1190,7 +1197,7 @@ describe("ThreadLoop", () => {
 			type: "session.status_idle",
 			stop_reason: { type: "end_turn" },
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			state: { state: "idle" },
 			nextStep: { action: "await_input" },
 		});
@@ -1988,7 +1995,7 @@ describe("ThreadState", () => {
 			action: "commit_accepted_input",
 			runtimeInputId: "rin_sibling_hot",
 		});
-		expect(hot.threadTurnReduction().checkpoint).toEqual({
+		expect(hot.threadTurnTransition().checkpoint).toEqual({
 			executionRunId: "run_attachment_hot",
 			pendingInputContextSequences: [],
 		});
@@ -2002,7 +2009,7 @@ describe("ThreadState", () => {
 			{ routes: [] },
 		);
 		cold.replacePendingAttachments([attachment]);
-		expect(cold.threadTurnReduction()).toMatchObject({
+		expect(cold.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				executionRunId: "run_attachment_cold",
 				pendingInputContextSequences: [],
@@ -2303,13 +2310,13 @@ describe("ThreadState", () => {
 				filename: "image.png",
 			},
 		]);
-		expect(state.threadTurnReduction().nextStep).toEqual({
+		expect(state.threadTurnTransition().nextStep).toEqual({
 			action: "prepare_next_request",
 		});
 		state.clear();
 
 		expect(state.pendingAttachments()).toEqual([]);
-		expect(state.threadTurnReduction()).toMatchObject({
+		expect(state.threadTurnTransition()).toMatchObject({
 			state: { state: "ready_to_finish" },
 			nextStep: { action: "finish_idle" },
 		});

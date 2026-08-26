@@ -3,11 +3,13 @@ import { Metadata } from "@grpc/grpc-js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
-import type { RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type {
+	RuntimeThreadPreloadState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/preload.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import type { ToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type {

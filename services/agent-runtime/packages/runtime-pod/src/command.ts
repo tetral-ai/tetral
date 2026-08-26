@@ -20,7 +20,9 @@ import type {
 	SkillGuidanceIndexEntry,
 } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
-import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type {
+	RuntimeThreadRoleState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type {
 	InstalledBuiltinFamily,
 	MCPManifest,

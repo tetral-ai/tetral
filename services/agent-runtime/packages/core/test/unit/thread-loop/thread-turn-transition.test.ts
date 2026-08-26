@@ -2,16 +2,18 @@ import { describe, expect, test } from "bun:test";
 import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "../../../src/thread-loop/thread-turn-checkpoint.js";
+} from "../../../src/thread-loop/turn/checkpoint.js";
 import {
 	deriveThreadTurnSnapshot,
 	initializeThreadTurnTransition,
 	reduceThreadTurn,
-	ThreadTurnContractError,
-	type ThreadActiveInputView,
-	type ThreadTurnFact,
-	type ThreadTurnTransition,
-} from "../../../src/thread-loop/thread-turn-reducer.js";
+} from "../../../src/thread-loop/turn/reducer.js";
+import type { ThreadTurnFact } from "../../../src/thread-loop/turn/facts.js";
+import type {
+	ThreadActiveInputView,
+	ThreadTurnTransition,
+} from "../../../src/thread-loop/turn/types.js";
+import { ThreadTurnContractError } from "../../../src/thread-loop/turn/types.js";
 
 const noRoutes: ThreadToolRouteView = { routes: [] };
 const noAttachments: ThreadActiveInputView = {

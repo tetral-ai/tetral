@@ -7,7 +7,7 @@ import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import { Effect, Stream } from "effect";
 import {

@@ -1,4 +1,8 @@
-import { describe, expect, jest, test } from "bun:test";
+import {
+	describe,
+	expect,
+	jest,
+	test } from "bun:test";
 import {
 	ProviderRequestKind,
 	SystemCacheHint,
@@ -45,8 +49,10 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputDeclaration,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/control-input.js";
 import type {
 	RuntimeApprovalReviewRequest,
 	RuntimeToolExecutionResult,
@@ -600,7 +606,7 @@ describe("ThreadLoop", () => {
 			targetPodUid: session.identity.targetPodUid,
 		};
 		expect(session.state.enqueueAcceptedInput(reviewerInput)).toBe("applied");
-		expect(session.state.threadTurnReduction().nextStep).toEqual({
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
 			action: "commit_accepted_input",
 			runtimeInputId: reviewerInput.runtimeInputId,
 		});

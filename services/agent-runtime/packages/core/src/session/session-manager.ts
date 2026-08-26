@@ -53,19 +53,25 @@ import * as ThreadLoop from "../thread-loop/thread-loop.js";
 import * as ThreadRuntime from "../thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
 	RuntimeAcceptedThreadMetadataState,
-	RuntimeConfigPatchState,
-	RuntimeControlInputCommit,
-	RuntimeControlInputState,
-	RuntimeInterruptCommandState,
 	RuntimeTaskNotificationCommandState,
 	RuntimeThreadAddressState,
-	RuntimeThreadPreloadState,
 	RuntimeThreadRoleState,
 	RuntimeThreadStatusState,
 	RuntimeThreadVisibilityState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
+	RuntimeControlInputCommit,
+	RuntimeControlInputState,
+	RuntimeInterruptCommandState,
 	RuntimeToolConfirmationState,
-} from "../thread-loop/thread-state.js";
+} from "../thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+	RuntimeThreadPreloadState,
+} from "../thread-loop/input/preload.js";
 import { SessionToolCoordinator } from "../tools/tool-scheduler.js";
 import type { ReviewerExecutionToken } from "./approval-reviewer-manager.js";
 import { AutoApprovalReviewerManager } from "./approval-reviewer-manager.js";
@@ -479,7 +485,7 @@ export class Service extends Context.Service<Service, Interface>()(
 //   | interrupt      | commit idle custody       | commit custody, stop, unwind     | reject concurrent custody     |
 //
 // On owner exit SessionManager clears the old slot, reduces the latest
-// ThreadProcessor projection, and starts at most one successor for an active action.
+// ThreadState projection, and starts at most one successor for an active next step.
 // A cold thread is inserted in the
 // installing state before its sole LoadContext call and becomes command-ready only
 // after that install succeeds. Cleanup cannot release an installing ThreadEntry or a
@@ -1094,7 +1100,7 @@ export function layer(
 					recordHotStateMetrics();
 					const custody: ThreadLoop.ThreadLoopRunCustody = {
 						activeTurnId: (session) =>
-							session.state.threadTurnReduction().checkpoint.executionRunId,
+							session.state.threadTurnTransition().checkpoint.executionRunId,
 						interruptLeaseRef: (runtimeInputId) =>
 							threadEntry.runtimeThread.state.userInterruptCommand()
 								?.runtimeInputId === runtimeInputId
@@ -1156,7 +1162,7 @@ export function layer(
 				const closeoutId = beginFailedRunCloseout();
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
-						session.state.threadTurnReduction().checkpoint.executionRunId,
+						session.state.threadTurnTransition().checkpoint.executionRunId,
 					interruptLeaseRef: (runtimeInputId) =>
 						threadEntry.runtimeThread.state.userInterruptCommand()
 							?.runtimeInputId === runtimeInputId
@@ -1302,7 +1308,7 @@ export function layer(
 							(yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit));
 						if (
 							closeout === "continuation" &&
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint
 								.executionRunId === undefined
 						) {
 							threadEntry.lastCompletedReviewerExecutionToken =
@@ -1402,7 +1408,7 @@ export function layer(
 					recordHotStateMetrics();
 					const reviewerRun = runSlot.reviewerExecutionToken !== undefined;
 					const latestNextStepNeedsRun = ThreadLoop.threadTurnNextStepNeedsRun(
-						threadEntry.runtimeThread.state.threadTurnReduction().nextStep,
+						threadEntry.runtimeThread.state.threadTurnTransition().nextStep,
 					);
 					if (
 						(!reviewerRun || !runSlot.stopping) &&
@@ -1562,7 +1568,7 @@ export function layer(
 									(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 										undefined ||
 										ThreadLoop.threadTurnNextStepNeedsRun(
-											threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
+											threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
 												.nextStep,
 										))
 										? yield* startThreadRun(
@@ -1640,7 +1646,7 @@ export function layer(
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
 					const openRequest =
-						threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request;
+						threadEntry.runtimeThread.state.threadTurnTransition().checkpoint.request;
 					if (openRequest !== undefined && openRequest.requestEnd === undefined) {
 						let closeoutCompleted = false;
 						const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
@@ -1663,7 +1669,7 @@ export function layer(
 							threadEntry.runtimeThread,
 							{
 								activeTurnId: (session) =>
-									session.state.threadTurnReduction().checkpoint.executionRunId,
+									session.state.threadTurnTransition().checkpoint.executionRunId,
 								interruptLeaseRef: (runtimeInputId) =>
 									threadEntry.runtimeThread.state.userInterruptCommand()
 										?.runtimeInputId === runtimeInputId
@@ -2480,7 +2486,7 @@ export function layer(
 						(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 							undefined ||
 							ThreadLoop.threadTurnNextStepNeedsRun(
-								threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
+								threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
 									.nextStep,
 							))
 					) {
@@ -2641,7 +2647,7 @@ export function layer(
 										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
 											undefined ||
 											ThreadLoop.threadTurnNextStepNeedsRun(
-												threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
+												threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
 													.nextStep,
 											))
 									) {
@@ -3204,7 +3210,7 @@ export function layer(
 					}
 					const reviewerRequestEndEventId = (): string | undefined => {
 						const request =
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint
 								.request;
 						return request?.requestKind === "approval_reviewer"
 							? request.requestEnd?.eventId
@@ -3290,7 +3296,7 @@ export function layer(
 						hasPendingApprovalToolJobs:
 							threadEntry.runtimeThread.state.hasPendingApprovalToolJobs(),
 						hasUnsettledToolOwner:
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint.request?.toolMembers.some(
 								(member) =>
 									member.memberKind === "public_tool_use" &&
 									member.terminalResult === undefined,

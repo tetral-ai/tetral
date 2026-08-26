@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import {
 	ProviderContextRole,
@@ -6,7 +9,8 @@ import {
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Effect, Stream } from "effect";
+import { Effect,
+	Stream } from "effect";
 import {
 	runtimeModelForThread,
 	runtimeToolPolicyFromPatchPayloads,
@@ -46,8 +50,10 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeConfigPatchState,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/preload.js";
 import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import {
 	createToolCatalog,
@@ -552,7 +558,7 @@ describe("ThreadLoop", () => {
 				),
 		).toHaveLength(2);
 		expect(providerCalls).toBe(0);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				idleCloseout: { stopReason: "end_turn" },
 			},
@@ -2367,7 +2373,7 @@ describe("ThreadLoop", () => {
 			appended.filter((event) => event.type === "span.model_request_start"),
 		).toEqual([]);
 		expect(
-			session.state.threadTurnReduction().checkpoint.pendingInputContextSequences,
+			session.state.threadTurnTransition().checkpoint.pendingInputContextSequences,
 		).toEqual([]);
 		expect(session.state.contextManager.entries()).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
@@ -2502,7 +2508,7 @@ describe("ThreadLoop", () => {
 
 		expect(result).toMatchObject({ type: "completed" });
 		expect(providerCalls).toBe(0);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			state: {
 				state: "waiting_for_tool_results",
 				modelRequestId: "request_unresolved_tool_call",

@@ -1,4 +1,5 @@
-import { expect } from "bun:test";
+import {
+	expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
 	ProviderContextRole,
@@ -52,7 +53,8 @@ import {
 	RuntimeInternalToolRepairStore,
 	SessionEventWriterRetryPolicy,
 } from "../../../src/contracts/runtime.js";
-import type { LLMEvent, RuntimeUsage } from "../../../src/llm/llm-event.js";
+import type { LLMEvent,
+	RuntimeUsage } from "../../../src/llm/llm-event.js";
 import {
 	LLMEventSchema,
 	runtimeFailureFromProviderError,
@@ -86,11 +88,15 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
-	RuntimeConfigPatchState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputCommitResult,
 	RuntimeControlInputDeclaration,
 	RuntimeControlInputState,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+} from "../../../src/thread-loop/input/preload.js";
 import type { RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { createToolCatalog } from "../../../src/tools/tool-catalog.js";
@@ -639,7 +645,7 @@ function threadLoopRuntime() {
 function testRunCustody(): ThreadLoop.ThreadLoopRunCustody {
 	return {
 		activeTurnId: (session) =>
-			session.state.threadTurnReduction().checkpoint.executionRunId,
+			session.state.threadTurnTransition().checkpoint.executionRunId,
 		interruptLeaseRef: (runtimeInputId) => ({
 			jobId: `qjob_${runtimeInputId}`,
 			leaseToken: `lease_${runtimeInputId}`,
