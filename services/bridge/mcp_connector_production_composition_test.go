@@ -362,8 +362,8 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("cold-load fully settled MCP production context: %v", err)
 	}
 	ready := runRuntimeColdContextComposition(t, finalLoaded.GetContextJson(), true)
-	if ready.ReducerAction.Action != "prepare_next_request" {
-		t.Fatalf("settled MCP Runtime action = %+v; want exactly one next Provider request authority", ready.ReducerAction)
+	if ready.NextStep.Action != "prepare_next_request" {
+		t.Fatalf("settled MCP Runtime next step = %+v; want exactly one next Provider request authority", ready.NextStep)
 	}
 	assertNoInventedAssistantText(t, ready.ProviderComposition)
 	assertProviderCompositionToolOrder(t, ready.ProviderComposition, []string{

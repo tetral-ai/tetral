@@ -201,11 +201,6 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	if err != nil || state.ProviderInvocations != 1 || state.ToolInvocations != 1 {
 		t.Fatalf("pending semantic Tool state = %+v/%v; process=%s", state, err, process.output.String())
 	}
-	time.Sleep(150 * time.Millisecond)
-	state, err = readProviderFailureRuntimeState(process.statePath)
-	if err != nil || state.ProviderInvocations != 1 {
-		t.Fatalf("provider retried before Tool settlement: state=%+v err=%v", state, err)
-	}
 	if err := os.WriteFile(process.toolReleasePath, []byte("release"), 0o600); err != nil {
 		t.Fatalf("release semantic Tool execution: %v", err)
 	}
@@ -214,7 +209,7 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	if captureErr := <-captureSettled; captureErr != nil {
 		t.Fatalf("settle semantic Tool output capture: %v", captureErr)
 	}
-	if result.ProviderInvocations != 3 || result.ToolInvocations != 1 || len(result.ProviderRequestContexts) != 3 {
+	if result.ProviderInvocations != 3 || result.ToolInvocations != 1 || len(result.ProviderRequestContexts) != 3 || result.ProviderStartedBeforeToolRelease {
 		t.Fatalf("semantic Tool provider/tool/context counts = %d/%d/%d; want 3/1/3",
 			result.ProviderInvocations, result.ToolInvocations, len(result.ProviderRequestContexts))
 	}
@@ -536,11 +531,12 @@ func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAd
 }
 
 type providerFailureRuntimeState struct {
-	ProviderInvocations     int      `json:"providerInvocations"`
-	ToolInvocations         int      `json:"toolInvocations"`
-	FinishIdleInvocations   int      `json:"finishIdleInvocations"`
-	FinishIdleResult        string   `json:"finishIdleResult"`
-	ProviderRequestContexts []string `json:"providerRequestContexts"`
+	ProviderInvocations              int      `json:"providerInvocations"`
+	ToolInvocations                  int      `json:"toolInvocations"`
+	FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+	FinishIdleResult                 string   `json:"finishIdleResult"`
+	ProviderRequestContexts          []string `json:"providerRequestContexts"`
+	ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 }
 
 func readProviderFailureRuntimeState(path string) (providerFailureRuntimeState, error) {
@@ -691,15 +687,16 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 }
 
 func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations      int      `json:"providerInvocations"`
-	ToolInvocations          int      `json:"toolInvocations"`
-	FinishIdleInvocations    int      `json:"finishIdleInvocations"`
-	FinishIdleResult         string   `json:"finishIdleResult"`
-	SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
-	OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
-	PlatformKeySelections    []string `json:"platformKeySelections"`
-	PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
-	ProviderRequestContexts  []string `json:"providerRequestContexts"`
+	ProviderInvocations              int      `json:"providerInvocations"`
+	ToolInvocations                  int      `json:"toolInvocations"`
+	FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+	FinishIdleResult                 string   `json:"finishIdleResult"`
+	SensitiveLogLeak                 bool     `json:"sensitiveLogLeak"`
+	OAuthAccessTokenConsumed         bool     `json:"oauthAccessTokenConsumed"`
+	PlatformKeySelections            []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines           []string `json:"platformKeyQuarantines"`
+	ProviderRequestContexts          []string `json:"providerRequestContexts"`
+	ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
@@ -709,15 +706,16 @@ func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
 		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations      int      `json:"providerInvocations"`
-		ToolInvocations          int      `json:"toolInvocations"`
-		FinishIdleInvocations    int      `json:"finishIdleInvocations"`
-		FinishIdleResult         string   `json:"finishIdleResult"`
-		SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
-		OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
-		PlatformKeySelections    []string `json:"platformKeySelections"`
-		PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
-		ProviderRequestContexts  []string `json:"providerRequestContexts"`
+		ProviderInvocations              int      `json:"providerInvocations"`
+		ToolInvocations                  int      `json:"toolInvocations"`
+		FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+		FinishIdleResult                 string   `json:"finishIdleResult"`
+		SensitiveLogLeak                 bool     `json:"sensitiveLogLeak"`
+		OAuthAccessTokenConsumed         bool     `json:"oauthAccessTokenConsumed"`
+		PlatformKeySelections            []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines           []string `json:"platformKeyQuarantines"`
+		ProviderRequestContexts          []string `json:"providerRequestContexts"`
+		ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
 		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())

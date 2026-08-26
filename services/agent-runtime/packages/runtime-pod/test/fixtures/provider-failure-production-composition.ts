@@ -102,6 +102,7 @@ let toolInvocations = 0;
 let finishIdleInvocations = 0;
 let finishIdleResult = "none";
 let oauthAccessTokenConsumed = false;
+let providerStartedBeforeToolRelease = false;
 const providerRequestContexts: string[] = [];
 let nextId = input.bindingGeneration * 1_000;
 const gatewayLogs: unknown[] = [];
@@ -118,6 +119,7 @@ const writeRuntimeState = async (): Promise<void> => {
 			platformKeyQuarantines,
 			oauthAccessTokenConsumed,
 			providerRequestContexts,
+			providerStartedBeforeToolRelease,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),
@@ -341,6 +343,17 @@ const providerClientRegistry = new ProviderClientRegistry({
 const semanticTimeoutStreamer = {
 	stream: async function* (request: ProviderRequestStreamInput) {
 		providerInvocations += 1;
+		if (
+			scenario === "semantic_tool_route" &&
+			providerInvocations > 1 &&
+			input.toolReleasePath !== undefined
+		) {
+			try {
+				await access(input.toolReleasePath);
+			} catch {
+				providerStartedBeforeToolRelease = true;
+			}
+		}
 		providerRequestContexts.push(JSON.stringify(request.request.context));
 		await writeRuntimeState();
 		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
@@ -597,6 +610,7 @@ try {
 			platformKeyQuarantines,
 			oauthAccessTokenConsumed,
 			providerRequestContexts,
+			providerStartedBeforeToolRelease,
 			sensitiveLogLeak:
 				/private-billing-canary|statusless-private-canary|private-byok-canary|provider-failure-canary|credential-unavailable-canary|session-key|oauth-access|oauth-refresh|sk-provider-failure/i.test(
 					JSON.stringify({ gatewayLogs, runtimeLogs, providerRequestContexts }),

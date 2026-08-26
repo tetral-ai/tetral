@@ -714,12 +714,12 @@ func assertRuntimeHotColdToolComposition(
 	var composed struct {
 		Checkpoint          any                        `json:"checkpoint"`
 		ToolRouteView       any                        `json:"toolRouteView"`
-		ReducerAction       any                        `json:"reducerAction"`
+		NextStep            map[string]any             `json:"nextStep"`
 		ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 		Hot                 struct {
 			Checkpoint          any                        `json:"checkpoint"`
 			ToolRouteView       any                        `json:"toolRouteView"`
-			ReducerAction       any                        `json:"reducerAction"`
+			NextStep            map[string]any             `json:"nextStep"`
 			ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 			ToolPart            any                        `json:"toolPart"`
 		} `json:"hot"`
@@ -729,7 +729,8 @@ func assertRuntimeHotColdToolComposition(
 	}
 	if !reflect.DeepEqual(composed.Checkpoint, composed.Hot.Checkpoint) ||
 		!reflect.DeepEqual(composed.ToolRouteView, composed.Hot.ToolRouteView) ||
-		!reflect.DeepEqual(composed.ReducerAction, composed.Hot.ReducerAction) ||
+		len(composed.NextStep) == 0 || len(composed.Hot.NextStep) == 0 ||
+		!reflect.DeepEqual(composed.NextStep, composed.Hot.NextStep) ||
 		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) || composed.Hot.ToolPart == nil {
 		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
 	}
@@ -782,10 +783,10 @@ type runtimeProviderComposition struct {
 }
 
 type runtimeColdContextComposition struct {
-	ReducerAction struct {
+	NextStep struct {
 		Action          string   `json:"action"`
 		ToolUseEventIDs []string `json:"toolUseEventIds"`
-	} `json:"reducerAction"`
+	} `json:"nextStep"`
 	ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 }
 

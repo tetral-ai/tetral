@@ -423,8 +423,8 @@ Invariants a replacement must preserve:
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
   result → hot admission → accepted Inbox stamp → exact Queue ACK. Initial and
-  later mail use this same path. Request Start remains a Reducer-owned action,
-  never delivery or ACK authority. If the Runtime binding is proven lost,
+  later mail use this same path. Request Start remains a one-time ThreadLoop
+  dispatch, never delivery or ACK authority. If the Runtime binding is proven lost,
   generic accepted-input handoff restores the same input and Queue identity for
   the replacement owner without replaying a second durable Message.
 - `task_name` is unique under the parent by durable constraint, never by

@@ -320,8 +320,10 @@ async function buildManager(): Promise<{
 				Effect.succeed({ type: "landed", disposition: "continuation" }),
 				closeRecoveredOpenRequestForInterrupt: () =>
 					Effect.succeed({ type: "interrupted" }),
-				settleIdleInterrupt: () => Effect.succeed({ type: "applied" }),
+				settleIdleInterrupt: () =>
+					Effect.succeed({ type: "applied", wakeThread: false }),
 				settleToolConfirmation: () => Effect.succeed({ type: "duplicate" }),
+				threadNeedsRun: () => false,
 				seedRuntimeModel: () => undefined,
 			installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 			installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),

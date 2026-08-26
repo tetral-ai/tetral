@@ -302,10 +302,17 @@ export function interpretThreadTurnNextStep(
 }
 
 /** Returns whether a reconstructed stable next step needs an owned ThreadRun. */
-export function threadTurnNextStepNeedsRun(
+function threadTurnNextStepNeedsRun(
 	nextStep: ThreadTurnNextStep,
 ): boolean {
 	return interpretThreadTurnNextStep(nextStep).runDisposition === "active";
+}
+
+function threadNeedsRun(session: ThreadRuntime): boolean {
+	return (
+		session.state.peekAcceptedInput() !== undefined ||
+		threadTurnNextStepNeedsRun(session.state.threadTurnTransition().nextStep)
+	);
 }
 
 interface ThreadRunOpeningSource {
@@ -369,7 +376,7 @@ export type ThreadLoopSessionReleaseReason =
 
 /** Result of applying one committed idle-interrupt receipt inside the ThreadLoop owner. */
 export type IdleInterruptSettlementResult =
-	| { readonly type: "applied" }
+	| { readonly type: "applied"; readonly wakeThread: boolean }
 	| { readonly type: "duplicate"; readonly stale?: true }
 	| { readonly type: "conflict" }
 	| { readonly type: "failed" };
@@ -422,6 +429,8 @@ export interface Interface {
 		command: RuntimeToolConfirmationState,
 		commitInput: RuntimeControlInputCommit,
 	) => Effect.Effect<ToolConfirmationSettlementResult>;
+	/** Keeps Reducer interpretation inside ThreadLoop while SessionManager owns the run slot. */
+	readonly threadNeedsRun: (session: ThreadRuntime) => boolean;
 	/**
 	 * Seeds config-sourced model state synchronously. Both preload and accepted-input config
 	 * application call this before pending-tool restoration; an unresolved model stays undefined
@@ -872,6 +881,7 @@ function threadLoopLayer(
 					),
 				settleToolConfirmation: (session, command, commitInput) =>
 					settleToolConfirmation(session, command, commitInput),
+				threadNeedsRun,
 				seedRuntimeModel: (session) => seedRuntimeModel(session, options),
 				installLoadedPendingToolUses: (
 					session,
@@ -917,7 +927,7 @@ function executeCloseFailedThreadTurnNextStep(
 		: Effect.die(new Error("close_failed next step must remain active"));
 }
 
-async function consumeRecoveredCloseInterruptedAction(
+async function executeRecoveredCloseInterruptedNextStep(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
 	custody: ThreadLoopRunCustody,
@@ -955,7 +965,7 @@ function failRecoveredOpenRequest(session: ThreadRuntime): ThreadLoopRunResult {
 	};
 }
 
-async function consumeRecoveredRequestRetryOrRescheduleAction(
+async function executeRecoveredRequestRetryOrRescheduleNextStep(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
 ): Promise<ThreadLoopRunResult> {
@@ -1038,20 +1048,8 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		);
 		return { type: "interrupted", discardHotState: true };
 	}
-	if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
+	if (!applyJoinedInterruptRequestEnd(session, end)) {
 		return failRecoveredOpenRequest(session);
-	}
-	const requestSealFailure = applyCommittedRequestEnd(
-		session,
-		end.requestEndEventId,
-		request.modelRequestId,
-		true,
-		"runtime_interrupted",
-		providerContextRetentionForRequest(session, "interrupted"),
-		undefined,
-	);
-	if (requestSealFailure !== undefined) {
-		return { type: "failed", error: requestSealFailure };
 	}
 	const projectionFailure = applyFailedRequestProviderProjection(session);
 	if (projectionFailure !== undefined) {
@@ -1167,7 +1165,10 @@ export function settleIdleInterrupt(
 
 		session.state.completeUserInterrupt(command.runtimeInputId);
 		session.state.finishThreadRunProjection();
-		return { type: "applied" as const };
+		return {
+			type: "applied" as const,
+			wakeThread: threadNeedsRun(session),
+		};
 	});
 }
 
@@ -1340,7 +1341,7 @@ function runThreadLoopEffect(
 			).nextStep;
 			if (recoveredNextStep.action === "close_interrupted") {
 				return yield* nonAbandonablePromise(() =>
-					consumeRecoveredCloseInterruptedAction(session, options, custody),
+					executeRecoveredCloseInterruptedNextStep(session, options, custody),
 				);
 			}
 			const recoveredRequest =
@@ -1362,7 +1363,7 @@ function runThreadLoopEffect(
 					(reschedule === undefined && !hasIncompleteTool)
 				) {
 					return yield* nonAbandonablePromise(() =>
-						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+						executeRecoveredRequestRetryOrRescheduleNextStep(session, options),
 					);
 				}
 				if (reschedule === undefined) {
@@ -1765,7 +1766,7 @@ function runThreadLoopEffect(
 						return { type: "failed", error: projectionFailure };
 					}
 					return yield* nonAbandonablePromise(() =>
-						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+						executeRecoveredRequestRetryOrRescheduleNextStep(session, options),
 					);
 				}
 				if (
@@ -3098,8 +3099,8 @@ function runOwnedCompactionSummaryAttemptEffect(
 							}),
 						);
 					}
-					const end = yield* Effect.promise(() =>
-						appendModelRequestEndEvent(
+					const end = yield* Effect.promise(async () => {
+						const result = await appendModelRequestEndEvent(
 							options,
 							session,
 							request.modelRequestId,
@@ -3117,22 +3118,17 @@ function runOwnedCompactionSummaryAttemptEffect(
 								command: interruptCommand,
 								interruptLeaseRef,
 							},
-						),
-					);
+						);
+						if (result.ok && !applyJoinedInterruptRequestEnd(session, result)) {
+							return {
+								ok: false as const,
+								error: joinedInterruptRequestEndFailure(session),
+							};
+						}
+						return result;
+					});
 					if (!end.ok) {
 						return yield* failRequestCloseout(end.error);
-					}
-					if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
-						return yield* failRequestCloseout(
-							normalizeRuntimeFailure({
-								type: "runtime",
-								code: "runtime_invalid_sequence",
-								retryable: false,
-								fatal: true,
-								reason: "runtime_contract_validation",
-								sessionId: session.sessionId,
-							}),
-						);
 					}
 					session.state.markUserInterruptCloseoutEligible();
 					return { type: "interrupted" } as const;
@@ -3350,8 +3346,8 @@ function closeStartedCompactionForUserInterruptEffect(
 				}),
 			);
 		}
-		const end = yield* Effect.promise(() =>
-			appendModelRequestEndEvent(
+		const end = yield* Effect.promise(async () => {
+			const result = await appendModelRequestEndEvent(
 				options,
 				session,
 				request.modelRequestId,
@@ -3369,22 +3365,17 @@ function closeStartedCompactionForUserInterruptEffect(
 					command,
 					interruptLeaseRef,
 				},
-			),
-		);
+			);
+			if (result.ok && !applyJoinedInterruptRequestEnd(session, result)) {
+				return {
+					ok: false as const,
+					error: joinedInterruptRequestEndFailure(session),
+				};
+			}
+			return result;
+		});
 		if (!end.ok) {
 			return yield* failRequestCloseout(end.error);
-		}
-		if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
-			return yield* failRequestCloseout(
-				normalizeRuntimeFailure({
-					type: "runtime",
-					code: "runtime_invalid_sequence",
-					retryable: false,
-					fatal: true,
-					reason: "runtime_contract_validation",
-					sessionId: session.sessionId,
-				}),
-			);
 		}
 		session.state.markUserInterruptCloseoutEligible();
 		return { type: "interrupted" };
@@ -7762,7 +7753,7 @@ function runtimeShutdownFailure(
 	});
 }
 
-function acknowledgeJoinedInterruptRequestEnd(
+function applyJoinedInterruptRequestEnd(
 	session: ThreadRuntime,
 	result: Extract<
 		Awaited<ReturnType<typeof appendModelRequestEndEvent>>,
@@ -7774,6 +7765,14 @@ function acknowledgeJoinedInterruptRequestEnd(
 		return false;
 	}
 	if (result.type === "stale") return false;
+	const request = session.state.threadTurnTransition().checkpoint.request;
+	if (request === undefined) {
+		return false;
+	}
+	const providerContextRetention = providerContextRetentionForRequest(
+		session,
+		"interrupted",
+	);
 	try {
 		const pendingTools = [
 			...session.state.pendingApprovalToolJobs(),
@@ -7805,11 +7804,34 @@ function acknowledgeJoinedInterruptRequestEnd(
 		fact: "interrupt_committed",
 		eventId: command.runtimeInputId,
 	});
+	const requestSealFailure = applyCommittedRequestEnd(
+		session,
+		result.requestEndEventId,
+		request.modelRequestId,
+		true,
+		"runtime_interrupted",
+		providerContextRetention,
+		undefined,
+	);
+	if (requestSealFailure !== undefined) {
+		return false;
+	}
 	return session.state.recordJoinedUserInterruptResult(
 		command.runtimeInputId,
 		{ ok: true, joined: true },
 		{ inputKind: "interrupt" },
 	);
+}
+
+function joinedInterruptRequestEndFailure(session: ThreadRuntime): RuntimeFailure {
+	return normalizeRuntimeFailure({
+		type: "runtime",
+		code: "runtime_invalid_sequence",
+		retryable: false,
+		fatal: true,
+		reason: "runtime_contract_validation",
+		sessionId: session.sessionId,
+	});
 }
 
 function userInterruptFailure(

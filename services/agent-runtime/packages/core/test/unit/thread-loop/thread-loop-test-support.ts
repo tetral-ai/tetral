@@ -1166,6 +1166,7 @@ async function activeCompactionRun(
 	const appended: SessionEvent[] = [];
 	const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
 	let compactionStartEventId: string | undefined;
+	let requestEndEventIdAtIdleWrite: string | undefined;
 	let observedAbortSignal: AbortSignal | undefined;
 	const llm: LLMServiceInterface = {
 		stream(request, options) {
@@ -1203,6 +1204,11 @@ async function activeCompactionRun(
 	const writer = writerFrom(
 		(envelope) => {
 			appended.push(envelope.event);
+			if (envelope.event.type === "session.status_idle") {
+				requestEndEventIdAtIdleWrite =
+					session.state.threadTurnTransition().checkpoint.request?.requestEnd
+						?.eventId;
+			}
 			const eventId = `bridge-${envelope.writeId}`;
 			if (envelope.event.type === "span.model_request_start") {
 				compactionStartEventId = eventId;
@@ -1241,6 +1247,7 @@ async function activeCompactionRun(
 		appended,
 		requestEndEnvelopes,
 		compactionStartEventId,
+		requestEndEventIdAtIdleWrite: () => requestEndEventIdAtIdleWrite,
 		observedAbortSignal,
 		runFiber,
 	};

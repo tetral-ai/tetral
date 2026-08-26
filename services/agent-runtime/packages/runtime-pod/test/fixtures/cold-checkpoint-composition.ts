@@ -93,7 +93,7 @@ let hot:
 	| {
 			readonly checkpoint: unknown;
 			readonly toolRouteView: unknown;
-			readonly reducerAction: unknown;
+			readonly nextStep: unknown;
 			readonly toolPart?: unknown;
 			readonly providerComposition?: unknown;
 	  }
@@ -166,7 +166,7 @@ if (input.hotScenario !== undefined) {
 	hot = {
 		checkpoint: hotCheckpoint,
 		toolRouteView: hotRoutes,
-		reducerAction: deriveThreadTurnSnapshot(
+		nextStep: deriveThreadTurnSnapshot(
 			hotCheckpoint,
 			hotRoutes,
 			[],
@@ -188,7 +188,7 @@ process.stdout.write(
 	JSON.stringify({
 		checkpoint,
 		toolRouteView,
-		reducerAction: deriveThreadTurnSnapshot(
+		nextStep: deriveThreadTurnSnapshot(
 			checkpoint,
 			toolRouteView,
 			[],

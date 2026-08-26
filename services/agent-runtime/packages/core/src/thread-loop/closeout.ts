@@ -1,6 +1,6 @@
 /**
  * Builds sub-agent completion declarations and validates durable FinishIdle
- * acknowledgements. ThreadLoop selects the typed closeout action; this module owns
+ * acknowledgements. ThreadLoop executes the typed closeout next step; this module owns
  * failed-run, FinishIdle, the narrow runtime-termination request, and typed-result execution.
  *
  * @packageDocumentation

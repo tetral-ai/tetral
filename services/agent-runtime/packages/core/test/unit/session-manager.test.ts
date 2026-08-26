@@ -327,6 +327,11 @@ function threadLoopService(
 			Effect.succeed({ type: "interrupted" }),
 		settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
 		settleToolConfirmation: ThreadLoop.settleToolConfirmation,
+		threadNeedsRun: (session) =>
+			session.state.peekAcceptedInput() !== undefined ||
+			ThreadLoop.interpretThreadTurnNextStep(
+				session.state.threadTurnTransition().nextStep,
+			).runDisposition === "active",
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
@@ -4401,6 +4406,60 @@ describe("SessionManager", () => {
 					type: "completed",
 					modelMessageCount: 0,
 				});
+			},
+		);
+	});
+
+	test("cold idle interrupt wakes completion mail preserved behind its durable receipt", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_cold_idle_interrupt_mail";
+		const threadId = "thrd_cold_idle_interrupt_mail";
+		const mail = agentMailInput(
+			sessionId,
+			"agent_mail:delivery_cold_idle_interrupt_mail",
+			threadId,
+			"thrd_cold_idle_interrupt_mail_child",
+			{ role: "main", visibility: "public", status: "idle" },
+		);
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (command) => ({
+					...command,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					pendingAgentMail: [mail],
+					thread: { role: "main", visibility: "public", status: "idle" },
+				}),
+			}),
+			async (manager) => {
+				const interrupt = {
+					...threadControl(
+						sessionId,
+						"rin_cold_idle_interrupt_mail",
+						threadId,
+					),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							testControlCommit(interrupt),
+						),
+					),
+				).toMatchObject({
+					ok: true,
+					idleInterrupt: true,
+				});
+				await waitForRuns(threadLoop, 1);
+				expect(
+					threadLoop.runs[0]?.session.state.peekAcceptedInput(),
+				).toMatchObject({
+					kind: "inter_agent_message",
+					runtimeInputId: mail.runtimeInputId,
+				});
+				threadLoop.runs[0]?.release();
 			},
 		);
 	});

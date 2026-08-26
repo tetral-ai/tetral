@@ -563,6 +563,13 @@ Previous anchored summary.
 				Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause),
 			).toBe(true);
 			expect(active.requestEndEnvelopes).toHaveLength(1);
+			expect(active.requestEndEventIdAtIdleWrite()).toBe(
+				`bridge-${requestEnd.writeId}`,
+			);
+			expect(active.session.state.threadTurnTransition()).toMatchObject({
+				state: { state: "idle" },
+				nextStep: { action: "await_input" },
+			});
 		} finally {
 			active.requestEndAck.resolve({ ok: true, type: "stale" });
 			active.providerRelease.resolve();

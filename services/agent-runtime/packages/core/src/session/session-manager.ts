@@ -514,9 +514,10 @@ interface ThreadEntry {
 	installationState: "installing" | "ready";
 	installation: ThreadInstallation | undefined;
 	readonly runtimeThread: ThreadRuntime.ThreadRuntime;
-	readonly acceptedInputQueue: ThreadRuntime.ThreadRuntime["state"];
-	readonly controlQueue: ThreadRuntime.ThreadRuntime["state"];
-	readonly statusSignal: ThreadRuntime.ThreadRuntime["state"];
+	readonly acceptedInputQueue: Pick<
+		ThreadRuntime.ThreadRuntime["state"],
+		"enqueueAcceptedInput"
+	>;
 	readonly commandChannel: ThreadCommandChannel;
 	runSlot: ThreadRunSlot | undefined;
 	interruptLeaseRef: RuntimeInterruptControlCommand["interruptLeaseRef"] | undefined;
@@ -783,8 +784,6 @@ export function layer(
 					installation: undefined,
 					runtimeThread,
 					acceptedInputQueue: runtimeThread.state,
-					controlQueue: runtimeThread.state,
-					statusSignal: runtimeThread.state,
 					commandChannel: Effect.runSync(makeThreadCommandChannel()),
 					runSlot: undefined,
 					interruptLeaseRef: undefined,
@@ -1407,8 +1406,8 @@ export function layer(
 					threadEntry.status = "idle";
 					recordHotStateMetrics();
 					const reviewerRun = runSlot.reviewerExecutionToken !== undefined;
-					const latestNextStepNeedsRun = ThreadLoop.threadTurnNextStepNeedsRun(
-						threadEntry.runtimeThread.state.threadTurnTransition().nextStep,
+					const latestNextStepNeedsRun = threadLoop.threadNeedsRun(
+						threadEntry.runtimeThread,
 					);
 					if (
 						(!reviewerRun || !runSlot.stopping) &&
@@ -1565,12 +1564,9 @@ export function layer(
 								const runSlot = threadResult.threadEntry.runSlot;
 								const started =
 									runSlot === undefined &&
-									(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-										undefined ||
-										ThreadLoop.threadTurnNextStepNeedsRun(
-											threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
-												.nextStep,
-										))
+									threadLoop.threadNeedsRun(
+										threadResult.threadEntry.runtimeThread,
+									)
 										? yield* startThreadRun(
 												threadResult.sessionEntry,
 												threadResult.threadEntry,
@@ -1757,6 +1753,17 @@ export function layer(
 							duplicate: true,
 							...(settlement.stale === true ? { stale: true as const } : {}),
 						} as const;
+					}
+					if (
+						settlement.wakeThread &&
+						threadEntry.runSlot === undefined &&
+						threadResult.sessionEntry.threads.get(threadEntry.sessionThreadId) ===
+							threadEntry
+					) {
+						yield* startThreadRun(
+							threadResult.sessionEntry,
+							threadEntry,
+						).pipe(Effect.asVoid);
 					}
 					return {
 						ok: true,
@@ -2483,12 +2490,7 @@ export function layer(
 					}
 					if (
 						startPendingWork &&
-						(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-							undefined ||
-							ThreadLoop.threadTurnNextStepNeedsRun(
-								threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
-									.nextStep,
-							))
+						threadLoop.threadNeedsRun(threadResult.threadEntry.runtimeThread)
 					) {
 						yield* startThreadRun(
 							threadResult.sessionEntry,
@@ -2644,12 +2646,9 @@ export function layer(
 									}
 									if (
 										installation.startPendingWork &&
-										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-											undefined ||
-											ThreadLoop.threadTurnNextStepNeedsRun(
-												threadResult.threadEntry.runtimeThread.state.threadTurnTransition()
-													.nextStep,
-											))
+										threadLoop.threadNeedsRun(
+											threadResult.threadEntry.runtimeThread,
+										)
 									) {
 										yield* startThreadRun(
 											threadResult.sessionEntry,
