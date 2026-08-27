@@ -144,6 +144,27 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 	repairEventID := repaired.GetCommitted().GetRepairEventId()
 
 	client := dbconnect.NewClientForTesting(runtime)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET payload_json = jsonb_set(payload_json::jsonb, '{repair_kind}', '"not_membership_authority"'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, repairEventID); err != nil {
+		t.Fatalf("alter repair payload marker: %v", err)
+	}
+	var relationOwnedRetention *bridgev1.ProviderContextRetention
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_relation_owned_retention", func(tx *dbconnect.Tx) error {
+		var loadErr error
+		relationOwnedRetention, loadErr = runtimeTerminalRequestRetentionTx(context.Background(), tx, scope, modelRequestID)
+		return loadErr
+	}); err != nil {
+		t.Fatalf("derive relation-owned terminal pod-loss retention: %v", err)
+	}
+	if !slices.Equal(relationOwnedRetention.GetRepairEventIds(), []string{repairEventID}) {
+		t.Fatalf("relation-owned repair retention = %#v; payload marker must not select membership", relationOwnedRetention)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET payload_json = jsonb_set(payload_json::jsonb, '{repair_kind}', '"invalid_tool"'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, repairEventID); err != nil {
+		t.Fatalf("restore repair payload marker: %v", err)
+	}
 	var retention *bridgev1.ProviderContextRetention
 	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_terminal_retention", func(tx *dbconnect.Tx) error {
 		var loadErr error

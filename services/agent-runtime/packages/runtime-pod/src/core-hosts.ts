@@ -13,11 +13,11 @@ import type {
 	ContextLoader,
 	RuntimeLoadedAgentMail,
 } from "@tetral/agent-runtime-core/src/context/context-loader.js";
-import {
-	ContextLoaderErrorSchema,
-	type SessionEvent,
-	type SessionEventWriterAppendResult,
+import type {
+	SessionEvent,
+	SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {

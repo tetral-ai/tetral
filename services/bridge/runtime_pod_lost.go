@@ -1672,16 +1672,24 @@ func runtimeTerminalRequestRetentionTx(
 	modelRequestID string,
 ) (*bridgev1.ProviderContextRetention, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT event_id,
-		        CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND (type IN ('agent.tool_use','agent.mcp_tool_use') OR
-		         (type = 'agent.tool_result' AND payload_json::jsonb ->> 'repair_kind' = 'invalid_tool'))
-		  ORDER BY sequence ASC, event_id ASC`,
+		`SELECT event.event_id,
+		        CASE WHEN repair.idempotency_key IS NULL THEN 'tool_use' ELSE 'repair' END
+		   FROM session_events event
+		   LEFT JOIN session_bridge_operations repair
+		     ON repair.workspace_id = event.workspace_id
+		    AND repair.session_id = event.session_id
+		    AND repair.session_thread_id = event.session_thread_id
+		    AND repair.operation = 'commit_internal_tool_repair'
+		    AND repair.source_kind = 'internal_tool_repair'
+		    AND repair.idempotency_key = event.runtime_write_id
+		    AND repair.ack_status = 'committed'
+		  WHERE event.workspace_id = $1
+		    AND event.session_id = $2
+		    AND event.session_thread_id = $3
+		    AND event.model_request_id = $4
+		    AND (event.type IN ('agent.tool_use','agent.mcp_tool_use') OR
+		         (event.type = 'agent.tool_result' AND repair.idempotency_key IS NOT NULL))
+		  ORDER BY event.sequence ASC, event.event_id ASC`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
 	)
 	if err != nil {

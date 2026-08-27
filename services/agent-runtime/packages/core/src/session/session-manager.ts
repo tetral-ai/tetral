@@ -39,10 +39,10 @@ import {
 	Semaphore,
 } from "effect";
 import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
+import type { RuntimeContextEntry } from "../contracts/runtime.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
-	type RuntimeContextEntry,
 } from "../contracts/runtime.js";
 import type {
 	RuntimeHotStateMetrics,
