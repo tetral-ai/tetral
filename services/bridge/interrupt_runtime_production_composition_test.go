@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,9 +38,18 @@ type interruptRuntimeCompositionProcess struct {
 }
 
 type interruptRuntimeCompositionOutput struct {
-	InterruptResult             json.RawMessage `json:"interruptResult"`
-	ProviderInvocations         int             `json:"providerInvocations"`
-	DurableOperationCompletions int             `json:"durableOperationCompletions"`
+	InterruptResult             json.RawMessage   `json:"interruptResult"`
+	InterruptResults            []json.RawMessage `json:"interruptResults"`
+	ThreadSnapshot              json.RawMessage   `json:"threadSnapshot"`
+	FinishIdleInvocations       int               `json:"finishIdleInvocations"`
+	ProviderInvocations         int               `json:"providerInvocations"`
+	ProviderContexts            []json.RawMessage `json:"providerContexts"`
+	DurableOperationCompletions int               `json:"durableOperationCompletions"`
+}
+
+type interruptRuntimeCompositionOptions struct {
+	failFirstFinishIdle bool
+	fastThreadText      string
 }
 
 type interruptFollowerRuntimeServer struct {
@@ -57,6 +67,12 @@ var errSyntheticInterruptResponseLoss = errors.New("synthetic interrupt response
 type interruptResponseLossSender struct {
 	RuntimeCommandSender
 	calls atomic.Int32
+}
+
+type interruptRequestCaptureSender struct {
+	RuntimeCommandSender
+	target  RuntimePodTarget
+	request *agentruntimev1.InterruptRequest
 }
 
 type blockingRecoveryCommandSender struct {
@@ -100,6 +116,16 @@ func (s *interruptResponseLossSender) Interrupt(
 		return nil, errors.New("interrupt response is nil")
 	}
 	return nil, errSyntheticInterruptResponseLoss
+}
+
+func (s *interruptRequestCaptureSender) Interrupt(
+	ctx context.Context,
+	target RuntimePodTarget,
+	request *agentruntimev1.InterruptRequest,
+) (*agentruntimev1.InterruptResponse, error) {
+	s.target = target
+	s.request = request
+	return s.RuntimeCommandSender.Interrupt(ctx, target, request)
 }
 
 func (s *interruptResponseLossSender) RecoverThread(
@@ -813,6 +839,12 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1`, configJobID).Scan(&configStatus); err != nil || configStatus != queue.StatusAcknowledged {
 		t.Fatalf("installed config Queue state = %s/%v; want acknowledged", configStatus, err)
 	}
+	coldAfterInterrupt, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	})
+	if err != nil {
+		t.Fatalf("load cold Provider context after interrupt: %v", err)
+	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("deliver ordinary input after config install = active:%t err:%v", active, err)
 	}
@@ -849,9 +881,53 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("release Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if composed.ProviderInvocations != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
+	if composed.ProviderInvocations != 2 || len(composed.ProviderContexts) != 2 || composed.DurableOperationCompletions != 1 || len(composed.InterruptResult) == 0 {
 		t.Fatalf("Runtime composition = %+v; want interrupted and resumed Provider calls, one joined operation, and interrupt response", composed)
 	}
+	hotProviderContext := composed.ProviderContexts[1]
+	for _, providerRequest := range runRuntimeProviderComposition(t, coldAfterInterrupt.GetContextJson()) {
+		var coldRequest struct {
+			Context json.RawMessage `json:"context"`
+		}
+		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
+			t.Fatalf("decode cold Provider request: %v", err)
+		}
+		var hotValue, coldValue []any
+		if err := json.Unmarshal(hotProviderContext, &hotValue); err != nil {
+			t.Fatalf("decode hot Provider context: %v", err)
+		}
+		if err := json.Unmarshal(coldRequest.Context, &coldValue); err != nil {
+			t.Fatalf("decode cold Provider context: %v", err)
+		}
+		if len(hotValue) == 0 {
+			t.Fatal("hot Provider context omitted the accepted follower input")
+		}
+		followerJSON, _ := json.Marshal(hotValue[len(hotValue)-1])
+		if !strings.Contains(string(followerJSON), "post-config ordinary") {
+			t.Fatalf("hot Provider context did not end with the accepted follower: %s", followerJSON)
+		}
+		hotJSON, _ := json.Marshal(hotValue[:len(hotValue)-1])
+		coldJSON, _ := json.Marshal(coldValue)
+		if !bytes.Equal(hotJSON, coldJSON) {
+			t.Fatalf("interrupt hot/cold Provider context diverged:\nhot:  %s\ncold: %s", hotJSON, coldJSON)
+		}
+		assertInterruptedProviderContext(
+			t,
+			coldRequest.Context,
+			"failed interrupt partial text",
+			"interrupt Tool reasoning",
+			"sig_interrupt_composition",
+			"call_interrupt_composition",
+		)
+	}
+	assertInterruptedProviderContext(
+		t,
+		hotProviderContext,
+		"failed interrupt partial text",
+		"interrupt Tool reasoning",
+		"sig_interrupt_composition",
+		"call_interrupt_composition",
+	)
 
 	var inboxStatus, queueStatus string
 	var starts, ends, toolUses, toolResults, receipts int
@@ -871,6 +947,254 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || starts != 2 || ends != 2 || toolUses != 1 || toolResults != 1 || receipts != 1 {
 		t.Fatalf("production closeout = Inbox:%s Queue:%s starts:%d ends:%d tool uses/results:%d/%d receipts:%d",
 			inboxStatus, queueStatus, starts, ends, toolUses, toolResults, receipts)
+	}
+}
+
+func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_interrupt_joined_replay"
+		threadID       = "thr_interrupt_joined_replay"
+		bindingID      = "bind_interrupt_joined_replay"
+		podUID         = "pod_interrupt_joined_replay"
+		turnID         = "evt_interrupt_joined_replay_running"
+		modelRequestID = "mreq_interrupt_joined_replay"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	client := dbconnect.NewClientForTesting(runtime)
+	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-joined-replay-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
+	seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	partial, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_partial", ModelRequestId: modelRequestID,
+		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"failed partial text"}]}`,
+		AssistantContextDelta: bridgeTextContextDeltaForTest("failed partial text"),
+	})
+	if err != nil || partial.GetCommitted() == nil {
+		t.Fatalf("write joined replay failed partial: response=%#v err=%v", partial, err)
+	}
+	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
+		ToolDeclaration: bridgeSignedReasoningToolDeclarationForTest(
+			"call_interrupt_joined_replay", "Read", `{"path":"joined.txt"}`, "allow",
+		),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("write joined replay Tool use: response=%#v err=%v", toolUse, err)
+	}
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
+
+	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
+	birth, err := eventService.AppendClientEvents(
+		context.Background(),
+		workspace.DefaultID,
+		sessionID,
+		"interrupt-joined-replay",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt}}},
+	)
+	if err != nil || len(birth.Data) != 1 {
+		t.Fatalf("birth joined replay interrupt = %#v/%v", birth, err)
+	}
+	var interruptID string
+	if err := admin.QueryRowContext(context.Background(), `SELECT runtime_input_id
+		FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1
+		AND input_kind='interrupt_control'`, sessionID).Scan(&interruptID); err != nil {
+		t.Fatalf("read joined replay interrupt identity: %v", err)
+	}
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for joined replay Bridge: %v", err)
+	}
+	bridgeServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeServer, bridgeStore)
+	go func() { _ = bridgeServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeServer.Stop()
+		_ = bridgeListener.Close()
+	})
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		threadID,
+		bindingID,
+		1,
+		podUID,
+		interruptRuntimeCompositionOptions{failFirstFinishIdle: true},
+	)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
+		SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
+		t.Fatalf("align joined replay Runtime binding: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	captureSender := &interruptRequestCaptureSender{RuntimeCommandSender: baseSender}
+	queueStore := queue.NewPostgreSQLStore(client)
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: captureSender},
+		Config: JobRunnerConfig{LeaseOwner: "interrupt-joined-replay", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
+		t.Fatalf("deliver joined replay interrupt = active:%t err:%v", active, err)
+	}
+	if captureSender.request == nil {
+		t.Fatal("joined replay did not reach Runtime")
+	}
+	replayContext, cancelReplay := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelReplay()
+	replay, err := baseSender.Interrupt(replayContext, captureSender.target, captureSender.request)
+	if err != nil || replay.GetDuplicate() == nil {
+		if closeErr := os.WriteFile(paths.close, []byte("close"), 0o600); closeErr != nil {
+			t.Fatalf("redeliver joined interrupt = %#v/%v and close Runtime: %v", replay, err, closeErr)
+		}
+		failed := runtimeProcess.wait(t)
+		t.Fatalf("redeliver joined interrupt = %#v rejected=%#v err=%v output=%+v; want duplicate", replay, replay.GetRejected(), err, failed)
+	}
+	replayDeadline := time.Now().Add(3 * time.Second)
+	for {
+		active, runErr := runner.RunOnceWithActivity(context.Background())
+		if runErr != nil {
+			t.Fatalf("replay joined receipt through JobRunner: %v", runErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(replayDeadline) {
+			t.Fatal("joined receipt did not become eligible for Queue replay")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build joined replay output capture provider registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-joined-replay-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete joined replay output capture operation: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("joined replay did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	idleDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var idleEvents int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.status_idle'`,
+			sessionID, threadID).Scan(&idleEvents); err != nil {
+			t.Fatalf("read joined replay idle completion: %v", err)
+		}
+		if idleEvents == 1 {
+			break
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("joined replay did not finish idle after output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
+		t.Fatalf("release joined replay Runtime: %v", err)
+	}
+	composed := runtimeProcess.wait(t)
+	if composed.ProviderInvocations != 0 || composed.FinishIdleInvocations != 2 || len(composed.InterruptResults) != 2 {
+		t.Fatalf("joined replay Runtime output = %+v; want zero Provider, one failed and one committed FinishIdle, two interrupts", composed)
+	}
+	var snapshot struct {
+		Ok       bool              `json:"ok"`
+		Observed bool              `json:"observed"`
+		Status   string            `json:"status"`
+		Entries  []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(composed.ThreadSnapshot, &snapshot); err != nil || !snapshot.Ok || !snapshot.Observed {
+		t.Fatalf("joined replay resident snapshot = %s/%v", composed.ThreadSnapshot, err)
+	}
+	joinedCold, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("load joined replay durable projection: %v", err)
+	}
+	hotEntries, _ := json.Marshal(snapshot.Entries)
+	assertInterruptedResidentContext(
+		t,
+		hotEntries,
+		"failed partial text",
+		"provider-declared reasoning",
+		"sig_provider_context",
+		"call_interrupt_joined_replay",
+	)
+	for _, providerRequest := range runRuntimeProviderComposition(t, joinedCold.GetContextJson()) {
+		var coldRequest struct {
+			Context json.RawMessage `json:"context"`
+		}
+		if err := json.Unmarshal(providerRequest, &coldRequest); err != nil {
+			t.Fatalf("decode joined replay cold Provider request: %v", err)
+		}
+		assertInterruptedProviderContext(
+			t,
+			coldRequest.Context,
+			"failed partial text",
+			"provider-declared reasoning",
+			"sig_provider_context",
+			"call_interrupt_joined_replay",
+		)
+	}
+	var inboxStatus, queueStatus string
+	var requestEnds, toolResults, receipts, idleEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
+		 AND session_thread_id=$4 AND type='span.model_request_end' AND model_request_id=$5),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
+		 AND session_thread_id=$4 AND type='agent.tool_result'
+		 AND COALESCE(payload_json::jsonb->>'tool_use_event_id', payload_json::jsonb->>'tool_use_id')=$6),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$3
+		 AND source_kind='interrupt_control' AND idempotency_key=$1 AND receipt_json <> ''),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$3
+		 AND session_thread_id=$4 AND type='session.status_idle')`,
+		interruptID,
+		queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, interruptID),
+		sessionID,
+		threadID,
+		modelRequestID,
+		toolUseEventID,
+	).Scan(&inboxStatus, &queueStatus, &requestEnds, &toolResults, &receipts, &idleEvents); err != nil {
+		t.Fatalf("read joined replay durable facts: %v", err)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || requestEnds != 1 ||
+		toolResults != 1 || receipts != 1 || idleEvents != 1 {
+		t.Fatalf("joined replay facts = Inbox:%s Queue:%s End:%d ToolResult:%d receipt:%d idle:%d",
+			inboxStatus, queueStatus, requestEnds, toolResults, receipts, idleEvents)
 	}
 }
 
@@ -1326,36 +1650,9 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	case <-time.After(10 * time.Second):
 		t.Fatalf("committed closeout recovery did not finish delivery: %s", runtimeProcess.output.String())
 	}
-	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
-		"daytona": &bridgeMemoryProjectionProvider{},
-	})
-	if err != nil {
-		t.Fatalf("build closeout recovery output capture registry: %v", err)
-	}
-	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
-		Queue:     tetralqueue.NewServer(queueStore, nil),
-		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
-		Providers: registry,
-		BlobStore: blob.NewFakeBlobStore(),
-		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
-			WorkspaceID: "default", LeaseOwner: "interrupt-closeout-recovery-capture", MaxJobs: 1,
-			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
-		},
-	}
-	captureDeadline := time.Now().Add(10 * time.Second)
-	for {
-		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
-		if captureErr != nil {
-			t.Fatalf("complete recovered interrupt output capture: %v", captureErr)
-		}
-		if active {
-			break
-		}
-		if time.Now().After(captureDeadline) {
-			t.Fatalf("recovered interrupt closeout did not enqueue output capture: %s", runtimeProcess.output.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	completeInterruptCompositionOutputCapture(
+		t, client, queueStore, "interrupt-closeout-recovery-capture", &runtimeProcess.output,
+	)
 	idleDeadline := time.Now().Add(10 * time.Second)
 	for {
 		var idleEvents int
@@ -1406,7 +1703,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	}
 }
 
-func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *testing.T) {
+func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCloseout(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID     = "sesn_interrupt_actor_production"
@@ -1506,7 +1803,17 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		bridgeServer.Stop()
 		_ = bridgeListener.Close()
 	})
-	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, siblingID, bindingID, 1, podUID)
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		siblingID,
+		bindingID,
+		1,
+		podUID,
+		interruptRuntimeCompositionOptions{fastThreadText: "external sibling mail waits"},
+	)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
 		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
 		t.Fatalf("align actor Runtime binding: %v", err)
@@ -1517,8 +1824,9 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
+	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
 		Config:    JobRunnerConfig{LeaseOwner: "interrupt-actor-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -1528,11 +1836,40 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("deliver released external sibling mail through Runtime = active:%t err:%v", active, err)
 	}
+	completeInterruptCompositionOutputCapture(
+		t, client, queueStore, "interrupt-actor-output-capture", &runtimeProcess.output,
+	)
+	requestEndDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var requestEnds int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='span.model_request_end'`, sessionID, siblingID).Scan(&requestEnds); err != nil {
+			t.Fatalf("read released external sibling mail Request End: %v", err)
+		}
+		if requestEnds == 1 {
+			break
+		}
+		if time.Now().After(requestEndDeadline) {
+			t.Fatalf("released external sibling mail did not complete: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release actor Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
+	var interruptResult struct {
+		OK            bool `json:"ok"`
+		Interrupted   bool `json:"interrupted"`
+		IdleInterrupt bool `json:"idleInterrupt"`
+	}
+	if err := json.Unmarshal(composed.InterruptResult, &interruptResult); err != nil {
+		t.Fatalf("decode actor interrupt Runtime composition: %v", err)
+	}
+	if !interruptResult.OK || interruptResult.Interrupted || !interruptResult.IdleInterrupt ||
+		composed.ProviderInvocations != 1 || len(composed.ProviderContexts) != 1 ||
+		!bytes.Contains(composed.ProviderContexts[0], []byte("external sibling mail waits")) {
 		t.Fatalf("actor interrupt Runtime composition = %+v", composed)
 	}
 
@@ -1555,7 +1892,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		t.Fatalf("read actor terminal facts: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		mailInbox != "committed" || mailQueue != queue.StatusDeadLettered || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
+		mailInbox != "accepted" || mailQueue != queue.StatusAcknowledged || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
 		t.Fatalf("actor terminal facts = interrupt:%s/%s mail:%s/%s late:%d/%d barriers:%d Runtime:%s",
 			interruptInbox, interruptQueue, mailInbox, mailQueue, lateOperations, lateChildren, activeBarriers, composed.InterruptResult)
 	}
@@ -1681,6 +2018,151 @@ func enqueueRuntimeCompositionJob(t *testing.T, store *queue.PostgreSQLQueueStor
 	}
 }
 
+func assertInterruptedProviderContext(
+	t *testing.T,
+	raw json.RawMessage,
+	failedText string,
+	reasoningText string,
+	reasoningSignature string,
+	modelToolCallID string,
+) {
+	t.Helper()
+	var entries []struct {
+		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+			Reasoning *struct {
+				Text         string `json:"text"`
+				MetadataJSON string `json:"metadataJson"`
+			} `json:"reasoning"`
+			ToolCall *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+			} `json:"toolCall"`
+			ToolResult *struct {
+				ModelToolCallID string `json:"modelToolCallId"`
+			} `json:"toolResult"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("decode interrupted Provider context: %v: %s", err, raw)
+	}
+	reasoningIndex, toolCallIndex, toolResultIndex := -1, -1, -1
+	reasoningCount, toolCallCount, toolResultCount := 0, 0, 0
+	partIndex := 0
+	for _, entry := range entries {
+		for _, part := range entry.Content {
+			if part.Text != nil && strings.Contains(part.Text.Text, failedText) {
+				t.Fatalf("interrupted Provider context retained failed text %q: %s", failedText, raw)
+			}
+			if part.Reasoning != nil {
+				reasoningCount++
+				reasoningIndex = partIndex
+				if part.Reasoning.Text != reasoningText {
+					t.Fatalf("interrupted Provider reasoning text = %q; want %q", part.Reasoning.Text, reasoningText)
+				}
+				var metadata any
+				if err := json.Unmarshal([]byte(part.Reasoning.MetadataJSON), &metadata); err != nil {
+					t.Fatalf("decode interrupted Provider reasoning metadata %q: %v", part.Reasoning.MetadataJSON, err)
+				}
+				gotMetadata, _ := json.Marshal(metadata)
+				wantMetadata, _ := json.Marshal(map[string]any{"anthropic": map[string]any{"signature": reasoningSignature}})
+				if !bytes.Equal(gotMetadata, wantMetadata) {
+					t.Fatalf("interrupted Provider reasoning metadata = %s; want %s", gotMetadata, wantMetadata)
+				}
+			}
+			if part.ToolCall != nil {
+				toolCallCount++
+				toolCallIndex = partIndex
+				if part.ToolCall.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted Provider Tool Call ID = %q; want %q", part.ToolCall.ModelToolCallID, modelToolCallID)
+				}
+			}
+			if part.ToolResult != nil {
+				toolResultCount++
+				toolResultIndex = partIndex
+				if part.ToolResult.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted Provider Tool Result ID = %q; want %q", part.ToolResult.ModelToolCallID, modelToolCallID)
+				}
+			}
+			partIndex++
+		}
+	}
+	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
+		reasoningIndex >= toolCallIndex || toolCallIndex >= toolResultIndex {
+		t.Fatalf("interrupted Provider ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
+			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
+	}
+}
+
+func assertInterruptedResidentContext(
+	t *testing.T,
+	raw json.RawMessage,
+	failedText string,
+	reasoningText string,
+	reasoningSignature string,
+	modelToolCallID string,
+) {
+	t.Helper()
+	var entries []struct {
+		Parts []struct {
+			Type             string          `json:"type"`
+			Text             string          `json:"text"`
+			ModelToolCallID  string          `json:"modelToolCallId"`
+			ProviderMetadata json.RawMessage `json:"providerMetadata"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("decode interrupted resident context: %v: %s", err, raw)
+	}
+	reasoningIndex, toolCallIndex, toolResultIndex := -1, -1, -1
+	reasoningCount, toolCallCount, toolResultCount := 0, 0, 0
+	partIndex := 0
+	for _, entry := range entries {
+		for _, part := range entry.Parts {
+			if part.Type == "text" && strings.Contains(part.Text, failedText) {
+				t.Fatalf("interrupted resident context retained failed text %q: %s", failedText, raw)
+			}
+			if part.Type == "reasoning" {
+				reasoningCount++
+				reasoningIndex = partIndex
+				if part.Text != reasoningText {
+					t.Fatalf("interrupted resident reasoning text = %q; want %q", part.Text, reasoningText)
+				}
+				var metadata any
+				if err := json.Unmarshal(part.ProviderMetadata, &metadata); err != nil {
+					t.Fatalf("decode interrupted resident reasoning metadata: %v", err)
+				}
+				gotMetadata, _ := json.Marshal(metadata)
+				wantMetadata, _ := json.Marshal(map[string]any{"anthropic": map[string]any{"signature": reasoningSignature}})
+				if !bytes.Equal(gotMetadata, wantMetadata) {
+					t.Fatalf("interrupted resident reasoning metadata = %s; want %s", gotMetadata, wantMetadata)
+				}
+			}
+			if part.Type == "tool_call" {
+				toolCallCount++
+				toolCallIndex = partIndex
+				if part.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted resident Tool Call ID = %q; want %q", part.ModelToolCallID, modelToolCallID)
+				}
+			}
+			if part.Type == "tool_result" {
+				toolResultCount++
+				toolResultIndex = partIndex
+				if part.ModelToolCallID != modelToolCallID {
+					t.Fatalf("interrupted resident Tool Result ID = %q; want %q", part.ModelToolCallID, modelToolCallID)
+				}
+			}
+			partIndex++
+		}
+	}
+	if reasoningCount != 1 || toolCallCount != 1 || toolResultCount != 1 ||
+		reasoningIndex >= toolCallIndex || toolCallIndex >= toolResultIndex {
+		t.Fatalf("interrupted resident ordering = reasoning:%d@%d call:%d@%d result:%d@%d: %s",
+			reasoningCount, reasoningIndex, toolCallCount, toolCallIndex, toolResultCount, toolResultIndex, raw)
+	}
+}
+
 type interruptRuntimeCompositionPaths struct {
 	toolStarted        string
 	operationCompleted string
@@ -1688,12 +2170,60 @@ type interruptRuntimeCompositionPaths struct {
 	close              string
 }
 
-func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID string) (*interruptRuntimeCompositionProcess, interruptRuntimeCompositionPaths) {
+func completeInterruptCompositionOutputCapture(
+	t *testing.T,
+	client *dbconnect.Client,
+	queueStore *queue.PostgreSQLQueueStore,
+	leaseOwner string,
+	output *bytes.Buffer,
+) {
 	t.Helper()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build interrupt composition output capture registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: leaseOwner, MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete interrupt composition output capture: %v", captureErr)
+		}
+		if active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("interrupt composition did not enqueue output capture: %s", output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID string, options ...interruptRuntimeCompositionOptions) (*interruptRuntimeCompositionProcess, interruptRuntimeCompositionPaths) {
+	t.Helper()
+	var compositionOptions interruptRuntimeCompositionOptions
+	if len(options) > 0 {
+		compositionOptions = options[0]
+	}
 	readyPath := tempDir + "/ready.json"
 	paths := interruptRuntimeCompositionPaths{
 		toolStarted: tempDir + "/tool-started", operationCompleted: tempDir + "/operation-completed",
 		acceptResult: tempDir + "/accept-result.json", close: tempDir + "/close",
+	}
+	fastThreadText := compositionOptions.fastThreadText
+	if fastThreadText == "" {
+		fastThreadText = "post-config ordinary"
 	}
 	inputPath := tempDir + "/input.json"
 	input, err := json.Marshal(map[string]any{
@@ -1701,8 +2231,11 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 		"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": bindingGeneration,
 		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
-		"durableOperationCompletedPath": paths.operationCompleted, "closePath": paths.close,
-		"fastThreadText": "post-config ordinary", "fastAfterFirstProviderCall": true,
+		"durableOperationCompletedPath": paths.operationCompleted,
+		"closePath":                     paths.close,
+		"fastThreadText":                fastThreadText,
+		"fastAfterFirstProviderCall":    true,
+		"failFirstFinishIdle":           compositionOptions.failFirstFinishIdle,
 	})
 	if err != nil {
 		t.Fatalf("encode interrupt Runtime composition: %v", err)

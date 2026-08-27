@@ -51,9 +51,9 @@ type closedThreadResumeCompositionResult struct {
 		State struct {
 			State string `json:"state"`
 		} `json:"state"`
-		Action struct {
+		NextStep struct {
 			Action string `json:"action"`
-		} `json:"action"`
+		} `json:"nextStep"`
 	} `json:"decision"`
 	ContextEntries   []bridgeRuntimeContextEntry `json:"contextEntries"`
 	TurnFacts        bridgeLoadContextTurnFacts  `json:"turnFacts"`
@@ -223,7 +223,7 @@ func assertQuiescentClosedThreadResume(t *testing.T, result closedThreadResumeCo
 	t.Helper()
 	if result.Result.Type != "completed" || !result.Inspected.OK || !result.Inspected.Observed ||
 		result.Inspected.Status != "idle" || len(result.Checkpoint.PendingInputSequences) != 0 ||
-		result.Decision.State.State != "idle" || result.Decision.Action.Action != "await_input" ||
+		result.Decision.State.State != "idle" || result.Decision.NextStep.Action != "await_input" ||
 		result.ProviderRequests != 0 || result.RuntimeEvents != 0 {
 		t.Fatalf("closed Thread resume = %s; want completed idle/await_input with no pending input, Provider request, or Runtime write", result.Raw)
 	}
@@ -636,12 +636,35 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		t.Fatalf("cross-Thread delivery custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDelivery, messages, starts)
 	}
 	started := mailRuntime.providerStart(t)
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), fixture.bridgeAddress, fixture.sessionID, parentID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
-	runSubagentRuntimeQueueOnce(t, fixture.runtimeDB, fixture.admin, interruptRuntime.port, fixture.sessionID, fixture.podUID)
+	type interruptDeliveryResult struct {
+		active bool
+		err    error
+	}
+	interruptDelivery := make(chan interruptDeliveryResult, 1)
+	interruptRunner := newSubagentRuntimeQueueRunner(
+		t, fixture.runtimeDB, fixture.admin, interruptRuntime.port,
+		fixture.sessionID, fixture.podUID, nil, nil,
+	)
+	go func() {
+		active, runErr := interruptRunner.RunOnceWithActivity(context.Background())
+		interruptDelivery <- interruptDeliveryResult{active: active, err: runErr}
+	}()
+	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
+	select {
+	case delivered := <-interruptDelivery:
+		if delivered.err != nil || !delivered.active {
+			t.Fatalf("deliver unrelated Thread interrupt = active:%t err:%v", delivered.active, delivered.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("unrelated Thread interrupt did not settle after output capture: %s", interruptRuntime.output.String())
+	}
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release main Thread interrupt Runtime: %v", err)
 	}
@@ -649,7 +672,6 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 		t.Fatalf("main Thread interrupt closeout = %+v", composed)
 	}
 
-	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
 	mailRuntime.kill(t)
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1),
@@ -2099,7 +2121,40 @@ func closeChildThroughProductionInterrupt(
 	interruptRuntime, interruptPaths := startInterruptRuntimeComposition(
 		t, t.TempDir(), bridgeAddress, sessionID, childID, bindingID, 1, podUID,
 	)
-	runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	type captureResult struct {
+		settled bool
+		err     error
+	}
+	captureContext, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
+	captureSettled := make(chan captureResult, 1)
+	go func() {
+		settled, settleErr := settleNextSubagentOutputCaptureForTest(captureContext, admin, sessionID)
+		captureSettled <- captureResult{settled: settled, err: settleErr}
+	}()
+	runSubagentRuntimeQueueOnce(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	var queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT job.status FROM session_runtime_inbox inbox
+		JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id
+		 AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND inbox.session_thread_id=$2
+		 AND inbox.input_kind='interrupt_control' ORDER BY inbox.created_at DESC LIMIT 1`,
+		sessionID, childID,
+	).Scan(&queueStatus); err != nil {
+		t.Fatalf("read child-close Queue custody: %v", err)
+	}
+	if queueStatus == queue.StatusPending {
+		capture := <-captureSettled
+		if capture.err != nil || !capture.settled {
+			t.Fatalf("settle child-close output capture = settled:%t err:%v", capture.settled, capture.err)
+		}
+		runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
+	} else {
+		cancelCapture()
+		if capture := <-captureSettled; capture.err != nil {
+			t.Fatalf("observe child-close output capture: %v", capture.err)
+		}
+	}
+	cancelCapture()
 	if err := os.WriteFile(interruptPaths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release child-close Runtime composition: %v", err)
 	}
@@ -2530,6 +2585,33 @@ func runSubagentOutputCaptureOnce(t *testing.T, runtimeDB *sql.DB) {
 	t.Fatal("Subagent Runtime did not enqueue output capture")
 }
 
+func settleNextSubagentOutputCaptureForTest(ctx context.Context, db *sql.DB, sessionID string) (bool, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var writeID string
+		var generation int
+		err := db.QueryRowContext(ctx, `SELECT finish_idle_write_id,capture_generation
+			FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND state IN ('pending','running')
+			ORDER BY created_at DESC LIMIT 1`, sessionID).Scan(&writeID, &generation)
+		if err == nil {
+			return true, settleOutputCaptureGenerationForTest(db, sessionID, writeID, generation, "staged")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, context.Canceled) {
+				return false, nil
+			}
+			return false, err
+		}
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID, runtimeInputID string, diagnosticPaths ...string) {
 	t.Helper()
 	for attempt := 0; attempt < 100; attempt++ {
@@ -2564,16 +2646,43 @@ func runQueueUntilInputSettled(t *testing.T, runtimeDB, admin *sql.DB, port int,
 
 func runQueueUntilInterruptSettled(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {
 	t.Helper()
-	for attempt := 0; attempt < 6; attempt++ {
-		var pending int
-		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_inbox
-			WHERE workspace_id='default' AND session_id=$1 AND input_kind='interrupt_control'
-			 AND status IN ('queued','delivering','accepted')`, sessionID).Scan(&pending); err == nil && pending == 0 {
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var inboxStatus, queueStatus, threadID string
+		var receipt bool
+		if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status,EXISTS(
+			SELECT 1 FROM session_bridge_operations operation
+			WHERE operation.workspace_id=inbox.workspace_id AND operation.session_id=inbox.session_id
+			 AND operation.operation='commit_inputs' AND operation.source_kind='interrupt_control'
+			 AND operation.idempotency_key=inbox.runtime_input_id AND operation.receipt_json <> ''),inbox.session_thread_id
+			FROM session_runtime_inbox inbox
+			JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id
+			 AND job.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+			WHERE inbox.workspace_id='default' AND inbox.session_id=$1 AND inbox.input_kind='interrupt_control'
+			ORDER BY inbox.created_at DESC LIMIT 1`, sessionID).Scan(&inboxStatus, &queueStatus, &receipt, &threadID); err != nil {
+			t.Fatalf("read child interrupt settlement: %v", err)
+		}
+		var openTurn *string
+		if err := client.WithWorkspaceTx(context.Background(), string(workspace.DefaultID), "test.child_interrupt.open_turn", func(tx *dbconnect.Tx) error {
+			var loadErr error
+			openTurn, loadErr = loadOpenDurableTurnIDTx(context.Background(), tx, &bridgev1.RuntimeScope{
+				WorkspaceId: string(workspace.DefaultID), SessionId: sessionID, SessionThreadId: threadID,
+			})
+			return loadErr
+		}); err != nil {
+			t.Fatalf("read child interrupt open Turn: %v", err)
+		}
+		if inboxStatus == "committed" && queueStatus == queue.StatusAcknowledged && receipt && openTurn == nil {
 			return
 		}
-		runSubagentRuntimeQueueOnce(t, runtimeDB, admin, port, sessionID, podUID)
+		if queueStatus == queue.StatusPending && receipt && openTurn == nil {
+			runSubagentRuntimeQueueOnce(t, runtimeDB, admin, port, sessionID, podUID)
+			continue
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("child interrupt did not settle")
+	t.Fatal("child interrupt receipt and Queue custody did not settle")
 }
 
 func readAgentMailAdmission(t *testing.T, process *attachmentRecoveryProcess) (string, int, string) {

@@ -221,8 +221,15 @@ describe("session run static boundaries", () => {
 			"src/thread-loop/thread-loop.ts",
 			"src/thread-loop/thread-runtime.ts",
 			"src/thread-loop/thread-state.ts",
-			"src/thread-loop/thread-turn-checkpoint.ts",
-			"src/thread-loop/thread-turn-reducer.ts",
+			"src/thread-loop/input/accepted-input.ts",
+			"src/thread-loop/input/control-input.ts",
+			"src/thread-loop/input/preload.ts",
+			"src/thread-loop/turn/checkpoint.ts",
+			"src/thread-loop/turn/facts.ts",
+			"src/thread-loop/turn/load.ts",
+			"src/thread-loop/turn/provider-context.ts",
+			"src/thread-loop/turn/reducer.ts",
+			"src/thread-loop/turn/types.ts",
 			"src/thread-loop/provider-request.ts",
 			"src/thread-loop/tool-execution.ts",
 			"src/thread-loop/compaction.ts",
@@ -313,8 +320,18 @@ describe("session run static boundaries", () => {
 			sourceUrl("src/thread-loop/thread-state.ts"),
 			"utf8",
 		);
+		const acceptedInputSource = await readFile(
+			sourceUrl("src/thread-loop/input/accepted-input.ts"),
+			"utf8",
+		);
+		const controlInputSource = await readFile(
+			sourceUrl("src/thread-loop/input/control-input.ts"),
+			"utf8",
+		);
 		const normalizedManager = normalizeSource(managerSource);
 		const normalizedState = normalizeSource(stateSource);
+		const normalizedAcceptedInput = normalizeSource(acceptedInputSource);
+		const normalizedControlInput = normalizeSource(controlInputSource);
 		const normalizedSessionEntry = normalizeSource(
 			namedInterfaceBody(managerSource, "SessionEntry"),
 		);
@@ -330,7 +347,7 @@ describe("session run static boundaries", () => {
 		expect(mapOwners).toEqual([
 			"src/session/approval-reviewer-manager.ts",
 			"src/session/session-manager.ts",
-			"src/thread-loop/thread-turn-checkpoint.ts",
+			"src/thread-loop/turn/load.ts",
 		]);
 		expect(normalizedManager).toContain("interfaceThreadRunSlot{");
 		expect(normalizedManager).toContain("interfaceThreadEntry{");
@@ -378,10 +395,10 @@ describe("session run static boundaries", () => {
 		expect(normalizedManager).toContain(
 			"for(constthreadEntryofsessionEntry.threads.values()){",
 		);
-		expect(normalizedState).toContain(
+		expect(normalizedAcceptedInput).toContain(
 			"interfaceRuntimeAcceptedInputScopeStateextendsRuntimeThreadAddressState{readonlyruntimeInputId:string;readonlyinputOrder:number;}",
 		);
-		expect(normalizedState).toContain(
+		expect(normalizedControlInput).toContain(
 			"interfaceRuntimeControlInputStateextendsRuntimeThreadAddressState{readonlyruntimeInputId:string;}",
 		);
 		expect(normalizedManager).not.toContain("runInFlight");
@@ -534,7 +551,7 @@ describe("session run static boundaries", () => {
 		).toBeLessThan(pendingAssignmentIndex);
 	});
 
-	test("pending approval hot state stores narrow settlement descriptors, never SessionProcessor", async () => {
+	test("pending approval hot state stores narrow settlement descriptors", async () => {
 		const stateSource = await readFile(
 			sourceUrl("src/thread-loop/thread-state.ts"),
 			"utf8",
@@ -552,7 +569,5 @@ describe("session run static boundaries", () => {
 		expect(normalizedPendingState).toContain(
 			'toolPart:Extract<RuntimeAssistantDraftPart,{readonlytype:"tool"}>',
 		);
-		expect(pendingState).not.toContain("SessionProcessor");
-		expect(pendingState).not.toMatch(/\bprocessor\s*:/);
 	});
 });

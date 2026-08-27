@@ -14,6 +14,7 @@ import type {
 	RuntimeAcceptedInputCommitObservation,
 	RuntimeProviderRescheduleObservation,
 	RuntimeProviderToolDeclarationRejectionObservation,
+	RuntimeTerminalSettlementObservation,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
 	TetralJsonLogger,
@@ -93,6 +94,10 @@ export type RuntimePodLogRecord = TetralLogRecord & {
 	readonly "caller.service_account"?: string;
 	readonly "runtime_input.id"?: string;
 	readonly "runtime_input.kind"?: string;
+	readonly "model_request.id"?: string;
+	readonly "terminal.disposition"?: "terminated";
+	readonly "retry.status"?: "terminal";
+	readonly "settlement.outcome"?: string;
 	readonly "closeout.active_count"?: number;
 	readonly "closeout.error_code"?: RuntimeCloseoutEvent["errorCode"];
 	readonly "startup.cause_class"?: string;
@@ -393,6 +398,34 @@ export function runtimeCloseoutLogRecord(
 			errorClass: "runtime_closeout",
 			errorCode: input.errorCode ?? input.event,
 			messageSafe: input.event,
+		}),
+	};
+}
+
+/** Builds the bounded operator record for a durably settled Runtime semantic failure. */
+export function runtimeTerminalSettlementLogRecord(
+	input: RuntimeTerminalSettlementObservation,
+): RuntimePodLogRecord {
+	return {
+		event: "runtime_terminal_settlement",
+		"event.kind": "runtime_terminal_settlement",
+		operation: "commit_runtime_termination",
+		component: "agent-runtime",
+		message: "runtime contract validation terminated the Thread",
+		"workspace.id": input.workspaceId,
+		"session.id": input.sessionId,
+		"thread.id": input.sessionThreadId,
+		...(input.modelRequestId !== undefined
+			? { "model_request.id": input.modelRequestId }
+			: {}),
+		terminal: true,
+		"terminal.disposition": "terminated",
+		"retry.status": "terminal",
+		"settlement.outcome": input.settlementOutcome,
+		...semanticErrorFields({
+			errorClass: "runtime_contract_validation",
+			errorCode: "runtime_semantic_error",
+			messageSafe: "runtime contract validation failed",
 		}),
 	};
 }

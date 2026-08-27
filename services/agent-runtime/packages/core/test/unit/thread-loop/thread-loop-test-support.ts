@@ -52,7 +52,10 @@ import {
 	RuntimeInternalToolRepairStore,
 	SessionEventWriterRetryPolicy,
 } from "../../../src/contracts/runtime.js";
-import type { LLMEvent, RuntimeUsage } from "../../../src/llm/llm-event.js";
+import type {
+	LLMEvent,
+	RuntimeUsage,
+} from "../../../src/llm/llm-event.js";
 import {
 	LLMEventSchema,
 	runtimeFailureFromProviderError,
@@ -86,11 +89,15 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
-	RuntimeConfigPatchState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputCommitResult,
 	RuntimeControlInputDeclaration,
 	RuntimeControlInputState,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+} from "../../../src/thread-loop/input/preload.js";
 import type { RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { createToolCatalog } from "../../../src/tools/tool-catalog.js";
@@ -639,7 +646,8 @@ function threadLoopRuntime() {
 function testRunCustody(): ThreadLoop.ThreadLoopRunCustody {
 	return {
 		activeTurnId: (session) =>
-			session.state.threadTurnReduction().checkpoint.executionRunId,
+			session.state.threadTurnTransition().checkpoint.executionRunId,
+		recordInterruptAttemptResult: () => {},
 		interruptLeaseRef: (runtimeInputId) => ({
 			jobId: `qjob_${runtimeInputId}`,
 			leaseToken: `lease_${runtimeInputId}`,
@@ -813,8 +821,10 @@ function requestEndResultFromAppend(
 	}
 	let sealedMessageSequence: number | undefined;
 	if (envelope.trailingContextAppend !== undefined) {
-		if (sequence.messageSequence === 0) sequence.messageSequence = 1;
-		sealedMessageSequence = sequence.messageSequence;
+		sealedMessageSequence = assistantMessageSequence(
+			sequence,
+			envelope.modelRequestId,
+		);
 	}
 	return {
 		ok: true,
@@ -856,7 +866,9 @@ function requestEndResultForTest(
 }
 
 function writerFrom(
-	append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult,
+	append: (
+		envelope: SessionEventEnvelope,
+	) => SessionEventWriterAppendResult | Promise<SessionEventWriterAppendResult>,
 	writeRequestEnd?: SessionEventWriter["writeRequestEnd"],
 	_existingContext: readonly unknown[] = [],
 	durableSequence: TestDurableSequence = {
@@ -869,7 +881,7 @@ function writerFrom(
 	const appendWithFacts = async (
 		envelope: SessionEventEnvelope,
 	): Promise<SessionEventWriterAppendResult> => {
-		const supplied = append(envelope);
+		const supplied = await append(envelope);
 		if (!supplied.ok || supplied.type === "stale") return supplied;
 		durableSequence.eventSequence += 1;
 		let result = supplied;
@@ -1158,6 +1170,7 @@ async function activeCompactionRun(
 	const appended: SessionEvent[] = [];
 	const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
 	let compactionStartEventId: string | undefined;
+	let requestEndEventIdAtIdleWrite: string | undefined;
 	let observedAbortSignal: AbortSignal | undefined;
 	const llm: LLMServiceInterface = {
 		stream(request, options) {
@@ -1195,6 +1208,11 @@ async function activeCompactionRun(
 	const writer = writerFrom(
 		(envelope) => {
 			appended.push(envelope.event);
+			if (envelope.event.type === "session.status_idle") {
+				requestEndEventIdAtIdleWrite =
+					session.state.threadTurnTransition().checkpoint.request?.requestEnd
+						?.eventId;
+			}
 			const eventId = `bridge-${envelope.writeId}`;
 			if (envelope.event.type === "span.model_request_start") {
 				compactionStartEventId = eventId;
@@ -1233,6 +1251,7 @@ async function activeCompactionRun(
 		appended,
 		requestEndEnvelopes,
 		compactionStartEventId,
+		requestEndEventIdAtIdleWrite: () => requestEndEventIdAtIdleWrite,
 		observedAbortSignal,
 		runFiber,
 	};
@@ -1329,6 +1348,9 @@ function runtimeThreadLoopLayer(
 		readonly recordAcceptedInputCommit?: Parameters<
 			typeof ThreadLoop.layer
 		>[0]["recordAcceptedInputCommit"];
+		readonly recordRuntimeTerminalSettlement?: Parameters<
+			typeof ThreadLoop.layer
+		>[0]["recordRuntimeTerminalSettlement"];
 		readonly refreshRuntimeBindingToken?: Parameters<
 			typeof ThreadLoop.layer
 		>[0]["refreshRuntimeBindingToken"];
@@ -1430,6 +1452,12 @@ function runtimeThreadLoopLayer(
 			: {}),
 		...(options.recordAcceptedInputCommit !== undefined
 			? { recordAcceptedInputCommit: options.recordAcceptedInputCommit }
+			: {}),
+		...(options.recordRuntimeTerminalSettlement !== undefined
+			? {
+					recordRuntimeTerminalSettlement:
+						options.recordRuntimeTerminalSettlement,
+				}
 			: {}),
 		...(options.refreshRuntimeBindingToken !== undefined
 			? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken }

@@ -7,7 +7,7 @@ import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import { Effect, Stream } from "effect";
 import {
@@ -24,6 +24,7 @@ import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import type { RuntimeCleanupController } from "../../src/runtime-service.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
+import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
@@ -45,6 +46,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly readyPath?: string;
 	readonly recoveryResultPath?: string;
 	readonly closePath?: string;
+	readonly waitForSandboxObservation?: boolean;
 };
 const command = {
 	workspaceId: input.workspaceId,
@@ -65,8 +67,34 @@ const waitedMs: number[] = [];
 let recoveredTurnEventIds: string[] = [];
 let providerInvocations = 0;
 let executorInvocations = 0;
+let sandboxAcceptanceInvocations = 0;
+let sandboxObservationInvocations = 0;
+let acceptedInputCommitCalls = 0;
+let acceptedInputCommitCallsInFlight = 0;
+let acceptedInputCommitBarrierEntered = false;
+let acceptedInputCommitBarrierReleased = false;
+let acceptedInputCommitTimeoutTriggered = false;
+let markFirstAcceptedInputCommitDurable: (() => void) | undefined;
+const firstAcceptedInputCommitDurable = new Promise<void>((resolve) => {
+	markFirstAcceptedInputCommitDurable = resolve;
+});
+let releaseFirstAcceptedInputCommit: (() => void) | undefined;
+const firstAcceptedInputCommitRelease = new Promise<void>((resolve) => {
+	releaseFirstAcceptedInputCommit = resolve;
+});
+let markSandboxObservationStarted: (() => void) | undefined;
+const sandboxObservationStarted = new Promise<void>((resolve) => {
+	markSandboxObservationStarted = resolve;
+});
 let nextID = 0;
 const writer = new BridgeAPIEventWriter(bridgeOptions);
+const toolRunner = new RuntimePodToolRunner({
+	bridgeAddress: input.bridgeAddress,
+	webAddress: "127.0.0.1:1",
+	mcpConnectorAddress: "127.0.0.1:1",
+	tokenPath: "/unused/test-token",
+	metadataFactory: async () => new Metadata(),
+});
 const hosts = await buildRuntimeCoreHosts({
 	maxLocalSessions: 1,
 	now: () => input.now,
@@ -76,61 +104,133 @@ const hosts = await buildRuntimeCoreHosts({
 			recoveredTurnEventIds = loaded.turnFacts.events.map((event) => event.eventId);
 			return loaded;
 		},
+		commitAcceptedInput: async (acceptedInput, options) => {
+			const commitCall = ++acceptedInputCommitCalls;
+			acceptedInputCommitCallsInFlight += 1;
+			try {
+				if (commitCall === 1) {
+					acceptedInputCommitBarrierEntered = true;
+				}
+				const result = await loader.commitAcceptedInput(acceptedInput, options);
+				if (commitCall === 1) {
+					markFirstAcceptedInputCommitDurable?.();
+					await firstAcceptedInputCommitRelease;
+				}
+				if (commitCall === 2) {
+					acceptedInputCommitBarrierReleased = true;
+					releaseFirstAcceptedInputCommit?.();
+				}
+				return result;
+			} finally {
+				acceptedInputCommitCallsInFlight -= 1;
+			}
+		},
 		refreshRuntimeBindingToken: async (identity) => identity.runtimeBindingToken,
 	},
 	threadLoop: {
 		internalToolRepairStore: {} as never,
 		sessionEventWriter: writer,
 		runtime: {
-					now: () => input.now,
-					monotonicMs: () => 0,
-					createId: (prefix) => `${prefix}_reschedule_recovery_${++nextID}`,
-					sleep: async (delayMs, signal) => {
-						if (signal.aborted) return false;
-						waitedMs.push(delayMs);
-						return true;
-					},
-				},
+			now: () => input.now,
+			monotonicMs: () => 0,
+			createId: (prefix) => `${prefix}_reschedule_recovery_${++nextID}`,
+			sleep: async (delayMs, signal) => {
+				if (signal.aborted) return false;
+				waitedMs.push(delayMs);
+				if (
+					acceptedInputCommitBarrierEntered &&
+					!acceptedInputCommitTimeoutTriggered &&
+					acceptedInputCommitCalls === 1 &&
+					acceptedInputCommitCallsInFlight === 1
+				) {
+					await firstAcceptedInputCommitDurable;
+					if (signal.aborted) return false;
+					acceptedInputCommitTimeoutTriggered = true;
+					return true;
+				}
+				if (
+					acceptedInputCommitTimeoutTriggered &&
+					acceptedInputCommitCalls >= 2 &&
+					acceptedInputCommitCallsInFlight > 0
+				) {
+					return await new Promise<boolean>((resolve) => {
+						signal.addEventListener("abort", () => resolve(false), {
+							once: true,
+						});
+					});
+				}
+				return true;
+			},
+		},
 		llmService: {
-					stream: (request) => {
-						providerInvocations += 1;
-						providerRequests.push(request);
-						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "recovered-text" },
-							{
-								type: "text-delta" as const,
-								id: "recovered-text",
-								text_delta: "recovered",
-							},
-							{ type: "text-end" as const, id: "recovered-text" },
-							{ type: "finish" as const, finishReason: "stop" as const },
-						]);
+			stream: (request) => {
+				providerInvocations += 1;
+				providerRequests.push(request);
+				if (providerInvocations === 1) {
+					return Stream.fail({
+						type: "llm-service" as const,
+						error: {
+							type: "runtime" as const,
+							code: "gateway_stream_error" as const,
+							message:
+								"Gateway provider stream did not complete within its bounded allowance.",
+							retryable: true,
+							fatal: false,
+							reason: "gateway_transport_completion_deadline" as const,
+						},
+					});
+				}
+				return Stream.fromIterable([
+					{ type: "text-start" as const, id: "recovered-text" },
+					{
+						type: "text-delta" as const,
+						id: "recovered-text",
+						text_delta: "recovered",
 					},
-				},
+					{ type: "text-end" as const, id: "recovered-text" },
+					{ type: "finish" as const, finishReason: "stop" as const },
+				]);
+			},
+		},
 		storeOperationTimeoutMs: 5_000,
 		approvalMode: "full_access",
 		providerCallRuntime: {
 			...DefaultProviderCallRuntimeConfig,
 			systemInstructions: "provider reschedule recovery composition",
+			timeoutMs: 5_000,
 		},
 		runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-		runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
+		runtimePolicy: () => ({
+			toolCatalog: createToolCatalog({ family: "claude" }),
+			providerRescheduleBudget: 1,
+		}),
+		acceptSandboxExecution: async () => {
+			sandboxAcceptanceInvocations += 1;
+			return { type: "accepted" as const };
+		},
+		awaitSandboxExecution: async (request) => {
+			sandboxObservationInvocations += 1;
+			markSandboxObservationStarted?.();
+			return await toolRunner.awaitSandboxExecution(request);
+		},
 		runTool: async (request) => {
-					executorInvocations += 1;
-					if (input.serveRecovery === true) {
-						await new Promise<void>((resolve) => {
-							if (request.abortSignal.aborted) {
-								resolve();
-								return;
-							}
-							request.abortSignal.addEventListener("abort", () => resolve(), { once: true });
-						});
-						return { type: "cancelled" };
+			executorInvocations += 1;
+			if (input.serveRecovery === true) {
+				await new Promise<void>((resolve) => {
+					if (request.abortSignal.aborted) {
+						resolve();
+						return;
 					}
-					return {
-						type: "completed",
-						output: { text: "unexpected replay", truncated: false },
-					};
+					request.abortSignal.addEventListener("abort", () => resolve(), {
+						once: true,
+					});
+				});
+				return { type: "cancelled" };
+			}
+			return {
+				type: "completed",
+				output: { text: "unexpected replay", truncated: false },
+			};
 		},
 	},
 });
@@ -161,11 +261,16 @@ if (input.serveRecovery === true) {
 			...hosts.commandRunHost,
 			handleRecoverThread: async (recoveryCommand) => {
 				const result = await hosts.commandRunHost.handleRecoverThread!(recoveryCommand);
+				if (input.waitForSandboxObservation === true) {
+					await sandboxObservationStarted;
+				}
 				const snapshot = await hosts.subAgentRunHost.inspectThread(recoveryCommand);
 				await writeFile(input.recoveryResultPath!, JSON.stringify({
 					resultType: "preloaded",
 					providerInvocations,
 					executorInvocations,
+					sandboxAcceptanceInvocations,
+					sandboxObservationInvocations,
 					recoveredTurnEventIds,
 					preloadResult: result,
 					lastSnapshot: snapshot,
@@ -195,6 +300,18 @@ if (input.serveRecovery === true) {
 		await server.shutdown();
 		await hosts.close();
 	}
+	process.stdout.write(JSON.stringify({
+		resultType: "completed",
+		providerInvocations,
+		executorInvocations,
+		sandboxAcceptanceInvocations,
+		sandboxObservationInvocations,
+		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
+		providerContext: providerRequests[0]?.context ?? [],
+		recoveredTurnEventIds,
+	}));
 	process.exit(0);
 }
 let resultType = "failed";
@@ -237,6 +354,8 @@ if (input.preloadOnly === true) {
 		providerInvocations,
 		executorInvocations,
 		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
 		providerContext: [],
 		recoveredTurnEventIds,
 		preloadResult,
@@ -292,7 +411,10 @@ const result = await Effect.runPromise(
 						]);
 					},
 				},
-				providerCallRuntime: { systemInstructions: "provider reschedule recovery composition" },
+				providerCallRuntime: {
+					systemInstructions: "provider reschedule recovery composition",
+					timeoutMs: 5_000,
+				},
 				runTool: () => {
 					executorInvocations += 1;
 					return { type: "completed", output: { text: "unexpected replay", truncated: false } };
@@ -309,6 +431,8 @@ process.stdout.write(
 		providerInvocations,
 		executorInvocations,
 		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
 		providerContext: providerRequests[0]?.context,
 		recoveredTurnEventIds,
 		preloadResult,

@@ -209,7 +209,7 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 	}
 
 	coldRuntime := startAttachmentRecoveryRuntime(t, result.BridgeAddress, "complete", sessionID, childID, bindingID, 1, podUID)
-	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtime, admin, coldRuntime.port, sessionID, "runtime-pod-0", podUID)
 	providerStart := coldRuntime.providerStart(t)
 	providerWire := string(providerStart.ProviderRequest)
 	prefixOffset := strings.Index(providerWire, "start a worker")
@@ -739,10 +739,10 @@ func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
 		t.Fatalf("compose generated LoadContext through Runtime parser/reducer: %v: %s", err, output)
 	}
 	var composed struct {
-		Checkpoint    json.RawMessage `json:"checkpoint"`
-		ReducerAction struct {
+		Checkpoint json.RawMessage `json:"checkpoint"`
+		NextStep   struct {
 			Action string `json:"action"`
-		} `json:"reducerAction"`
+		} `json:"nextStep"`
 		ProviderComposition struct {
 			CarrierMessages []json.RawMessage `json:"carrierMessages"`
 			Strategies      []struct {
@@ -752,7 +752,7 @@ func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
 			} `json:"strategies"`
 		} `json:"providerComposition"`
 	}
-	if err := json.Unmarshal(output, &composed); err != nil || len(composed.Checkpoint) == 0 || composed.ReducerAction.Action == "" {
+	if err := json.Unmarshal(output, &composed); err != nil || len(composed.Checkpoint) == 0 || composed.NextStep.Action == "" {
 		t.Fatalf("Runtime direct-context composition = %s err:%v", output, err)
 	}
 	if len(composed.ProviderComposition.Strategies) == 0 {

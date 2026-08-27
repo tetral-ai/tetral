@@ -170,6 +170,10 @@ func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawM
 	var result struct {
 		ProviderComposition struct {
 			Strategies []struct {
+				ProviderFamily string `json:"providerFamily"`
+				Validation     struct {
+					Ok bool `json:"ok"`
+				} `json:"validation"`
 				ProviderRequest json.RawMessage `json:"providerRequest"`
 			} `json:"strategies"`
 		} `json:"providerComposition"`
@@ -179,9 +183,13 @@ func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawM
 	}
 	requests := make([]json.RawMessage, 0, len(result.ProviderComposition.Strategies))
 	for _, strategy := range result.ProviderComposition.Strategies {
-		if len(strategy.ProviderRequest) > 0 {
-			requests = append(requests, strategy.ProviderRequest)
+		if !strategy.Validation.Ok || len(strategy.ProviderRequest) == 0 {
+			t.Fatalf("Runtime Provider composition for %s was invalid or absent: %s", strategy.ProviderFamily, output)
 		}
+		requests = append(requests, strategy.ProviderRequest)
+	}
+	if len(requests) == 0 {
+		t.Fatal("Runtime Provider composition returned no strategies")
 	}
 	return requests
 }
@@ -342,8 +350,6 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		"call_durable_error",
 		adapter.RuntimeSettlement,
@@ -500,8 +506,6 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		modelToolCallID,
 		map[string]any{"type": "completed", "output": map[string]any{"text": originalText, "truncated": true}},
@@ -602,8 +606,6 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		"call_durable_cancel",
 		map[string]any{
@@ -676,8 +678,6 @@ func assertRuntimeHotColdToolComposition(
 	t *testing.T,
 	baseContextJSON string,
 	coldContextJSON string,
-	assistantMessageSequence int64,
-	coldPayload bridgeLoadContextPayload,
 	toolUseEventID string,
 	modelToolCallID string,
 	settlement any,
@@ -687,13 +687,10 @@ func assertRuntimeHotColdToolComposition(
 		"contextJson":         coldContextJSON,
 		"providerComposition": true,
 		"hotScenario": map[string]any{
-			"baseContextJson":          baseContextJSON,
-			"assistantMessageSequence": assistantMessageSequence,
-			"toolUseEventId":           toolUseEventID,
-			"modelToolCallId":          modelToolCallID,
-			"settlement":               settlement,
-			"pendingToolUses":          coldPayload.PendingToolUses,
-			"pendingSandboxExecutions": coldPayload.PendingSandboxExecutions,
+			"baseContextJson": baseContextJSON,
+			"toolUseEventId":  toolUseEventID,
+			"modelToolCallId": modelToolCallID,
+			"settlement":      settlement,
 		},
 	})
 	if err != nil {
@@ -712,25 +709,21 @@ func assertRuntimeHotColdToolComposition(
 		t.Fatalf("run Runtime hot/cold Tool composition: %v: %s", err, output)
 	}
 	var composed struct {
-		Checkpoint          any                        `json:"checkpoint"`
-		ToolRouteView       any                        `json:"toolRouteView"`
-		ReducerAction       any                        `json:"reducerAction"`
-		ProviderComposition runtimeProviderComposition `json:"providerComposition"`
-		Hot                 struct {
-			Checkpoint          any                        `json:"checkpoint"`
-			ToolRouteView       any                        `json:"toolRouteView"`
-			ReducerAction       any                        `json:"reducerAction"`
+		ColdProductionPreloaded bool                       `json:"coldProductionPreloaded"`
+		NextStep                map[string]any             `json:"nextStep"`
+		ProviderComposition     runtimeProviderComposition `json:"providerComposition"`
+		Hot                     struct {
 			ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 			ToolPart            any                        `json:"toolPart"`
+			ProviderInvocations int                        `json:"providerInvocations"`
 		} `json:"hot"`
 	}
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode Runtime hot/cold Tool composition: %v: %s", err, output)
 	}
-	if !reflect.DeepEqual(composed.Checkpoint, composed.Hot.Checkpoint) ||
-		!reflect.DeepEqual(composed.ToolRouteView, composed.Hot.ToolRouteView) ||
-		!reflect.DeepEqual(composed.ReducerAction, composed.Hot.ReducerAction) ||
-		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) || composed.Hot.ToolPart == nil {
+	if !composed.ColdProductionPreloaded || len(composed.NextStep) == 0 ||
+		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) ||
+		composed.Hot.ToolPart == nil || composed.Hot.ProviderInvocations != 1 {
 		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
 	}
 	assertNoInventedAssistantText(t, composed.ProviderComposition)
@@ -782,10 +775,10 @@ type runtimeProviderComposition struct {
 }
 
 type runtimeColdContextComposition struct {
-	ReducerAction struct {
+	NextStep struct {
 		Action          string   `json:"action"`
 		ToolUseEventIDs []string `json:"toolUseEventIds"`
-	} `json:"reducerAction"`
+	} `json:"nextStep"`
 	ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 }
 

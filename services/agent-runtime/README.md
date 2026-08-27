@@ -40,8 +40,13 @@ invariants stated with them.
 | `SessionEntry` | `session-manager.ts` | `threads: Map<session_thread_id, ThreadEntry>` — a residency map, not a durable parent-child index | rebuilt from Bridge reads over `session_threads` |
 | `ThreadEntry` | `session-manager.ts` | one resident thread with role, status, `ThreadRuntime`, command channel, and `run_slot` | released whole on cleanup — no orphan fibers, timers, or maps survive |
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
-| `ThreadState` | `thread-loop/thread-state.ts` | accepted inputs, pending tool and approval work, attachments, configuration views, and request usage hints for one resident thread | rebuilt from durable state on cold start; held limits and usage hints are never durable |
-| `ContextManager` | `context-manager.ts` | sealed provider context plus one optional open Assistant draft | mutates only after an operation-specific durable result |
+| `ThreadRuntime` | `thread-loop/thread-runtime.ts` | one thread's binding identity, `ThreadState`, configuration and shared coordinators | recreated when the thread becomes resident; owns no durable truth |
+| `ThreadState` | `thread-loop/thread-state.ts` | canonical `ThreadTurnCheckpoint`, read-only route/input/media views, pending tool work and other reconstructible hot data | rebuilt from durable state on cold start; dispatch is never stored here |
+| `ContextManager` | `context-manager.ts` | provider-visible sealed entries, one optional open Assistant draft and an immutable child prefix | rebuilt from durable projection; mutates only after the owning operation's durable ACK |
+| `ThreadTurnCheckpoint` | `thread-loop/turn/checkpoint.ts` | canonical durable lifecycle projection for one thread | reconstructed from durable facts; contains no provider write identity or hot dispatch |
+| Turn views | `thread-loop/turn/types.ts`, `thread-loop/turn/checkpoint.ts`, and `ThreadState` | read-only accepted-input, attachment and Tool-route projections consulted with the checkpoint | derived from current hot/durable custody; not an independent lifecycle |
+| Reducer / transition | `thread-loop/turn/reducer.ts` | pure rules producing checkpoint, state, stable next step and an optional one-time dispatch | immutable result of one fact/view cut; owns no I/O or mutable data |
+| `ThreadLoop` | `thread-loop/thread-loop.ts` | sole fact-application and dispatch-execution authority for one thread | captures dispatch on the stack, performs external work, then applies the next durable fact |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; failure fallback requires an ACKed outcome, failed requests reach durable idle before trunk reuse, and uncertain outcomes evict only the addressed execution |
@@ -59,14 +64,14 @@ Invariants a replacement must preserve:
 ### Session infrastructure and Thread execution
 
 `SessionEntry` owns shared binding-local infrastructure and the `controlGate`.
-Each `ThreadEntry` independently owns its command queue, `ContextManager`,
-Reducer/checkpoint, and one `ThreadRunSlot`:
+Each `ThreadEntry` independently owns one `ThreadRuntime`, command queue and
+`ThreadRunSlot`:
 
 ```text
 SessionEntry
   -> shared configuration / binding / cleanup control
-  -> ThreadEntry A -> accepted inputs -> runSlot A -> ThreadLoop A
-  -> ThreadEntry B -> accepted inputs -> runSlot B -> ThreadLoop B
+  -> ThreadEntry A -> ThreadRuntime A -> runSlot A -> ThreadLoop A
+  -> ThreadEntry B -> ThreadRuntime B -> runSlot B -> ThreadLoop B
 ```
 
 Sibling run slots may execute concurrently. An interrupt or close addresses one
@@ -77,24 +82,55 @@ once every run slot is idle. Durable delivery exclusion is owned by Queue and
 Bridge, while `threadRunCanStart`, `startThreadRunUnderControl`, and
 `applyRuntimeConfigPatch` own the corresponding hot-state rules.
 
+The turn data and execution flow for each thread is:
+
+```text
+durable Events / Messages / Tool facts
+  -> turn/load.ts
+  -> ThreadTurnCheckpoint + read-only views
+  -> ThreadState
+  -> pure Reducer
+  -> ThreadTurnTransition
+       checkpoint + state + stable nextStep
+       optional one-time dispatch
+  -> ThreadLoop captures dispatch on its stack
+  -> Provider / Tool / Bridge operation
+  -> durable ACK
+  -> next committed ThreadTurnFact
+```
+
+Cold preload installs a checkpoint and views and derives a stable snapshot; it
+never replays a hot dispatch. Ordinary input such as a message or task
+notification updates the accepted-input view and signals the run slot. It does
+not mutate the current Request/Tool lifecycle or replace a dispatch already
+captured by ThreadLoop. Explicit interrupt and shutdown use their control paths
+and may cancel current execution.
+
+`ContextManager` is adjacent to, not inside, the turn state machine. It supplies
+provider-visible context after durable ACKs. A model Request ID identifies the
+provider attempt, an Event ID identifies a durable lifecycle fact, and a Runtime
+write ID identifies one in-flight idempotent write. A write ID may live in the
+stack-local operation and Bridge receipt, but never in `ContextManager`, the
+checkpoint, provider history, Tool payloads or a later turn.
+
 ### `run_slot` — single-owner run guard
 
-At most one owner run per thread. Many callers may join that owner. Inputs
-accepted while it is active are installed in the thread's `ThreadProcessor`;
-the reducer, not a side-channel wake flag, decides whether work remains.
+At most one owner run exists per thread. Many callers may join that owner.
+Accepted inputs remain in `ThreadState` until their durable custody transition;
+the Reducer decides at a legal boundary whether they can advance the thread.
 
 | Field | Meaning |
 | --- | --- |
 | `run_id` / `owner_fiber` / `scope` / `done_deferred` | the active run, its scope, and the deferred that joined waiters await |
 | `stopping` | interrupt installed; the owner is unwinding |
-| `ThreadProcessor.acceptedInputs` | ordered accepted facts retained until a durable commit, parked custody, or terminal rejection/stale result |
+| `ThreadState` accepted-input view | ordered accepted custody retained until a durable commit, parked custody, or terminal rejection/stale result |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
 | `resume` | mark the resident Thread idle and receivable; later input starts work | reject as busy | reject as busy |
-| accepted input | install the fact and start one run only when its reducer action is active | install the fact; the current run observes it at an action boundary | install the fact behind the interrupt fence |
+| accepted input | install the input and start one run only when its derived next step is active | install the input; the current run observes it at a legal transition boundary | install the input behind the interrupt fence |
 | `interrupt` | mark accepted, start no provider request | `stopping = true`, interrupt owner, close scopes | already stopping |
-| owner exits clean | — | clear the old slot, reduce the latest projection, and start at most one successor for an active action | clear the old slot after finalizers, then apply the same reducer rule |
+| owner exits clean | — | clear the old slot, derive the latest transition, and start at most one successor for an active next step | clear the old slot after finalizers, then apply the same reducer rule |
 
 A successful `FinishIdle(end_turn)` ends the run even when input is queued; the
 follow-up run for queued work is the next run. Intra-turn retries — reschedule,
@@ -102,19 +138,25 @@ overflow, compaction — stay inside the run. Cancelling a joined waiter never
 cancels the owner. Different threads run concurrently while each thread stays
 single-owner.
 
+`FinishIdle(end_turn)` closes the Request/Run that authored the durable
+closeout. Its validity comes from that exact owner and its committed Request
+End, not from the action currently derived after later input arrives. Applying
+the closeout removes only the old execution owner; queued input remains owned
+by the successor run.
+
 ### The ThreadRun loop
 
 One fixed algorithm per run freezes and commits a finite input cut, then drives
-the durable Thread-turn reduction. Hot context changes only after the matching
-ACK. Compaction, approval, reviewer, retry, interrupt, and failure are typed
-actions around the six states rather than extra top-level states.
+the durable Thread-turn transition. Hot context changes only after the matching
+ACK. Compaction, approval, reviewer, retry, interrupt and failure are typed
+next steps around the six states rather than extra top-level states.
 
 | Loop state | Owner | Durable boundary |
 | --- | --- | --- |
 | `idle` | ThreadRun owner fiber | `CommitInputs` installs pending context; the Reducer decides when that context authorizes Request Start |
 | `ready_to_request` | ThreadRun owner fiber | pure hot decision point |
 | `request_open` | provider-request scope | Tool Use ACKs and then `WriteRequestEnd` ACK |
-| `request_sealed` | ThreadRun owner fiber | typed seal reconciliation |
+| `request_sealed` | ThreadRun owner fiber | the committed Request End directly selects retry, Tool settlement, compaction, reviewer completion or closeout |
 | `waiting_for_tool_results` | provider-request tool-fiber set or durable pending routes | every named terminal Tool Result ACK |
 | `ready_to_finish` | ThreadRun owner fiber | `FinishIdle` ACK gates local idle |
 
@@ -123,8 +165,10 @@ Cold reconstruction consumes the same durable facts that ACK application uses:
 Message sequence defines pending user-side input, Request and Tool Events define
 the active request, and internal repairs carry one direct repair identity. It
 never compares Message and Event sequence coordinate systems or reconstructs a
-Message mutation history. The reducer then selects the next action from the
-checkpoint and the separately validated Tool-route view.
+Message mutation history. The Reducer selects the stable next step from the
+checkpoint and separately owned read-only views. Only the exact fact transition
+that first hands external work to ThreadLoop can also emit a dispatch; duplicate
+fact replay and later ordinary input cannot reacquire it.
 Every run exit settles its scope exactly once, by exactly one writer with
 disjoint triggers (`FinishIdle`, terminal commit, pod-loss repair, or the
 cooperative cancellation closeout for internal child scopes on a healthy pod) —
@@ -147,6 +191,16 @@ state are awaited Effects, never detached background work.
 | `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
 | `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
+
+An interrupt delivery attempt reports a retryable Request-End failure through
+the current `ThreadRunSlot`; retryable attempt state is never promoted into the
+terminal replay memo. A joined duplicate is different: the durable operation
+already committed, so it completes only the matching resident interrupt fence
+and asks ordinary Reducer readiness whether one successor run must wake. Joined
+without a matching fence is a successful no-op; stale custody keeps its discard
+semantics. If a completed `ThreadRunSlot` is still retained as a custody fence,
+the matching settlement releases that exact slot before starting the successor;
+an active or replaced slot is never displaced by the wake.
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
@@ -385,8 +439,8 @@ Invariants a replacement must preserve:
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → committed input
   result → hot admission → accepted Inbox stamp → exact Queue ACK. Initial and
-  later mail use this same path. Request Start remains a Reducer-owned action,
-  never delivery or ACK authority. If the Runtime binding is proven lost,
+  later mail use this same path. Request Start remains a one-time ThreadLoop
+  dispatch, never delivery or ACK authority. If the Runtime binding is proven lost,
   generic accepted-input handoff restores the same input and Queue identity for
   the replacement owner without replaying a second durable Message.
 - `task_name` is unique under the parent by durable constraint, never by
@@ -434,7 +488,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | --- | --- |
 | `core/test/unit/session-manager.test.ts` | `run_slot` single-owner, `wake` coalescing, idle-only resume, interrupt/stop fences, concurrent distinct threads, sub-agent delivery and lifecycle, cold load of durable context, pending waits, and background handles |
 | `core/test/unit/thread-loop/thread-loop.test.ts` | ThreadLoop coordination and recoverable ThreadState behavior |
-| `core/test/unit/thread-loop/thread-turn-checkpoint.test.ts`, `thread-turn-reducer.test.ts` | durable turn reconstruction and the closed transition table |
+| `core/test/unit/thread-loop/thread-turn-load.test.ts`, `thread-turn-transition.test.ts` | durable turn reconstruction and the closed transition table |
 | `core/test/unit/thread-loop/tool-execution.test.ts`, `closeout.test.ts` | post-ACK tool execution, continuation, interruption, and settlement |
 | `core/test/unit/thread-loop/compaction.test.ts` | proactive and reactive compaction lifecycle |
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |

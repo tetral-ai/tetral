@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
 	ProviderContextRole,
@@ -6,7 +9,9 @@ import {
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Effect, Layer, Stream } from "effect";
+import { Effect,
+	Layer,
+	Stream } from "effect";
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import type {
 	PendingInputResult,
@@ -31,13 +36,15 @@ import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeTaskNotificationState,
-} from "../../../src/thread-loop/thread-state.js";
+} from "../../../src/thread-loop/input/accepted-input.js";
 import {
 	MaxProviderAttachments,
 	ThreadState,
 } from "../../../src/thread-loop/thread-state.js";
-import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
+import type { ThreadTurnNextStep } from "../../../src/thread-loop/turn/types.js";
 import type {
 	PackageJson,
 	TestContextLoader,
@@ -47,6 +54,7 @@ import {
 	acceptedInputCommitResult,
 	catalogForTest,
 	createdAt,
+	deferred,
 	failingEventWriter,
 	installLoaderStateForTest,
 	llmService,
@@ -64,12 +72,9 @@ import {
 } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
-	test("the ThreadLoop action interpreter exhaustively classifies the closed action union", () => {
-		const activeActions: ThreadTurnAction[] = [
+	test("the ThreadLoop next-step interpreter exhaustively classifies the closed union", () => {
+		const activeNextSteps: ThreadTurnNextStep[] = [
 			{ action: "prepare_next_request" },
-			{ action: "start_provider_request", modelRequestId: "mrq_start" },
-			{ action: "dispatch_tool_use", toolUseEventId: "sevt_tool" },
-			{ action: "reconcile_request_seal", modelRequestId: "mrq_seal" },
 			{
 				action: "resume_tool_routes",
 				modelRequestId: "mrq_resume",
@@ -86,8 +91,7 @@ describe("ThreadLoop", () => {
 			{ action: "close_interrupted" },
 			{ action: "close_failed" },
 		];
-		const passiveActions: ThreadTurnAction[] = [
-			{ action: "none" },
+		const passiveNextSteps: ThreadTurnNextStep[] = [
 			{ action: "await_input" },
 			{ action: "await_request_end", modelRequestId: "mrq_open" },
 			{
@@ -97,15 +101,17 @@ describe("ThreadLoop", () => {
 			},
 		];
 		expect(
-			activeActions.map(
-				(action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition,
+			activeNextSteps.map(
+				(nextStep) =>
+					ThreadLoop.interpretThreadTurnNextStep(nextStep).runDisposition,
 			),
-		).toEqual(activeActions.map(() => "active"));
+		).toEqual(activeNextSteps.map(() => "active"));
 		expect(
-			passiveActions.map(
-				(action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition,
+			passiveNextSteps.map(
+				(nextStep) =>
+					ThreadLoop.interpretThreadTurnNextStep(nextStep).runDisposition,
 			),
-		).toEqual(passiveActions.map(() => "passive"));
+		).toEqual(passiveNextSteps.map(() => "passive"));
 	});
 	test("pins effect to the approved beta version in package metadata", async () => {
 		const packageJson = JSON.parse(
@@ -422,6 +428,96 @@ describe("ThreadLoop", () => {
 		expect(requestStartWriteIds).toHaveLength(2);
 		expect(new Set(requestStartWriteIds).size).toBe(1);
 		expect(providerCalls).toBe(1);
+	});
+	test("a notification admitted behind a committed Request Start cannot replace its dispatch", async () => {
+		const session = new ThreadRuntime("sesn_notification_after_request_start");
+		session.state.enqueueAcceptedInput(
+			acceptedInput(
+				"rin_initial_notification_race",
+				session.sessionId,
+			),
+		);
+		const requestStartCommitted = deferred<void>();
+		const releaseRequestStartResponse = deferred<void>();
+		const requests: LLMRequest[] = [];
+		const events: SessionEvent[] = [];
+		const requestStartBoundaries: number[] = [];
+		let heldFirstRequestStart = false;
+		const writer = writerFrom(async (envelope) => {
+			events.push(envelope.event);
+			if (envelope.event.type === "span.model_request_start") {
+				requestStartBoundaries.push(
+					envelope.contextThroughMessageSequence ?? -1,
+				);
+				if (!heldFirstRequestStart) {
+					heldFirstRequestStart = true;
+					requestStartCommitted.resolve();
+					await releaseRequestStartResponse.promise;
+				}
+			}
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+				eventSequence: events.length,
+			};
+		});
+		const run = Effect.runPromise(
+			Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(
+					session,
+					testRunCustody(),
+				);
+			}).pipe(
+				Effect.provide(
+						runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+							writer,
+							llmService: llmService(
+								[
+									{ type: "text-start", id: "notification-race-text" },
+									{
+										type: "text-delta",
+										id: "notification-race-text",
+										text_delta: "done",
+									},
+									{ type: "text-end", id: "notification-race-text" },
+									{ type: "finish", finishReason: "stop" },
+								],
+								(request) => requests.push(request),
+							),
+					}),
+				),
+			),
+		);
+
+		await requestStartCommitted.promise;
+		expect(
+			session.state.enqueueAcceptedInput(
+				taskNotificationInput(
+					"rin_notification_after_start",
+					"task_notification_after_start",
+					"sevt_notification_source",
+					"completed",
+					'{"status":"completed","text":"notification for successor"}',
+					session.sessionId,
+				),
+			),
+		).toBe("applied");
+		releaseRequestStartResponse.resolve();
+
+		expect(await run).toMatchObject({ type: "completed" });
+		expect(requests).toHaveLength(2);
+		expect(requestStartBoundaries).toEqual([1, 3]);
+		expect(JSON.stringify(requests[0]?.context)).not.toContain(
+			"notification for successor",
+		);
+		expect(JSON.stringify(requests[1]?.context)).toContain(
+			"notification for successor",
+		);
+		expect(
+			events.filter((event) => event.type === "span.model_request_end"),
+		).toHaveLength(2);
+		expect(events.filter((event) => event.type === "session.error")).toEqual([]);
 	});
 	test("input accepted during an empty provider response prevents premature idle closeout", async () => {
 		const session = new ThreadRuntime("sesn_late_input_before_idle");
@@ -797,7 +893,7 @@ describe("ThreadLoop", () => {
 			replayedInput.runtimeInputId,
 		]);
 		expect(
-			session.state.threadTurnReduction().checkpoint
+			session.state.threadTurnTransition().checkpoint
 				.pendingInputContextSequences,
 		).toEqual([]);
 		expect(requests).toHaveLength(1);
@@ -880,7 +976,7 @@ describe("ThreadLoop", () => {
 			appended.filter((event) => event.type === "span.model_request_start"),
 		).toHaveLength(1);
 	});
-	test("cold interrupt closeout consumes the typed action before releasing the run", async () => {
+	test("cold interrupt closeout follows the typed next step before releasing the run", async () => {
 		const session = new ThreadRuntime("sesn_cold_interrupt_closeout");
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
@@ -920,7 +1016,7 @@ describe("ThreadLoop", () => {
 		expect(appended).toEqual([
 			{ type: "session.status_idle", stop_reason: { type: "end_turn" } },
 		]);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				idleCloseout: {
 					eventId: expect.any(String),
@@ -928,7 +1024,7 @@ describe("ThreadLoop", () => {
 				},
 			},
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("a cold open request fails closed before accepting a later input", async () => {
@@ -980,10 +1076,10 @@ describe("ThreadLoop", () => {
 		});
 		expect(loader.commitCalls ?? []).toEqual([]);
 		expect(providerCalls).toBe(0);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("cold committed reschedule reopens exactly one provider request", async () => {
@@ -1101,9 +1197,9 @@ describe("ThreadLoop", () => {
 			type: "session.status_idle",
 			stop_reason: { type: "end_turn" },
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("accepted input without a resolvable runtime model settles an explicit exhausted error", async () => {
@@ -1760,6 +1856,124 @@ describe("ThreadLoop", () => {
 const timestamp = "2026-01-01T00:00:00.000Z";
 
 describe("ThreadState", () => {
+	test("joined interrupt replay releases only its matching local fence", async () => {
+		const session = new ThreadRuntime("sesn_joined_interrupt_replay");
+		const input = acceptedInput(
+			"rin_after_joined_interrupt",
+			"sesn_joined_interrupt_replay",
+		);
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_joined_interrupt_replay",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_joined_interrupt_replay",
+			origin: "user" as const,
+		};
+		let closeouts = 0;
+		session.state.enqueueAcceptedInput(input);
+		expect(
+			session.state.beginUserInterrupt(
+				command,
+				async () => ({ ok: true, joined: true }),
+				() => {
+					closeouts += 1;
+				},
+			),
+		).toBe("applied");
+		expect(
+			session.state.recordJoinedUserInterruptResult(command.runtimeInputId),
+		).toBe(true);
+
+		expect(
+			await Effect.runPromise(
+				ThreadLoop.settleIdleInterrupt(
+					session,
+					command,
+					async () => ({ ok: true, joined: true }),
+				),
+			),
+		).toEqual({ type: "duplicate", wakeThread: true });
+		expect(closeouts).toBe(1);
+		expect(session.state.userInterruptRequested()).toBe(false);
+		expect(session.state.acceptedInputSnapshot()).toEqual([input]);
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: input.runtimeInputId,
+		});
+	});
+
+	test("joined recording never caches a retryable interrupt failure", async () => {
+		const state = new ThreadState("sesn_retryable_joined_recording");
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_retryable_joined_recording",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_retryable_joined_recording",
+			origin: "user" as const,
+		};
+		let commitCalls = 0;
+		state.beginUserInterrupt(command, async () => {
+			commitCalls += 1;
+			return {
+				ok: true as const,
+				type: "committed" as const,
+				assignedContextSequences: [],
+				pendingAttachments: [],
+				interruptToolResults: [],
+			};
+		});
+		expect(
+			state.recordJoinedUserInterruptResult(command.runtimeInputId, {
+				ok: false,
+				retryable: true,
+				errorCode: "bridge_unavailable",
+			}),
+		).toBe(true);
+		expect(state.userInterruptCommitResult(command.runtimeInputId)).toBeUndefined();
+
+		expect(
+			(await state.commitUserInterruptInput({ inputKind: "interrupt" })).result,
+		).toMatchObject({ ok: true, type: "committed" });
+		expect(commitCalls).toBe(1);
+	});
+
+	test("joined interrupt without a matching resident fence is a wake-free no-op", async () => {
+		const session = new ThreadRuntime("sesn_unmatched_joined_interrupt");
+		const input = acceptedInput(
+			"rin_unmatched_joined_follower",
+			"sesn_unmatched_joined_interrupt",
+		);
+		session.state.enqueueAcceptedInput(input);
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_unmatched_joined_interrupt",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_unmatched_joined_interrupt",
+			origin: "user" as const,
+		};
+
+		expect(
+			await Effect.runPromise(
+				ThreadLoop.settleIdleInterrupt(
+					session,
+					command,
+					async () => ({ ok: true, joined: true }),
+				),
+			),
+		).toEqual({ type: "duplicate", wakeThread: false });
+		expect(session.state.acceptedInputSnapshot()).toEqual([input]);
+		expect(session.state.userInterruptRequested()).toBe(false);
+	});
+
 	test("successful request hints stay paired and an actual model change invalidates both", () => {
 		const state = new ThreadState("sesn_compaction_hints");
 		state.updateCurrentModel({ providerId: "openai", modelId: "gpt-5.5" });
@@ -1894,12 +2108,12 @@ describe("ThreadState", () => {
 				fact: "inputs_committed",
 				eventId: "sevt_attachment_committed",
 				contextSequences: [],
-			}).action,
+			}).nextStep,
 		).toEqual({
 			action: "commit_accepted_input",
 			runtimeInputId: "rin_sibling_hot",
 		});
-		expect(hot.threadTurnReduction().checkpoint).toEqual({
+		expect(hot.threadTurnTransition().checkpoint).toEqual({
 			executionRunId: "run_attachment_hot",
 			pendingInputContextSequences: [],
 		});
@@ -1913,13 +2127,13 @@ describe("ThreadState", () => {
 			{ routes: [] },
 		);
 		cold.replacePendingAttachments([attachment]);
-		expect(cold.threadTurnReduction()).toMatchObject({
+		expect(cold.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				executionRunId: "run_attachment_cold",
 				pendingInputContextSequences: [],
 			},
 			state: { state: "ready_to_request" },
-			action: { action: "prepare_next_request" },
+			nextStep: { action: "prepare_next_request" },
 		});
 	});
 
@@ -2214,15 +2428,15 @@ describe("ThreadState", () => {
 				filename: "image.png",
 			},
 		]);
-		expect(state.threadTurnReduction().action).toEqual({
+		expect(state.threadTurnTransition().nextStep).toEqual({
 			action: "prepare_next_request",
 		});
 		state.clear();
 
 		expect(state.pendingAttachments()).toEqual([]);
-		expect(state.threadTurnReduction()).toMatchObject({
+		expect(state.threadTurnTransition()).toMatchObject({
 			state: { state: "ready_to_finish" },
-			action: { action: "finish_idle" },
+			nextStep: { action: "finish_idle" },
 		});
 	});
 

@@ -32,7 +32,7 @@ import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeThreadAddressState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type {
 	RuntimeApprovalReviewer,
 	RuntimeApprovalReviewRequest,

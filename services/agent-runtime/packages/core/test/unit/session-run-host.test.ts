@@ -1,10 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import {
 	ProviderContextRole,
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { Context, Effect, Exit, Layer, Scope, Stream } from "effect";
+import { Context,
+	Effect,
+	Exit,
+	Layer,
+	Scope,
+	Stream } from "effect";
 import type {
 	AcceptedInputCommitResult,
 	ContextLoader,
@@ -31,8 +39,10 @@ import * as SessionRunHost from "../../src/session-run-host/session-run-host.js"
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputDeclaration,
-} from "../../src/thread-loop/thread-state.js";
+} from "../../src/thread-loop/input/control-input.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
 function acceptedInput(

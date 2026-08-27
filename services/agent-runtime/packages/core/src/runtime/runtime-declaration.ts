@@ -22,9 +22,11 @@ import {
 	runtimeToolErrorFromFailure,
 } from "../contracts/runtime.js";
 import type {
-	RuntimeAcceptedInputState,
 	RuntimePendingApprovalToolJobState,
 } from "../thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "../thread-loop/input/accepted-input.js";
 import { stableRuntimeID } from "./runtime-identity.js";
 
 export interface RuntimeContextDraft {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,148 @@ func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) 
 		return nil
 	}); err != nil {
 		t.Fatalf("query runtime-termination open starts: %v", err)
+	}
+}
+
+func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_pod_loss_terminal_retention"
+		threadID       = "thr_pod_loss_terminal_retention"
+		bindingID      = "bind_pod_loss_terminal_retention"
+		podUID         = "pod_pod_loss_terminal_retention"
+		modelRequestID = "mreq_pod_loss_terminal_retention"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("pod-loss-terminal-retention-signing-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_pod_loss_retention_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_pod_loss_retention_tool", ModelRequestId: modelRequestID,
+		ToolDeclaration: bridgeToolDeclarationForTest(
+			"call_pod_loss_retention", "Read", `{"file_path":"README.md"}`, "allow", "sandbox_execute",
+		),
+	})
+	if err != nil || toolUse.GetCommitted() == nil {
+		t.Fatalf("commit terminal retention Tool Use: %#v/%v", toolUse, err)
+	}
+	toolUseEventID := toolUse.GetCommitted().GetEventId()
+	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+		scope,
+		bridgeCompletedToolSettlementForTest(toolUseEventID, "terminal before pod loss"),
+	))
+	if err != nil || settled.GetCommitted() == nil {
+		t.Fatalf("settle terminal retention Tool: %#v/%v", settled, err)
+	}
+	repairKey := internalToolRepairKey(modelRequestID, "call_pod_loss_repair", "unknown_tool")
+	repaired, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+		Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_pod_loss_repair",
+		ToolName: "unknown_tool", RepairKey: repairKey, CanonicalInputJson: `{"q":"x"}`,
+		Error: &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}`},
+	})
+	if err != nil || repaired.GetCommitted() == nil {
+		t.Fatalf("commit terminal retention repair: %#v/%v", repaired, err)
+	}
+	repairEventID := repaired.GetCommitted().GetRepairEventId()
+
+	client := dbconnect.NewClientForTesting(runtime)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET payload_json = jsonb_set(payload_json::jsonb, '{repair_kind}', '"not_membership_authority"'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, repairEventID); err != nil {
+		t.Fatalf("alter repair payload marker: %v", err)
+	}
+	var relationOwnedRetention *bridgev1.ProviderContextRetention
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_relation_owned_retention", func(tx *dbconnect.Tx) error {
+		var loadErr error
+		relationOwnedRetention, loadErr = runtimeTerminalRequestRetentionTx(context.Background(), tx, scope, modelRequestID)
+		return loadErr
+	}); err != nil {
+		t.Fatalf("derive relation-owned terminal pod-loss retention: %v", err)
+	}
+	if !slices.Equal(relationOwnedRetention.GetRepairEventIds(), []string{repairEventID}) {
+		t.Fatalf("relation-owned repair retention = %#v; payload marker must not select membership", relationOwnedRetention)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET payload_json = jsonb_set(payload_json::jsonb, '{repair_kind}', '"invalid_tool"'::jsonb)::text
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, repairEventID); err != nil {
+		t.Fatalf("restore repair payload marker: %v", err)
+	}
+	var retention *bridgev1.ProviderContextRetention
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_terminal_retention", func(tx *dbconnect.Tx) error {
+		var loadErr error
+		retention, loadErr = runtimeTerminalRequestRetentionTx(context.Background(), tx, scope, modelRequestID)
+		if loadErr != nil {
+			return loadErr
+		}
+		return verifyProviderContextRetentionReferencesTx(context.Background(), tx, &bridgev1.WriteRequestEndRequest{
+			Scope: scope, ModelRequestId: modelRequestID, ProviderContextRetention: retention,
+		})
+	}); err != nil {
+		t.Fatalf("derive terminal pod-loss retention: %v", err)
+	}
+	if retention.GetAssistantMessageSequence() != toolUse.GetCommitted().GetAssignedMessageSequence() ||
+		!slices.Equal(retention.GetToolUseEventIds(), []string{toolUseEventID}) ||
+		!slices.Equal(retention.GetRepairEventIds(), []string{repairEventID}) {
+		t.Fatalf("terminal pod-loss retention = %#v; want exact Assistant, Tool Use, and repair identities", retention)
+	}
+	binding := runtimeBindingForDelivery{BindingID: bindingID, BindingGeneration: 1, PodUID: podUID}
+	if _, err := runRuntimePodLostRepairTransaction(
+		context.Background(), runtime, sessionID, binding, time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatalf("close open Request through pod-loss owner: %v", err)
+	}
+	var durableAssistant int64
+	var durableToolUses, durableRepairs []byte
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT (payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}')::bigint,
+		        payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}',
+		        payload_json::jsonb #> '{provider_context_retention,repair_event_ids}'
+		   FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND model_request_id = $3 AND type = 'span.model_request_end'`,
+		sessionID, threadID, modelRequestID,
+	).Scan(&durableAssistant, &durableToolUses, &durableRepairs); err != nil {
+		t.Fatalf("read pod-loss Request End retention: %v", err)
+	}
+	if durableAssistant != toolUse.GetCommitted().GetAssignedMessageSequence() ||
+		string(durableToolUses) != `["`+toolUseEventID+`"]` ||
+		string(durableRepairs) != `["`+repairEventID+`"]` {
+		t.Fatalf("durable pod-loss retention = assistant:%d tools:%s repairs:%s", durableAssistant, durableToolUses, durableRepairs)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
+	if err != nil {
+		t.Fatalf("cold LoadContext after pod-loss terminalization: %v", err)
+	}
+	var cold bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &cold); err != nil {
+		t.Fatalf("decode pod-loss terminal context: %v", err)
+	}
+	memberCounts := map[string]map[string]int{}
+	for _, entry := range cold.ContextEntries {
+		for _, rawPart := range entry.Parts {
+			var part struct {
+				Type            string `json:"type"`
+				ModelToolCallID string `json:"modelToolCallId"`
+			}
+			if err := json.Unmarshal(rawPart, &part); err != nil || part.ModelToolCallID == "" {
+				continue
+			}
+			if memberCounts[part.ModelToolCallID] == nil {
+				memberCounts[part.ModelToolCallID] = map[string]int{}
+			}
+			memberCounts[part.ModelToolCallID][part.Type]++
+		}
+	}
+	for _, callID := range []string{"call_pod_loss_retention", "call_pod_loss_repair"} {
+		if memberCounts[callID]["tool_call"] != 1 || memberCounts[callID]["tool_result"] != 1 {
+			t.Fatalf("cold pod-loss pair %s = %#v; want one Call and one Result", callID, memberCounts[callID])
+		}
+	}
+	if len(cold.TurnFacts.InternalRepairs) != 1 || cold.TurnFacts.InternalRepairs[0].RepairKey != repairKey {
+		t.Fatalf("cold pod-loss repair facts = %#v; want exact committed repair", cold.TurnFacts.InternalRepairs)
 	}
 }
 
@@ -830,7 +973,10 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				Namespace: "tetral-agent-runtime", PodName: "runtime-recovery-" + suffix,
 				PodUID: "pod-recovery-" + suffix, PodIP: "127.0.0.1",
 			}
-			runtimeProcess := startProviderRecoveryRuntime(t, bridgeAddress, sessionID, threadID, replacement.PodUID, time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC))
+			runtimeProcess := startProviderRecoveryRuntime(
+				t, bridgeAddress, sessionID, threadID, replacement.PodUID,
+				time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC), false,
+			)
 			deliveryStore.RuntimeGRPCPort = runtimeProcess.port
 			deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})

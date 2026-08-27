@@ -480,7 +480,10 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_end", ModelRequestId: "mreq_history_first",
 		FinishReason: "tool_calls", UsageJson: `{}`,
-		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed"},
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition:     "completed",
+			ToolUseEventIds: []string{first.GetCommitted().GetEventId()},
+		},
 	}); err != nil {
 		t.Fatalf("seal first request: %v", err)
 	}

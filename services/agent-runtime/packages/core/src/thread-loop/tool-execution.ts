@@ -42,23 +42,27 @@ import type {
 	AutoApprovalReviewerManager,
 	ParentTranscriptView,
 } from "../session/approval-reviewer-manager.js";
-import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
+import type {
+	ToolCatalog,
+	ToolEntry,
+} from "../tools/tool-catalog.js";
 import {
 	effectivePermissionPolicy,
 	lookupToolEntry,
 } from "../tools/tool-catalog.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
-import type { ToolJob } from "../tools/tool-scheduler.js";
-import type { ToolScheduler } from "../tools/tool-scheduler.js";
+import type { ToolJob, ToolScheduler } from "../tools/tool-scheduler.js";
 import { inferToolRunPolicy } from "../tools/tool-scheduler.js";
 import type { ThreadRuntime } from "./thread-runtime.js";
 import type {
 	RuntimePendingApprovalToolJobState,
 	RuntimePendingSandboxExecutionJobState,
-	RuntimePreloadedPendingToolUseState,
-	RuntimePreloadedSandboxExecutionState,
 	RuntimeResolvedToolRouteJobState,
 } from "./thread-state.js";
+import type {
+	RuntimePreloadedPendingToolUseState,
+	RuntimePreloadedSandboxExecutionState,
+} from "./input/preload.js";
 
 /** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =

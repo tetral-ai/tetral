@@ -81,7 +81,7 @@ func TestPostgreSQLAttachmentRequestStartLostACKReplaysBeforeSingleProviderInvoc
 	defer stopBridge()
 
 	process := startAttachmentRecoveryRuntime(t, bridgeAddress, "complete", sessionID, threadID, bindingID, 1, podUID)
-	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 	started := process.providerStart(t)
 	waitForAttachmentRequestEnd(t, admin, process, sessionID, "")
 	process.kill(t)
@@ -119,7 +119,7 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	defer stopBridge()
 
 	process := startAttachmentRecoveryRuntime(t, bridgeAddress, "hang", sessionID, threadID, bindingID, 1, podUID)
-	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 	started := process.providerStart(t)
 	if started.ProviderInvocations != 1 || started.GatewayRequests != 1 || started.AttachmentCount != 1 || started.LoweredAttachmentBytes != int64(len("attachment")) {
 		t.Fatalf("started Gateway/provider invocation = %+v; want one lowered request with one attachment", started)
@@ -200,7 +200,7 @@ func (attachmentRuntimeTokenSource) Token(context.Context) (string, error) {
 	return "attachment-runtime-composition-token", nil
 }
 
-func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podUID string) {
+func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port int, sessionID, podName, podUID string) {
 	t.Helper()
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
 		SET agent_runtime_pod_ip='127.0.0.1'
@@ -211,7 +211,7 @@ func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port 
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(client, port)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
-			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+			Namespace: "tetral-agent-runtime", PodName: podName, PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	runner := &JobRunner{

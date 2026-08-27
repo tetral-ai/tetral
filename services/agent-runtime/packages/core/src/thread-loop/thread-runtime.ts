@@ -1,11 +1,10 @@
 /**
- * This module is the thread-local Runtime aggregate passed into ThreadLoop. It
- * guards the current binding identity while keeping hot ThreadState, reviewer
- * coordination, and session-wide tool coordination under explicit owners.
- * SessionManager creates and refreshes it, ThreadLoop consumes it, and its
- * constructor creates ThreadState and, when needed, a tool coordinator.
- *
  * @packageDocumentation
+ * Per-Thread Runtime composition passed to ThreadLoop. It joins the current
+ * binding-fenced identity, reconstructible ThreadState, configuration and
+ * explicitly shared coordinators. SessionManager creates or refreshes it;
+ * ThreadLoop owns transitions and execution. This aggregate is hot and owns no
+ * durable lifecycle or provider context beyond its named members.
  */
 
 import { ThreadState } from "./thread-state.js";

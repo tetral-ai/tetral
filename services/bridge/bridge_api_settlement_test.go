@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -62,6 +65,52 @@ func TestProviderContextRetentionValidationAcceptsMechanicallyValidRuntimeDeclar
 	}
 	if err := validateProviderContextRetention(request); err != nil {
 		t.Fatalf("mechanically valid Runtime retention declaration: %v", err)
+	}
+}
+
+func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_incomplete_tool_retention"
+		threadID  = "thr_incomplete_tool_retention"
+		bindingID = "bind_incomplete_tool_retention"
+		podUID    = "pod_incomplete_tool_retention"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_incomplete_retention_start", "mreq_incomplete_retention", requestKindAgentProviderRequest, 0)
+	toolUseIDs := make([]string, 0, 2)
+	for index, suffix := range []string{"a", "b"} {
+		written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: "rwrite_incomplete_retention_tool_" + suffix, ModelRequestId: "mreq_incomplete_retention",
+			ToolDeclaration: bridgeToolDeclarationForTest("call_incomplete_retention_"+suffix, "Read", `{}`, "allow", "sandbox_execute"),
+		})
+		if err != nil || written.GetCommitted() == nil {
+			t.Fatalf("write Tool Use %d = %#v/%v", index, written, err)
+		}
+		toolUseIDs = append(toolUseIDs, written.GetCommitted().GetEventId())
+	}
+
+	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_incomplete_retention_end", ModelRequestId: "mreq_incomplete_retention",
+		FinishReason: "tool_calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", ToolUseEventIds: toolUseIDs[:1],
+		},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("incomplete Tool retention error = %v; want FailedPrecondition", err)
+	}
+	var ends int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`,
+		sessionID, threadID).Scan(&ends); err != nil {
+		t.Fatalf("count Request Ends: %v", err)
+	}
+	if ends != 0 {
+		t.Fatalf("Request Ends = %d; want zero after incomplete retention", ends)
 	}
 }
 

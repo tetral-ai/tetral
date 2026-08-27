@@ -17,7 +17,7 @@ import { NoopRuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/m
 import type {
 	RuntimeControlInputCommitResult,
 	RuntimeControlInputDeclaration,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/control-input.js";
 import {
 	validateAcceptAgentMailRequest,
 	validateAcceptInputRequest,

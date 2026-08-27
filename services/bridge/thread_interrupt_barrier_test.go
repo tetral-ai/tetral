@@ -408,7 +408,10 @@ func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *te
 			ended, err := bridgeStore.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_tool_interrupt_end_" + suffix, ModelRequestId: modelRequestID,
 				FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
-				ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
+				ProviderContextRetention: &bridgev1.ProviderContextRetention{
+					Disposition:     "interrupted",
+					ToolUseEventIds: []string{toolUseID},
+				},
 				InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
 					RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(leased[0]),
 				},

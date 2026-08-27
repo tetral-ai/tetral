@@ -1,12 +1,10 @@
 /**
- * This module owns the ordered hot message view and rewrite generation for one
- * Runtime thread. It guards copy-on-read ownership, append-versus-rewrite cursor
- * semantics, and compaction preservation above a sequence boundary. ThreadState
- * and ThreadLoop call it after write acknowledgements and while hydrating already
- * durable cold state; SessionManager supplies preload data, and this module performs
- * only in-memory message-list transformations.
- *
  * @packageDocumentation
+ * Ordered provider-visible hot context for one Runtime thread: sealed entries,
+ * one optional open Assistant draft and an immutable child prefix. Cold preload
+ * rebuilds it from durable projections; ThreadLoop mutates it only after the
+ * owning write is durably acknowledged. It owns no turn lifecycle decisions,
+ * dispatch, Runtime write identities, policy or external I/O.
  */
 
 import type {
@@ -24,10 +22,9 @@ export interface ThreadContextPrefix {
 	readonly entries: readonly RuntimeContextEntry[];
 }
 
-// ContextManager owns sealed provider context plus one optional open Assistant draft. New writes are
-// projected only after durable ACK; cold hydration may append projections already read
-// from durable state. These methods carry the hot mutation, but the discipline
-// permitting each one lives at the ThreadLoop/SessionManager call site:
+// New writes are projected only after durable ACK; cold hydration may install
+// projections already read from durable state. The write discipline lives at
+// the ThreadLoop/SessionManager call site:
 //
 // | hot mutation                       | gated on durable ACK            |
 // | ---------------------------------- | ------------------------------- |

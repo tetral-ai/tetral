@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeContextEntry } from "../../../src/contracts/runtime.js";
-import type { ThreadTurnLoadFacts } from "../../../src/thread-loop/thread-turn-checkpoint.js";
+import type { ThreadTurnLoadFacts } from "../../../src/thread-loop/turn/load.js";
+import { parseThreadTurnCheckpoint } from "../../../src/thread-loop/turn/checkpoint.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-	parseThreadTurnCheckpoint,
+} from "../../../src/thread-loop/turn/load.js";
+import { deriveThreadTurnSnapshot } from "../../../src/thread-loop/turn/reducer.js";
+import {
 	projectFailedRequestProviderContext,
 	projectFailedRequestsProviderContext,
-} from "../../../src/thread-loop/thread-turn-checkpoint.js";
+} from "../../../src/thread-loop/turn/provider-context.js";
 
 function entry(
 	messageSequence: number,
@@ -141,6 +144,208 @@ describe("cold Thread-turn reconstruction", () => {
 				terminalResult: { outcome: "success" },
 			},
 		]);
+	});
+
+	test("durable extraction covers the six stable Thread-turn states", () => {
+		const run = {
+			eventId: "evt_run",
+			eventSequence: 1,
+			type: "session.status_running",
+		} as const;
+		const start = {
+			eventId: "evt_start",
+			eventSequence: 2,
+			type: "span.model_request_start",
+			modelRequestId: "req_1",
+			requestStart: {
+				requestKind: "agent_provider_request",
+				contextThroughMessageSequence: 1,
+			},
+		} as const;
+		const toolUse = {
+			eventId: "evt_tool",
+			eventSequence: 3,
+			type: "agent.tool_use",
+			modelRequestId: "req_1",
+			toolUse: { modelToolCallId: "call_1", toolName: "Read" },
+		} as const;
+		const completedResult = {
+			eventId: "evt_result",
+			eventSequence: 4,
+			type: "agent.tool_result",
+			modelRequestId: "req_1",
+			toolResult: {
+				modelToolCallId: "call_1",
+				toolName: "Read",
+				outcome: "completed",
+			},
+		} as const;
+		const requestEnd = (
+			eventSequence: number,
+			options: {
+				readonly isError?: boolean;
+				readonly reschedule?: {
+					readonly attempt: number;
+					readonly effectiveDeadline: string;
+					readonly providerAttempts: number;
+					readonly compactionAttempts: number;
+				};
+				readonly toolUseEventIds?: string[];
+			} = {},
+		): ThreadTurnLoadFacts["events"][number] =>
+			({
+				eventId: `evt_end_${eventSequence}`,
+				eventSequence,
+				type: "span.model_request_end",
+				modelRequestId: "req_1",
+				requestEnd: {
+					requestStartEventId: "evt_start",
+					isError: options.isError ?? false,
+					providerContextRetention: {
+						disposition: options.reschedule === undefined ? "completed" : "rescheduled",
+						toolUseEventIds: options.toolUseEventIds ?? [],
+						repairEventIds: [] as string[],
+					},
+					...(options.reschedule === undefined
+						? {}
+						: { reschedule: options.reschedule }),
+				},
+			});
+		const cases: readonly {
+			readonly name: string;
+			readonly facts: ThreadTurnLoadFacts;
+			readonly pendingSandboxExecutions?: readonly {
+				readonly toolUseEventId: string;
+				readonly modelRequestId: string;
+				readonly modelToolCallId: string;
+				readonly toolName: string;
+			}[];
+			readonly state: ReturnType<
+				typeof deriveThreadTurnSnapshot
+			>["state"]["state"];
+			readonly nextStep: ReturnType<
+				typeof deriveThreadTurnSnapshot
+			>["nextStep"]["action"];
+		}[] = [
+			{
+				name: "open request",
+				facts: { events: [run, start], internalRepairs: [] },
+				state: "request_open",
+				nextStep: "await_request_end",
+			},
+			{
+				name: "unresolved Tool",
+				facts: {
+					events: [
+						run,
+						start,
+						toolUse,
+						requestEnd(4, { toolUseEventIds: ["evt_tool"] }),
+					],
+					internalRepairs: [],
+				},
+				pendingSandboxExecutions: [
+					{
+						toolUseEventId: "evt_tool",
+						modelRequestId: "req_1",
+						modelToolCallId: "call_1",
+						toolName: "Read",
+					},
+				],
+				state: "waiting_for_tool_results",
+				nextStep: "resume_tool_routes",
+			},
+			{
+				name: "completed Tool pair",
+				facts: {
+					events: [
+						run,
+						start,
+						toolUse,
+						completedResult,
+						requestEnd(5, { toolUseEventIds: ["evt_tool"] }),
+					],
+					internalRepairs: [],
+				},
+				state: "ready_to_request",
+				nextStep: "prepare_next_request",
+			},
+			{
+				name: "reschedule",
+				facts: {
+					events: [
+						run,
+						start,
+						requestEnd(3, {
+							isError: true,
+							reschedule: {
+								attempt: 1,
+								effectiveDeadline: "2026-08-26T00:00:00.000Z",
+								providerAttempts: 1,
+								compactionAttempts: 0,
+							},
+						}),
+					],
+					internalRepairs: [],
+				},
+				state: "request_sealed",
+				nextStep: "apply_request_retry_or_reschedule",
+			},
+			{
+				name: "interrupt",
+				facts: {
+					events: [
+						run,
+						start,
+						{ eventId: "evt_interrupt", eventSequence: 3, type: "user.interrupt" },
+					],
+					internalRepairs: [],
+				},
+				state: "request_open",
+				nextStep: "close_interrupted",
+			},
+			{
+				name: "idle",
+				facts: {
+					events: [
+						run,
+						start,
+						requestEnd(3),
+						{
+							eventId: "evt_idle",
+							eventSequence: 4,
+							type: "session.status_idle",
+							idle: { stopReason: "end_turn" },
+						},
+					],
+					internalRepairs: [],
+				},
+				state: "idle",
+				nextStep: "await_input",
+			},
+		];
+
+		for (const testCase of cases) {
+			const checkpoint = extractThreadTurnCheckpoint({
+				contextEntries: [entry(1, "user", "go")],
+				facts: testCase.facts,
+			});
+			const routes = extractColdThreadToolRouteView({
+				checkpoint,
+				pendingToolUses: [],
+				pendingSandboxExecutions:
+					testCase.pendingSandboxExecutions ?? [],
+			});
+			const snapshot = deriveThreadTurnSnapshot(
+				checkpoint,
+				routes,
+				[],
+				{ hasPendingAttachments: false },
+			);
+			expect(snapshot.state.state, testCase.name).toBe(testCase.state);
+			expect(snapshot.nextStep.action, testCase.name).toBe(testCase.nextStep);
+			expect(snapshot).not.toHaveProperty("dispatch");
+		}
 	});
 
 	test("cold pending Tool route is derived from the dedicated active fact", () => {

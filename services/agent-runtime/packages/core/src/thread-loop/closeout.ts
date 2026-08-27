@@ -1,6 +1,6 @@
 /**
  * Builds sub-agent completion declarations and validates durable FinishIdle
- * acknowledgements. ThreadLoop selects the typed closeout action; this module owns
+ * acknowledgements. ThreadLoop executes the typed closeout next step; this module owns
  * failed-run, FinishIdle, the narrow runtime-termination request, and typed-result execution.
  *
  * @packageDocumentation
@@ -114,7 +114,7 @@ export async function closeFailedThreadRun(
 			? result.error
 			: runtimeFailureFromProviderError(result.error);
 	const reviewerRequest =
-		session.state.threadTurnReduction().checkpoint.request?.requestKind ===
+		session.state.threadTurnTransition().checkpoint.request?.requestKind ===
 		"approval_reviewer";
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
 		if (!reviewerRequest) {
@@ -156,6 +156,8 @@ export async function closeFailedThreadRun(
 	const pendingTools = unfinishedToolUseEventIds(session).map(
 		(toolUseEventId) => ({ toolUseEventId }),
 	);
+	const modelRequestId =
+		session.state.threadTurnTransition().checkpoint.request?.modelRequestId;
 	const termination = await commitRuntimeTerminationWithRetry(options, {
 		workspaceId: session.identity.workspaceId,
 		sessionId: session.identity.sessionId,
@@ -177,6 +179,13 @@ export async function closeFailedThreadRun(
 		session.state.clearAfterCustodyHandoff();
 		return { type: "interrupted", discardHotState: true };
 	}
+	observeRuntimeTerminalSettlement(
+		options,
+		session,
+		failure,
+		modelRequestId,
+		termination.type,
+	);
 	session.state.applyThreadTurnFact({
 		fact: "terminal_closeout_committed",
 		eventId: termination.closeoutEventId,
@@ -243,6 +252,7 @@ export async function appendIdleEvent(
 			}),
 		};
 	}
+	const transitionOwner = session.state.threadTurnTransition();
 	let result: SessionEventWriterFinishIdleResult;
 	let declaredCompletionMail: string | undefined;
 	try {
@@ -296,22 +306,14 @@ export async function appendIdleEvent(
 	if (!validated.ok) {
 		return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
 	}
-	const currentAction = session.state.threadTurnReduction().action;
-	const committedRequiresActionTargets =
-		stopReason.type === "requires_action" &&
-		currentAction.action === "finish_idle" &&
-		currentAction.stopReason.type === "requires_action"
-			? currentAction.stopReason.eventIds
-			: undefined;
-	session.state.applyThreadTurnFact({
+	session.state.applyFinishIdleFact(transitionOwner, {
 		fact: "finish_idle_committed",
 		eventId: validated.eventId,
 		stopReason:
 			stopReason.type === "requires_action"
 				? {
 						type: "requires_action",
-						eventIds:
-							committedRequiresActionTargets ?? stopReason.event_ids,
+						eventIds: stopReason.event_ids,
 					}
 				: stopReason.type === "retries_exhausted"
 					? {
@@ -377,7 +379,7 @@ export async function closeFailedRunDurably(
 			}
 			const durableTurnId = closeout.durableTurnId;
 			if (durableTurnId === undefined) {
-				const checkpoint = session.state.threadTurnReduction().checkpoint;
+				const checkpoint = session.state.threadTurnTransition().checkpoint;
 				if (checkpoint.terminalCloseout !== undefined) {
 					return { type: "landed", disposition: "terminal" };
 				}
@@ -395,6 +397,8 @@ export async function closeFailedRunDurably(
 			const pendingTools = unfinishedToolUseEventIds(session).map(
 				(toolUseEventId) => ({ toolUseEventId }),
 			);
+			const modelRequestId =
+				session.state.threadTurnTransition().checkpoint.request?.modelRequestId;
 			const termination = await commitRuntimeTerminationWithRetry(options, {
 				workspaceId: session.identity.workspaceId,
 				sessionId: session.identity.sessionId,
@@ -418,6 +422,13 @@ export async function closeFailedRunDurably(
 					}),
 				};
 			}
+			observeRuntimeTerminalSettlement(
+				options,
+				session,
+				failure,
+				modelRequestId,
+				termination.type,
+			);
 			session.state.applyThreadTurnFact({
 				fact: "terminal_closeout_committed",
 				eventId: termination.closeoutEventId,
@@ -513,7 +524,7 @@ export async function closeFailedRunDurably(
 			return failedRunCloseoutFailure(validatedIdle.error);
 		}
 		if (
-			session.state.threadTurnReduction().checkpoint.idleCloseout?.eventId !==
+			session.state.threadTurnTransition().checkpoint.idleCloseout?.eventId !==
 			validatedIdle.eventId
 		) {
 			session.state.applyThreadTurnFact({
@@ -525,6 +536,34 @@ export async function closeFailedRunDurably(
 		return { type: "landed", disposition: "continuation" };
 	} finally {
 		observationController?.abort();
+	}
+}
+
+function observeRuntimeTerminalSettlement(
+	options: ThreadLoopRuntimeOptions,
+	session: ThreadRuntime,
+	failure: RuntimeFailure,
+	modelRequestId: string | undefined,
+	settlementOutcome: "committed" | "duplicate",
+): void {
+	if (
+		failure.type !== "runtime" ||
+		failure.code !== "runtime_invalid_sequence" ||
+		failure.reason !== "runtime_contract_validation" ||
+		failure.retryStatus?.type !== "terminal"
+	) {
+		return;
+	}
+	try {
+		options.recordRuntimeTerminalSettlement?.({
+			workspaceId: session.identity.workspaceId,
+			sessionId: session.identity.sessionId,
+			sessionThreadId: session.identity.sessionThreadId,
+			...(modelRequestId !== undefined ? { modelRequestId } : {}),
+			settlementOutcome,
+		});
+	} catch {
+		// Observability cannot participate in terminal settlement custody.
 	}
 }
 
@@ -888,7 +927,7 @@ function finalAssistantText(entries: readonly RuntimeContextEntry[]): string {
 function unfinishedToolUseEventIds(runtimeThread: ThreadRuntime): string[] {
 	return (
 		runtimeThread.state
-			.threadTurnReduction()
+			.threadTurnTransition()
 			.checkpoint.request?.toolMembers.flatMap((member) =>
 				member.memberKind === "public_tool_use" &&
 				member.terminalResult === undefined

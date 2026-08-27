@@ -19,11 +19,13 @@ import type { RuntimeThreadIdentity } from "../thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
+	RuntimeThreadAddressState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
 	RuntimeConfigPatchState,
 	RuntimePreloadedSandboxExecutionState,
-	RuntimeThreadAddressState,
-} from "../thread-loop/thread-state.js";
-import type { ThreadTurnLoadFacts } from "../thread-loop/thread-turn-checkpoint.js";
+} from "../thread-loop/input/preload.js";
+import type { ThreadTurnLoadFacts } from "../thread-loop/turn/load.js";
 
 /** Operations through which session orchestration cold-loads and commits thread state. */
 export interface ContextLoader {

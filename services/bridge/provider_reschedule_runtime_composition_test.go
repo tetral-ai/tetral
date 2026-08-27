@@ -83,7 +83,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 	}
 
 	appendMessage("idem_provider_timeout_first", "survive semantic timeout exhaustion")
-	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 	waitForProviderFailureFacts(t, admin, sessionID, 2, "rescheduling", process)
 	select {
 	case <-firstCapturePending:
@@ -92,7 +92,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 	}
 
 	appendMessage("idem_provider_timeout_second", "continue after the failed turn")
-	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 	close(releaseFirstCapture)
 	waitForProviderFailureFacts(t, admin, sessionID, 3, "idle", process)
 	result := process.close(t)
@@ -181,7 +181,7 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	if err != nil || len(appended.Data) != 1 {
 		t.Fatalf("append semantic Tool route input = %#v/%v", appended, err)
 	}
-	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -201,11 +201,6 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	if err != nil || state.ProviderInvocations != 1 || state.ToolInvocations != 1 {
 		t.Fatalf("pending semantic Tool state = %+v/%v; process=%s", state, err, process.output.String())
 	}
-	time.Sleep(150 * time.Millisecond)
-	state, err = readProviderFailureRuntimeState(process.statePath)
-	if err != nil || state.ProviderInvocations != 1 {
-		t.Fatalf("provider retried before Tool settlement: state=%+v err=%v", state, err)
-	}
 	if err := os.WriteFile(process.toolReleasePath, []byte("release"), 0o600); err != nil {
 		t.Fatalf("release semantic Tool execution: %v", err)
 	}
@@ -214,9 +209,9 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	if captureErr := <-captureSettled; captureErr != nil {
 		t.Fatalf("settle semantic Tool output capture: %v", captureErr)
 	}
-	if result.ProviderInvocations != 3 || result.ToolInvocations != 1 || len(result.ProviderRequestContexts) != 3 {
-		t.Fatalf("semantic Tool provider/tool/context counts = %d/%d/%d; want 3/1/3",
-			result.ProviderInvocations, result.ToolInvocations, len(result.ProviderRequestContexts))
+	if result.ProviderInvocations != 3 || result.ToolInvocations != 1 || len(result.ProviderRequestContexts) != 3 || result.ProviderStartedBeforeToolRelease {
+		t.Fatalf("semantic Tool provider/tool/context/early-start = %d/%d/%d/%t; want 3/1/3/false",
+			result.ProviderInvocations, result.ToolInvocations, len(result.ProviderRequestContexts), result.ProviderStartedBeforeToolRelease)
 	}
 	const callID = "call_semantic_tool_route"
 	for requestIndex, providerContext := range result.ProviderRequestContexts[1:] {
@@ -328,7 +323,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			}
 
 			appendMessage("idem_provider_failure_first_"+suffix, "fail only this provider turn")
-			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, podUID)
+			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", podUID)
 			select {
 			case <-firstCapturePending:
 			case <-time.After(10 * time.Second):
@@ -342,6 +337,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			waitForProviderFailureFacts(t, admin, sessionID, firstTurnEnds, "idle", process)
 			repairCredential()
 			if testCase.scenario == "invalid_openai_oauth" {
+				waitForProviderFailureIdleReceipt(t, process, 1)
 				prior := process.close(t)
 				priorProviderInvocations = prior.ProviderInvocations
 				priorFinishIdleInvocations = prior.FinishIdleInvocations
@@ -370,8 +366,13 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					replacementBindingID, replacementGeneration, activePodUID, testCase.scenario)
 			}
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
-			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, activePodUID)
+			deliverAttachmentRuntimeInput(t, runtimeDB, admin, process.port, sessionID, "runtime-pod-0", activePodUID)
 			waitForProviderFailureFacts(t, admin, sessionID, testCase.wantRequestEnds, "idle", process)
+			processFinishIdle := testCase.wantFinishIdle
+			if testCase.scenario == "invalid_openai_oauth" {
+				processFinishIdle = 1
+			}
+			waitForProviderFailureIdleReceipt(t, process, processFinishIdle)
 			result := process.close(t)
 			if captureErr := <-capturesSettled; captureErr != nil {
 				t.Fatalf("settle %s output captures: %v", testCase.scenario, captureErr)
@@ -530,9 +531,12 @@ func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAd
 }
 
 type providerFailureRuntimeState struct {
-	ProviderInvocations     int      `json:"providerInvocations"`
-	ToolInvocations         int      `json:"toolInvocations"`
-	ProviderRequestContexts []string `json:"providerRequestContexts"`
+	ProviderInvocations              int      `json:"providerInvocations"`
+	ToolInvocations                  int      `json:"toolInvocations"`
+	FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+	FinishIdleResult                 string   `json:"finishIdleResult"`
+	ProviderRequestContexts          []string `json:"providerRequestContexts"`
+	ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 }
 
 func readProviderFailureRuntimeState(path string) (providerFailureRuntimeState, error) {
@@ -543,6 +547,20 @@ func readProviderFailureRuntimeState(path string) (providerFailureRuntimeState, 
 	}
 	err = json.Unmarshal(raw, &state)
 	return state, err
+}
+
+func waitForProviderFailureIdleReceipt(t *testing.T, process *providerFailureRuntimeProcess, minimumInvocations int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := readProviderFailureRuntimeState(process.statePath)
+		if err == nil && state.FinishIdleInvocations >= minimumInvocations && state.FinishIdleResult == "committed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	state, err := readProviderFailureRuntimeState(process.statePath)
+	t.Fatalf("provider failure FinishIdle receipt = %+v/%v; want at least %d committed invocation(s)", state, err, minimumInvocations)
 }
 
 func seedProviderFailureCredential(t *testing.T, runtimeDB, admin *sql.DB, sessionID, scenario string) func() {
@@ -669,15 +687,16 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 }
 
 func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
-	ProviderInvocations      int      `json:"providerInvocations"`
-	ToolInvocations          int      `json:"toolInvocations"`
-	FinishIdleInvocations    int      `json:"finishIdleInvocations"`
-	FinishIdleResult         string   `json:"finishIdleResult"`
-	SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
-	OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
-	PlatformKeySelections    []string `json:"platformKeySelections"`
-	PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
-	ProviderRequestContexts  []string `json:"providerRequestContexts"`
+	ProviderInvocations              int      `json:"providerInvocations"`
+	ToolInvocations                  int      `json:"toolInvocations"`
+	FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+	FinishIdleResult                 string   `json:"finishIdleResult"`
+	SensitiveLogLeak                 bool     `json:"sensitiveLogLeak"`
+	OAuthAccessTokenConsumed         bool     `json:"oauthAccessTokenConsumed"`
+	PlatformKeySelections            []string `json:"platformKeySelections"`
+	PlatformKeyQuarantines           []string `json:"platformKeyQuarantines"`
+	ProviderRequestContexts          []string `json:"providerRequestContexts"`
+	ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 } {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
@@ -687,15 +706,16 @@ func (p *providerFailureRuntimeProcess) close(t *testing.T) struct {
 		t.Fatalf("wait provider failure composition: %v: %s", err, p.output.String())
 	}
 	var result struct {
-		ProviderInvocations      int      `json:"providerInvocations"`
-		ToolInvocations          int      `json:"toolInvocations"`
-		FinishIdleInvocations    int      `json:"finishIdleInvocations"`
-		FinishIdleResult         string   `json:"finishIdleResult"`
-		SensitiveLogLeak         bool     `json:"sensitiveLogLeak"`
-		OAuthAccessTokenConsumed bool     `json:"oauthAccessTokenConsumed"`
-		PlatformKeySelections    []string `json:"platformKeySelections"`
-		PlatformKeyQuarantines   []string `json:"platformKeyQuarantines"`
-		ProviderRequestContexts  []string `json:"providerRequestContexts"`
+		ProviderInvocations              int      `json:"providerInvocations"`
+		ToolInvocations                  int      `json:"toolInvocations"`
+		FinishIdleInvocations            int      `json:"finishIdleInvocations"`
+		FinishIdleResult                 string   `json:"finishIdleResult"`
+		SensitiveLogLeak                 bool     `json:"sensitiveLogLeak"`
+		OAuthAccessTokenConsumed         bool     `json:"oauthAccessTokenConsumed"`
+		PlatformKeySelections            []string `json:"platformKeySelections"`
+		PlatformKeyQuarantines           []string `json:"platformKeyQuarantines"`
+		ProviderRequestContexts          []string `json:"providerRequestContexts"`
+		ProviderStartedBeforeToolRelease bool     `json:"providerStartedBeforeToolRelease"`
 	}
 	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
 		t.Fatalf("decode provider failure composition: %v: %s", err, p.output.String())
@@ -725,16 +745,20 @@ func waitForPendingOutputCapture(db *sql.DB, sessionID, excludedWriteID string) 
 }
 
 type providerRescheduleRecoveryComposition struct {
-	ResultType          string          `json:"resultType"`
-	ProviderInvocations int             `json:"providerInvocations"`
-	ExecutorInvocations int             `json:"executorInvocations"`
-	WaitedMS            []int64         `json:"waitedMs"`
-	ProviderContext     json.RawMessage `json:"providerContext"`
-	RecoveredTurnEvents []string        `json:"recoveredTurnEventIds"`
-	PreloadResult       json.RawMessage `json:"preloadResult"`
-	LastSnapshot        json.RawMessage `json:"lastSnapshot"`
-	TerminationResults  json.RawMessage `json:"terminationResults"`
-	Command             struct {
+	ResultType                    string          `json:"resultType"`
+	ProviderInvocations           int             `json:"providerInvocations"`
+	ExecutorInvocations           int             `json:"executorInvocations"`
+	SandboxAcceptanceInvocations  int             `json:"sandboxAcceptanceInvocations"`
+	SandboxObservationInvocations int             `json:"sandboxObservationInvocations"`
+	WaitedMS                      []int64         `json:"waitedMs"`
+	AcceptedInputBarrierEntered   bool            `json:"acceptedInputCommitBarrierEntered"`
+	AcceptedInputBarrierReleased  bool            `json:"acceptedInputCommitBarrierReleased"`
+	ProviderContext               json.RawMessage `json:"providerContext"`
+	RecoveredTurnEvents           []string        `json:"recoveredTurnEventIds"`
+	PreloadResult                 json.RawMessage `json:"preloadResult"`
+	LastSnapshot                  json.RawMessage `json:"lastSnapshot"`
+	TerminationResults            json.RawMessage `json:"terminationResults"`
+	Command                       struct {
 		WorkspaceID       string `json:"workspaceId"`
 		SessionID         string `json:"sessionId"`
 		SessionThreadID   string `json:"sessionThreadId"`
@@ -779,7 +803,12 @@ func (c *responseLosingRecoveryCommandClient) RecoverThread(
 	return response, err
 }
 
-func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, threadID, podUID string, now time.Time) *providerRecoveryProcess {
+func startProviderRecoveryRuntime(
+	t *testing.T,
+	bridgeAddress, sessionID, threadID, podUID string,
+	now time.Time,
+	waitForSandboxObservation bool,
+) *providerRecoveryProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -793,6 +822,7 @@ func startProviderRecoveryRuntime(t *testing.T, bridgeAddress, sessionID, thread
 		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID,
 		"now": now.Format(time.RFC3339Nano), "readyPath": readyPath,
 		"recoveryResultPath": process.resultPath, "closePath": process.closePath,
+		"waitForSandboxObservation": waitForSandboxObservation,
 	})
 	if err != nil {
 		t.Fatalf("encode serving recovery composition: %v", err)
@@ -848,7 +878,7 @@ func (p *providerRecoveryProcess) recoveryResult(t *testing.T) providerReschedul
 	return providerRescheduleRecoveryComposition{}
 }
 
-func (p *providerRecoveryProcess) close(t *testing.T) {
+func (p *providerRecoveryProcess) close(t *testing.T) providerRescheduleRecoveryComposition {
 	t.Helper()
 	if err := os.WriteFile(p.closePath, nil, 0o600); err != nil {
 		t.Fatalf("signal serving recovery composition close: %v", err)
@@ -856,6 +886,11 @@ func (p *providerRecoveryProcess) close(t *testing.T) {
 	if err := p.command.Wait(); err != nil {
 		t.Fatalf("close serving recovery composition: %v: %s", err, p.output.String())
 	}
+	var result providerRescheduleRecoveryComposition
+	if err := json.Unmarshal(p.output.Bytes(), &result); err != nil {
+		t.Fatalf("decode serving recovery result: %v: %s", err, p.output.String())
+	}
+	return result
 }
 
 func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t *testing.T) {
@@ -1198,7 +1233,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		_ = listener.Close()
 	})
 	runtimeProcess := startProviderRecoveryRuntime(
-		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(250*time.Millisecond),
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(250*time.Millisecond), true,
 	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	replacement := enginekubernetes.BindingCandidate{
@@ -1276,41 +1311,150 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if recoveryQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("replayed recovery Queue status = %q; want acked", recoveryQueueStatus)
 	}
-	runtimeProcess.close(t)
-	newBindingID := preloaded.Command.BindingID
-	newBindingGeneration := preloaded.Command.BindingGeneration
-	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
-	settleSandboxExecutionForHotReceiptProof(t, runtimeDB, admin, newScope, toolUse.GetCommitted().GetEventId(),
-		`{"status":"success","result":{"content":"original result"}}`)
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
-		newScope,
-		bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "original result"),
-	))
-	if err != nil || settled.GetCommitted() == nil {
-		t.Fatalf("settle original Tool Result through replacement Runtime identity: response=%#v err=%v", settled, err)
+	eventsService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)))
+	appended, err := eventsService.AppendClientEvents(
+		context.Background(), workspace.DefaultID, sessionID,
+		"idem_provider_reschedule_recovered_input",
+		sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{
+			Type: sessionevent.EventTypeUserMessage,
+			Content: []sessionevent.ContentBlock{{
+				Type: sessionevent.ContentBlockTypeText,
+				Text: "continue after recovered tool settlement",
+			}},
+		}}},
+	)
+	if err != nil || len(appended.Data) != 1 {
+		t.Fatalf("append ordinary input behind recovered Tool = %#v/%v", appended, err)
 	}
-
+	deliverAttachmentRuntimeInput(t, runtimeDB, admin, runtimeProcess.port, sessionID, replacement.PodName, newPodUID)
+	ordinaryCommitDeadline := time.Now().Add(5 * time.Second)
+	ordinaryInputStatus := ""
+	for {
+		if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+			WHERE workspace_id='default' AND session_id=$1 AND input_kind='messages'
+			ORDER BY created_at DESC LIMIT 1`, sessionID).Scan(&ordinaryInputStatus); err != nil {
+			t.Fatalf("read ordinary input admission behind unresolved recovered Tool: %v", err)
+		}
+		if ordinaryInputStatus == "committed" {
+			break
+		}
+		if time.Now().After(ordinaryCommitDeadline) {
+			t.Fatalf("ordinary input behind unresolved recovered Tool remained %s; want committed; recovery=%+v runtime=%s", ordinaryInputStatus, preloaded.Command, runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var startsBeforeSettlement, resultsBeforeSettlement, durableOrdinaryInputs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1
+		  AND input_kind='messages' AND status='committed')`, sessionID).
+		Scan(&startsBeforeSettlement, &resultsBeforeSettlement, &durableOrdinaryInputs); err != nil {
+		t.Fatalf("read ordinary input behind unresolved recovered Tool: %v", err)
+	}
+	if startsBeforeSettlement != 503 || resultsBeforeSettlement != 0 || durableOrdinaryInputs != 1 {
+		t.Fatalf("pre-settlement recovered progress starts/results/durable-inputs/status = %d/%d/%d/%s; want 503/0/1/live",
+			startsBeforeSettlement, resultsBeforeSettlement, durableOrdinaryInputs, ordinaryInputStatus)
+	}
 	captureSettled := make(chan error, 1)
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, "evt_provider_reschedule_durable_turn", 1, "staged")
 	}()
-	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": listener.Addr().String(),
-		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
-		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
-	})
-	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
+	newScope := bridgeAPIScope(
+		sessionID, threadID, preloaded.Command.BindingID, preloaded.Command.BindingGeneration, newPodUID,
+	)
+	settleSandboxExecutionForHotReceiptProof(t, runtimeDB, admin, newScope, toolUse.GetCommitted().GetEventId(),
+		`{"status":"success","result":{"content":"original result"}}`)
+	var sandboxQueueStatus, sandboxQueueErrorKind, sandboxQueueErrorMessage string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, COALESCE(last_error_kind,''), COALESCE(last_error_message,'')
+		FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND partition_key=$2
+		ORDER BY created_at DESC LIMIT 1`, queue.KindSandboxToolExecute,
+		queue.FormatSandboxExecutionPartitionKey(workspace.DefaultID, sessionID, threadID, toolUse.GetCommitted().GetEventId())).Scan(
+		&sandboxQueueStatus, &sandboxQueueErrorKind, &sandboxQueueErrorMessage,
+	); err != nil {
+		t.Fatalf("read recovered Sandbox execution settlement: %v", err)
+	}
+	if sandboxQueueStatus != queue.StatusAcknowledged {
+		t.Fatalf("recovered Sandbox execution = %s/%s/%s; want acknowledged", sandboxQueueStatus, sandboxQueueErrorKind, sandboxQueueErrorMessage)
+	}
+	var sandboxExecutionState, sandboxResultJSON string
+	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, COALESCE(result_json,'')
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(&sandboxExecutionState, &sandboxResultJSON); err != nil {
+		t.Fatalf("read recovered Sandbox result: %v", err)
+	}
+	if sandboxExecutionState != "terminal_unconsumed" || sandboxResultJSON == "" {
+		t.Fatalf("recovered Sandbox result = %s/%s; want terminal_unconsumed payload", sandboxExecutionState, sandboxResultJSON)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	observedStarts, observedEnds, observedToolResults := 0, 0, 0
+	for {
+		var starts, ends, toolResults int
+		var threadStatus string
+		err := admin.QueryRowContext(context.Background(), `SELECT
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_start'),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'),
+			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result'),
+			(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2)`,
+			sessionID, threadID).Scan(&starts, &ends, &toolResults, &threadStatus)
+		if err != nil {
+			t.Fatalf("read resident recovery progress: %v", err)
+		}
+		if toolResults == 1 && threadStatus == "idle" {
+			observedStarts, observedEnds, observedToolResults = starts, ends, toolResults
+			break
+		}
+		if time.Now().After(deadline) {
+			var sessionErrors int
+			var latestSessionError, latestEndKind, routeStatus string
+			if err := admin.QueryRowContext(context.Background(), `SELECT
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+				COALESCE((SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id=$1
+				  AND type='session.error' ORDER BY sequence DESC LIMIT 1), ''),
+				COALESCE((SELECT payload_json::jsonb->>'error_kind' FROM session_events
+				  WHERE workspace_id='default' AND session_id=$1 AND type='span.model_request_end'
+				  ORDER BY sequence DESC LIMIT 1), ''),
+				(SELECT status FROM session_pending_tool_uses WHERE workspace_id='default' AND session_id=$1
+				  AND session_thread_id=$2 AND tool_use_event_id=$3)`,
+				sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(
+				&sessionErrors, &latestSessionError, &latestEndKind, &routeStatus,
+			); err != nil {
+				t.Fatalf("read resident recovery diagnostics: %v", err)
+			}
+			t.Fatalf("resident recovery did not finish: starts/ends/results/status=%d/%d/%d/%s input=%s session-errors=%d latest-error=%s latest-end-kind=%s route=%s output=%s",
+				starts, ends, toolResults, threadStatus, ordinaryInputStatus, sessionErrors, latestSessionError, latestEndKind, routeStatus, runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	result := runtimeProcess.close(t)
+	if observedStarts != 504 || observedEnds != 504 || observedToolResults != 1 {
+		t.Fatalf("resident recovery stopped before provider retry: starts/ends/results=%d/%d/%d runtime=%+v",
+			observedStarts, observedEnds, observedToolResults, result)
+	}
+	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 ||
+		result.SandboxAcceptanceInvocations != 0 || result.SandboxObservationInvocations != 1 {
 		t.Fatalf("replacement Runtime recovery = %+v", result)
 	}
 	if err := <-captureSettled; err != nil {
 		t.Fatalf("stage provider reschedule closeout capture: %v", err)
 	}
-	if len(result.WaitedMS) == 0 || result.WaitedMS[0] != 500 {
-		t.Fatalf("replacement Runtime accepted-deadline wait = %v; want first wait 500ms", result.WaitedMS)
+	semanticWaits := 0
+	for _, waited := range result.WaitedMS {
+		if waited == 750 {
+			semanticWaits++
+		}
+	}
+	if semanticWaits != 1 {
+		t.Fatalf("replacement Runtime accepted-deadline waits = %v; want one 750ms semantic wait", result.WaitedMS)
+	}
+	if !result.AcceptedInputBarrierEntered || !result.AcceptedInputBarrierReleased {
+		t.Fatalf("accepted-input response-loss barrier entered/released = %t/%t; want true/true",
+			result.AcceptedInputBarrierEntered, result.AcceptedInputBarrierReleased)
 	}
 	providerContext := string(result.ProviderContext)
-	expectedProviderContext := `[{"role":1,"content":[{"text":{"text":"read the original file"}}]},{"role":2,"content":[{"toolCall":{"modelToolCallId":"call_provider_reschedule_original","name":"Read","inputJson":"{\"path\":\"original.txt\"}"}},{"toolResult":{"modelToolCallId":"call_provider_reschedule_original","completed":{"outputJson":"{\"text\":\"original result\"}"}}}]}]`
+	expectedProviderContext := `[{"role":1,"content":[{"text":{"text":"read the original file"}}]},{"role":2,"content":[{"toolCall":{"modelToolCallId":"call_provider_reschedule_original","name":"Read","inputJson":"{\"path\":\"original.txt\"}"}},{"toolResult":{"modelToolCallId":"call_provider_reschedule_original","completed":{"outputJson":"{\"text\":\"status: success\\ncontent:\\noriginal result\"}"}}}]},{"role":1,"content":[{"text":{"text":"continue after recovered tool settlement"}}]}]`
 	if providerContext != expectedProviderContext {
 		t.Fatalf("recovered provider context did not preserve the exact narrow Tool pair: %s", providerContext)
 	}
@@ -1421,7 +1565,9 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		  AND type='session.status_rescheduled' ORDER BY sequence DESC LIMIT 1`, sessionID, threadID).Scan(&rescheduleEventID); err != nil {
 		t.Fatalf("read subagent reschedule recovery root: %v", err)
 	}
-	runtimeProcess := startProviderRecoveryRuntime(t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond))
+	runtimeProcess := startProviderRecoveryRuntime(
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond), false,
+	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port)
 	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
@@ -1445,26 +1591,18 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID || preloaded.ResultType != "preloaded" {
 		t.Fatalf("subagent recovery preload = %+v; want exact Queue-owned recovery", preloaded)
 	}
-	runtimeProcess.close(t)
-	newBindingID := preloaded.Command.BindingID
-	newBindingGeneration := preloaded.Command.BindingGeneration
 	captureSettled := make(chan error, 1)
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, durableTurnID, 1, "staged")
 	}()
-	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": listener.Addr().String(),
-		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
-		"now": acceptedAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
-	})
+	result := runtimeProcess.close(t)
 	if err := <-captureSettled; err != nil {
 		t.Fatalf("stage subagent reschedule closeout capture: %v", err)
 	}
 	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
 		t.Fatalf("replacement Runtime subagent recovery = %+v", result)
 	}
-	recoveredSnapshot := string(result.LastSnapshot)
+	recoveredSnapshot := string(preloaded.LastSnapshot)
 	if strings.Count(recoveredSnapshot, `"toolName":"spawn_agent"`) != 1 ||
 		strings.Count(recoveredSnapshot, `task_name: recovery-worker`) != 1 ||
 		!strings.Contains(recoveredSnapshot, childID) {

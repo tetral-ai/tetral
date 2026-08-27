@@ -33,9 +33,12 @@ import (
 )
 
 type taskNotificationRuntimeCompositionOutput struct {
-	Declaration  json.RawMessage `json:"declaration"`
-	AcceptResult json.RawMessage `json:"acceptResult"`
-	CommitResult json.RawMessage `json:"commitResult"`
+	Declaration         json.RawMessage   `json:"declaration"`
+	AcceptResult        json.RawMessage   `json:"acceptResult"`
+	CommitResult        json.RawMessage   `json:"commitResult"`
+	ProviderInvocations int               `json:"providerInvocations"`
+	RequestEndCount     int               `json:"requestEndCount"`
+	ProviderContexts    []json.RawMessage `json:"providerContexts"`
 }
 
 func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testing.T) {
@@ -195,7 +198,7 @@ type runningTaskNotificationRuntime struct {
 	port    int
 }
 
-func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, request *agentruntimev1.AcceptTaskNotificationRequest, bridgeAddress string) *runningTaskNotificationRuntime {
+func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, request *agentruntimev1.AcceptTaskNotificationRequest, bridgeAddress string, requestStartRace bool) *runningTaskNotificationRuntime {
 	t.Helper()
 	readyPath := t.TempDir() + "/runtime-ready.json"
 	input := map[string]any{
@@ -204,6 +207,7 @@ func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, req
 		"bindingId": request.GetBindingId(), "bindingGeneration": request.GetBindingGeneration(),
 		"targetPodUid": request.GetTargetPodUid(), "runtimeInputId": request.GetRuntimeInputId(),
 		"inputOrder": request.GetInputOrder(), "bridgeAddress": bridgeAddress, "readyPath": readyPath,
+		"requestStartRace": requestStartRace,
 	}
 	rawInput, err := json.Marshal(input)
 	if err != nil {
@@ -269,6 +273,36 @@ type taskNotificationLostACKStore struct {
 	mu          sync.Mutex
 	dropped     bool
 	declaration *bridgev1.CommitTaskNotificationResultRequest
+}
+
+type taskNotificationRequestStartBarrierStore struct {
+	BridgeAPIStore
+	mu         sync.Mutex
+	startCount int
+	entered    chan struct{}
+	release    chan struct{}
+}
+
+func (s *taskNotificationRequestStartBarrierStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
+	response, err := s.BridgeAPIStore.WriteEvent(ctx, request)
+	if err != nil || request.GetEventType() != "span.model_request_start" || (response.GetCommitted() == nil && response.GetDuplicate() == nil) {
+		return response, err
+	}
+	s.mu.Lock()
+	s.startCount++
+	hold := s.startCount == 1
+	if hold {
+		close(s.entered)
+	}
+	s.mu.Unlock()
+	if hold {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return response, nil
 }
 
 func (s *taskNotificationLostACKStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
@@ -395,7 +429,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		RuntimeInputId: inputID, InputOrder: 0,
 		NotificationJson: mustCanonicalTaskNotificationPayloadJSON(t, taskID, sourceID, "completed", storedResultJSON),
 	}
-	runningRuntime := startTaskNotificationRuntimeComposition(t, t.TempDir()+"/task-notification-live.json", runtimeRequest, bridgeListener.Addr().String())
+	runningRuntime := startTaskNotificationRuntimeComposition(t, t.TempDir()+"/task-notification-live.json", runtimeRequest, bridgeListener.Addr().String(), false)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
 		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
 		t.Fatalf("align production Runtime visibility snapshot: %v", err)
@@ -422,9 +456,10 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	var accepted struct {
 		OK      bool `json:"ok"`
 		Applied bool `json:"applied"`
+		Created bool `json:"created"`
 	}
-	if err := json.Unmarshal(composed.AcceptResult, &accepted); err != nil || !accepted.OK || !accepted.Applied {
-		t.Fatalf("Runtime task-notification acceptance = %s/%v; want applied", composed.AcceptResult, err)
+	if err := json.Unmarshal(composed.AcceptResult, &accepted); err != nil || !accepted.OK || !accepted.Applied || accepted.Created {
+		t.Fatalf("Runtime task-notification acceptance = %s/%v; want applied to an existing resident Thread", composed.AcceptResult, err)
 	}
 	if !bridgeServerStore.didDrop() {
 		t.Fatal("task notification composition did not exercise committed lost-ACK replay")
@@ -442,7 +477,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	}
 
 	var inboxStatus, queueStatus, storedMessageText string
-	var eventCount, messageCount int
+	var eventCount, messageCount, requestStartCount, requestEndCount int
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
 		WHERE workspace_id='default' AND runtime_input_id=$1`, inputID).Scan(&inboxStatus); err != nil {
 		t.Fatalf("read Inbox disposition: %v", err)
@@ -464,9 +499,240 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		WHERE workspace_id='default' AND session_id=$1 AND kind='runtime_notification'`, sessionID).Scan(&storedMessageText); err != nil {
 		t.Fatalf("read stored notification Message text: %v", err)
 	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		count(*) FILTER (WHERE type='span.model_request_start'),
+		count(*) FILTER (WHERE type='span.model_request_end')
+		FROM session_events WHERE workspace_id='default' AND session_id=$1`, sessionID).
+		Scan(&requestStartCount, &requestEndCount); err != nil {
+		t.Fatalf("count parked notification request lifecycle: %v", err)
+	}
 	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || eventCount != 1 || messageCount != 1 || storedMessageText != runtimeRequest.GetNotificationJson() {
 		t.Fatalf("durable settlement = Inbox:%s Queue:%s Events:%d Messages:%d text-match:%t",
 			inboxStatus, queueStatus, eventCount, messageCount, storedMessageText == runtimeRequest.GetNotificationJson())
+	}
+	if composed.ProviderInvocations != 1 || composed.RequestEndCount != 1 || requestStartCount != 1 || requestEndCount != 1 {
+		t.Fatalf("parked notification wake lifecycle = providers:%d runtime-ends:%d starts:%d durable-ends:%d; want 1/1/1/1",
+			composed.ProviderInvocations, composed.RequestEndCount, requestStartCount, requestEndCount)
+	}
+	var providerContext []struct {
+		Content []struct {
+			Text *struct {
+				Text string `json:"text"`
+			} `json:"text"`
+		} `json:"content"`
+	}
+	if len(composed.ProviderContexts) != 1 || json.Unmarshal(composed.ProviderContexts[0], &providerContext) != nil ||
+		len(providerContext) != 1 || len(providerContext[0].Content) != 1 || providerContext[0].Content[0].Text == nil ||
+		providerContext[0].Content[0].Text.Text != storedMessageText {
+		t.Fatalf("parked notification Provider context = %s; want exact task identity and result", composed.ProviderContexts)
+	}
+}
+
+func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_task_request_start_race"
+		threadID        = "thr_task_request_start_race"
+		bindingID       = "bind_task_request_start_race"
+		podUID          = "pod_task_request_start_race"
+		taskID          = "task_request_start_race"
+		notificationID  = "task_notification:task_request_start_race"
+		sourceID        = "evt_task_request_start_race_source"
+		initialEventID  = "evt_task_request_start_race_initial"
+		initialInputID  = "rin_task_request_start_race_initial"
+		initialSequence = int64(10)
+	)
+	now := time.Now().UTC()
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	baseStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	baseStore.RuntimeBindingTokenHMACKey = []byte("task-request-start-race-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, baseStore, scope, "rwrite_task_source_start", "mreq_"+sourceID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, sourceID)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+		SET visibility='public', session_visible=true, model_request_id=$2
+		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, "mreq_"+sourceID, sourceID); err != nil {
+		t.Fatalf("make background source Tool Use public: %v", err)
+	}
+	var sourceAssistantSequence int64
+	if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND source_event_id=$3`, sessionID, threadID, sourceID).Scan(&sourceAssistantSequence); err != nil {
+		t.Fatalf("read background source Assistant sequence: %v", err)
+	}
+	if response, err := baseStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_task_source_end", ModelRequestId: "mreq_" + sourceID,
+		FinishReason: "tool-calls", UsageJson: `{}`,
+		ProviderContextRetention: &bridgev1.ProviderContextRetention{
+			Disposition: "completed", AssistantMessageSequence: bridgeAPIInt64(sourceAssistantSequence),
+			ToolUseEventIds: []string{sourceID},
+		},
+	}); err != nil || response.GetCommitted() == nil {
+		t.Fatalf("close background source Request = %#v/%v", response, err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, initialEventID, initialSequence, "user.message", `{"content":[{"type":"text","text":"run before task notification"}]}`)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id,session_id,logical_sandbox_id,environment_id,environment_generation,
+		provider,provider_resource_id,binding_revision,materialized_resource_revision,
+		resource_credential_expires_at,resource_roots_json,helper_verified_at,created_at,updated_at
+	) VALUES ('default',$1,'sbox_task_request_start_race',$2,1,
+		'daytona','provider_task_request_start_race',1,1,$3,'[]',$4,$4,$4)`,
+		sessionID, "env_"+sessionID, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("seed Sandbox binding: %v", err)
+	}
+
+	initialJob := RuntimeJob{
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: initialInputID, InputKind: "messages", EventIDs: []string{initialEventID},
+		SequenceFrom: initialSequence, SequenceTo: initialSequence,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + initialInputID + `","event_ids":["` + initialEventID + `"],"sequence_from":10,"sequence_to":10,"input_kind":"messages"}`,
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	seedRuntimeInboxBirthForJob(t, admin, initialJob)
+	enqueueRuntimeCompositionJob(t, queueStore, sessionID, initialJob, 0)
+
+	barrierStore := &taskNotificationRequestStartBarrierStore{
+		BridgeAPIStore: baseStore,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for task notification Request Start Bridge: %v", err)
+	}
+	bridgeGRPCServer := grpc.NewServer()
+	RegisterBridgeAPI(bridgeGRPCServer, barrierStore)
+	go func() { _ = bridgeGRPCServer.Serve(bridgeListener) }()
+	t.Cleanup(func() {
+		bridgeGRPCServer.Stop()
+		_ = bridgeListener.Close()
+	})
+
+	storedResultJSON := `{"status":"completed","exit_code":0,"stdout":{"text":"TASK_NOTIFICATION_SUCCESSOR_CANARY","truncated":false},"stderr":{"text":"","truncated":false}}`
+	runtimeRequest := &agentruntimev1.AcceptTaskNotificationRequest{
+		WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID,
+		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		RuntimeInputId: notificationID, InputOrder: 0,
+		NotificationJson: mustCanonicalTaskNotificationPayloadJSON(t, taskID, sourceID, "completed", storedResultJSON),
+	}
+	runningRuntime := startTaskNotificationRuntimeComposition(t, t.TempDir()+"/task-notification-request-start.json", runtimeRequest, bridgeListener.Addr().String(), true)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
+		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
+		t.Fatalf("align production Runtime visibility snapshot: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runningRuntime.port)
+	deliveryStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
+		}})
+	}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Config:    JobRunnerConfig{LeaseOwner: "task-request-start-race", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+		t.Fatalf("deliver initial input through JobRunner = active:%t err:%v", active, runErr)
+	}
+	select {
+	case <-barrierStore.entered:
+	case <-time.After(10 * time.Second):
+		barrierStore.mu.Lock()
+		startCount := barrierStore.startCount
+		barrierStore.mu.Unlock()
+		t.Fatalf("Request Start did not durably commit: starts=%d runtime=%s", startCount, runningRuntime.output.String())
+	}
+	reconcilePayload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "task_id": taskID, "reconcile_generation": 1,
+	})
+	if err != nil {
+		t.Fatalf("encode background reconcile job: %v", err)
+	}
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.DefaultID, Kind: queue.KindSandboxBackgroundReconcile,
+		PartitionKey:   queue.FormatSandboxBackgroundPartitionKey(workspace.DefaultID, sessionID, taskID),
+		DedupeKey:      queue.FormatSandboxBackgroundReconcileDedupeKey(workspace.DefaultID, sessionID, taskID, 1),
+		PayloadVersion: 1, PayloadJSON: reconcilePayload, MaxAttempts: queue.DefaultMaxAttempts, Now: now,
+	}); err != nil {
+		t.Fatalf("enqueue background reconcile job: %v", err)
+	}
+	provider, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: terminalBackgroundProvider{result: sandboxdriver.CommandResult{ResultJSON: storedResultJSON, TerminalStatus: "completed"}},
+	})
+	if err != nil {
+		t.Fatalf("build background provider registry: %v", err)
+	}
+	sandboxRunner := &tetralsandbox.SandboxBackgroundReconcileJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxBackgroundCommandStore(dbconnect.NewClientForTesting(runtime)),
+		Providers: provider,
+		Config:    tetralsandbox.SandboxBackgroundRunnerConfig{WorkspaceID: "default", LeaseOwner: "task-race-producer", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 30 * time.Second},
+		Clock:     func() time.Time { return now },
+	}
+	if active, runErr := sandboxRunner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+		t.Fatalf("settle background task through producer = active:%t err:%v", active, runErr)
+	}
+	if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
+		t.Fatalf("deliver notification while Request Start ACK is held = active:%t err:%v", active, runErr)
+	}
+	close(barrierStore.release)
+	composed := runningRuntime.wait(t)
+
+	if composed.ProviderInvocations != 2 || composed.RequestEndCount != 2 {
+		t.Fatalf("Runtime lifecycle = providers:%d ends:%d; want 2/2 after the retained Tool pair", composed.ProviderInvocations, composed.RequestEndCount)
+	}
+	if len(composed.ProviderContexts) != 2 || !bytes.Contains(composed.ProviderContexts[0], []byte("Background command accepted.")) || bytes.Contains(composed.ProviderContexts[0], []byte("TASK_NOTIFICATION_SUCCESSOR_CANARY")) || !bytes.Contains(composed.ProviderContexts[1], []byte("TASK_NOTIFICATION_SUCCESSOR_CANARY")) {
+		t.Fatalf("Provider context cut did not defer notification: %s", composed.ProviderContexts)
+	}
+
+	rows, err := admin.QueryContext(context.Background(), `SELECT (projection_json::jsonb->>'context_through_message_sequence')::bigint
+		FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND type='span.model_request_start' ORDER BY sequence`, sessionID, threadID)
+	if err != nil {
+		t.Fatalf("read Request Start boundaries: %v", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			t.Errorf("close Request Start boundary rows: %v", closeErr)
+		}
+	}()
+	var boundaries []int64
+	for rows.Next() {
+		var boundary int64
+		if err := rows.Scan(&boundary); err != nil {
+			t.Fatalf("scan Request Start boundary: %v", err)
+		}
+		boundaries = append(boundaries, boundary)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate Request Start boundaries: %v", err)
+	}
+	var notificationSequence int64
+	var inboxStatus, queueStatus, sessionStatus, threadStatus string
+	var requestEnds, semanticErrors, terminalEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='runtime_notification'`, sessionID, threadID).Scan(&notificationSequence); err != nil {
+		t.Fatalf("read notification Message sequence: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$4),
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.error'),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('session.status_terminated','session.thread_status_terminated'))`,
+		sessionID, threadID, notificationID, queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, notificationID),
+	).Scan(&inboxStatus, &queueStatus, &sessionStatus, &threadStatus, &requestEnds, &semanticErrors, &terminalEvents); err != nil {
+		t.Fatalf("read final task-notification lifecycle: %v", err)
+	}
+	if len(boundaries) != 3 || boundaries[1] >= notificationSequence || boundaries[2] < notificationSequence {
+		t.Fatalf("Request Start boundaries = %v notification=%d; want frozen second cut and notification in third", boundaries, notificationSequence)
+	}
+	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || requestEnds != 3 || semanticErrors != 0 || terminalEvents != 0 || sessionStatus == "terminated" || threadStatus == "terminated" {
+		t.Fatalf("final lifecycle = Inbox:%s Queue:%s Session:%s Thread:%s Ends:%d Errors:%d Terminal:%d",
+			inboxStatus, queueStatus, sessionStatus, threadStatus, requestEnds, semanticErrors, terminalEvents)
 	}
 }
 

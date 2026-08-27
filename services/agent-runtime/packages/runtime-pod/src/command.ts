@@ -20,7 +20,9 @@ import type {
 	SkillGuidanceIndexEntry,
 } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
-import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type {
+	RuntimeThreadRoleState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
 import type {
 	InstalledBuiltinFamily,
 	MCPManifest,
@@ -74,6 +76,7 @@ import {
 	providerToolDeclarationRejectedLogRecord,
 	runtimeCloseoutLogRecord,
 	runtimeMCPManifestUpdateLogRecord,
+	runtimeTerminalSettlementLogRecord,
 	startupFailureLogRecord,
 } from "./logger.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -316,6 +319,13 @@ export async function buildRuntimePodCommandDependencies(input: {
 			},
 			recordAcceptedInputCommit: (event) => {
 				input.logger.info(acceptedInputCommitLogRecord(event));
+			},
+			recordRuntimeTerminalSettlement: (event) => {
+				try {
+					input.logger.error(runtimeTerminalSettlementLogRecord(event));
+				} catch {
+					// Terminal settlement cannot depend on a logging sink.
+				}
 			},
 			providerCallRuntime: {
 				...DefaultProviderCallRuntimeConfig,

@@ -16,6 +16,7 @@ import type {
 	SessionEvent,
 	SessionEventWriter,
 	SessionEventWriterAppendResult,
+	SessionEventWriterFinishIdleEnvelope,
 	SessionEventWriterRequestEndEnvelope,
 	SessionEventWriterRuntimeTerminationEnvelope,
 } from "../../../src/contracts/runtime.js";
@@ -36,7 +37,9 @@ import { appendIdleEvent } from "../../../src/thread-loop/closeout.js";
 import { assembleProviderCallRequest } from "../../../src/thread-loop/provider-request.js";
 import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
-import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
+import type {
+	RuntimeAcceptedInputState,
+} from "../../../src/thread-loop/input/accepted-input.js";
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 import {
 	acceptedInput,
@@ -145,10 +148,10 @@ describe("ThreadLoop", () => {
 		});
 		expect(writeIds[0]).not.toBe(writeIds[1]);
 		expect(JSON.stringify(appended)).not.toContain(defectCanary);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("failed-run closeout with accepted custody uses atomic Runtime termination", async () => {
@@ -161,12 +164,20 @@ describe("ThreadLoop", () => {
 			{
 				executionRunId: "evt_failed_closeout_accepted_running",
 				pendingInputContextSequences: [],
+				request: {
+					modelRequestId: "mreq_failed_closeout_accepted",
+					requestStartEventId: "sevt_failed_closeout_accepted_start",
+					requestKind: "agent_provider_request",
+					contextThroughMessageSequence: 1,
+					toolMembers: [],
+				},
 			},
 			{ routes: [] },
 		);
 		session.state.enqueueAcceptedInput(unresolved);
 		const appended: SessionEvent[] = [];
 		const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appended.push(envelope.event);
 			return {
@@ -179,7 +190,19 @@ describe("ThreadLoop", () => {
 			...baseWriter,
 			commitRuntimeTermination: async (envelope) => {
 				terminations.push(envelope);
-				return await baseWriter.commitRuntimeTermination!(envelope);
+				if (terminations.length === 1) {
+					return {
+						ok: false,
+						error: normalizeSessionEventWriterError({
+							code: "unavailable",
+							sessionId: envelope.sessionId,
+							writeId: envelope.writeId,
+						}),
+					};
+				}
+				const result = await baseWriter.commitRuntimeTermination!(envelope);
+				if (!result.ok || result.type === "stale") return result;
+				return { ...result, type: "duplicate" };
 			},
 		};
 		const result = await Effect.runPromise(
@@ -195,7 +218,18 @@ describe("ThreadLoop", () => {
 						new RecordingContextLoader([], { type: "empty" }),
 						{
 							writer,
-							runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted },
+							runtime: {
+								...threadLoopRuntime(),
+								sleep: async (durationMs, signal) =>
+									durationMs ===
+									SessionEventWriterRetryPolicy.timeoutPerAttemptMs
+										? await sleepUntilAborted(durationMs, signal)
+										: true,
+							},
+							recordRuntimeTerminalSettlement: (event) => {
+								observations.push(event);
+								throw new Error("logging sink failed");
+							},
 						},
 					),
 				),
@@ -204,7 +238,16 @@ describe("ThreadLoop", () => {
 
 		expect(result).toEqual({ type: "landed", disposition: "terminal" });
 		expect(appended).toEqual([]);
-		expect(terminations).toHaveLength(1);
+		expect(terminations).toHaveLength(2);
+		expect(observations).toEqual([
+			{
+				workspaceId: "workspace-test",
+				sessionId: "sesn_failed_closeout_accepted",
+				sessionThreadId: "thread-test",
+				modelRequestId: "mreq_failed_closeout_accepted",
+				settlementOutcome: "duplicate",
+			},
+		]);
 		expect(terminations[0]).toMatchObject({
 			writeId: "evt_failed_closeout_accepted_running",
 			failure: {
@@ -214,12 +257,84 @@ describe("ThreadLoop", () => {
 				retryStatus: { type: "terminal" },
 			},
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { terminalCloseout: { disposition: "terminated" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 		expect(session.state.acceptedInputSnapshot()).toEqual([unresolved]);
+	});
+	test("terminal settlement observation excludes stale and failed durable outcomes", async () => {
+		for (const outcome of ["stale", "failed"] as const) {
+			const session = new ThreadRuntime(`sesn_terminal_observation_${outcome}`);
+			session.state.installThreadTurn(
+				{
+					executionRunId: `evt_terminal_observation_${outcome}`,
+					pendingInputContextSequences: [],
+					request: {
+						modelRequestId: `mreq_terminal_observation_${outcome}`,
+						requestStartEventId: `sevt_terminal_observation_${outcome}`,
+						requestKind: "agent_provider_request",
+						contextThroughMessageSequence: 1,
+						toolMembers: [],
+					},
+				},
+				{ routes: [] },
+			);
+			session.state.enqueueAcceptedInput(
+				acceptedInput(`rin_terminal_observation_${outcome}`, session.sessionId),
+			);
+			const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
+			const baseWriter = writerFrom((envelope) => ({
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			}));
+			const writer: SessionEventWriter = {
+				...baseWriter,
+				commitRuntimeTermination: async (envelope) =>
+					outcome === "stale"
+						? { ok: true, type: "stale" }
+						: {
+								ok: false,
+								error: normalizeSessionEventWriterError({
+									code: "ack_mismatch",
+									sessionId: envelope.sessionId,
+									writeId: envelope.writeId,
+								}),
+							},
+			};
+
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* ThreadLoop.Service).closeFailedRun(
+						session,
+						new Error("failed run"),
+						testRunCustody(),
+					);
+				}).pipe(
+					Effect.provide(
+						runtimeThreadLoopLayer(
+							new RecordingContextLoader([], { type: "empty" }),
+							{
+								writer,
+								runtime: {
+									...threadLoopRuntime(),
+									sleep: sleepUntilAborted,
+								},
+								recordRuntimeTerminalSettlement: (event) =>
+									observations.push(event),
+							},
+						),
+					),
+				),
+			);
+
+			expect(result.type).toBe(
+				outcome === "stale" ? "superseded" : "unrepairable",
+			);
+			expect(observations).toEqual([]);
+		}
 	});
 	test("failed-run closeout observes one in-flight step across timeout windows and memoizes success", async () => {
 		const errorResult = deferred<SessionEventWriterAppendResult>();
@@ -591,38 +706,51 @@ describe("ThreadLoop", () => {
 		});
 		expect(appendedTypes).toEqual([]);
 	});
-	test("idle finalization retries lost ACKs with the same runtime write id", async () => {
-		const loader = new RecordingContextLoader([], { type: "empty" });
-		const session = new ThreadRuntime("sesn_1");
-		session.state.markPersistentContextLoaded();
-		session.state.installThreadTurn(
-			{
-				executionRunId: "evt_open_idle_retry",
-				pendingInputContextSequences: [],
-			},
-			{ routes: [] },
-		);
+	test("SessionManager starts the queued successor after replaying a lost FinishIdle ACK", async () => {
+		const loader = new QueuedContextLoader([], []);
 		const finishIdleWriteIds: string[] = [];
-		const statesBeforeFinishIdleReceipts: string[] = [];
-		const writer: SessionEventWriter = {
-			settleToolResult: async () => ({
-				ok: true,
-				result: { type: "committed" },
-			}),
-			append: async (envelope) => ({
-				ok: true,
-				eventId: `bridge-${envelope.writeId}`,
-				type: "committed",
-			}),
-			writeRequestEnd: async () => {
-				throw new Error("idle-only test must not close a provider request");
+		const finishIdleEnvelopes: SessionEventWriterFinishIdleEnvelope[] = [];
+		const appended: SessionEvent[] = [];
+		const providerRequests: LLMRequest[] = [];
+		const finishIdleStarted = deferred<void>();
+		const releaseFinishIdle = deferred<void>();
+		const durableSequence = { eventSequence: 0, messageSequence: 0 };
+		let lostFinishIdleReceipt:
+			| Extract<
+					Awaited<ReturnType<NonNullable<SessionEventWriter["finishIdle"]>>>,
+					{ readonly ok: true; readonly type: "committed" | "duplicate" }
+			  >
+			| undefined;
+		const baseWriter = writerFrom(
+			(envelope) => {
+				appended.push(envelope.event);
+				return {
+					ok: true,
+					eventId: `bridge-${envelope.writeId}`,
+					type: "committed",
+				};
 			},
+			undefined,
+			[],
+			durableSequence,
+		);
+		const writer: SessionEventWriter = {
+			...baseWriter,
 			finishIdle: async (envelope) => {
 				finishIdleWriteIds.push(envelope.durableTurnId);
-				statesBeforeFinishIdleReceipts.push(
-					session.state.threadTurnReduction().state.state,
-				);
+				finishIdleEnvelopes.push(envelope);
 				if (finishIdleWriteIds.length === 1) {
+					const durableResult = await baseWriter.finishIdle!(envelope);
+					expect(durableResult).toMatchObject({
+						ok: true,
+						type: "committed",
+					});
+					if (!durableResult.ok || durableResult.type === "stale") {
+						throw new Error("FinishIdle response-loss setup did not commit");
+					}
+					lostFinishIdleReceipt = durableResult;
+					finishIdleStarted.resolve();
+					await releaseFinishIdle.promise;
 					return {
 						ok: false,
 						error: {
@@ -636,39 +764,104 @@ describe("ThreadLoop", () => {
 						},
 					};
 				}
-				return withFinishIdleResultForTest(envelope, {
-					ok: true,
-					eventId: `bridge-${envelope.durableTurnId}`,
-					type: "committed",
-				});
+				if (finishIdleWriteIds.length === 2) {
+					if (lostFinishIdleReceipt === undefined) {
+						throw new Error("FinishIdle duplicate replay is missing its receipt");
+					}
+					return { ...lostFinishIdleReceipt, type: "duplicate" };
+				}
+				return baseWriter.finishIdle!(envelope);
 			},
 		};
-		const result = await Effect.runPromise(
-			Effect.gen(function* () {
-				const threadLoop = yield* ThreadLoop.Service;
-				return yield* threadLoop.run(session, testRunCustody());
-			}).pipe(
-				Effect.provide(
-					runtimeThreadLoopLayer(loader, {
-						installLoaderState: false,
-						runtimeModel: () => undefined,
-						writer,
-					}),
-				),
-			),
-		);
-		expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
-		expect(finishIdleWriteIds).toEqual([
-			"evt_open_idle_retry",
-			"evt_open_idle_retry",
-		]);
-		expect(statesBeforeFinishIdleReceipts).toEqual([
-			"ready_to_finish",
-			"ready_to_finish",
-		]);
-		expect(session.state.threadTurnReduction().state).toEqual({
-			state: "idle",
+		const agentLayer = runtimeThreadLoopLayer(loader, {
+			writer,
+			onStream: (request) => providerRequests.push(request),
 		});
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+		}).pipe(Layer.provide(agentLayer));
+		const { manager, scope } = await Effect.runPromise(
+			Effect.gen(function* () {
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
+		);
+		try {
+			const preloadAddress = acceptedInput("rin_before_finish_idle_replay");
+			await Effect.runPromise(
+				manager.preloadThread({
+					...preloadAddress,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					turnCheckpoint: {
+						executionRunId: "evt_open_idle_retry",
+						pendingInputContextSequences: [],
+					},
+					turnToolRouteView: { routes: [] },
+					thread: {
+						role: "main",
+						visibility: "public",
+						agentType: "general",
+						status: "idle",
+					},
+				}),
+			);
+			await finishIdleStarted.promise;
+
+			const successorInput = {
+				...acceptedInput("rin_during_finish_idle_replay"),
+				inputOrder: 2,
+				contentJson: JSON.stringify({
+					messages: [
+						userMessage(
+							"user-during-finish-idle-replay",
+							2,
+							"FINISH_IDLE_REPLAY_SUCCESSOR_CANARY",
+						),
+					],
+				}),
+			};
+			expect(
+				await Effect.runPromise(manager.acceptInput(successorInput)),
+			).toMatchObject({ ok: true });
+			expect(providerRequests).toHaveLength(0);
+
+			releaseFinishIdle.resolve();
+			const successorWait = await Effect.runPromise(
+				manager.waitThread(successorInput, 1000),
+			);
+			expect(successorWait).toMatchObject({ ok: true, observed: true, timedOut: false });
+			await waitForCondition(
+				() => finishIdleWriteIds.length === 3 && providerRequests.length === 1,
+				"automatic successor closeout",
+			);
+			await flushMicrotasks(20);
+			expect(finishIdleWriteIds).toHaveLength(3);
+			expect(finishIdleWriteIds[1]).toBe(finishIdleWriteIds[0]);
+			expect(finishIdleWriteIds[2]).not.toBe(finishIdleWriteIds[0]);
+			expect(finishIdleEnvelopes[1]).toEqual(finishIdleEnvelopes[0]);
+			expect(providerRequests).toHaveLength(1);
+			expect(JSON.stringify(providerRequests[0]?.context)).toContain(
+				"FINISH_IDLE_REPLAY_SUCCESSOR_CANARY",
+			);
+			expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+				"rin_during_finish_idle_replay",
+			]);
+			expect(
+				appended.filter((event) => event.type === "span.model_request_start"),
+			).toHaveLength(1);
+			expect(
+				await Effect.runPromise(manager.inspectThread(successorInput)),
+			).toMatchObject({ ok: true, observed: true, status: "idle" });
+		} finally {
+			releaseFinishIdle.resolve();
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
 	});
 	test("idle finalization drains the raw FinishIdle call after its local timeout", async () => {
 		const rawFinish = deferred<SessionEventWriterAppendResult>();
@@ -725,7 +918,7 @@ describe("ThreadLoop", () => {
 		expect(await run).toEqual({ type: "completed", modelMessageCount: 0 });
 		expect(finishCalls).toBe(1);
 	});
-	test("user interruption during an accepted reschedule wait settles end_turn before unwind", async () => {
+	test("reschedule exit settles its Request before a later accepted input runs", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const loader = new RecordingContextLoader([], {
 			type: "context",
@@ -734,6 +927,7 @@ describe("ThreadLoop", () => {
 		const waitStarted = deferred<void>();
 		const appended: SessionEvent[] = [];
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		const providerRequests: LLMRequest[] = [];
 		const writer = writerFrom(
 			(envelope) => {
 				appended.push(envelope.event);
@@ -765,40 +959,71 @@ describe("ThreadLoop", () => {
 				return true;
 			},
 		} satisfies RuntimeDependencies;
+		const llmService = queuedLLMService(
+			[
+				[
+					{
+						type: "provider-error",
+						error: runtimeFailureFromProviderError(
+							normalizeProviderError({
+								code: "provider_unavailable",
+								message: "temporary provider failure",
+								retryable: true,
+								fatal: false,
+							}),
+						),
+					},
+				],
+				[
+					{ type: "text-start", id: "reschedule-successor" },
+					{
+						type: "text-delta",
+						id: "reschedule-successor",
+						text_delta: "accepted successor completed",
+					},
+					{ type: "text-end", id: "reschedule-successor" },
+					{ type: "finish", finishReason: "stop" },
+				],
+			],
+			providerRequests,
+		);
+		const layer = runtimeThreadLoopLayer(loader, {
+			llmService,
+			writer,
+			runtime,
+		});
 		const runFiber = Effect.runFork(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
 				return yield* threadLoop.run(session, testRunCustody());
-			}).pipe(
-				Effect.provide(
-					runtimeThreadLoopLayer(loader, {
-						llmService: queuedLLMService([
-							[
-								{
-									type: "provider-error",
-									error: runtimeFailureFromProviderError(
-										normalizeProviderError({
-											code: "provider_unavailable",
-											message: "temporary provider failure",
-											retryable: true,
-											fatal: false,
-										}),
-									),
-								},
-							],
-						]),
-						writer,
-						runtime,
-					}),
-				),
-			),
+			}).pipe(Effect.provide(layer)),
 		);
 		await waitStarted.promise;
 		expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
+		const successorInput = {
+			...acceptedInput("rin_after_reschedule_exit"),
+			inputOrder: 2,
+			contentJson: JSON.stringify({
+				messages: [
+					userMessage(
+						"user-after-reschedule-exit",
+						1,
+						"RESCHEDULE_EXIT_SUCCESSOR_CANARY",
+					),
+				],
+			}),
+		};
+		expect(session.state.enqueueAcceptedInput(successorInput)).toBe("applied");
 		await Effect.runPromise(Fiber.interrupt(runFiber));
+		const firstExit = await Effect.runPromise(Fiber.await(runFiber));
+		expect(Exit.hasDies(firstExit)).toBe(false);
 		expect(appended.at(-1)).toEqual({
 			type: "session.status_idle",
 			stop_reason: { type: "end_turn" },
+		});
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "rin_after_reschedule_exit",
 		});
 		expect(appended.filter((event) => event.type === "session.error")).toEqual([
 			expect.objectContaining({
@@ -809,6 +1034,23 @@ describe("ThreadLoop", () => {
 				}),
 			}),
 		]);
+
+		const successor = await Effect.runPromise(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.run(session, testRunCustody());
+			}).pipe(Effect.provide(layer)),
+		);
+		expect(successor).toMatchObject({ type: "completed" });
+		expect(
+			loader.commitCalls.filter(
+				(input) => input.runtimeInputId === "rin_after_reschedule_exit",
+			),
+		).toHaveLength(1);
+		expect(providerRequests).toHaveLength(2);
+		expect(JSON.stringify(providerRequests[1]?.context)).toContain(
+			"RESCHEDULE_EXIT_SUCCESSOR_CANARY",
+		);
 	});
 	test("runtime shutdown abandons active provider state without Runtime-owned idle or error", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -1385,6 +1627,261 @@ describe("ThreadLoop", () => {
 			errorCode: "unavailable",
 		});
 	});
+	test("retryable interrupt Request End reports only the current run attempt", async () => {
+		const loader = new RecordingContextLoader([], { type: "empty" });
+		const streamStarted = deferred<void>();
+		const releaseStream = deferred<void>();
+		let requestEndCalls = 0;
+		const baseWriter = writerFrom((envelope) => ({
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) => {
+				if (envelope.interruptSettlement === undefined) {
+					return requestEndResultForTest(envelope);
+				}
+				requestEndCalls += 1;
+				return {
+					ok: false,
+					error: {
+					type: "session-event-writer",
+					code: "unavailable",
+					message: "request end not ACKed",
+						retryable: true,
+						fatal: false,
+						sessionId: envelope.sessionId,
+					},
+				};
+			},
+		};
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+		}).pipe(
+			Layer.provide(
+				runtimeThreadLoopLayer(loader, {
+					writer,
+					llmService: {
+						stream(_request, options) {
+							return Stream.fromAsyncIterable(
+								(async function* () {
+									streamStarted.resolve();
+									if (options?.abortSignal === undefined) {
+										throw new Error(
+											"provider stream requires an abort signal",
+										);
+									}
+									await waitForReleaseOrAbort(
+										releaseStream.promise,
+										options.abortSignal,
+									);
+								})(),
+								(error): LLMServiceError => ({
+									type: "llm-service",
+									error: runtimeFailureFromProviderError(
+										normalizeProviderError({
+											code: "provider_unknown",
+											retryable: false,
+											message: String(error),
+										}),
+									),
+								}),
+							);
+						},
+					},
+				}),
+			),
+		);
+		const { manager, scope } = await Effect.runPromise(
+			Effect.gen(function* () {
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
+		);
+		try {
+			const input = acceptedInput("rin_retryable_interrupt_owner");
+			await Effect.runPromise(
+				manager.preloadThread({
+					...input,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					thread: {
+						role: "main",
+						visibility: "public",
+						agentType: "general",
+						status: "idle",
+					},
+				}),
+			);
+			await Effect.runPromise(manager.acceptInput(input));
+			await streamStarted.promise;
+			const interrupt = interruptInput("rin_retryable_interrupt_attempt", 2);
+			expect(
+				await Effect.runPromise(
+					manager.interruptControl(
+						"sesn_1",
+						interrupt,
+						testControlCommit(interrupt),
+					),
+				),
+			).toEqual({
+				ok: false,
+				sessionId: "sesn_1",
+				reason: "context_load_failed",
+				retryable: true,
+				errorCode: "unavailable",
+			});
+			expect(requestEndCalls).toBeGreaterThan(0);
+		} finally {
+			releaseStream.resolve();
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
+	});
+	test("recovered-open projection failure emits one real reload through SessionManager", async () => {
+		const sessionId = "sesn_recovered_projection_reload";
+		const threadId = "thrd_recovered_projection_reload";
+		let requestEndWrites = 0;
+		let coldLoads = 0;
+		const baseWriter = writerFrom((envelope) => ({
+			ok: true,
+			eventId: `bridge-${envelope.writeId}`,
+			type: "committed",
+		}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) => {
+				requestEndWrites += 1;
+				return {
+					...requestEndResultForTest(envelope),
+					interruptToolResults: [
+						{
+							toolUseEventId: "unknown_recovered_projection_tool",
+							result: { type: "cancelled" as const },
+						},
+					],
+				};
+			},
+		};
+		const threadAddress = {
+			...acceptedInput("rin_recovered_projection_reload", sessionId),
+			sessionThreadId: threadId,
+		};
+		const emptyPreload = () => ({
+			...threadAddress,
+			runtimeBindingToken: "runtime-binding-token",
+			contextEntries: [],
+			turnCheckpoint: { pendingInputContextSequences: [] },
+			turnToolRouteView: { routes: [] },
+			thread: {
+				role: "main" as const,
+				visibility: "public" as const,
+				agentType: "general" as const,
+				status: "idle" as const,
+			},
+		});
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+			loadThreadContext: async () => {
+				coldLoads += 1;
+				return emptyPreload();
+			},
+		}).pipe(
+			Layer.provide(
+				runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+					writer,
+				}),
+			),
+		);
+		const { manager, scope } = await Effect.runPromise(
+			Effect.gen(function* () {
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
+		);
+		try {
+			await Effect.runPromise(
+				manager.preloadThread({
+					...emptyPreload(),
+					contextEntries: [
+						{
+							messageSequence: 1,
+							contextKind: "assistant",
+							parts: [
+								{
+									type: "tool_call",
+									modelToolCallId: "call_recovered_projection_reload",
+									toolName: "Write",
+									canonicalInput: { path: "README.md" },
+								},
+							],
+						},
+					],
+					turnCheckpoint: {
+						pendingInputContextSequences: [],
+						request: {
+							modelRequestId: "mreq_recovered_projection_reload",
+							requestStartEventId: "sevt_recovered_projection_reload_start",
+							requestKind: "agent_provider_request",
+							contextThroughMessageSequence: 0,
+							toolMembers: [
+								{
+									memberKind: "public_tool_use",
+									modelToolCallId: "call_recovered_projection_reload",
+									toolUseEventId: "sevt_recovered_projection_reload_tool",
+									toolName: "Write",
+								},
+							],
+						},
+					},
+				}),
+			);
+			const interrupt = {
+				...interruptInput("rin_recovered_projection_reload_interrupt", 2),
+				sessionId,
+				sessionThreadId: threadId,
+			};
+			const failed = await Effect.runPromise(
+				manager.interruptControl(
+					sessionId,
+					interrupt,
+					testControlCommit(interrupt),
+				),
+			);
+			expect(failed).toMatchObject({
+				ok: false,
+				reason: "context_load_failed",
+			});
+			expect(failed).not.toHaveProperty("stale");
+			expect(requestEndWrites).toBe(1);
+			expect(
+				await Effect.runPromise(manager.inspectThread(interrupt)),
+			).toMatchObject({ ok: true, observed: false });
+
+			const replay = await Effect.runPromise(
+				manager.interruptControl(
+					sessionId,
+					interrupt,
+					testControlCommit(interrupt),
+				),
+			);
+			expect(replay).toMatchObject({ ok: true, idleInterrupt: true });
+			expect(coldLoads).toBe(1);
+		} finally {
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
+	});
 	test("a stale interrupt request-end receipt performs no fallback idle closeout", async () => {
 		const session = new ThreadRuntime("sesn_stale_interrupt_end");
 		const loader = new RecordingContextLoader([], {
@@ -1446,6 +1943,64 @@ describe("ThreadLoop", () => {
 			ok: true,
 			stale: true,
 		});
+	});
+	test("interrupt projection mismatch cannot record benign stale attempt success", async () => {
+		const runtimeInputId = "rin_interrupt_projection_mismatch";
+		const session = new ThreadRuntime("sesn_interrupt_projection_mismatch");
+		const loader = new RecordingContextLoader([], {
+			type: "context",
+			entries: [userMessage("user-projection-mismatch", 0, "stop")],
+		});
+		const attemptResults: unknown[] = [];
+		let interrupted = false;
+		const baseWriter = writerFrom((envelope) => {
+			if (!interrupted && envelope.event.type === "span.model_request_start") {
+				interrupted = true;
+				beginTestUserInterrupt(session, runtimeInputId);
+			}
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			};
+		});
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) =>
+				requestEndResultForTest(envelope, {
+					type: "ordinary",
+					sealedMessageSequence: 99,
+				}),
+		};
+		const runExit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.run(session, {
+					...testRunCustody(),
+					recordInterruptAttemptResult: (_inputId, result) => {
+						attemptResults.push(result);
+					},
+				});
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						writer,
+						llmService: {
+							stream() {
+								throw new Error("provider must not start");
+							},
+						},
+					}),
+				),
+			),
+		);
+		expect(Exit.isFailure(runExit)).toBe(true);
+		if (Exit.isFailure(runExit)) {
+			expect(
+				runExit.cause.reasons.find(Cause.isDieReason)?.defect,
+			).toMatchObject({ code: "schema_mismatch" });
+		}
+		expect(attemptResults).toEqual([]);
 	});
 	test("cooperative child cancellation closes an ACKed request before run release", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -2024,7 +2579,7 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(Fiber.interrupt(runFiber));
 		}
 	});
-	test("a late requires-action receipt commits the remaining production action", async () => {
+	test("a late requires-action receipt uses its frozen action after confirmation changes the current route", async () => {
 		const session = new ThreadRuntime("sesn_partial_requires_action_ack");
 		const durableTurnId = "sevt_partial_requires_action_run";
 		const settledToolUseEventId = "sevt_partial_requires_action_settled";
@@ -2098,6 +2653,7 @@ describe("ThreadLoop", () => {
 			session,
 			{
 				activeTurnId: () => durableTurnId,
+				recordInterruptAttemptResult: () => {},
 				interruptLeaseRef: () => undefined,
 			},
 			{
@@ -2112,25 +2668,35 @@ describe("ThreadLoop", () => {
 			outcome: "success",
 		});
 		session.state.clearThreadToolRoute(settledToolUseEventId);
+		session.state.recordThreadToolRoute(
+			pendingToolUseEventId,
+			"resume_approval_settlement",
+		);
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "resume_tool_routes",
+			modelRequestId: "mreq_partial_requires_action",
+			toolUseEventIds: [pendingToolUseEventId],
+		});
 		releaseFinishIdle.resolve();
 		expect(await idle).toEqual({
 			ok: true,
 			eventId: "sevt_partial_requires_action_idle",
 		});
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				idleCloseout: {
 					eventId: "sevt_partial_requires_action_idle",
 					stopReason: "requires_action",
 				},
 			},
-			action: {
-				action: "await_tool_results",
+			nextStep: {
+				action: "resume_tool_routes",
+				modelRequestId: "mreq_partial_requires_action",
 				toolUseEventIds: [pendingToolUseEventId],
 			},
 		});
 		expect(
-			session.state.threadTurnReduction().checkpoint.executionRunId,
+			session.state.threadTurnTransition().checkpoint.executionRunId,
 		).toBeUndefined();
 	});
 	test("interrupt closeout joins an in-flight pre-fence CommitInputs before atomic Request End", async () => {
@@ -2709,6 +3275,7 @@ describe("ThreadLoop", () => {
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
 		const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
 		const closeoutOrder: string[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => {
 			appended.push(envelope.event);
 			return {
@@ -2748,6 +3315,8 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
+						recordRuntimeTerminalSettlement: (event) =>
+							observations.push(event),
 						events: [
 							{ type: "text-start", id: "terminal-text" },
 							{
@@ -2768,6 +3337,7 @@ describe("ThreadLoop", () => {
 			releaseSession: { reason: "terminated" },
 		});
 		expect(terminations).toHaveLength(1);
+		expect(observations).toEqual([]);
 		expect(terminations[0]?.writeId).toMatch(/^bridge-stid_/);
 		expect(terminations[0]).toMatchObject({
 			sessionId: "sesn_1",
@@ -2793,7 +3363,7 @@ describe("ThreadLoop", () => {
 			"agent.message",
 			"span.model_request_end",
 		]);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: {
 				terminalCloseout: {
 					failureEventId: expect.any(String),
@@ -2802,7 +3372,7 @@ describe("ThreadLoop", () => {
 				},
 			},
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("a fatal reviewer request failure closes durably idle without terminating its thread", async () => {
@@ -2881,10 +3451,10 @@ describe("ThreadLoop", () => {
 		expect(appended.map((event) => event.type)).toContain(
 			"session.status_idle",
 		);
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			checkpoint: { idleCloseout: { stopReason: "end_turn" } },
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 		});
 	});
 	test("runtime layer seals a terminal stream failure before atomic termination", async () => {
@@ -2982,6 +3552,7 @@ describe("ThreadLoop", () => {
 			entries: [userMessage("user-1", 0, "hello")],
 		});
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		const observations: ThreadLoop.RuntimeTerminalSettlementObservation[] = [];
 		const baseWriter = writerFrom((envelope) => ({
 			ok: true,
 			eventId: `bridge-${envelope.writeId}`,
@@ -3002,6 +3573,8 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						writer,
+						recordRuntimeTerminalSettlement: (event) =>
+							observations.push(event),
 						events: [
 							{ type: "text-start", id: "processor-failure-text" },
 							{
@@ -3027,6 +3600,7 @@ describe("ThreadLoop", () => {
 											retryable: false,
 											fatal: true,
 											reason: "runtime_contract_validation",
+											retryStatus: { type: "terminal" },
 										},
 									};
 								}
@@ -3039,6 +3613,15 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toMatchObject({ type: "failed" });
+		expect(observations).toEqual([
+			{
+				workspaceId: "workspace-test",
+				sessionId: "sesn_1",
+				sessionThreadId: "thread-test",
+				modelRequestId: expect.any(String),
+				settlementOutcome: "committed",
+			},
+		]);
 		expect(requestEnds).toEqual([
 			expect.objectContaining({
 				isError: true,
@@ -3112,9 +3695,9 @@ describe("ThreadLoop", () => {
 			stop_reason: { type: "retries_exhausted" },
 		});
 		expect(failureEventId).toBeDefined();
-		expect(session.state.threadTurnReduction()).toMatchObject({
+		expect(session.state.threadTurnTransition()).toMatchObject({
 			state: { state: "idle" },
-			action: { action: "await_input" },
+			nextStep: { action: "await_input" },
 			checkpoint: {
 				terminalCloseout: {
 					failureEventId,

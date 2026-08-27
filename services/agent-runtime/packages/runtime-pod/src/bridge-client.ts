@@ -8,7 +8,11 @@
  * populated projected JSON before exposing it, and keep per-thread scope bookkeeping local and disposable.
  */
 
-import type { CallOptions, Metadata, ServiceError } from "@grpc/grpc-js";
+import type {
+	CallOptions,
+	Metadata,
+	ServiceError,
+} from "@grpc/grpc-js";
 import { credentials, status } from "@grpc/grpc-js";
 import type {
 	AcceptedInputCommitResult,
@@ -56,12 +60,14 @@ import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/threa
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
+	RuntimeThreadAddressState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeConfigPatchState,
 	RuntimePreloadedSandboxExecutionState,
-	RuntimeThreadAddressState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { ThreadTurnLoadFactsSchema } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/preload.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
+import { ThreadTurnLoadFactsSchema } from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
 	AdmitApprovalReviewInputRequest,

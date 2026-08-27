@@ -1,8 +1,9 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
+import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
-import { Effect, Stream } from "effect";
+import { Stream } from "effect";
 import {
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
@@ -30,6 +31,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly closePath: string;
 	readonly fastThreadText?: string;
 	readonly fastAfterFirstProviderCall?: boolean;
+	readonly failFirstFinishIdle?: boolean;
 };
 
 const metadataFactory = async () => new Metadata();
@@ -43,6 +45,24 @@ const writer = new BridgeAPIEventWriter({
 	tokenPath: "/unused/service-account-token",
 	metadataFactory,
 });
+let finishIdleInvocations = 0;
+if (input.failFirstFinishIdle === true) {
+	const finishIdle = writer.finishIdle.bind(writer);
+	writer.finishIdle = async (envelope) => {
+		finishIdleInvocations += 1;
+		if (finishIdleInvocations === 1) {
+			return {
+				ok: false,
+				error: normalizeSessionEventWriterError({
+					code: "schema_mismatch",
+					sessionId: envelope.sessionId,
+					writeId: envelope.durableTurnId,
+				}),
+			};
+		}
+		return await finishIdle(envelope);
+	};
+}
 const controlInputCommitter = new BridgeAPIControlInputCommitter({
 	address: input.bridgeAddress,
 	tokenPath: "/unused/service-account-token",
@@ -50,8 +70,11 @@ const controlInputCommitter = new BridgeAPIControlInputCommitter({
 });
 let nextId = 0;
 let providerInvocations = 0;
+const providerContexts: unknown[] = [];
 let durableOperationCompletions = 0;
 let interruptResult: unknown;
+const interruptResults: unknown[] = [];
+let threadSnapshot: unknown;
 const runtimeSleep = async (durationMs: number, signal: AbortSignal): Promise<boolean> => {
 	if (signal.aborted) return false;
 	return await new Promise<boolean>((resolve) => {
@@ -86,6 +109,7 @@ const hosts = await buildRuntimeCoreHosts({
 		llmService: {
 			stream: (request) => {
 				providerInvocations += 1;
+				providerContexts.push(request.context);
 				if (
 					(input.fastAfterFirstProviderCall === true && providerInvocations > 1) ||
 					(input.fastThreadText !== undefined &&
@@ -103,15 +127,33 @@ const hosts = await buildRuntimeCoreHosts({
 					]);
 				}
 				return Stream.concat(
-					Stream.fromEffect(Effect.sync(() => {
-						return {
+					Stream.fromIterable([
+						{ type: "text-start" as const, id: "interrupt-partial" },
+						{
+							type: "text-delta" as const,
+							id: "interrupt-partial",
+							text_delta: "failed interrupt partial text",
+						},
+						{ type: "text-end" as const, id: "interrupt-partial" },
+						{ type: "reasoning-start" as const, id: "interrupt-reasoning" },
+						{
+							type: "reasoning-delta" as const,
+							id: "interrupt-reasoning",
+							text_delta: "interrupt Tool reasoning",
+						},
+						{
+							type: "reasoning-end" as const,
+							id: "interrupt-reasoning",
+							providerMetadata: { anthropic: { signature: "sig_interrupt_composition" } },
+						},
+						{
 							type: "tool-call" as const,
-						id: "call_interrupt_composition",
-						toolName: "Bash",
-						input: { command: "durable-operation" },
-						inputPreview: { preview: "{}", truncated: false },
-						};
-					})),
+							id: "call_interrupt_composition",
+							toolName: "Bash",
+							input: { command: "durable-operation" },
+							inputPreview: { preview: "{}", truncated: false },
+						},
+					]),
 					Stream.never,
 				);
 			},
@@ -170,6 +212,8 @@ const service = new RuntimeControlService({
 		handleInterruptControl: async (...args) => {
 			const result = await hosts.commandRunHost.handleInterruptControl(...args);
 			interruptResult = result;
+			interruptResults.push(result);
+			threadSnapshot = await hosts.subAgentRunHost.inspectThread(args[1]);
 			return result;
 		},
 	},
@@ -193,7 +237,11 @@ try {
 	}
 	process.stdout.write(JSON.stringify({
 		interruptResult,
+		interruptResults,
+		threadSnapshot,
+		finishIdleInvocations,
 		providerInvocations,
+		providerContexts,
 		durableOperationCompletions,
 	}));
 } finally {

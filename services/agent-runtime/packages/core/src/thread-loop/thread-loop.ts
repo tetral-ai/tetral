@@ -1,9 +1,9 @@
 /*
- * This module runs the hot agent lifecycle for one loaded session thread.
- * SessionManager calls Service.run from the thread's sole run-slot owner fiber,
- * while Runtime Pod composition builds Service through layer and supplies context
- * loading, persistence, event writing, provider streaming, tool routing, approval
- * review, policy, metrics, clocks, IDs, and binding-token refresh.
+ * This module is the sole transition and dispatch owner for one loaded Thread.
+ * SessionManager calls Service.run from the thread's single run-slot owner Fiber;
+ * committed facts are applied here and any returned dispatch is captured on the
+ * current stack before external work begins. Ordinary input may update ThreadState
+ * and signal the run slot, but cannot replace an in-flight dispatch.
  *
  * The loop guards these invariants:
  * - Newly accepted input enters hot context only after its durable write acknowledges it;
@@ -23,9 +23,10 @@
  * - FinishIdle acknowledgment gates a locally completed or requires-action return,
  *   while failure results tell SessionManager when to release hot state.
  *
- * The coordinator invokes ContextLoader and the provider, tool, compaction, and
- * closeout responsibility modules. It does not own their concrete I/O lifecycles,
- * thread run-slot coalescing, Bridge storage, or Gateway transport.
+ * Runtime Pod composition supplies context loading, persistence, event writing,
+ * provider streaming, Tool routing, review, policy, metrics, clocks, IDs and
+ * binding refresh. This module does not own run-slot coalescing, Bridge storage,
+ * Gateway transport or the provider-visible message list in ContextManager.
  */
 
 import type { ProviderContextEntry as GatewayProviderContextEntry } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -209,18 +210,28 @@ import {
 } from "./provider-request.js";
 import type { ThreadRuntime } from "./thread-runtime.js";
 import type {
-	RuntimeAcceptedInputState,
 	RuntimePendingApprovalToolJobState,
 	RuntimePendingSandboxExecutionJobState,
-	RuntimePreloadedPendingToolUseState,
-	RuntimePreloadedSandboxExecutionState,
 	SessionCurrentModel,
 } from "./thread-state.js";
 import type {
-	ThreadTurnAction,
-	ThreadTurnReduction,
-} from "./thread-turn-reducer.js";
-import { projectFailedRequestProviderContext } from "./thread-turn-checkpoint.js";
+	RuntimeAcceptedInputState,
+} from "./input/accepted-input.js";
+import type {
+	RuntimeControlInputCommit,
+	RuntimeControlInputCommitResult,
+	RuntimeInterruptCommandState,
+	RuntimeToolConfirmationState,
+} from "./input/control-input.js";
+import type {
+	RuntimePreloadedPendingToolUseState,
+	RuntimePreloadedSandboxExecutionState,
+} from "./input/preload.js";
+import type {
+	ThreadTurnNextStep,
+	ThreadTurnTransition,
+} from "./turn/types.js";
+import { projectFailedRequestProviderContext } from "./turn/provider-context.js";
 import type {
 	RuntimeApprovalReviewer,
 	RuntimeRecoveredToolJobState,
@@ -261,25 +272,21 @@ export {
 	toolConfirmationContext,
 };
 
-export interface InterpretedThreadTurnAction {
-	readonly action: ThreadTurnAction;
+export interface InterpretedThreadTurnNextStep {
+	readonly nextStep: ThreadTurnNextStep;
 	readonly runDisposition: "passive" | "active";
 }
 
-/** Exhaustively interprets reducer actions before ThreadLoop or SessionManager acts on them. */
-export function interpretThreadTurnAction(
-	action: ThreadTurnAction,
-): InterpretedThreadTurnAction {
-	switch (action.action) {
-		case "none":
+/** Exhaustively interprets stable next steps before ThreadLoop or SessionManager acts on them. */
+export function interpretThreadTurnNextStep(
+	nextStep: ThreadTurnNextStep,
+): InterpretedThreadTurnNextStep {
+	switch (nextStep.action) {
 		case "await_input":
 		case "await_request_end":
 		case "await_tool_results":
-			return { action, runDisposition: "passive" };
+			return { nextStep, runDisposition: "passive" };
 		case "prepare_next_request":
-		case "start_provider_request":
-		case "dispatch_tool_use":
-		case "reconcile_request_seal":
 		case "resume_tool_routes":
 		case "finish_idle":
 		case "continue_after_compaction":
@@ -288,13 +295,22 @@ export function interpretThreadTurnAction(
 		case "commit_accepted_input":
 		case "close_interrupted":
 		case "close_failed":
-			return { action, runDisposition: "active" };
+			return { nextStep, runDisposition: "active" };
 	}
 }
 
-/** Returns whether a reconstructed reducer action needs an owned ThreadRun. */
-export function threadTurnActionNeedsRun(action: ThreadTurnAction): boolean {
-	return interpretThreadTurnAction(action).runDisposition === "active";
+/** Returns whether a reconstructed stable next step needs an owned ThreadRun. */
+function threadTurnNextStepNeedsRun(
+	nextStep: ThreadTurnNextStep,
+): boolean {
+	return interpretThreadTurnNextStep(nextStep).runDisposition === "active";
+}
+
+function threadNeedsRun(session: ThreadRuntime): boolean {
+	return (
+		session.state.peekAcceptedInput() !== undefined ||
+		threadTurnNextStepNeedsRun(session.state.threadTurnTransition().nextStep)
+	);
 }
 
 interface ThreadRunOpeningSource {
@@ -306,23 +322,23 @@ interface ThreadRunOpeningSource {
 }
 
 function recoveredThreadRunOpeningSource(
-	reduction: ThreadTurnReduction,
+	transition: ThreadTurnTransition,
 ): ThreadRunOpeningSource | undefined {
 	if (
-		reduction.action.action !== "prepare_next_request" &&
-		reduction.action.action !== "continue_after_compaction"
+		transition.nextStep.action !== "prepare_next_request" &&
+		transition.nextStep.action !== "continue_after_compaction"
 	) {
 		return undefined;
 	}
 	const pendingInputContextSequence =
-		reduction.checkpoint.pendingInputContextSequences[0];
+		transition.checkpoint.pendingInputContextSequences[0];
 	if (pendingInputContextSequence !== undefined) {
 		return { kind: "committed_input", id: String(pendingInputContextSequence) };
 	}
-	const requestEndEventId = reduction.checkpoint.request?.requestEnd?.eventId;
+	const requestEndEventId = transition.checkpoint.request?.requestEnd?.eventId;
 	return requestEndEventId === undefined
 		? undefined
-		: { kind: reduction.action.action, id: requestEndEventId };
+		: { kind: transition.nextStep.action, id: requestEndEventId };
 }
 
 /** Tells SessionManager whether one run retains, discards, or releases the thread's hot state. */
@@ -342,6 +358,7 @@ export type ThreadLoopRunResult =
 	| {
 			readonly type: "failed";
 			readonly error: ProviderError | RuntimeFailure;
+			readonly reloadHotState?: true;
 			readonly failureEventId?: string;
 			readonly closeoutDisposition?: "continuation" | "terminal";
 			readonly releaseSession?: {
@@ -355,6 +372,33 @@ export type ThreadLoopSessionReleaseReason =
 	| "crashed"
 	| "persistence_failed"
 	| "event_write_failed";
+
+/** Result of applying one committed idle-interrupt receipt inside the ThreadLoop owner. */
+export type IdleInterruptSettlementResult =
+	| { readonly type: "applied"; readonly wakeThread: boolean }
+	| { readonly type: "duplicate"; readonly wakeThread: boolean }
+	| { readonly type: "stale" }
+	| { readonly type: "conflict" }
+	| {
+			readonly type: "commit_failed";
+			readonly retryable: boolean;
+			readonly errorCode: string | number;
+	  }
+	| { readonly type: "projection_failed" };
+
+/** Result of applying one Tool-confirmation receipt before SessionManager consumes its wake intent. */
+export type ToolConfirmationSettlementResult =
+	| {
+			readonly type: "applied";
+			readonly applied: boolean;
+			readonly wakeThread: boolean;
+	  }
+	| { readonly type: "duplicate" }
+	| { readonly type: "stale" }
+	| {
+			readonly type: "failed";
+			readonly reason: "context_load_failed" | "control_conflict";
+	  };
 
 /** Identifies the provider and model selected from immutable Runtime configuration. */
 export interface RuntimeModelRef {
@@ -378,6 +422,20 @@ export interface Interface {
 		session: ThreadRuntime,
 		custody: ThreadLoopRunCustody,
 	) => Effect.Effect<ThreadLoopRunResult>;
+	/** Applies an idle interrupt's complete durable receipt before releasing its local fence. */
+	readonly settleIdleInterrupt: (
+		session: ThreadRuntime,
+		command: RuntimeInterruptCommandState,
+		commitInput: RuntimeControlInputCommit,
+	) => Effect.Effect<IdleInterruptSettlementResult>;
+	/** Applies a committed Tool confirmation and returns one run wake intent. */
+	readonly settleToolConfirmation: (
+		session: ThreadRuntime,
+		command: RuntimeToolConfirmationState,
+		commitInput: RuntimeControlInputCommit,
+	) => Effect.Effect<ToolConfirmationSettlementResult>;
+	/** Keeps Reducer interpretation inside ThreadLoop while SessionManager owns the run slot. */
+	readonly threadNeedsRun: (session: ThreadRuntime) => boolean;
 	/**
 	 * Seeds config-sourced model state synchronously. Both preload and accepted-input config
 	 * application call this before pending-tool restoration; an unresolved model stays undefined
@@ -401,6 +459,11 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
+	/** Reports one in-run interrupt attempt without turning retryable failure into replay state. */
+	readonly recordInterruptAttemptResult: (
+		runtimeInputId: string,
+		result: RuntimeControlInputCommitResult,
+	) => void;
 	readonly interruptLeaseRef: (
 		runtimeInputId: string,
 	) =>
@@ -537,6 +600,10 @@ export interface ThreadLoopRuntimeOptions {
 	readonly recordAcceptedInputCommit?:
 		| ((event: RuntimeAcceptedInputCommitObservation) => void)
 		| undefined;
+	/** Bounded observation emitted only after a terminal Runtime settlement lands durably. */
+	readonly recordRuntimeTerminalSettlement?:
+		| ((event: RuntimeTerminalSettlementObservation) => void)
+		| undefined;
 	readonly refreshRuntimeBindingToken?: (
 		identity: ThreadRuntime["identity"],
 		options?: { readonly force?: boolean | undefined },
@@ -593,6 +660,15 @@ export interface RuntimeAcceptedInputCommitObservation {
 		| "task_notification_message_invalid"
 		| "task_notification_payload_mismatch"
 		| undefined;
+}
+
+/** Stable identity and durable outcome for one terminal Runtime settlement. */
+export interface RuntimeTerminalSettlementObservation {
+	readonly workspaceId: string;
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly modelRequestId?: string | undefined;
+	readonly settlementOutcome: "committed" | "duplicate";
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
@@ -773,9 +849,9 @@ function threadLoopLayer(
 					),
 				closeFailedRun: (session, defect, custody) => {
 					const request =
-						session.state.threadTurnReduction().checkpoint.request;
-					const action: Extract<
-						ThreadTurnAction,
+						session.state.threadTurnTransition().checkpoint.request;
+					const nextStep: Extract<
+						ThreadTurnNextStep,
 						{ readonly action: "close_failed" }
 					> =
 						request === undefined
@@ -788,7 +864,7 @@ function threadLoopLayer(
 						options.runtime.createId("event_write"),
 						custody.activeTurnId(session),
 					);
-					return consumeCloseFailedThreadTurnAction(action, () =>
+					return executeCloseFailedThreadTurnNextStep(nextStep, () =>
 						closeFailedRunDurably(
 							options,
 							session,
@@ -806,6 +882,16 @@ function threadLoopLayer(
 					nonAbandonablePromise(() =>
 						closeRecoveredOpenRequestForUserInterrupt(session, options, custody),
 					),
+				settleIdleInterrupt: (session, command, commitInput) =>
+					settleIdleInterrupt(
+						session,
+						command,
+						commitInput,
+						runtimeMetrics(options),
+					),
+				settleToolConfirmation: (session, command, commitInput) =>
+					settleToolConfirmation(session, command, commitInput),
+				threadNeedsRun,
 				seedRuntimeModel: (session) => seedRuntimeModel(session, options),
 				installLoadedPendingToolUses: (
 					session,
@@ -842,16 +928,16 @@ function threadLoopLayer(
 	);
 }
 
-function consumeCloseFailedThreadTurnAction(
-	action: Extract<ThreadTurnAction, { readonly action: "close_failed" }>,
+function executeCloseFailedThreadTurnNextStep(
+	nextStep: Extract<ThreadTurnNextStep, { readonly action: "close_failed" }>,
 	close: () => Promise<FailedRunCloseoutResult>,
 ): Effect.Effect<FailedRunCloseoutResult, never> {
-	return interpretThreadTurnAction(action).runDisposition === "active"
+	return interpretThreadTurnNextStep(nextStep).runDisposition === "active"
 		? Effect.promise(close)
-		: Effect.die(new Error("close_failed action must remain active"));
+		: Effect.die(new Error("close_failed next step must remain active"));
 }
 
-async function consumeRecoveredCloseInterruptedAction(
+async function executeRecoveredCloseInterruptedNextStep(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
 	custody: ThreadLoopRunCustody,
@@ -874,9 +960,13 @@ async function consumeRecoveredCloseInterruptedAction(
 	return { type: "interrupted" };
 }
 
-function failRecoveredOpenRequest(session: ThreadRuntime): ThreadLoopRunResult {
+function failRecoveredOpenRequest(
+	session: ThreadRuntime,
+	reloadHotState = false,
+): ThreadLoopRunResult {
 	return {
 		type: "failed",
+		...(reloadHotState ? { reloadHotState: true as const } : {}),
 		error: normalizeRuntimeFailure({
 			type: "runtime",
 			code: "runtime_invalid_sequence",
@@ -889,7 +979,7 @@ function failRecoveredOpenRequest(session: ThreadRuntime): ThreadLoopRunResult {
 	};
 }
 
-async function consumeRecoveredRequestRetryOrRescheduleAction(
+async function executeRecoveredRequestRetryOrRescheduleNextStep(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
 ): Promise<ThreadLoopRunResult> {
@@ -928,7 +1018,7 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 	options: ThreadLoopRuntimeOptions,
 	custody: ThreadLoopRunCustody,
 ): Promise<ThreadLoopRunResult> {
-	const request = session.state.threadTurnReduction().checkpoint.request;
+	const request = session.state.threadTurnTransition().checkpoint.request;
 	if (request === undefined || request.requestEnd !== undefined) {
 		session.state.markUserInterruptCloseoutEligible();
 		return { type: "interrupted" };
@@ -955,9 +1045,22 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		undefined,
 		undefined,
 		undefined,
-		{ command, interruptLeaseRef },
+		{
+			command,
+			interruptLeaseRef,
+		},
 	);
 	if (!end.ok) {
+		const attemptResult = {
+			ok: false as const,
+			retryable: end.error.retryable,
+			errorCode: end.error.code,
+		};
+		session.state.recordJoinedUserInterruptResult(
+			command.runtimeInputId,
+			attemptResult,
+			{ inputKind: "interrupt" },
+		);
 		return {
 			type: "failed",
 			error: end.error,
@@ -972,24 +1075,8 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		);
 		return { type: "interrupted", discardHotState: true };
 	}
-	if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
-		return failRecoveredOpenRequest(session);
-	}
-	const requestSealFailure = reconcileRequestEndTurn(
-		session,
-		end.requestEndEventId,
-		request.modelRequestId,
-		true,
-		"runtime_interrupted",
-		providerContextRetentionForRequest(session, "interrupted"),
-		undefined,
-	);
-	if (requestSealFailure !== undefined) {
-		return { type: "failed", error: requestSealFailure };
-	}
-	const projectionFailure = applyFailedRequestProviderProjection(session);
-	if (projectionFailure !== undefined) {
-		return { type: "failed", error: projectionFailure };
+	if (!applyJoinedInterruptRequestEnd(session, end)) {
+		return failRecoveredOpenRequest(session, true);
 	}
 	releaseInterruptedPendingTools(
 		session,
@@ -1014,6 +1101,247 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 	}
 	session.state.completeUserInterrupt(command.runtimeInputId);
 	return { type: "interrupted" };
+}
+
+export function settleIdleInterrupt(
+	session: ThreadRuntime,
+	command: RuntimeInterruptCommandState,
+	commitInput: RuntimeControlInputCommit,
+	metrics: RuntimeMetricsSink = NoopRuntimeMetricsSink,
+): Effect.Effect<IdleInterruptSettlementResult> {
+	return Effect.gen(function* () {
+		const committed = yield* Effect.promise(() =>
+			commitInput({ inputKind: "interrupt" }),
+		);
+		if (!committed.ok) {
+			return {
+				type: "commit_failed" as const,
+				retryable: committed.retryable,
+				errorCode: committed.errorCode,
+			};
+		}
+		if ("stale" in committed) {
+			return { type: "stale" as const };
+		}
+		if ("joined" in committed) {
+			const completedMatchingFence =
+				session.state.userInterruptCommand()?.runtimeInputId ===
+				command.runtimeInputId;
+			if (completedMatchingFence) {
+				session.state.completeUserInterrupt(command.runtimeInputId);
+				session.state.finishThreadRunProjection();
+			}
+			return {
+				type: "duplicate" as const,
+				wakeThread: completedMatchingFence && threadNeedsRun(session),
+			};
+		}
+
+		const admitted = session.state.beginUserInterrupt(
+			command,
+			async () => committed,
+		);
+		if (admitted === "conflict") {
+			return { type: "conflict" as const };
+		}
+		if (admitted === "applied") {
+			session.state.discardQueuedAcceptedInputsForInterrupt(
+				command.origin === "user",
+			);
+		}
+
+		const application = yield* Effect.promise(() =>
+			session.state.commitUserInterruptInput({ inputKind: "interrupt" }),
+		);
+		if (!application.result.ok) {
+			return {
+				type: "commit_failed" as const,
+				retryable: application.result.retryable,
+				errorCode: application.result.errorCode,
+			};
+		}
+		if ("stale" in application.result) {
+			return { type: "stale" as const };
+		}
+		if ("joined" in application.result) {
+			session.state.completeUserInterrupt(command.runtimeInputId);
+			session.state.finishThreadRunProjection();
+			return {
+				type: "duplicate" as const,
+				wakeThread: threadNeedsRun(session),
+			};
+		}
+
+		try {
+			const pendingTools = [
+				...session.state.pendingApprovalToolJobs(),
+				...session.state.resolvedToolRouteJobs(),
+				...session.state.pendingSandboxExecutionJobs(),
+			];
+			session.state.contextManager.appendInterruptToolResults(
+				pendingTools.map((pending) => ({
+					toolUseEventId: pending.toolUseEventId,
+					assistantMessageSequence: pending.assistantMessageSequence,
+					modelToolCallId: pending.toolPart.modelToolCallId,
+				})),
+				application.result.interruptToolResults,
+			);
+			session.state.addPendingAttachments(application.result.pendingAttachments);
+			session.state.applyThreadTurnFact({
+				fact: "interrupt_committed",
+				eventId: command.runtimeInputId,
+			});
+			for (const cancellation of application.result.interruptToolResults) {
+				if (
+					session.state
+						.pendingApprovalToolJobs()
+						.some(
+							(pending) =>
+								pending.toolUseEventId === cancellation.toolUseEventId,
+						)
+				) {
+					session.state.removePendingApprovalToolJob(
+						cancellation.toolUseEventId,
+					);
+					metrics.addPendingApprovals(-1);
+				}
+				session.state.clearThreadToolRoute(cancellation.toolUseEventId);
+				session.state.removeResolvedToolRouteJob(cancellation.toolUseEventId);
+				session.state.removePendingSandboxExecutionJob(
+					cancellation.toolUseEventId,
+				);
+			}
+		} catch {
+			return { type: "projection_failed" as const };
+		}
+
+		session.state.completeUserInterrupt(command.runtimeInputId);
+		session.state.finishThreadRunProjection();
+		return {
+			type: "applied" as const,
+			wakeThread: threadNeedsRun(session),
+		};
+	});
+}
+
+export function settleToolConfirmation(
+	session: ThreadRuntime,
+	command: RuntimeToolConfirmationState,
+	commitInput: RuntimeControlInputCommit,
+): Effect.Effect<ToolConfirmationSettlementResult> {
+	return Effect.gen(function* () {
+		const existingConfirmation = session.state.toolConfirmation(
+			command.toolUseEventId,
+		);
+		if (existingConfirmation?.runtimeInputId === command.runtimeInputId) {
+			return { type: "duplicate" as const };
+		}
+
+		const pendingTool = session.state
+			.pendingApprovalToolJobs()
+			.find((pending) => pending.toolUseEventId === command.toolUseEventId);
+		if (pendingTool === undefined) {
+			const replay = yield* Effect.promise(() =>
+				commitInput({ inputKind: "tool_confirmation" }),
+			);
+			if (!replay.ok) {
+				return {
+					type: "failed" as const,
+					reason: "context_load_failed" as const,
+				};
+			}
+			if ("stale" in replay) {
+				return { type: "stale" as const };
+			}
+			if (
+				"type" in replay &&
+				replay.assignedContextSequences.length > 0 &&
+				replay.assignedContextSequences.every(
+					(sequence) => session.state.contextManager.entry(sequence) !== undefined,
+				)
+			) {
+				return { type: "duplicate" as const };
+			}
+			return {
+				type: "failed" as const,
+				reason: "context_load_failed" as const,
+			};
+		}
+
+		const draft = toolConfirmationContext({
+			toolUseEventId: command.toolUseEventId,
+			pendingTool,
+			decision: command.decision,
+			...(command.denyMessage === undefined
+				? {}
+				: { denyMessage: command.denyMessage }),
+		});
+		const committed = yield* Effect.promise(() =>
+			commitInput({ inputKind: "tool_confirmation" }),
+		);
+		if (!committed.ok) {
+			return {
+				type: "failed" as const,
+				reason: "context_load_failed" as const,
+			};
+		}
+		if ("stale" in committed) {
+			return { type: "stale" as const };
+		}
+		if (!("type" in committed)) {
+			return {
+				type: "failed" as const,
+				reason: "control_conflict" as const,
+			};
+		}
+
+		const message = applyAcceptedInputResult(
+			[draft],
+			committed.assignedContextSequences,
+		)[0];
+		if (message === undefined) {
+			return {
+				type: "failed" as const,
+				reason: "control_conflict" as const,
+			};
+		}
+		const existingEntry = session.state.contextManager.entry(
+			message.messageSequence,
+		);
+		if (existingEntry === undefined) {
+			session.state.contextManager.appendEntry(message);
+		} else if (JSON.stringify(existingEntry) !== JSON.stringify(message)) {
+			return {
+				type: "failed" as const,
+				reason: "control_conflict" as const,
+			};
+		}
+		session.state.addPendingAttachments(committed.pendingAttachments);
+		session.state.applyThreadTurnFact({
+			fact: "inputs_committed",
+			eventId: command.runtimeInputId,
+			contextSequences: [message.messageSequence],
+		});
+		const confirmation = session.state.resolveToolConfirmation(command);
+		if (confirmation === "conflict") {
+			return {
+				type: "failed" as const,
+				reason: "control_conflict" as const,
+			};
+		}
+		const wakeThread = session.state.hasPendingApprovalToolJobs();
+		if (wakeThread) {
+			session.state.recordThreadToolRoute(
+				command.toolUseEventId,
+				"resume_approval_settlement",
+			);
+		}
+		return {
+			type: "applied" as const,
+			applied: confirmation === "applied",
+			wakeThread,
+		};
+	});
 }
 
 function runThreadLoopEffect(
@@ -1060,29 +1388,34 @@ function runThreadLoopEffect(
 				return { type: "interrupted" };
 			}
 			seedRuntimeModel(session, options);
-			const recoveredAction = interpretThreadTurnAction(
-				session.state.threadTurnReduction().action,
-			).action;
-			if (recoveredAction.action === "close_interrupted") {
+			const recoveredNextStep = interpretThreadTurnNextStep(
+				session.state.threadTurnTransition().nextStep,
+			).nextStep;
+			if (recoveredNextStep.action === "close_interrupted") {
 				return yield* nonAbandonablePromise(() =>
-					consumeRecoveredCloseInterruptedAction(session, options, custody),
+					executeRecoveredCloseInterruptedNextStep(session, options, custody),
 				);
 			}
-			if (recoveredAction.action === "apply_request_retry_or_reschedule") {
-				const recoveredRequest =
-					session.state.threadTurnReduction().checkpoint.request;
-				const reschedule = recoveredRequest?.requestEnd?.reschedule;
-				const hasIncompleteTool = recoveredRequest?.toolMembers.some(
+			const recoveredRequest =
+				session.state.threadTurnTransition().checkpoint.request;
+			const reschedule = recoveredRequest?.requestEnd?.reschedule;
+			const hasIncompleteTool = recoveredRequest?.toolMembers.some(
 					(member) =>
 						member.memberKind === "public_tool_use" &&
 						member.terminalResult === undefined,
-				);
+				) ?? false;
+			if (
+				recoveredNextStep.action === "apply_request_retry_or_reschedule" ||
+				reschedule !== undefined ||
+				(recoveredRequest?.requestEnd?.isError === true &&
+					hasIncompleteTool)
+			) {
 				if (
 					recoveredRequest === undefined ||
 					(reschedule === undefined && !hasIncompleteTool)
 				) {
 					return yield* nonAbandonablePromise(() =>
-						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+						executeRecoveredRequestRetryOrRescheduleNextStep(session, options),
 					);
 				}
 				if (reschedule === undefined) {
@@ -1098,7 +1431,7 @@ function runThreadLoopEffect(
 					recoveredRescheduleKind = recoveredRequest.requestKind;
 				}
 			}
-			if (recoveredAction.action === "await_request_end") {
+			if (recoveredNextStep.action === "await_request_end") {
 				return failRecoveredOpenRequest(session);
 			}
 			while (true) {
@@ -1115,33 +1448,30 @@ function runThreadLoopEffect(
 					return { type: "interrupted" };
 				}
 				// The reducer selects one exact accepted-input identity at a safe Turn
-				// boundary. Inputs admitted while provider or Tool work is open remain in
-				// ThreadProcessor and cannot be projected into the in-flight request.
-				const selectedAction = interpretThreadTurnAction(
-					session.state.threadTurnReduction().action,
-				).action;
+				// boundary. Inputs admitted while Provider or Tool work is open remain in
+				// ThreadState and cannot be projected into the in-flight request.
+				const selectedNextStep = interpretThreadTurnNextStep(
+					session.state.threadTurnTransition().nextStep,
+				).nextStep;
 				const selectedAcceptedInput =
-					selectedAction.action === "commit_accepted_input"
+					selectedNextStep.action === "commit_accepted_input"
 						? session.state
 								.acceptedInputSnapshot()
 								.find(
 									(input) =>
-										input.runtimeInputId === selectedAction.runtimeInputId,
+										input.runtimeInputId === selectedNextStep.runtimeInputId,
 								)
 						: undefined;
 				if (
-					selectedAction.action === "commit_accepted_input" &&
+					selectedNextStep.action === "commit_accepted_input" &&
 					selectedAcceptedInput === undefined
 				) {
 					throw new Error(
-						"reducer selected an accepted input that is not owned by ThreadProcessor",
+						"reducer selected an accepted input that is not owned by ThreadState",
 					);
 				}
 				const acceptedInputCut =
-					pendingProviderRequestReschedule ||
-					selectedAcceptedInput === undefined
-						? []
-						: [selectedAcceptedInput];
+					selectedAcceptedInput === undefined ? [] : [selectedAcceptedInput];
 				const committedContextEntries: RuntimeContextEntry[] = [];
 				const committedRequestInputEntries: RuntimeContextEntry[] = [];
 				for (const acceptedInput of acceptedInputCut) {
@@ -1324,7 +1654,7 @@ function runThreadLoopEffect(
 								(entry) => !residentSequences.has(entry.messageSequence),
 							);
 							const pendingContextSequences = new Set(
-								session.state.threadTurnReduction().checkpoint
+								session.state.threadTurnTransition().checkpoint
 									.pendingInputContextSequences,
 							);
 							const resumesPendingInput =
@@ -1401,7 +1731,7 @@ function runThreadLoopEffect(
 					acceptedInputCut.length > 0 &&
 					session.state.acceptedInputSnapshot().length > 0
 				) {
-					// One reducer action owns one commit. Re-enter reduction before opening
+					// One stable next step owns one commit. Derive again before opening
 					// provider work so the next admitted identity is selected explicitly.
 					pendingInput = { type: "empty" };
 					continue;
@@ -1457,6 +1787,13 @@ function runThreadLoopEffect(
 					statusRunningAlreadyAppended = true;
 					pendingInput = { type: "empty" };
 				}
+				const postToolNextStep = interpretThreadTurnNextStep(
+					session.state.threadTurnTransition().nextStep,
+				).nextStep;
+				if (postToolNextStep.action === "commit_accepted_input") {
+					pendingInput = { type: "empty" };
+					continue;
+				}
 				if (
 					pendingProviderRequestReschedule &&
 					recoveredRescheduleDeadline !== undefined
@@ -1485,22 +1822,30 @@ function runThreadLoopEffect(
 						return { type: "failed", error: projectionFailure };
 					}
 					return yield* nonAbandonablePromise(() =>
-						consumeRecoveredRequestRetryOrRescheduleAction(session, options),
+						executeRecoveredRequestRetryOrRescheduleNextStep(session, options),
 					);
 				}
 				if (
 					(pendingInput.type !== "context" ||
 						pendingInput.entries.length === 0) &&
 					!acceptedContextCommitted &&
-					!pendingProviderRequestReschedule &&
-					interpretThreadTurnAction(session.state.threadTurnReduction().action)
-						.action.action !== "prepare_next_request" &&
-					interpretThreadTurnAction(session.state.threadTurnReduction().action)
-						.action.action !== "continue_after_compaction"
+					!pendingProviderRequestReschedule
 				) {
-					return yield* nonAbandonablePromise(() =>
-						completeRun(session, options, custody),
-					);
+					const resumedNextStep = interpretThreadTurnNextStep(
+						session.state.threadTurnTransition().nextStep,
+					).nextStep;
+					if (resumedNextStep.action === "commit_accepted_input") {
+						pendingInput = { type: "empty" };
+						continue;
+					}
+					if (
+						resumedNextStep.action !== "prepare_next_request" &&
+						resumedNextStep.action !== "continue_after_compaction"
+					) {
+						return yield* nonAbandonablePromise(() =>
+							completeRun(session, options, custody),
+						);
+					}
 				}
 				const committedContext = session.state.contextManager.entries();
 				const providerContextMessages =
@@ -1589,7 +1934,7 @@ function runThreadLoopEffect(
 				}
 				if (!statusRunningAlreadyAppended) {
 					const pendingTool = session.state.pendingApprovalToolJobs()[0];
-					const turnReduction = session.state.threadTurnReduction();
+					const turnReduction = session.state.threadTurnTransition();
 					const recoveredOpeningSource =
 						recoveredThreadRunOpeningSource(turnReduction);
 					const openingSource =
@@ -1855,24 +2200,26 @@ function runThreadLoopEffect(
 					return baseResult;
 				}
 				reactiveContextOverflowPending = false;
-				const turnDecision = session.state.threadTurnReduction();
-				const turnAction = interpretThreadTurnAction(
-					turnDecision.action,
-				).action;
+				const turnTransition = session.state.threadTurnTransition();
+				const turnNextStep = interpretThreadTurnNextStep(
+					turnTransition.nextStep,
+				).nextStep;
 				if (
-					turnAction.action === "commit_accepted_input" &&
+					turnNextStep.action === "commit_accepted_input" &&
 					session.state
 						.acceptedInputSnapshot()
-						.some((input) => input.runtimeInputId === turnAction.runtimeInputId)
+						.some(
+							(input) => input.runtimeInputId === turnNextStep.runtimeInputId,
+						)
 				) {
 					pendingInput = { type: "empty" };
 					continue;
 				}
-				if (turnAction.action === "prepare_next_request") {
+				if (turnNextStep.action === "prepare_next_request") {
 					pendingInput = { type: "empty" };
 					continue;
 				}
-				if (turnAction.action === "complete_reviewer") {
+				if (turnNextStep.action === "complete_reviewer") {
 					const idleAppend = yield* nonAbandonablePromise(() =>
 						appendIdleEvent(options, session, custody, { type: "end_turn" }),
 					);
@@ -1886,8 +2233,8 @@ function runThreadLoopEffect(
 					return baseResult;
 				}
 				if (
-					turnAction.action !== "finish_idle" ||
-					turnAction.stopReason.type !== "end_turn"
+					turnNextStep.action !== "finish_idle" ||
+					turnNextStep.stopReason.type !== "end_turn"
 				) {
 					return {
 						type: "failed",
@@ -1947,7 +2294,7 @@ function runThreadLoopEffect(
 					return settleUserInterruptAtRunExitEffect(session, options, custody);
 				}
 				const hasUnsettledToolOwner =
-					session.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+					session.state.threadTurnTransition().checkpoint.request?.toolMembers.some(
 						(member) =>
 							member.memberKind === "public_tool_use" &&
 							member.terminalResult === undefined,
@@ -2631,10 +2978,11 @@ function runOwnedCompactionSummaryAttemptEffect(
 						.map((entry) => entry.messageSequence),
 				);
 				const consumedInputContextSequences = session.state
-					.threadTurnReduction()
+					.threadTurnTransition()
 					.checkpoint.pendingInputContextSequences.filter((sequence) =>
 						compactedContextSequences.has(sequence),
 					);
+				const requestStartOwner = session.state.threadTurnTransition();
 				const startAppend = yield* Effect.promise(() =>
 					appendRetriedEvent(
 						options,
@@ -2665,20 +3013,21 @@ function runOwnedCompactionSummaryAttemptEffect(
 					session.state.clearAfterCustodyHandoff();
 					return { type: "interrupted", discardHotState: true } as const;
 				}
-				const requestStartReduction = session.state.applyThreadTurnFact({
+				const requestStartReduction = session.state.applyRequestStartFact(
+					requestStartOwner,
+					{
 					fact: "request_started",
 					eventId: startAppend.eventId,
 					modelRequestId: request.modelRequestId,
 					requestKind: "compaction_summary",
 					contextThroughMessageSequence,
 					consumedInputContextSequences,
-				});
-				const requestStartAction = interpretThreadTurnAction(
-					requestStartReduction.action,
-				).action;
+					},
+				);
+				const requestStartDispatch = requestStartReduction.dispatch;
 				if (
-					requestStartAction.action !== "start_provider_request" ||
-					requestStartAction.modelRequestId !== request.modelRequestId
+					requestStartDispatch?.dispatch !== "start_provider_request" ||
+					requestStartDispatch.modelRequestId !== request.modelRequestId
 				) {
 					return {
 						type: "failed",
@@ -2731,11 +3080,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 						undefined,
 					);
 				}
-				const providerStream = Effect.sync(() =>
-					session.state.consumeThreadTurnEdge(),
-				).pipe(
-					Effect.andThen(
-						Effect.suspend(() =>
+				const providerStream = Effect.suspend(() =>
 							options.llmService
 								.stream(request, {
 									abortSignal: providerAbortController.signal,
@@ -2753,9 +3098,7 @@ function runOwnedCompactionSummaryAttemptEffect(
 									),
 									Effect.as({ type: "completed" as const }),
 								),
-						),
-					),
-				);
+						);
 				const providerLifecycle = yield* runCompactionStreamLifecycle(
 					restore,
 					providerStream,
@@ -2812,9 +3155,9 @@ function runOwnedCompactionSummaryAttemptEffect(
 							}),
 						);
 					}
-					const end = yield* Effect.promise(() =>
-						appendModelRequestEndEvent(
-							options,
+						const endResult = yield* Effect.promise(() =>
+							appendModelRequestEndEvent(
+								options,
 							session,
 							request.modelRequestId,
 							startAppend.eventId,
@@ -2830,23 +3173,23 @@ function runOwnedCompactionSummaryAttemptEffect(
 							{
 								command: interruptCommand,
 								interruptLeaseRef,
+								recordAttemptResult: (result) =>
+									custody.recordInterruptAttemptResult(
+										interruptCommand.runtimeInputId,
+										result,
+									),
 							},
-						),
-					);
+							),
+						);
+						const end =
+							endResult.ok && !applyJoinedInterruptRequestEnd(session, endResult)
+								? {
+										ok: false as const,
+										error: joinedInterruptRequestEndFailure(session),
+									}
+								: endResult;
 					if (!end.ok) {
 						return yield* failRequestCloseout(end.error);
-					}
-					if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
-						return yield* failRequestCloseout(
-							normalizeRuntimeFailure({
-								type: "runtime",
-								code: "runtime_invalid_sequence",
-								retryable: false,
-								fatal: true,
-								reason: "runtime_contract_validation",
-								sessionId: session.sessionId,
-							}),
-						);
 					}
 					session.state.markUserInterruptCloseoutEligible();
 					return { type: "interrupted" } as const;
@@ -3064,7 +3407,7 @@ function closeStartedCompactionForUserInterruptEffect(
 				}),
 			);
 		}
-		const end = yield* Effect.promise(() =>
+		const endResult = yield* Effect.promise(() =>
 			appendModelRequestEndEvent(
 				options,
 				session,
@@ -3082,23 +3425,20 @@ function closeStartedCompactionForUserInterruptEffect(
 				{
 					command,
 					interruptLeaseRef,
+					recordAttemptResult: (result) =>
+						custody.recordInterruptAttemptResult(command.runtimeInputId, result),
 				},
 			),
 		);
+		const end =
+			endResult.ok && !applyJoinedInterruptRequestEnd(session, endResult)
+				? {
+						ok: false as const,
+						error: joinedInterruptRequestEndFailure(session),
+					}
+				: endResult;
 		if (!end.ok) {
 			return yield* failRequestCloseout(end.error);
-		}
-		if (!acknowledgeJoinedInterruptRequestEnd(session, end)) {
-			return yield* failRequestCloseout(
-				normalizeRuntimeFailure({
-					type: "runtime",
-					code: "runtime_invalid_sequence",
-					retryable: false,
-					fatal: true,
-					reason: "runtime_contract_validation",
-					sessionId: session.sessionId,
-				}),
-			);
 		}
 		session.state.markUserInterruptCloseoutEligible();
 		return { type: "interrupted" };
@@ -3409,6 +3749,7 @@ function coordinateProviderTurnEffect(
 				durableOperations,
 			);
 		}
+		const requestStartOwner = session.state.threadTurnTransition();
 		const spanStartAppend = yield* nonAbandonablePromise(() =>
 			appendRetriedEvent(
 				options,
@@ -3445,22 +3786,23 @@ function coordinateProviderTurnEffect(
 			session.state.clearAfterCustodyHandoff();
 			return providerTurnInterruptedWithDiscard();
 		}
-		const requestStartReduction = session.state.applyThreadTurnFact({
-			fact: "request_started",
-			eventId: spanStartAppend.eventId,
-			modelRequestId: request.modelRequestId,
-			requestKind: runtimeProviderStreamKindFromRequest(request),
-			contextThroughMessageSequence: requestContextAnchorSequence,
-			consumedInputContextSequences:
-				session.state.threadTurnReduction().checkpoint
-					.pendingInputContextSequences,
-		});
-		const requestStartAction = interpretThreadTurnAction(
-			requestStartReduction.action,
-		).action;
+		const requestStartReduction = session.state.applyRequestStartFact(
+			requestStartOwner,
+			{
+				fact: "request_started",
+				eventId: spanStartAppend.eventId,
+				modelRequestId: request.modelRequestId,
+				requestKind: runtimeProviderStreamKindFromRequest(request),
+				contextThroughMessageSequence: requestContextAnchorSequence,
+				consumedInputContextSequences:
+					session.state.threadTurnTransition().checkpoint
+						.pendingInputContextSequences,
+			},
+		);
+		const requestStartDispatch = requestStartReduction.dispatch;
 		if (
-			requestStartAction.action !== "start_provider_request" ||
-			requestStartAction.modelRequestId !== request.modelRequestId
+			requestStartDispatch?.dispatch !== "start_provider_request" ||
+			requestStartDispatch.modelRequestId !== request.modelRequestId
 		) {
 			return providerTurnFailed(
 				pendingApprovalResumeFailure(
@@ -3571,11 +3913,7 @@ function coordinateProviderTurnEffect(
 								streamState,
 							);
 				}
-				const providerStream = Effect.sync(() =>
-					session.state.consumeThreadTurnEdge(),
-				).pipe(
-					Effect.andThen(
-						Effect.suspend(() =>
+				const providerStream = Effect.suspend(() =>
 							options.llmService
 								.stream(request, {
 									abortSignal: providerAbortController.signal,
@@ -3602,9 +3940,7 @@ function coordinateProviderTurnEffect(
 									}),
 									Effect.as({ type: "completed" as const }),
 								),
-						),
-					),
-				);
+						);
 				const streamStartedAt = options.runtime.monotonicMs();
 				const providerLifecycle = yield* runProviderStreamLifecycle(
 					restore,
@@ -5021,7 +5357,7 @@ function coordinateRuntimeToolJobEffect(
 
 		if (gateDecision.type === "review_required") {
 			const parentBoundaryEventId =
-				session.state.threadTurnReduction().checkpoint.request
+				session.state.threadTurnTransition().checkpoint.request
 					?.requestStartEventId;
 			if (parentBoundaryEventId === undefined) {
 				return yield* Effect.promise(() =>
@@ -5145,12 +5481,10 @@ function coordinateRuntimeToolJobEffect(
 							modelToolCallId: job.modelToolCallId,
 							toolName: job.name,
 						});
-						const toolUseAction = interpretThreadTurnAction(
-							toolUseReduction.action,
-						).action;
+						const toolUseDispatch = toolUseReduction.dispatch;
 						const dispatchAuthorized =
-							toolUseAction.action === "dispatch_tool_use" &&
-							toolUseAction.toolUseEventId === result.toolUseEventId;
+							toolUseDispatch?.dispatch === "route_tool_use" &&
+							toolUseDispatch.toolUseEventId === result.toolUseEventId;
 						if (dispatchAuthorized) {
 							session.state.recordThreadToolRoute(
 								result.toolUseEventId,
@@ -5159,7 +5493,6 @@ function coordinateRuntimeToolJobEffect(
 									? "requires_user_action"
 									: "hot_execution",
 							);
-							session.state.consumeThreadTurnEdge();
 						}
 						return { ...result, dispatchAuthorized };
 					}),
@@ -5787,7 +6120,7 @@ function settleProviderErrorToolsEffect(
 		const blockingEventIds = [
 			...new Set([
 				...state.waitingToolUseEventIds,
-				...(session.state.threadTurnReduction().checkpoint.request?.toolMembers.flatMap(
+				...(session.state.threadTurnTransition().checkpoint.request?.toolMembers.flatMap(
 					(member) =>
 						member.memberKind === "public_tool_use" &&
 						member.terminalResult === undefined
@@ -5819,7 +6152,7 @@ function applyFailedRequestProviderProjection(
 						openRequestDraft:
 							session.state.contextManager.openRequestDraft(),
 					}),
-			checkpoint: session.state.threadTurnReduction().checkpoint,
+			checkpoint: session.state.threadTurnTransition().checkpoint,
 		});
 		session.state.contextManager.replaceEntries(projected.contextEntries);
 		session.state.contextManager.installOpenRequestDraft(
@@ -6059,22 +6392,29 @@ function settleRuntimeShutdownEffect(
 					{
 						command,
 						interruptLeaseRef,
+						recordAttemptResult: (result) =>
+							custody.recordInterruptAttemptResult(command.runtimeInputId, result),
 					},
 				),
 			);
 			if (!spanEndAppend.ok) {
+				const attemptResult = {
+					ok: false as const,
+					retryable: spanEndAppend.error.retryable,
+					errorCode: spanEndAppend.error.code,
+				};
 				session.state.recordJoinedUserInterruptResult(
 					command.runtimeInputId,
-					{
-						ok: false,
-						retryable: spanEndAppend.error.retryable,
-						errorCode: spanEndAppend.error.code,
-					},
+					attemptResult,
 					{ inputKind: "interrupt" },
 				);
 				return yield* failRequestCloseout(spanEndAppend.error);
 			}
 			if (spanEndAppend.type === "stale") {
+				custody.recordInterruptAttemptResult(command.runtimeInputId, {
+					ok: true,
+					stale: true,
+				});
 				session.state.recordJoinedUserInterruptResult(
 					command.runtimeInputId,
 					{ ok: true, stale: true },
@@ -6090,30 +6430,6 @@ function settleRuntimeShutdownEffect(
 				undefined,
 				requestEndOutcome(spanEndAppend),
 			);
-			if (sealApplication.type === "stale_custody") {
-				if (
-					!session.state.recordJoinedUserInterruptResult(
-						command.runtimeInputId,
-						{ ok: true, stale: true },
-						{ inputKind: "interrupt" },
-					)
-				) {
-					return yield* failRequestCloseout(
-						normalizeRuntimeFailure({
-							type: "runtime",
-							code: "runtime_invalid_sequence",
-							retryable: false,
-							fatal: true,
-							reason: "runtime_contract_validation",
-							sessionId: session.sessionId,
-						}),
-					);
-				}
-				return requestEndCommitted(
-					providerTurnInterrupted(),
-					"discard_hot_state",
-				);
-			}
 			if (sealApplication.type === "failed") {
 				return yield* failRequestCloseout(sealApplication.error);
 			}
@@ -6139,13 +6455,13 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
-			const requestSealFailure = reconcileRequestEndTurn(
+			const requestSealFailure = applyCommittedRequestEnd(
 				session,
 				spanEndAppend.requestEndEventId,
 				modelRequestId,
 				true,
 				"runtime_interrupted",
-				providerContextRetentionForRequest(session, "interrupted"),
+				spanEndAppend.providerContextRetention,
 				undefined,
 			);
 			if (requestSealFailure !== undefined) {
@@ -6173,6 +6489,10 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
+			custody.recordInterruptAttemptResult(command.runtimeInputId, {
+				ok: true,
+				joined: true,
+			});
 			releaseInterruptedPendingTools(
 				session,
 				options,
@@ -6773,6 +7093,9 @@ async function appendModelRequestEndEvent(
 		readonly interruptLeaseRef: NonNullable<
 			SessionEventWriterRequestEndEnvelope["interruptSettlement"]
 		>["interruptLeaseRef"];
+		readonly recordAttemptResult?: (
+			result: RuntimeControlInputCommitResult,
+		) => void;
 	},
 ): Promise<
 	| {
@@ -6783,6 +7106,7 @@ async function appendModelRequestEndEvent(
 				SessionEventWriterRequestEndResult,
 				{ readonly ok: true; readonly type: "committed" | "duplicate" }
 			>["outcome"];
+			readonly providerContextRetention: SessionEventWriterRequestEndEnvelope["providerContextRetention"];
 			readonly interruptToolResults: readonly RuntimeInterruptToolResult[];
 			readonly assistantSeal: {
 				readonly status: "completed" | "failed";
@@ -6803,7 +7127,7 @@ async function appendModelRequestEndEvent(
 	| { readonly ok: false; readonly error: RuntimeFailure }
 > {
 	const writeId = options.runtime.createId("event_write");
-	const activeRequest = session.state.threadTurnReduction().checkpoint.request;
+	const activeRequest = session.state.threadTurnTransition().checkpoint.request;
 	if (
 		activeRequest === undefined ||
 		activeRequest.modelRequestId !== modelRequestId ||
@@ -6889,7 +7213,13 @@ async function appendModelRequestEndEvent(
 	};
 	const result = await writeRequestEndWithRetry(options, envelope);
 	if (!result.ok) {
-		return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
+		const error = runtimeFailureFromEventWriter(result.error);
+		interrupt?.recordAttemptResult?.({
+			ok: false,
+			retryable: error.retryable,
+			errorCode: error.code,
+		});
+		return { ok: false, error };
 	}
 	if (result.type !== "stale" && interrupt === undefined) {
 		const acceptedReschedule =
@@ -6901,7 +7231,7 @@ async function appendModelRequestEndEvent(
 						compactionAttempts: reschedule.compactionAttempts,
 					}
 				: undefined;
-		const requestSealFailure = reconcileRequestEndTurn(
+		const requestSealFailure = applyCommittedRequestEnd(
 			session,
 			result.requestEndEventId,
 			modelRequestId,
@@ -6935,6 +7265,7 @@ async function appendModelRequestEndEvent(
 		type: result.type,
 		requestEndEventId: result.requestEndEventId,
 		outcome: result.outcome,
+		providerContextRetention,
 		interruptToolResults: result.interruptToolResults,
 		assistantSeal,
 	};
@@ -6955,7 +7286,7 @@ function requestEndOutcome(
 }
 
 /** Applies the reducer half of a durable Request End after all co-committed Tool facts are projected. */
-function reconcileRequestEndTurn(
+function applyCommittedRequestEnd(
 	session: ThreadRuntime,
 	eventId: string,
 	modelRequestId: string,
@@ -6972,7 +7303,7 @@ function reconcileRequestEndTurn(
 		| undefined,
 ): RuntimeFailure | undefined {
 	try {
-		const requestEndReduction = session.state.applyThreadTurnFact({
+		const requestEndTransition = session.state.applyThreadTurnFact({
 			fact: "request_ended",
 			eventId,
 			modelRequestId,
@@ -6981,13 +7312,9 @@ function reconcileRequestEndTurn(
 			providerContextRetention,
 			...(reschedule !== undefined ? { reschedule } : {}),
 		});
-		if (
-			interpretThreadTurnAction(requestEndReduction.action).action.action !==
-			"reconcile_request_seal"
-		) {
-			throw new Error("Request End did not enter the reducer seal boundary");
+		if (requestEndTransition.dispatch !== undefined) {
+			throw new Error("Request End must not produce a dispatch");
 		}
-		session.state.reconcileThreadTurnSeal();
 		return undefined;
 	} catch (error) {
 		return normalizeRuntimeFailure({
@@ -7006,7 +7333,7 @@ function providerContextRetentionForRequest(
 	session: ThreadRuntime,
 	disposition: SessionEventWriterRequestEndEnvelope["providerContextRetention"]["disposition"],
 ): SessionEventWriterRequestEndEnvelope["providerContextRetention"] {
-	const request = session.state.threadTurnReduction().checkpoint.request;
+	const request = session.state.threadTurnTransition().checkpoint.request;
 	if (request === undefined) {
 		throw new Error("provider-context retention requires an active request");
 	}
@@ -7218,7 +7545,7 @@ async function appendRunningEvent(
 	const existingDurableTurnId = custody.activeTurnId(session);
 	if (existingDurableTurnId !== undefined) {
 		if (
-			session.state.threadTurnReduction().checkpoint.executionRunId !==
+			session.state.threadTurnTransition().checkpoint.executionRunId !==
 			existingDurableTurnId
 		) {
 			session.state.applyThreadTurnFact({
@@ -7252,7 +7579,7 @@ async function appendRunningEvent(
 		};
 	}
 	if (
-		session.state.threadTurnReduction().checkpoint.executionRunId !==
+		session.state.threadTurnTransition().checkpoint.executionRunId !==
 		result.eventId
 	) {
 		session.state.applyThreadTurnFact({
@@ -7487,7 +7814,7 @@ function runtimeShutdownFailure(
 	});
 }
 
-function acknowledgeJoinedInterruptRequestEnd(
+function applyJoinedInterruptRequestEnd(
 	session: ThreadRuntime,
 	result: Extract<
 		Awaited<ReturnType<typeof appendModelRequestEndEvent>>,
@@ -7499,6 +7826,10 @@ function acknowledgeJoinedInterruptRequestEnd(
 		return false;
 	}
 	if (result.type === "stale") return false;
+	const request = session.state.threadTurnTransition().checkpoint.request;
+	if (request === undefined) {
+		return false;
+	}
 	try {
 		const pendingTools = [
 			...session.state.pendingApprovalToolJobs(),
@@ -7513,6 +7844,14 @@ function acknowledgeJoinedInterruptRequestEnd(
 			})),
 			result.interruptToolResults,
 		);
+		for (const settlement of result.interruptToolResults) {
+			session.state.applyThreadTurnFact({
+				fact: "tool_result_committed",
+				toolUseEventId: settlement.toolUseEventId,
+				outcome: settlement.result.type,
+			});
+			session.state.clearThreadToolRoute(settlement.toolUseEventId);
+		}
 		const openDraft = session.state.contextManager.openRequestDraft();
 		if (openDraft !== undefined) {
 			if (
@@ -7530,11 +7869,38 @@ function acknowledgeJoinedInterruptRequestEnd(
 		fact: "interrupt_committed",
 		eventId: command.runtimeInputId,
 	});
+	const requestSealFailure = applyCommittedRequestEnd(
+		session,
+		result.requestEndEventId,
+		request.modelRequestId,
+		true,
+		"runtime_interrupted",
+		result.providerContextRetention,
+		undefined,
+	);
+	if (requestSealFailure !== undefined) {
+		return false;
+	}
+	const projectionFailure = applyFailedRequestProviderProjection(session);
+	if (projectionFailure !== undefined) {
+		return false;
+	}
 	return session.state.recordJoinedUserInterruptResult(
 		command.runtimeInputId,
 		{ ok: true, joined: true },
 		{ inputKind: "interrupt" },
 	);
+}
+
+function joinedInterruptRequestEndFailure(session: ThreadRuntime): RuntimeFailure {
+	return normalizeRuntimeFailure({
+		type: "runtime",
+		code: "runtime_invalid_sequence",
+		retryable: false,
+		fatal: true,
+		reason: "runtime_contract_validation",
+		sessionId: session.sessionId,
+	});
 }
 
 function userInterruptFailure(

@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { Context, Effect, Exit, Fiber, Layer, Scope } from "effect";
+import {
+	Context,
+	Effect,
+	Exit,
+	Fiber,
+	Layer,
+	Scope,
+} from "effect";
 import {
 	normalizeRuntimeFailure,
 	normalizeSessionEventWriterError,
@@ -16,9 +23,13 @@ import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
-	RuntimeConfigPatchState,
+} from "../../src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputDeclaration,
-} from "../../src/thread-loop/thread-state.js";
+} from "../../src/thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+} from "../../src/thread-loop/input/preload.js";
 
 const timestamp = "2026-06-14T00:00:00.000Z";
 
@@ -311,6 +322,13 @@ function threadLoopService(
 			Effect.succeed({ type: "landed", disposition: "terminal" }),
 		closeRecoveredOpenRequestForInterrupt: () =>
 			Effect.succeed({ type: "interrupted" }),
+		settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+		settleToolConfirmation: ThreadLoop.settleToolConfirmation,
+		threadNeedsRun: (session) =>
+			session.state.peekAcceptedInput() !== undefined ||
+			ThreadLoop.interpretThreadTurnNextStep(
+				session.state.threadTurnTransition().nextStep,
+			).runDisposition === "active",
 		seedRuntimeModel: () => {},
 		installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
 		installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
@@ -1786,6 +1804,51 @@ describe("SessionManager", () => {
 					stale: true,
 				});
 				expect(commits).toBe(2);
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: false });
+			},
+		);
+	});
+
+	test("joined idle interrupt replay preserves its resident thread", async () => {
+		const sessionId = "sesn_joined_idle_interrupt";
+		const threadId = "thrd_joined_idle_interrupt";
+		await withSessionManager(
+			sessionManagerLayer(makeInterruptRecordingThreadLoop()),
+			async (manager) => {
+				expect(
+					await Effect.runPromise(
+						manager.preloadThread({
+							...threadControl(sessionId, "rin_preload_joined", threadId),
+							runtimeBindingToken: "runtime-binding-token",
+							contextEntries: [],
+						}),
+					),
+				).toMatchObject({ ok: true, applied: true });
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_idle_interrupt", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(sessionId, interrupt, async () => ({
+							ok: true,
+							joined: true,
+						})),
+					),
+				).toMatchObject({
+					ok: true,
+					duplicate: true,
+					idleInterrupt: true,
+				});
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: true, status: "idle" });
 			},
 		);
 	});
@@ -1947,6 +2010,17 @@ describe("SessionManager", () => {
 					},
 				);
 				let idleInterruptCommits = 0;
+				const interruptAttachment = {
+					transient: {
+						attachmentRef: "att_idle_interrupt",
+						sourcePath: "mcp:github/interrupt.png",
+						pageRange: "",
+						detail: "auto" as const,
+					},
+					fileBacked: undefined,
+					mime: "image/png",
+					filename: "interrupt.png",
+				};
 				const idleInterrupt = {
 					...threadControl("sesn_1"),
 					runtimeInputId: "rin_idle_interrupt",
@@ -1966,6 +2040,7 @@ describe("SessionManager", () => {
 								if (!result.ok) return result;
 								return {
 									...result,
+									pendingAttachments: [interruptAttachment],
 									interruptToolResults: [
 										{
 											toolUseEventId: "sevt_idle_interrupt_tool",
@@ -2022,9 +2097,12 @@ describe("SessionManager", () => {
 				]);
 				expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
 				expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
-				expect(session.state.threadTurnReduction()).toMatchObject({
+				expect(session.state.pendingAttachments()).toEqual([
+					interruptAttachment,
+				]);
+				expect(session.state.threadTurnTransition()).toMatchObject({
 					state: { state: "idle" },
-					action: { action: "await_input" },
+					nextStep: { action: "await_input" },
 				});
 				expect(idleInterruptCommits).toBe(1);
 				expect(session.state.contextManager.entries()).toHaveLength(2);
@@ -2183,26 +2261,56 @@ describe("SessionManager", () => {
 	});
 
 	test("retryable idle interrupt replay retries the frozen declaration", async () => {
-		const threadLoop = makeInterruptRecordingThreadLoop();
+		const threadLoop = makeControlledCrashThreadLoop("die", {
+			closeFailedRun: () =>
+				Effect.succeed({
+					type: "unrepairable" as const,
+					error: normalizeSessionEventWriterError({
+						code: "unrepairable",
+					}),
+				}),
+		});
+		let contextLoads = 0;
 		await withSessionManager(
-			sessionManagerLayer(threadLoop),
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (command) => {
+					contextLoads += 1;
+					return {
+						...command,
+						runtimeBindingToken: "runtime-binding-token",
+						contextEntries: [],
+					};
+				},
+			}),
 			async (manager) => {
 				const sessionId = "sesn_retryable_idle_interrupt";
 				const threadId = "thrd_retryable_idle_interrupt";
-				const preload = threadControl(
-					sessionId,
-					"rin_preload_retryable_idle_interrupt",
-					threadId,
-				);
 				expect(
 					await Effect.runPromise(
-						manager.preloadThread({
-							...preload,
-							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
-						}),
+						manager.acceptInput(
+							acceptedInput(
+								sessionId,
+								"rin_retryable_idle_owner",
+								threadId,
+							),
+						),
 					),
-				).toMatchObject({ ok: true, applied: true });
+				).toMatchObject({ ok: true, started: true });
+				await waitForCrashRuns(threadLoop, 1);
+				threadLoop.runs[0]?.releaseCrash();
+				await waitForCondition(async () => {
+					const snapshot = await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					);
+					return snapshot.ok && snapshot.observed;
+				}, "unrepairable accepted custody");
+				const resident = threadLoop.runs[0]?.session;
+				if (resident === undefined) throw new Error("expected resident thread");
+				const checkpointBefore =
+					resident.state.threadTurnTransition().checkpoint;
+				const acceptedBefore = resident.state.acceptedInputSnapshot();
+				const loadsBeforeInterrupt = contextLoads;
+				expect(acceptedBefore).toHaveLength(1);
 
 				const interrupt = {
 					...threadControl(sessionId, "rin_retryable_idle_interrupt", threadId),
@@ -2229,7 +2337,19 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId,
 					reason: "context_load_failed",
+					retryable: true,
+					errorCode: "bridge_token_unavailable",
 				});
+				expect(contextLoads).toBe(loadsBeforeInterrupt);
+				expect(resident.state.acceptedInputSnapshot()).toEqual(acceptedBefore);
+				expect(resident.state.threadTurnTransition().checkpoint).toEqual(
+					checkpointBefore,
+				);
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: true });
 				expect(
 					await Effect.runPromise(
 						manager.interruptControl(sessionId, interrupt, commit),
@@ -2241,8 +2361,287 @@ describe("SessionManager", () => {
 					interrupted: false,
 					idleInterrupt: true,
 				});
+				expect(contextLoads).toBe(loadsBeforeInterrupt);
 				expect(declarations).toHaveLength(2);
 				expect(declarations[1]).toEqual(declarations[0]);
+			},
+		);
+	});
+
+	test("in-run retryable interrupt closeout reports the current attempt without terminal memoization", async () => {
+		const attempts: string[] = [];
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session, custody) =>
+					Effect.never.pipe(
+						Effect.onInterrupt(() =>
+							Effect.sync(() => {
+								const runtimeInputId =
+									session.state.userInterruptCommand()?.runtimeInputId;
+								if (runtimeInputId === undefined) {
+									throw new Error("expected active interrupt command");
+								}
+								attempts.push(runtimeInputId);
+								const attemptResult = {
+									ok: false,
+									retryable: true,
+									errorCode: "bridge_request_end_unavailable",
+								} as const;
+								custody.recordInterruptAttemptResult(runtimeInputId, attemptResult);
+								session.state.recordJoinedUserInterruptResult(
+									runtimeInputId,
+									attemptResult,
+								);
+							}).pipe(
+								Effect.andThen(
+									Effect.die(new Error("retryable interrupt closeout failed")),
+								),
+							),
+						),
+					),
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_retryable_in_run_interrupt";
+				const threadId = "thrd_retryable_in_run_interrupt";
+				await Effect.runPromise(
+					manager.acceptInput(acceptedInput(sessionId, "rin_active", threadId)),
+				);
+				const interrupt = {
+					...threadControl(sessionId, "rin_retryable_interrupt", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							testControlCommit(interrupt),
+						),
+					),
+				).toEqual({
+					ok: false,
+					sessionId,
+					reason: "context_load_failed",
+					retryable: true,
+					errorCode: "bridge_request_end_unavailable",
+				});
+				expect(attempts).toEqual([interrupt.runtimeInputId]);
+			},
+		);
+	});
+
+	test("in-run non-retryable interrupt closeout reports terminal failure and releases hot state", async () => {
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session, custody) =>
+					Effect.never.pipe(
+						Effect.onInterrupt(() =>
+							Effect.sync(() => {
+								const runtimeInputId =
+									session.state.userInterruptCommand()?.runtimeInputId;
+								if (runtimeInputId === undefined) {
+									throw new Error("expected active interrupt command");
+								}
+								const attemptResult = {
+									ok: false,
+									retryable: false,
+									errorCode: "bridge_request_end_rejected",
+								} as const;
+								custody.recordInterruptAttemptResult(runtimeInputId, attemptResult);
+								session.state.recordJoinedUserInterruptResult(
+									runtimeInputId,
+									attemptResult,
+								);
+							}).pipe(
+								Effect.andThen(
+									Effect.die(new Error("non-retryable interrupt closeout failed")),
+								),
+							),
+						),
+					),
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_nonretryable_in_run_interrupt";
+				const threadId = "thrd_nonretryable_in_run_interrupt";
+				await Effect.runPromise(
+					manager.acceptInput(acceptedInput(sessionId, "rin_active", threadId)),
+				);
+				const interrupt = {
+					...threadControl(sessionId, "rin_nonretryable_interrupt", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(sessionId, interrupt, testControlCommit(interrupt)),
+					),
+				).toEqual({
+					ok: false,
+					sessionId,
+					reason: "context_load_failed",
+					retryable: false,
+					errorCode: "bridge_request_end_rejected",
+				});
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: false });
+			},
+		);
+	});
+
+	test("joined idle interrupt wakes one successor only after releasing its matching fence", async () => {
+		const runs: ThreadRuntime.ThreadRuntime[] = [];
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session) =>
+					Effect.sync(() => {
+						runs.push(session);
+						const input = session.state.peekAcceptedInput();
+						if (input !== undefined) {
+							session.state.acknowledgeAcceptedInput(input.runtimeInputId);
+						}
+						return { type: "completed" as const, modelMessageCount: 0 };
+					}),
+				settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_joined_idle_wake";
+				const threadId = "thrd_joined_idle_wake";
+				await Effect.runPromise(
+					manager.acceptInput(
+						acceptedInput(sessionId, "rin_initial_joined_idle", threadId),
+					),
+				);
+				await waitForCondition(() => runs.length === 1, "initial run");
+				const resident = runs[0];
+				if (resident === undefined) throw new Error("expected resident thread");
+				const input = acceptedInput(sessionId, "rin_after_joined_idle", threadId);
+				resident.state.enqueueAcceptedInput(input);
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_idle_wake", threadId),
+					inputOrder: 2,
+				};
+				resident.state.beginUserInterrupt(
+					interrupt,
+					async () => ({ ok: true, joined: true }),
+				);
+				resident.state.recordJoinedUserInterruptResult(interrupt.runtimeInputId);
+
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				await waitForCondition(() => runs.length === 2, "joined successor run");
+				expect(runs).toHaveLength(2);
+				expect(resident.state.acceptedInputCount()).toBe(0);
+
+				const unmatched = {
+					...threadControl(sessionId, "rin_unmatched_joined_idle", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							unmatched,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				expect(runs).toHaveLength(2);
+			},
+		);
+	});
+
+	test("joined interrupt wakes preserved input after releasing a completed run slot", async () => {
+		const threadLoop = makeControlledCrashThreadLoop("die", {
+			closeFailedRun: () =>
+				Effect.succeed({
+					type: "unrepairable" as const,
+					error: normalizeSessionEventWriterError({ code: "unrepairable" }),
+				}),
+			settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+		});
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				const sessionId = "sesn_joined_completed_slot_wake";
+				const threadId = "thrd_joined_completed_slot_wake";
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionId, "rin_completed_slot_owner", threadId),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForCrashRuns(threadLoop, 1);
+				const resident = threadLoop.runs[0]?.session;
+				if (resident === undefined) throw new Error("expected resident thread");
+				const follower = {
+					...acceptedInput(sessionId, "rin_completed_slot_follower", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(manager.acceptInput(follower)),
+				).toMatchObject({ ok: true, started: false });
+				threadLoop.runs[0]?.releaseCrash();
+				expect(
+					await Effect.runPromise(
+						manager.waitThread(
+							threadControl(sessionId, undefined, threadId),
+							undefined,
+						),
+					),
+				).toMatchObject({ ok: true, timedOut: false });
+				resident.state.acknowledgeAcceptedInput("rin_completed_slot_owner");
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_completed_slot", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					resident.state.beginUserInterrupt(
+						interrupt,
+						async () => ({ ok: true, joined: true }),
+					),
+				).toBe("applied");
+				expect(
+					resident.state.recordJoinedUserInterruptResult(interrupt.runtimeInputId),
+				).toBe(true);
+				expect(resident.state.acceptedInputSnapshot()).toEqual([follower]);
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				expect(resident.state.peekAcceptedInput()).toMatchObject({
+					runtimeInputId: follower.runtimeInputId,
+				});
+				await waitForCrashRuns(threadLoop, 2);
+				expect(threadLoop.runs).toHaveLength(2);
+				expect(resident.state.acceptedInputCount()).toBe(1);
 			},
 		);
 	});
@@ -2936,11 +3335,11 @@ describe("SessionManager", () => {
 				expect(threadLoop.runs[0]?.session.state.pendingAttachments()).toEqual(
 					pendingAttachments,
 				);
-				expect(threadLoop.runs[0]?.session.state.threadTurnReduction()).toMatchObject(
+				expect(threadLoop.runs[0]?.session.state.threadTurnTransition()).toMatchObject(
 					{
 						checkpoint: { pendingInputContextSequences: [] },
 						state: { state: "ready_to_request" },
-						action: { action: "prepare_next_request" },
+						nextStep: { action: "prepare_next_request" },
 					},
 				);
 				threadLoop.runs[0]?.release();
@@ -3729,7 +4128,7 @@ describe("SessionManager", () => {
 					.at(-1);
 				expect(confirmationMessage).toBeDefined();
 				expect(
-					session?.state.threadTurnReduction().checkpoint
+					session?.state.threadTurnTransition().checkpoint
 						.pendingInputContextSequences,
 				).toEqual([confirmationMessage!.messageSequence]);
 				expect(threadLoop.runs).toHaveLength(1);
@@ -4385,6 +4784,60 @@ describe("SessionManager", () => {
 					type: "completed",
 					modelMessageCount: 0,
 				});
+			},
+		);
+	});
+
+	test("cold idle interrupt wakes completion mail preserved behind its durable receipt", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		const sessionId = "sesn_cold_idle_interrupt_mail";
+		const threadId = "thrd_cold_idle_interrupt_mail";
+		const mail = agentMailInput(
+			sessionId,
+			"agent_mail:delivery_cold_idle_interrupt_mail",
+			threadId,
+			"thrd_cold_idle_interrupt_mail_child",
+			{ role: "main", visibility: "public", status: "idle" },
+		);
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, {
+				loadThreadContext: async (command) => ({
+					...command,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					pendingAgentMail: [mail],
+					thread: { role: "main", visibility: "public", status: "idle" },
+				}),
+			}),
+			async (manager) => {
+				const interrupt = {
+					...threadControl(
+						sessionId,
+						"rin_cold_idle_interrupt_mail",
+						threadId,
+					),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							testControlCommit(interrupt),
+						),
+					),
+				).toMatchObject({
+					ok: true,
+					idleInterrupt: true,
+				});
+				await waitForRuns(threadLoop, 1);
+				expect(
+					threadLoop.runs[0]?.session.state.peekAcceptedInput(),
+				).toMatchObject({
+					kind: "inter_agent_message",
+					runtimeInputId: mail.runtimeInputId,
+				});
+				threadLoop.runs[0]?.release();
 			},
 		);
 	});

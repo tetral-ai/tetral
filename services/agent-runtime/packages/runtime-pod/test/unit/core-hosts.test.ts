@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import {
+	describe,
+	expect,
+	test } from "bun:test";
 import { status } from "@grpc/grpc-js";
 import type { AcceptedInputCommitResult } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
@@ -23,12 +26,16 @@ import type * as SessionManager from "@tetral/agent-runtime-core/src/session/ses
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import type {
 	RuntimeAcceptedInputState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
+	RuntimeThreadAddressState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeControlInputCommitResult,
 	RuntimeControlInputDeclaration,
 	RuntimeControlInputState,
-	RuntimeThreadAddressState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/control-input.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
 import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import {
 	createToolCatalog,

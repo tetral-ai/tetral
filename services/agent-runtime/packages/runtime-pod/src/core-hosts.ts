@@ -8,9 +8,9 @@
  * shutdown and scope release as separate operations that the process composition root orders.
  */
 
-import type * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
 	AcceptedInputCommitResult,
+	ContextLoader,
 	RuntimeLoadedAgentMail,
 } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
@@ -31,18 +31,20 @@ import type {
 	RuntimeAcceptedInputState,
 	RuntimeApprovalReviewAcceptedInputState,
 	RuntimeThreadAddressState,
+} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
+import type {
 	RuntimeThreadPreloadState,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/input/preload.js";
 import type {
 	ThreadToolRouteView,
 	ThreadTurnCheckpoint,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/checkpoint.js";
 import {
 	extractColdThreadToolRouteView,
 	extractThreadTurnCheckpoint,
-	projectFailedRequestsProviderContext,
-} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
-import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
+import { projectFailedRequestsProviderContext } from "@tetral/agent-runtime-core/src/thread-loop/turn/provider-context.js";
+import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodLogger } from "./logger.js";
@@ -145,7 +147,7 @@ export interface RuntimeCoreHostsOptions {
 	readonly maxLocalSessions: number;
 	readonly maxConcurrentTools?: number | undefined;
 	readonly now: () => string;
-	readonly contextLoader: ContextLoader.ContextLoader;
+	readonly contextLoader: ContextLoader;
 	readonly threadLoop: ThreadLoop.ThreadLoopRuntimeOptions;
 	readonly metrics?: RuntimeMetricsSink | undefined;
 	readonly recordCloseoutEvent?:
@@ -173,7 +175,7 @@ export async function buildRuntimeCoreHosts(
 	>();
 	const acceptedInputCommitKey = (input: RuntimeAcceptedInputState): string =>
 		`${input.workspaceId}\u0000${input.sessionId}\u0000${input.sessionThreadId}\u0000${input.runtimeInputId}`;
-	const runtimeContextLoader: ContextLoader.ContextLoader = {
+	const runtimeContextLoader: ContextLoader = {
 		...options.contextLoader,
 		...(options.contextLoader.commitAcceptedInput === undefined
 			? {}
@@ -659,7 +661,7 @@ export function validateClosedThreadResumeCheckpoint(
 	pendingSandboxExecutions: readonly unknown[],
 	hasPendingAttachments: boolean,
 ): void {
-	const decision = deriveThreadTurnDecision(checkpoint, routeView, [], {
+	const decision = deriveThreadTurnSnapshot(checkpoint, routeView, [], {
 		hasPendingAttachments,
 	});
 	const incompleteToolUse =
@@ -679,7 +681,7 @@ export function validateClosedThreadResumeCheckpoint(
 		pendingSandboxExecutions.length !== 0 ||
 		routeView.routes.length !== 0 ||
 		decision.state.state !== "idle" ||
-		decision.action.action !== "await_input"
+		decision.nextStep.action !== "await_input"
 	) {
 		throw new Error(
 			"closed Thread resume requires a quiescent durable checkpoint",

@@ -2,9 +2,12 @@ import { readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import type {
 	SessionEventEnvelope,
+	SessionEventWriter,
 	SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { writerFrom } from "@tetral/agent-runtime-core/test/unit/thread-loop/thread-loop-test-support.js";
 import { AgentRuntimePodServiceClient } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type {
@@ -16,7 +19,10 @@ import {
 	TaskNotificationRejectionReason,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { Stream } from "effect";
-import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
+import {
+	BridgeAPIContextLoader,
+	BridgeAPIEventWriter,
+} from "../../src/bridge-client.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import type { RuntimeCleanupController } from "../../src/runtime-service.js";
@@ -39,6 +45,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly commitResponse?: CommitTaskNotificationResultResponse;
 	readonly bridgeAddress?: string;
 	readonly readyPath?: string;
+	readonly requestStartRace?: boolean;
 };
 
 const cleanupController = {
@@ -56,6 +63,10 @@ const acceptedRequest = new Promise<void>((resolve) => {
 let resolveCommitResult: ((value: unknown) => void) | undefined;
 const committedInput = new Promise<unknown>((resolve) => {
 	resolveCommitResult = resolve;
+});
+let resolveLifecycleCompleted: (() => void) | undefined;
+const lifecycleCompleted = new Promise<void>((resolve) => {
+	resolveLifecycleCompleted = resolve;
 });
 const generatedBridgeClient =
 	input.bridgeAddress === undefined
@@ -113,11 +124,39 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			},
 		} as unknown as AgentRuntimeBridgeServiceClient),
 });
+const productionWriter =
+	input.bridgeAddress !== undefined
+		? new BridgeAPIEventWriter({
+				address: input.bridgeAddress,
+				tokenPath: "/unused/token",
+				metadataFactory: async () => new Metadata(),
+			})
+		: undefined;
+let requestEndCount = 0;
+const sessionEventWriter: SessionEventWriter =
+	productionWriter === undefined
+		? writerFrom(successfulEventAppend)
+		: {
+				append: productionWriter.append.bind(productionWriter),
+				settleToolResult:
+					productionWriter.settleToolResult.bind(productionWriter),
+			writeRequestEnd: async (envelope) => {
+				const result = await productionWriter.writeRequestEnd(envelope);
+				if (result.ok && result.type !== "stale") {
+					requestEndCount += 1;
+					const expectedEnds = input.requestStartRace === true ? 2 : 1;
+					if (requestEndCount >= expectedEnds) resolveLifecycleCompleted?.();
+				}
+					return result;
+				},
+				finishIdle: productionWriter.finishIdle.bind(productionWriter),
+				commitRuntimeTermination:
+					productionWriter.commitRuntimeTermination.bind(productionWriter),
+			};
 const contextLoader = {
 	loadThreadContext:
 		input.bridgeAddress === undefined
-			? bridgeLoader.loadThreadContext.bind(bridgeLoader)
-			: async () => ({
+			? async () => ({
 					contextEntries: [],
 					turnFacts: { events: [], internalRepairs: [] },
 					thread: {
@@ -127,7 +166,8 @@ const contextLoader = {
 						status: "idle" as const,
 					},
 					runtimeBindingToken: "runtime-binding-token-composition",
-				}),
+				})
+			: bridgeLoader.loadThreadContext.bind(bridgeLoader),
 	commitAcceptedInput: async (
 		...args: Parameters<typeof bridgeLoader.commitAcceptedInput>
 	) => {
@@ -139,6 +179,8 @@ const contextLoader = {
 		bridgeLoader.refreshRuntimeBindingToken.bind(bridgeLoader),
 };
 let nextID = 0;
+let providerInvocations = 0;
+const providerRequests: LLMRequest[] = [];
 const runtimeSleep = async (durationMs: number, signal: AbortSignal): Promise<boolean> => {
 	if (signal.aborted) return false;
 	return await new Promise<boolean>((resolve) => {
@@ -159,21 +201,59 @@ const hosts = await buildRuntimeCoreHosts({
 	contextLoader,
 	threadLoop: {
 		internalToolRepairStore: {} as never,
-		sessionEventWriter: writerFrom(successfulEventAppend),
+		sessionEventWriter,
 		runtime: {
 			now: () => "2026-01-01T00:00:00.000Z",
 			monotonicMs: () => 0,
 			createId: (prefix) => `${prefix}_${++nextID}`,
 			sleep: runtimeSleep,
 		},
-		llmService: { stream: () => Stream.never },
-		storeOperationTimeoutMs: 100,
-		runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
+		llmService: {
+			stream: (request) => {
+				providerInvocations += 1;
+				providerRequests.push(request);
+				const id = `task-notification-race-${providerInvocations}`;
+				return Stream.fromIterable([
+					{ type: "text-start" as const, id },
+					{
+						type: "text-delta" as const,
+						id,
+						text_delta:
+							providerInvocations === 1
+								? "current request completed"
+								: "task notification consumed",
+					},
+					{ type: "text-end" as const, id },
+					{ type: "finish" as const, finishReason: "stop" as const },
+				]);
+			},
+		},
+		storeOperationTimeoutMs: input.requestStartRace === true ? 5_000 : 100,
+		approvalMode: "full_access",
+		providerCallRuntime: {
+			...DefaultProviderCallRuntimeConfig,
+			systemInstructions: "task notification Request Start composition",
+			timeoutMs: 5_000,
+		},
+		runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }),
 		runtimePolicy: () => ({
 			toolCatalog: createToolCatalog({ family: "claude" }),
 		}),
 	},
 });
+const preloadResult = await hosts.subAgentRunHost.preloadThread({
+	workspaceId: input.workspaceId,
+	sessionId: input.sessionId,
+	sessionThreadId: input.sessionThreadId,
+	bindingId: input.bindingId,
+	bindingGeneration: input.bindingGeneration,
+	targetPodUid: input.targetPodUid,
+});
+if (!preloadResult.ok || !preloadResult.applied) {
+	throw new Error(
+		`task-notification resident preload failed: ${JSON.stringify(preloadResult)}`,
+	);
+}
 const service = new RuntimeControlService({
 	ownPod: {
 		namespace: "engine",
@@ -242,19 +322,33 @@ try {
 			);
 		}
 	}
-	const [commitResult] = await Promise.all([committedInput, acceptedRequest]);
+	const [commitResult] = await Promise.all([
+		committedInput,
+		acceptedRequest,
+		...(input.bridgeAddress === undefined ? [] : [lifecycleCompleted]),
+	]);
 	if (declaration === undefined && input.bridgeAddress === undefined) {
 		throw new Error(
 			"resident ThreadLoop did not cross the Bridge declaration adapter",
 		);
 	}
-	process.stdout.write(
-		JSON.stringify({
-			...(declaration !== undefined ? { declaration } : {}),
-			acceptResult,
-			commitResult,
-		}),
-	);
+	const output = JSON.stringify({
+		...(declaration !== undefined ? { declaration } : {}),
+		acceptResult,
+		commitResult,
+		providerInvocations,
+		requestEndCount,
+		providerContexts: providerRequests.map((request) => request.context),
+	});
+	if (input.requestStartRace === true) {
+		await new Promise<void>((resolve, reject) => {
+			process.stdout.write(output, (error) =>
+				error === null ? resolve() : reject(error),
+			);
+		});
+		process.exit(0);
+	}
+	process.stdout.write(output);
 } finally {
 	client.close();
 	generatedBridgeClient?.close();

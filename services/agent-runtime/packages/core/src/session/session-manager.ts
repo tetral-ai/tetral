@@ -38,8 +38,8 @@ import {
 	Scope,
 	Semaphore,
 } from "effect";
-import type { RuntimeContextEntry } from "../contracts/runtime.js";
 import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
+import type { RuntimeContextEntry } from "../contracts/runtime.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
@@ -54,18 +54,23 @@ import * as ThreadRuntime from "../thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
-	RuntimeConfigPatchState,
-	RuntimeControlInputCommit,
-	RuntimeControlInputState,
-	RuntimeInterruptCommandState,
 	RuntimeTaskNotificationCommandState,
 	RuntimeThreadAddressState,
-	RuntimeThreadPreloadState,
 	RuntimeThreadRoleState,
 	RuntimeThreadStatusState,
 	RuntimeThreadVisibilityState,
+} from "../thread-loop/input/accepted-input.js";
+import type {
+	RuntimeControlInputCommit,
+	RuntimeControlInputCommitResult,
+	RuntimeControlInputState,
+	RuntimeInterruptCommandState,
 	RuntimeToolConfirmationState,
-} from "../thread-loop/thread-state.js";
+} from "../thread-loop/input/control-input.js";
+import type {
+	RuntimeConfigPatchState,
+	RuntimeThreadPreloadState,
+} from "../thread-loop/input/preload.js";
 import { SessionToolCoordinator } from "../tools/tool-scheduler.js";
 import type { ReviewerExecutionToken } from "./approval-reviewer-manager.js";
 import { AutoApprovalReviewerManager } from "./approval-reviewer-manager.js";
@@ -478,8 +483,10 @@ export class Service extends Context.Service<Service, Interface>()(
 //   | wake/new input | start run_slot(wake)      | install reducer-visible fact     | install reducer-visible fact  |
 //   | interrupt      | commit idle custody       | commit custody, stop, unwind     | reject concurrent custody     |
 //
-// On owner exit SessionManager clears the old slot, reduces the latest
-// ThreadProcessor projection, and starts at most one successor for an active action.
+// On owner exit SessionManager normally clears the old slot, reduces the latest
+// ThreadState projection, and starts at most one successor for an active next step.
+// A deliberately retained completed slot remains a custody fence until its exact
+// lifecycle settlement releases it; that release may start the same single successor.
 // A cold thread is inserted in the
 // installing state before its sole LoadContext call and becomes command-ready only
 // after that install succeeds. Cleanup cannot release an installing ThreadEntry or a
@@ -494,6 +501,12 @@ interface ThreadRunSlot {
 	>;
 	readonly scope: Scope.Scope;
 	stopping: boolean;
+	interruptAttemptResult:
+		| {
+				readonly runtimeInputId: string;
+				readonly result: RuntimeControlInputCommitResult;
+		  }
+		| undefined;
 	readonly reviewerExecutionToken: ReviewerExecutionToken | undefined;
 }
 
@@ -508,9 +521,10 @@ interface ThreadEntry {
 	installationState: "installing" | "ready";
 	installation: ThreadInstallation | undefined;
 	readonly runtimeThread: ThreadRuntime.ThreadRuntime;
-	readonly acceptedInputQueue: ThreadRuntime.ThreadRuntime["state"];
-	readonly controlQueue: ThreadRuntime.ThreadRuntime["state"];
-	readonly statusSignal: ThreadRuntime.ThreadRuntime["state"];
+	readonly acceptedInputQueue: Pick<
+		ThreadRuntime.ThreadRuntime["state"],
+		"enqueueAcceptedInput"
+	>;
 	readonly commandChannel: ThreadCommandChannel;
 	runSlot: ThreadRunSlot | undefined;
 	interruptLeaseRef: RuntimeInterruptControlCommand["interruptLeaseRef"] | undefined;
@@ -777,8 +791,6 @@ export function layer(
 					installation: undefined,
 					runtimeThread,
 					acceptedInputQueue: runtimeThread.state,
-					controlQueue: runtimeThread.state,
-					statusSignal: runtimeThread.state,
 					commandChannel: Effect.runSync(makeThreadCommandChannel()),
 					runSlot: undefined,
 					interruptLeaseRef: undefined,
@@ -1080,6 +1092,7 @@ export function layer(
 						>(),
 						scope: runScope,
 						stopping: false,
+						interruptAttemptResult: undefined,
 						reviewerExecutionToken:
 							reviewId === undefined
 								? undefined
@@ -1094,7 +1107,10 @@ export function layer(
 					recordHotStateMetrics();
 					const custody: ThreadLoop.ThreadLoopRunCustody = {
 						activeTurnId: (session) =>
-							session.state.threadTurnReduction().checkpoint.executionRunId,
+							session.state.threadTurnTransition().checkpoint.executionRunId,
+						recordInterruptAttemptResult: (runtimeInputId, result) => {
+							runSlot.interruptAttemptResult = { runtimeInputId, result };
+						},
 						interruptLeaseRef: (runtimeInputId) =>
 							threadEntry.runtimeThread.state.userInterruptCommand()
 								?.runtimeInputId === runtimeInputId
@@ -1156,7 +1172,8 @@ export function layer(
 				const closeoutId = beginFailedRunCloseout();
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
-						session.state.threadTurnReduction().checkpoint.executionRunId,
+						session.state.threadTurnTransition().checkpoint.executionRunId,
+					recordInterruptAttemptResult: () => {},
 					interruptLeaseRef: (runtimeInputId) =>
 						threadEntry.runtimeThread.state.userInterruptCommand()
 							?.runtimeInputId === runtimeInputId
@@ -1302,7 +1319,7 @@ export function layer(
 							(yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit));
 						if (
 							closeout === "continuation" &&
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint
 								.executionRunId === undefined
 						) {
 							threadEntry.lastCompletedReviewerExecutionToken =
@@ -1401,12 +1418,12 @@ export function layer(
 					threadEntry.status = "idle";
 					recordHotStateMetrics();
 					const reviewerRun = runSlot.reviewerExecutionToken !== undefined;
-					const latestActionNeedsRun = ThreadLoop.threadTurnActionNeedsRun(
-						threadEntry.runtimeThread.state.threadTurnReduction().action,
+					const latestNextStepNeedsRun = threadLoop.threadNeedsRun(
+						threadEntry.runtimeThread,
 					);
 					if (
 						(!reviewerRun || !runSlot.stopping) &&
-						latestActionNeedsRun &&
+						latestNextStepNeedsRun &&
 						sessionEntry.threads.get(threadEntry.sessionThreadId) ===
 							threadEntry
 					) {
@@ -1559,12 +1576,9 @@ export function layer(
 								const runSlot = threadResult.threadEntry.runSlot;
 								const started =
 									runSlot === undefined &&
-									(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-										undefined ||
-										ThreadLoop.threadTurnActionNeedsRun(
-											threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-												.action,
-										))
+									threadLoop.threadNeedsRun(
+										threadResult.threadEntry.runtimeThread,
+									)
 										? yield* startThreadRun(
 												threadResult.sessionEntry,
 												threadResult.threadEntry,
@@ -1636,12 +1650,12 @@ export function layer(
 				commitInput: RuntimeControlInputCommit,
 				threadResult: ResidentThreadResult,
 				markReloadRequired: () => void,
+				completedRunSlot?: ThreadRunSlot,
 			): Effect.Effect<InterruptControlResult> =>
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
-					const declaration = { inputKind: "interrupt" as const };
 					const openRequest =
-						threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request;
+						threadEntry.runtimeThread.state.threadTurnTransition().checkpoint.request;
 					if (openRequest !== undefined && openRequest.requestEnd === undefined) {
 						let closeoutCompleted = false;
 						const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
@@ -1664,7 +1678,8 @@ export function layer(
 							threadEntry.runtimeThread,
 							{
 								activeTurnId: (session) =>
-									session.state.threadTurnReduction().checkpoint.executionRunId,
+									session.state.threadTurnTransition().checkpoint.executionRunId,
+								recordInterruptAttemptResult: () => {},
 								interruptLeaseRef: (runtimeInputId) =>
 									threadEntry.runtimeThread.state.userInterruptCommand()
 										?.runtimeInputId === runtimeInputId
@@ -1677,6 +1692,9 @@ export function layer(
 						);
 						threadEntry.interruptLeaseRef = undefined;
 						if (closeout.type === "failed") {
+							if (closeout.reloadHotState === true) {
+								markReloadRequired();
+							}
 							return {
 								ok: false,
 								sessionId,
@@ -1726,15 +1744,32 @@ export function layer(
 							idleInterrupt: false,
 						} as const;
 					}
-					const committed = yield* Effect.promise(() => commitInput(declaration));
-					if (!committed.ok) {
+					const settlement = yield* threadLoop.settleIdleInterrupt(
+						threadEntry.runtimeThread,
+						interruptStateCommand(command),
+						commitInput,
+					);
+					if (settlement.type === "commit_failed") {
+						return {
+							ok: false,
+							sessionId,
+							reason: "context_load_failed",
+							retryable: settlement.retryable,
+							errorCode: settlement.errorCode,
+						} as const;
+					}
+					if (settlement.type === "projection_failed") {
+						markReloadRequired();
 						return {
 							ok: false,
 							sessionId,
 							reason: "context_load_failed",
 						} as const;
 					}
-					if ("stale" in committed || "joined" in committed) {
+					if (settlement.type === "conflict") {
+						return { ok: false, sessionId, reason: "control_busy" } as const;
+					}
+					if (settlement.type === "stale") {
 						return {
 							ok: true,
 							sessionId,
@@ -1742,102 +1777,38 @@ export function layer(
 							interrupted: false,
 							idleInterrupt: true,
 							duplicate: true,
-							...("stale" in committed ? { stale: true as const } : {}),
+							stale: true,
 						} as const;
 					}
-					const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(
-						interruptStateCommand(command),
-						async () => committed,
-					);
-					if (admitted === "conflict") {
-						return { ok: false, sessionId, reason: "control_busy" } as const;
-					}
-					if (admitted === "applied") {
-						threadEntry.runtimeThread.state.discardQueuedAcceptedInputsForInterrupt(
-							command.origin === "user",
-						);
-					}
-					const application = yield* Effect.promise(() =>
-						threadEntry.runtimeThread.state.commitUserInterruptInput(
-							declaration,
-						),
-					);
-					if ("type" in application.result) {
-						try {
-							const pendingTools = [
-								...threadEntry.runtimeThread.state.pendingApprovalToolJobs(),
-								...threadEntry.runtimeThread.state.resolvedToolRouteJobs(),
-								...threadEntry.runtimeThread.state.pendingSandboxExecutionJobs(),
-							];
-							threadEntry.runtimeThread.state.contextManager.appendInterruptToolResults(
-								pendingTools.map((pending) => ({
-									toolUseEventId: pending.toolUseEventId,
-									assistantMessageSequence: pending.assistantMessageSequence,
-									modelToolCallId: pending.toolPart.modelToolCallId,
-								})),
-								application.result.interruptToolResults,
-							);
-							threadEntry.runtimeThread.state.addPendingAttachments(
-								application.result.pendingAttachments,
-							);
-							threadEntry.runtimeThread.state.applyThreadTurnFact({
-								fact: "interrupt_committed",
-								eventId: command.runtimeInputId,
-							});
-							for (const cancellation of application.result.interruptToolResults) {
-								if (
-									threadEntry.runtimeThread.state
-										.pendingApprovalToolJobs()
-										.some(
-											(pending) =>
-												pending.toolUseEventId === cancellation.toolUseEventId,
-										)
-								) {
-									threadEntry.runtimeThread.state.removePendingApprovalToolJob(
-										cancellation.toolUseEventId,
-									);
-									metrics.addPendingApprovals(-1);
-								}
-								threadEntry.runtimeThread.state.clearThreadToolRoute(
-									cancellation.toolUseEventId,
-								);
-								threadEntry.runtimeThread.state.removeResolvedToolRouteJob(
-									cancellation.toolUseEventId,
-								);
-							}
-							for (const toolUseEventId of application.result.interruptToolResults.map(
-								(result) => result.toolUseEventId,
-							)) {
-								threadEntry.runtimeThread.state.removePendingSandboxExecutionJob(
-									toolUseEventId,
-								);
-								threadEntry.runtimeThread.state.clearThreadToolRoute(
-									toolUseEventId,
-								);
-							}
-						} catch {
-							markReloadRequired();
-							return {
-								ok: false,
-								sessionId,
-								reason: "context_load_failed",
-							} as const;
+					if (
+						settlement.wakeThread &&
+						threadResult.sessionEntry.threads.get(threadEntry.sessionThreadId) ===
+							threadEntry
+					) {
+						if (
+							completedRunSlot !== undefined &&
+							threadEntry.runSlot === completedRunSlot
+						) {
+							threadEntry.runSlot = undefined;
+							threadEntry.status = "idle";
+							recordHotStateMetrics();
+						}
+						if (threadEntry.runSlot === undefined) {
+							yield* startThreadRun(
+								threadResult.sessionEntry,
+								threadEntry,
+							).pipe(Effect.asVoid);
 						}
 					}
-					threadEntry.runtimeThread.state.completeUserInterrupt(
-						command.runtimeInputId,
-					);
-					// An idle interrupt has no owner Fiber whose run finalizer can reopen
-					// reducer admission. Release that local fence only after the durable
-					// interrupt result has been applied, so a later accepted input can
-					// become the sole follow-up run without racing the control commit.
-					threadEntry.runtimeThread.state.finishThreadRunProjection();
 					return {
 						ok: true,
 						sessionId,
 						created: false,
 						interrupted: false,
 						idleInterrupt: true,
+						...(settlement.type === "duplicate"
+							? { duplicate: true as const }
+							: {}),
 					} as const;
 				});
 
@@ -1897,9 +1868,11 @@ export function layer(
 					const runSlot = threadEntry.runSlot;
 					const completedRunSlot =
 						runSlot === undefined
-							? false
-							: Option.isSome(yield* Deferred.poll(runSlot.doneDeferred));
-					if (runSlot?.ownerFiber !== undefined && !completedRunSlot) {
+							? undefined
+							: Option.isSome(yield* Deferred.poll(runSlot.doneDeferred))
+								? runSlot
+								: undefined;
+					if (runSlot?.ownerFiber !== undefined && completedRunSlot === undefined) {
 						let interruptCommitResult:
 							| Awaited<ReturnType<RuntimeControlInputCommit>>
 							| undefined;
@@ -1946,6 +1919,10 @@ export function layer(
 						yield* awaitRunSlot(runSlot);
 						const committed =
 							interruptCommitResult ??
+							(runSlot.interruptAttemptResult?.runtimeInputId ===
+							command.runtimeInputId
+								? runSlot.interruptAttemptResult.result
+								: undefined) ??
 							threadEntry.runtimeThread.state.userInterruptCommitResult(
 								command.runtimeInputId,
 							);
@@ -2008,10 +1985,11 @@ export function layer(
 								() => {
 									reloadRequired = true;
 								},
+								completedRunSlot,
 							);
 							if (
 								settled.ok &&
-								completedRunSlot &&
+								completedRunSlot !== undefined &&
 								threadEntry.runSlot === runSlot
 							) {
 								threadEntry.runSlot = undefined;
@@ -2044,14 +2022,12 @@ export function layer(
 							{},
 							(threadResult) =>
 								Effect.gen(function* () {
-									const existingConfirmation =
-										threadResult.threadEntry.runtimeThread.state.toolConfirmation(
-											command.toolUseEventId,
-										);
-									if (
-										existingConfirmation?.runtimeInputId ===
-										command.runtimeInputId
-									) {
+									const settlement = yield* threadLoop.settleToolConfirmation(
+										threadResult.threadEntry.runtimeThread,
+										command,
+										commit,
+									);
+									if (settlement.type === "duplicate") {
 										return {
 											ok: true,
 											sessionId,
@@ -2059,76 +2035,7 @@ export function layer(
 											applied: false,
 										} as const;
 									}
-									const pendingTool =
-										threadResult.threadEntry.runtimeThread.state
-											.pendingApprovalToolJobs()
-											.find(
-												(pending) =>
-													pending.toolUseEventId === command.toolUseEventId,
-											);
-									if (pendingTool === undefined) {
-										const replay = yield* Effect.promise(() =>
-											commit({ inputKind: "tool_confirmation" }),
-										);
-										if (!replay.ok) {
-											return {
-												ok: false,
-												sessionId,
-												reason: "context_load_failed",
-											} as const;
-										}
-										if ("stale" in replay) {
-											staleTarget = threadResult;
-											return {
-												ok: true,
-												sessionId,
-												created: threadResult.sessionCreated,
-												applied: false,
-												stale: true,
-											} as const;
-										}
-										if (
-											"type" in replay &&
-											replay.assignedContextSequences.length > 0 &&
-											replay.assignedContextSequences.every(
-												(sequence) =>
-													threadResult.threadEntry.runtimeThread.state.contextManager.entry(
-														sequence,
-													) !== undefined,
-											)
-										) {
-											return {
-												ok: true,
-												sessionId,
-												created: threadResult.sessionCreated,
-												applied: false,
-											} as const;
-										}
-										return {
-											ok: false,
-											sessionId,
-											reason: "context_load_failed",
-										} as const;
-									}
-									const draft = ThreadLoop.toolConfirmationContext({
-										toolUseEventId: command.toolUseEventId,
-										pendingTool,
-										decision: command.decision,
-										...(command.denyMessage === undefined
-											? {}
-											: { denyMessage: command.denyMessage }),
-									});
-									const committed = yield* Effect.promise(() =>
-										commit({ inputKind: "tool_confirmation" }),
-									);
-									if (!committed.ok) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "context_load_failed",
-										} as const;
-									}
-									if ("stale" in committed) {
+									if (settlement.type === "stale") {
 										staleTarget = threadResult;
 										return {
 											ok: true,
@@ -2138,70 +2045,15 @@ export function layer(
 											stale: true,
 										} as const;
 									}
-									if (!("type" in committed)) {
+									if (settlement.type === "failed") {
 										return {
 											ok: false,
 											sessionId,
-											reason: "control_conflict",
+											reason: settlement.reason,
 										} as const;
 									}
-									const message = ThreadLoop.applyAcceptedInputResult(
-										[draft],
-										committed.assignedContextSequences,
-									)[0];
-									if (message === undefined) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									const existingEntry =
-										threadResult.threadEntry.runtimeThread.state.contextManager.entry(
-											message.messageSequence,
-										);
-									if (existingEntry === undefined) {
-										threadResult.threadEntry.runtimeThread.state.contextManager.appendEntry(
-											message,
-										);
-									} else if (
-										JSON.stringify(existingEntry) !== JSON.stringify(message)
-									) {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									threadResult.threadEntry.runtimeThread.state.addPendingAttachments(
-										committed.pendingAttachments,
-									);
-									threadResult.threadEntry.runtimeThread.state.applyThreadTurnFact(
-										{
-											fact: "inputs_committed",
-											eventId: command.runtimeInputId,
-											contextSequences: [message.messageSequence],
-										},
-									);
 									threadResult.threadEntry.bridgeScope = command;
-									const confirmation =
-										threadResult.threadEntry.controlQueue.resolveToolConfirmation(
-											command,
-										);
-									if (confirmation === "conflict") {
-										return {
-											ok: false,
-											sessionId,
-											reason: "control_conflict",
-										} as const;
-									}
-									if (
-										threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()
-									) {
-										threadResult.threadEntry.runtimeThread.state.recordThreadToolRoute(
-											command.toolUseEventId,
-											"resume_approval_settlement",
-										);
+									if (settlement.wakeThread) {
 										const runSlot = threadResult.threadEntry.runSlot;
 										if (runSlot === undefined) {
 											yield* startThreadRun(
@@ -2214,7 +2066,7 @@ export function layer(
 										ok: true,
 										sessionId,
 										created: threadResult.sessionCreated,
-										applied: confirmation === "applied",
+										applied: settlement.applied,
 									} as const;
 								}),
 							(reason) =>
@@ -2683,12 +2535,7 @@ export function layer(
 					}
 					if (
 						startPendingWork &&
-						(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-							undefined ||
-							ThreadLoop.threadTurnActionNeedsRun(
-								threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-									.action,
-							))
+						threadLoop.threadNeedsRun(threadResult.threadEntry.runtimeThread)
 					) {
 						yield* startThreadRun(
 							threadResult.sessionEntry,
@@ -2844,12 +2691,9 @@ export function layer(
 									}
 									if (
 										installation.startPendingWork &&
-										(threadResult.threadEntry.runtimeThread.state.peekAcceptedInput() !==
-											undefined ||
-											ThreadLoop.threadTurnActionNeedsRun(
-												threadResult.threadEntry.runtimeThread.state.threadTurnReduction()
-													.action,
-											))
+										threadLoop.threadNeedsRun(
+											threadResult.threadEntry.runtimeThread,
+										)
 									) {
 										yield* startThreadRun(
 											threadResult.sessionEntry,
@@ -3410,7 +3254,7 @@ export function layer(
 					}
 					const reviewerRequestEndEventId = (): string | undefined => {
 						const request =
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint
 								.request;
 						return request?.requestKind === "approval_reviewer"
 							? request.requestEnd?.eventId
@@ -3496,7 +3340,7 @@ export function layer(
 						hasPendingApprovalToolJobs:
 							threadEntry.runtimeThread.state.hasPendingApprovalToolJobs(),
 						hasUnsettledToolOwner:
-							threadEntry.runtimeThread.state.threadTurnReduction().checkpoint.request?.toolMembers.some(
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint.request?.toolMembers.some(
 								(member) =>
 									member.memberKind === "public_tool_use" &&
 									member.terminalResult === undefined,

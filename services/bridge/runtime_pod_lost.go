@@ -1661,10 +1661,10 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 	return true, nil
 }
 
-// A synthetic terminal Request boundary preserves only identities carried by
-// direct durable ownership relations. A live Tool route requires its exact
-// Assistant message owner and Tool Use event to survive cold reconstruction;
-// provider-visible content and Tool payloads are never consulted here.
+// A synthetic terminal Request boundary preserves every member carried by the
+// Request's direct durable ownership relations. The exact Assistant owner,
+// Tool Use events, and internal repair events survive cold reconstruction;
+// route state, provider-visible content, and Tool payloads are never consulted.
 func runtimeTerminalRequestRetentionTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -1672,32 +1672,42 @@ func runtimeTerminalRequestRetentionTx(
 	modelRequestID string,
 ) (*bridgev1.ProviderContextRetention, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT route.tool_use_event_id
-		   FROM session_pending_tool_uses route
-		   JOIN session_events tool_use
-		     ON tool_use.workspace_id = route.workspace_id
-		    AND tool_use.session_id = route.session_id
-		    AND tool_use.session_thread_id = route.session_thread_id
-		    AND tool_use.event_id = route.tool_use_event_id
-		    AND tool_use.model_request_id = $4
-		  WHERE route.workspace_id = $1
-		    AND route.session_id = $2
-		    AND route.session_thread_id = $3
-		    AND route.status IN ('pending', 'resolving')
-		  ORDER BY tool_use.sequence ASC, route.tool_use_event_id ASC`,
+		`SELECT event.event_id,
+		        CASE WHEN repair.idempotency_key IS NULL THEN 'tool_use' ELSE 'repair' END
+		   FROM session_events event
+		   LEFT JOIN session_bridge_operations repair
+		     ON repair.workspace_id = event.workspace_id
+		    AND repair.session_id = event.session_id
+		    AND repair.session_thread_id = event.session_thread_id
+		    AND repair.operation = 'commit_internal_tool_repair'
+		    AND repair.source_kind = 'internal_tool_repair'
+		    AND repair.idempotency_key = event.runtime_write_id
+		    AND repair.ack_status = 'committed'
+		  WHERE event.workspace_id = $1
+		    AND event.session_id = $2
+		    AND event.session_thread_id = $3
+		    AND event.model_request_id = $4
+		    AND (event.type IN ('agent.tool_use','agent.mcp_tool_use') OR
+		         (event.type = 'agent.tool_result' AND repair.idempotency_key IS NOT NULL))
+		  ORDER BY event.sequence ASC, event.event_id ASC`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
 	)
 	if err != nil {
 		return nil, err
 	}
 	toolUseEventIDs := make([]string, 0)
+	repairEventIDs := make([]string, 0)
 	for rows.Next() {
-		var toolUseEventID string
-		if err := rows.Scan(&toolUseEventID); err != nil {
+		var eventID, memberKind string
+		if err := rows.Scan(&eventID, &memberKind); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
-		toolUseEventIDs = append(toolUseEventIDs, toolUseEventID)
+		if memberKind == "tool_use" {
+			toolUseEventIDs = append(toolUseEventIDs, eventID)
+		} else {
+			repairEventIDs = append(repairEventIDs, eventID)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -1709,8 +1719,9 @@ func runtimeTerminalRequestRetentionTx(
 	retention := &bridgev1.ProviderContextRetention{
 		Disposition:     "failed",
 		ToolUseEventIds: toolUseEventIDs,
+		RepairEventIds:  repairEventIDs,
 	}
-	if len(toolUseEventIDs) == 0 {
+	if len(toolUseEventIDs) == 0 && len(repairEventIDs) == 0 {
 		return retention, nil
 	}
 	var assistantCount int
