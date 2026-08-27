@@ -1,7 +1,6 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
-import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
@@ -70,6 +69,19 @@ let providerInvocations = 0;
 let executorInvocations = 0;
 let sandboxAcceptanceInvocations = 0;
 let sandboxObservationInvocations = 0;
+let acceptedInputCommitCalls = 0;
+let acceptedInputCommitCallsInFlight = 0;
+let acceptedInputCommitBarrierEntered = false;
+let acceptedInputCommitBarrierReleased = false;
+let acceptedInputCommitTimeoutTriggered = false;
+let markFirstAcceptedInputCommitDurable: (() => void) | undefined;
+const firstAcceptedInputCommitDurable = new Promise<void>((resolve) => {
+	markFirstAcceptedInputCommitDurable = resolve;
+});
+let releaseFirstAcceptedInputCommit: (() => void) | undefined;
+const firstAcceptedInputCommitRelease = new Promise<void>((resolve) => {
+	releaseFirstAcceptedInputCommit = resolve;
+});
 let markSandboxObservationStarted: (() => void) | undefined;
 const sandboxObservationStarted = new Promise<void>((resolve) => {
 	markSandboxObservationStarted = resolve;
@@ -92,8 +104,27 @@ const hosts = await buildRuntimeCoreHosts({
 			recoveredTurnEventIds = loaded.turnFacts.events.map((event) => event.eventId);
 			return loaded;
 		},
-		commitAcceptedInput: (acceptedInput, options) =>
-			loader.commitAcceptedInput(acceptedInput, options),
+		commitAcceptedInput: async (acceptedInput, options) => {
+			const commitCall = ++acceptedInputCommitCalls;
+			acceptedInputCommitCallsInFlight += 1;
+			try {
+				if (commitCall === 1) {
+					acceptedInputCommitBarrierEntered = true;
+				}
+				const result = await loader.commitAcceptedInput(acceptedInput, options);
+				if (commitCall === 1) {
+					markFirstAcceptedInputCommitDurable?.();
+					await firstAcceptedInputCommitRelease;
+				}
+				if (commitCall === 2) {
+					acceptedInputCommitBarrierReleased = true;
+					releaseFirstAcceptedInputCommit?.();
+				}
+				return result;
+			} finally {
+				acceptedInputCommitCallsInFlight -= 1;
+			}
+		},
 		refreshRuntimeBindingToken: async (identity) => identity.runtimeBindingToken,
 	},
 	threadLoop: {
@@ -106,17 +137,26 @@ const hosts = await buildRuntimeCoreHosts({
 			sleep: async (delayMs, signal) => {
 				if (signal.aborted) return false;
 				waitedMs.push(delayMs);
-				if (delayMs === SessionEventWriterRetryPolicy.timeoutPerAttemptMs) {
+				if (
+					acceptedInputCommitBarrierEntered &&
+					!acceptedInputCommitTimeoutTriggered &&
+					acceptedInputCommitCalls === 1 &&
+					acceptedInputCommitCallsInFlight === 1
+				) {
+					await firstAcceptedInputCommitDurable;
+					if (signal.aborted) return false;
+					acceptedInputCommitTimeoutTriggered = true;
+					return true;
+				}
+				if (
+					acceptedInputCommitTimeoutTriggered &&
+					acceptedInputCommitCalls >= 2 &&
+					acceptedInputCommitCallsInFlight > 0
+				) {
 					return await new Promise<boolean>((resolve) => {
-						const timeout = setTimeout(() => resolve(true), delayMs);
-						signal.addEventListener(
-							"abort",
-							() => {
-								clearTimeout(timeout);
-								resolve(false);
-							},
-							{ once: true },
-						);
+						signal.addEventListener("abort", () => resolve(false), {
+							once: true,
+						});
 					});
 				}
 				return true;
@@ -267,6 +307,8 @@ if (input.serveRecovery === true) {
 		sandboxAcceptanceInvocations,
 		sandboxObservationInvocations,
 		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
 		providerContext: providerRequests[0]?.context ?? [],
 		recoveredTurnEventIds,
 	}));
@@ -312,6 +354,8 @@ if (input.preloadOnly === true) {
 		providerInvocations,
 		executorInvocations,
 		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
 		providerContext: [],
 		recoveredTurnEventIds,
 		preloadResult,
@@ -387,6 +431,8 @@ process.stdout.write(
 		providerInvocations,
 		executorInvocations,
 		waitedMs,
+		acceptedInputCommitBarrierEntered,
+		acceptedInputCommitBarrierReleased,
 		providerContext: providerRequests[0]?.context,
 		recoveredTurnEventIds,
 		preloadResult,

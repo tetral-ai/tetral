@@ -1031,9 +1031,10 @@ Previous anchored summary.
 		const result = await run;
 		expect(result).toMatchObject({ type: "completed", modelMessageCount: 3 });
 		expect(requests).toHaveLength(3);
-		expect(JSON.stringify(requests[0]?.context)).not.toContain(
-			"later ACKed input",
-		);
+		const compactionContext = JSON.stringify(requests[0]?.context);
+		expect(compactionContext).toContain("old context that should be summarized");
+		expect(compactionContext).not.toContain("new request");
+		expect(compactionContext).not.toContain("later ACKed input");
 		expect(
 			requests.filter(
 				(request) =>
@@ -1041,12 +1042,16 @@ Previous anchored summary.
 					ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY,
 			),
 		).toHaveLength(1);
+		expect(requests[1]?.context).toHaveLength(1);
 		expect(JSON.stringify(requests[1]?.context[0])).toContain(
 			"<conversation-checkpoint>",
 		);
-		expect(JSON.stringify(requests[1]?.context)).not.toContain(
-			"later ACKed input",
+		const firstPostCompactionContext = JSON.stringify(requests[1]?.context);
+		expect(firstPostCompactionContext).toContain("new request");
+		expect(firstPostCompactionContext).not.toContain(
+			"old context that should be summarized",
 		);
+		expect(firstPostCompactionContext).not.toContain("later ACKed input");
 		expect(JSON.stringify(requests[2]?.context)).toContain(
 			"later ACKed input",
 		);

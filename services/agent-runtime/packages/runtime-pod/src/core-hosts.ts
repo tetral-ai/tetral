@@ -8,16 +8,16 @@
  * shutdown and scope release as separate operations that the process composition root orders.
  */
 
-import type * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
 	AcceptedInputCommitResult,
+	ContextLoader,
 	RuntimeLoadedAgentMail,
 } from "@tetral/agent-runtime-core/src/context/context-loader.js";
-import type {
-	SessionEvent,
-	SessionEventWriterAppendResult,
+import {
+	ContextLoaderErrorSchema,
+	type SessionEvent,
+	type SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import { createSessionEventWriter } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import type {
@@ -29,8 +29,6 @@ import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
 	RuntimeAcceptedInputState,
-} from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
-import type {
 	RuntimeApprovalReviewAcceptedInputState,
 	RuntimeThreadAddressState,
 } from "@tetral/agent-runtime-core/src/thread-loop/input/accepted-input.js";
@@ -149,7 +147,7 @@ export interface RuntimeCoreHostsOptions {
 	readonly maxLocalSessions: number;
 	readonly maxConcurrentTools?: number | undefined;
 	readonly now: () => string;
-	readonly contextLoader: ContextLoader.ContextLoader;
+	readonly contextLoader: ContextLoader;
 	readonly threadLoop: ThreadLoop.ThreadLoopRuntimeOptions;
 	readonly metrics?: RuntimeMetricsSink | undefined;
 	readonly recordCloseoutEvent?:
@@ -177,7 +175,7 @@ export async function buildRuntimeCoreHosts(
 	>();
 	const acceptedInputCommitKey = (input: RuntimeAcceptedInputState): string =>
 		`${input.workspaceId}\u0000${input.sessionId}\u0000${input.sessionThreadId}\u0000${input.runtimeInputId}`;
-	const runtimeContextLoader: ContextLoader.ContextLoader = {
+	const runtimeContextLoader: ContextLoader = {
 		...options.contextLoader,
 		...(options.contextLoader.commitAcceptedInput === undefined
 			? {}

@@ -751,6 +751,8 @@ type providerRescheduleRecoveryComposition struct {
 	SandboxAcceptanceInvocations  int             `json:"sandboxAcceptanceInvocations"`
 	SandboxObservationInvocations int             `json:"sandboxObservationInvocations"`
 	WaitedMS                      []int64         `json:"waitedMs"`
+	AcceptedInputBarrierEntered   bool            `json:"acceptedInputCommitBarrierEntered"`
+	AcceptedInputBarrierReleased  bool            `json:"acceptedInputCommitBarrierReleased"`
 	ProviderContext               json.RawMessage `json:"providerContext"`
 	RecoveredTurnEvents           []string        `json:"recoveredTurnEventIds"`
 	PreloadResult                 json.RawMessage `json:"preloadResult"`
@@ -1446,6 +1448,10 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	}
 	if semanticWaits != 1 {
 		t.Fatalf("replacement Runtime accepted-deadline waits = %v; want one 750ms semantic wait", result.WaitedMS)
+	}
+	if !result.AcceptedInputBarrierEntered || !result.AcceptedInputBarrierReleased {
+		t.Fatalf("accepted-input response-loss barrier entered/released = %t/%t; want true/true",
+			result.AcceptedInputBarrierEntered, result.AcceptedInputBarrierReleased)
 	}
 	providerContext := string(result.ProviderContext)
 	expectedProviderContext := `[{"role":1,"content":[{"text":{"text":"read the original file"}}]},{"role":2,"content":[{"toolCall":{"modelToolCallId":"call_provider_reschedule_original","name":"Read","inputJson":"{\"path\":\"original.txt\"}"}},{"toolResult":{"modelToolCallId":"call_provider_reschedule_original","completed":{"outputJson":"{\"text\":\"status: success\\ncontent:\\noriginal result\"}"}}}]},{"role":1,"content":[{"text":{"text":"continue after recovered tool settlement"}}]}]`

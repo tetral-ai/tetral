@@ -38,11 +38,11 @@ import {
 	Scope,
 	Semaphore,
 } from "effect";
-import type { RuntimeContextEntry } from "../contracts/runtime.js";
 import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
+	type RuntimeContextEntry,
 } from "../contracts/runtime.js";
 import type {
 	RuntimeHotStateMetrics,
@@ -53,8 +53,6 @@ import * as ThreadLoop from "../thread-loop/thread-loop.js";
 import * as ThreadRuntime from "../thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
-} from "../thread-loop/input/accepted-input.js";
-import type {
 	RuntimeAcceptedThreadMetadataState,
 	RuntimeTaskNotificationCommandState,
 	RuntimeThreadAddressState,

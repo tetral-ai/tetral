@@ -101,7 +101,8 @@ describe("Thread-turn semantic characterization", () => {
 				events: [run, start, requestEndEvent(3, "completed", [], [])],
 				internalRepairs: [],
 				expectedAction: "finish_idle",
-				expectedMembers: [],
+				expectedState: "ready_to_finish",
+				expectedMemberKinds: [],
 			},
 			{
 				name: "multi Tool",
@@ -121,7 +122,8 @@ describe("Thread-turn semantic characterization", () => {
 				],
 				internalRepairs: [],
 				expectedAction: "prepare_next_request",
-				expectedMembers: ["event_tool_a", "event_tool_b"],
+				expectedState: "ready_to_request",
+				expectedMemberKinds: ["public_tool_use", "public_tool_use"],
 			},
 			{
 				name: "approval",
@@ -148,7 +150,8 @@ describe("Thread-turn semantic characterization", () => {
 					},
 				],
 				expectedAction: "await_tool_results",
-				expectedMembers: ["event_tool_a"],
+				expectedState: "waiting_for_tool_results",
+				expectedMemberKinds: ["public_tool_use"],
 			},
 			{
 				name: "reschedule with Tool and repair",
@@ -168,7 +171,8 @@ describe("Thread-turn semantic characterization", () => {
 				],
 				internalRepairs: [repairReference],
 				expectedAction: "apply_request_retry_or_reschedule",
-				expectedMembers: ["event_tool_a", "event_repair"],
+				expectedState: "request_sealed",
+				expectedMemberKinds: ["public_tool_use", "internal_tool_repair"],
 			},
 			{
 				name: "interrupt",
@@ -180,7 +184,8 @@ describe("Thread-turn semantic characterization", () => {
 				],
 				internalRepairs: [],
 				expectedAction: "close_interrupted",
-				expectedMembers: ["event_tool_a"],
+				expectedState: "request_open",
+				expectedMemberKinds: ["public_tool_use"],
 			},
 			{
 				name: "terminal",
@@ -196,7 +201,8 @@ describe("Thread-turn semantic characterization", () => {
 				],
 				internalRepairs: [],
 				expectedAction: "await_input",
-				expectedMembers: [],
+				expectedState: "idle",
+				expectedMemberKinds: [],
 			},
 		] as const;
 
@@ -229,14 +235,33 @@ describe("Thread-turn semantic characterization", () => {
 			expect(snapshot.nextStep.action, scenario.name).toBe(
 				scenario.expectedAction,
 			);
+			expect(snapshot.state.state, scenario.name).toBe(scenario.expectedState);
+			const members = checkpoint.request?.toolMembers ?? [];
 			expect(
-				checkpoint.request?.toolMembers.map((member) =>
-					member.memberKind === "public_tool_use"
-						? member.toolUseEventId
-						: member.repairEventId,
-				) ?? [],
+				members.map((member) => member.memberKind),
 				scenario.name,
-			).toEqual([...scenario.expectedMembers]);
+			).toEqual([...scenario.expectedMemberKinds]);
+			for (const member of members) {
+				if (member.memberKind === "public_tool_use") {
+					const source = facts.events.find(
+						(event) => event.eventId === member.toolUseEventId,
+					);
+					expect(source?.type, scenario.name).toBe("agent.tool_use");
+					expect(source?.modelRequestId, scenario.name).toBe(
+						checkpoint.request?.modelRequestId,
+					);
+					continue;
+				}
+				const source = facts.internalRepairs.find(
+					(repairFact) => repairFact.repairEventId === member.repairEventId,
+				);
+				expect(source?.modelRequestId, scenario.name).toBe(
+					checkpoint.request?.modelRequestId,
+				);
+				expect(source?.modelToolCallId, scenario.name).toBe(
+					member.modelToolCallId,
+				);
+			}
 		}
 	});
 

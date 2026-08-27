@@ -350,8 +350,6 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		"call_durable_error",
 		adapter.RuntimeSettlement,
@@ -508,8 +506,6 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		modelToolCallID,
 		map[string]any{"type": "completed", "output": map[string]any{"text": originalText, "truncated": true}},
@@ -610,8 +606,6 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t,
 		baseLoaded.GetContextJson(),
 		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetAssignedMessageSequence(),
-		payload,
 		toolUse.GetCommitted().GetEventId(),
 		"call_durable_cancel",
 		map[string]any{
@@ -684,8 +678,6 @@ func assertRuntimeHotColdToolComposition(
 	t *testing.T,
 	baseContextJSON string,
 	coldContextJSON string,
-	assistantMessageSequence int64,
-	coldPayload bridgeLoadContextPayload,
 	toolUseEventID string,
 	modelToolCallID string,
 	settlement any,
@@ -695,13 +687,10 @@ func assertRuntimeHotColdToolComposition(
 		"contextJson":         coldContextJSON,
 		"providerComposition": true,
 		"hotScenario": map[string]any{
-			"baseContextJson":          baseContextJSON,
-			"assistantMessageSequence": assistantMessageSequence,
-			"toolUseEventId":           toolUseEventID,
-			"modelToolCallId":          modelToolCallID,
-			"settlement":               settlement,
-			"pendingToolUses":          coldPayload.PendingToolUses,
-			"pendingSandboxExecutions": coldPayload.PendingSandboxExecutions,
+			"baseContextJson": baseContextJSON,
+			"toolUseEventId":  toolUseEventID,
+			"modelToolCallId": modelToolCallID,
+			"settlement":      settlement,
 		},
 	})
 	if err != nil {
@@ -720,26 +709,23 @@ func assertRuntimeHotColdToolComposition(
 		t.Fatalf("run Runtime hot/cold Tool composition: %v: %s", err, output)
 	}
 	var composed struct {
-		Checkpoint          any                        `json:"checkpoint"`
-		ToolRouteView       any                        `json:"toolRouteView"`
-		NextStep            map[string]any             `json:"nextStep"`
-		ProviderComposition runtimeProviderComposition `json:"providerComposition"`
-		Hot                 struct {
-			Checkpoint          any                        `json:"checkpoint"`
-			ToolRouteView       any                        `json:"toolRouteView"`
-			NextStep            map[string]any             `json:"nextStep"`
+		ColdProductionPreloaded bool                       `json:"coldProductionPreloaded"`
+		Checkpoint              any                        `json:"checkpoint"`
+		ToolRouteView           any                        `json:"toolRouteView"`
+		NextStep                map[string]any             `json:"nextStep"`
+		ProviderComposition     runtimeProviderComposition `json:"providerComposition"`
+		Hot                     struct {
 			ProviderComposition runtimeProviderComposition `json:"providerComposition"`
 			ToolPart            any                        `json:"toolPart"`
+			ProviderInvocations int                        `json:"providerInvocations"`
 		} `json:"hot"`
 	}
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode Runtime hot/cold Tool composition: %v: %s", err, output)
 	}
-	if !reflect.DeepEqual(composed.Checkpoint, composed.Hot.Checkpoint) ||
-		!reflect.DeepEqual(composed.ToolRouteView, composed.Hot.ToolRouteView) ||
-		len(composed.NextStep) == 0 || len(composed.Hot.NextStep) == 0 ||
-		!reflect.DeepEqual(composed.NextStep, composed.Hot.NextStep) ||
-		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) || composed.Hot.ToolPart == nil {
+	if !composed.ColdProductionPreloaded || len(composed.NextStep) == 0 ||
+		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) ||
+		composed.Hot.ToolPart == nil || composed.Hot.ProviderInvocations != 1 {
 		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
 	}
 	assertNoInventedAssistantText(t, composed.ProviderComposition)

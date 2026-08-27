@@ -138,6 +138,12 @@ overflow, compaction — stay inside the run. Cancelling a joined waiter never
 cancels the owner. Different threads run concurrently while each thread stays
 single-owner.
 
+`FinishIdle(end_turn)` closes the Request/Run that authored the durable
+closeout. Its validity comes from that exact owner and its committed Request
+End, not from the action currently derived after later input arrives. Applying
+the closeout removes only the old execution owner; queued input remains owned
+by the successor run.
+
 ### The ThreadRun loop
 
 One fixed algorithm per run freezes and commits a finite input cut, then drives
@@ -185,6 +191,14 @@ state are awaited Effects, never detached background work.
 | `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
 | `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
+
+An interrupt delivery attempt reports a retryable Request-End failure through
+the current `ThreadRunSlot`; retryable attempt state is never promoted into the
+terminal replay memo. A joined duplicate is different: the durable operation
+already committed, so it completes only the matching resident interrupt fence
+and asks ordinary Reducer readiness whether one successor run must wake. Joined
+without a matching fence is a successful no-op; stale custody keeps its discard
+semantics.
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider

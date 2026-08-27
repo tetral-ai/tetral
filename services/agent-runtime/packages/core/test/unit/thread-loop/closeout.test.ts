@@ -1744,6 +1744,144 @@ describe("ThreadLoop", () => {
 			await Effect.runPromise(Scope.close(scope, Exit.void));
 		}
 	});
+	test("recovered-open projection failure emits one real reload through SessionManager", async () => {
+		const sessionId = "sesn_recovered_projection_reload";
+		const threadId = "thrd_recovered_projection_reload";
+		let requestEndWrites = 0;
+		let coldLoads = 0;
+		const baseWriter = writerFrom((envelope) => ({
+			ok: true,
+			eventId: `bridge-${envelope.writeId}`,
+			type: "committed",
+		}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) => {
+				requestEndWrites += 1;
+				return {
+					...requestEndResultForTest(envelope),
+					interruptToolResults: [
+						{
+							toolUseEventId: "unknown_recovered_projection_tool",
+							result: { type: "cancelled" as const },
+						},
+					],
+				};
+			},
+		};
+		const threadAddress = {
+			...acceptedInput("rin_recovered_projection_reload", sessionId),
+			sessionThreadId: threadId,
+		};
+		const emptyPreload = () => ({
+			...threadAddress,
+			runtimeBindingToken: "runtime-binding-token",
+			contextEntries: [],
+			turnCheckpoint: { pendingInputContextSequences: [] },
+			turnToolRouteView: { routes: [] },
+			thread: {
+				role: "main" as const,
+				visibility: "public" as const,
+				agentType: "general" as const,
+				status: "idle" as const,
+			},
+		});
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+			loadThreadContext: async () => {
+				coldLoads += 1;
+				return emptyPreload();
+			},
+		}).pipe(
+			Layer.provide(
+				runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+					writer,
+				}),
+			),
+		);
+		const { manager, scope } = await Effect.runPromise(
+			Effect.gen(function* () {
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
+		);
+		try {
+			await Effect.runPromise(
+				manager.preloadThread({
+					...emptyPreload(),
+					contextEntries: [
+						{
+							messageSequence: 1,
+							contextKind: "assistant",
+							parts: [
+								{
+									type: "tool_call",
+									modelToolCallId: "call_recovered_projection_reload",
+									toolName: "Write",
+									canonicalInput: { path: "README.md" },
+								},
+							],
+						},
+					],
+					turnCheckpoint: {
+						pendingInputContextSequences: [],
+						request: {
+							modelRequestId: "mreq_recovered_projection_reload",
+							requestStartEventId: "sevt_recovered_projection_reload_start",
+							requestKind: "agent_provider_request",
+							contextThroughMessageSequence: 0,
+							toolMembers: [
+								{
+									memberKind: "public_tool_use",
+									modelToolCallId: "call_recovered_projection_reload",
+									toolUseEventId: "sevt_recovered_projection_reload_tool",
+									toolName: "Write",
+								},
+							],
+						},
+					},
+				}),
+			);
+			const interrupt = {
+				...interruptInput("rin_recovered_projection_reload_interrupt", 2),
+				sessionId,
+				sessionThreadId: threadId,
+			};
+			const failed = await Effect.runPromise(
+				manager.interruptControl(
+					sessionId,
+					interrupt,
+					testControlCommit(interrupt),
+				),
+			);
+			expect(failed).toMatchObject({
+				ok: false,
+				reason: "context_load_failed",
+			});
+			expect(failed).not.toHaveProperty("stale");
+			expect(requestEndWrites).toBe(1);
+			expect(
+				await Effect.runPromise(manager.inspectThread(interrupt)),
+			).toMatchObject({ ok: true, observed: false });
+
+			const replay = await Effect.runPromise(
+				manager.interruptControl(
+					sessionId,
+					interrupt,
+					testControlCommit(interrupt),
+				),
+			);
+			expect(replay).toMatchObject({ ok: true, idleInterrupt: true });
+			expect(coldLoads).toBe(1);
+		} finally {
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
+	});
 	test("a stale interrupt request-end receipt performs no fallback idle closeout", async () => {
 		const session = new ThreadRuntime("sesn_stale_interrupt_end");
 		const loader = new RecordingContextLoader([], {

@@ -1088,10 +1088,6 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		ok: true,
 		joined: true,
 	});
-	const projectionFailure = applyFailedRequestProviderProjection(session);
-	if (projectionFailure !== undefined) {
-		return { type: "failed", error: projectionFailure, reloadHotState: true };
-	}
 	releaseInterruptedPendingTools(
 		session,
 		options,

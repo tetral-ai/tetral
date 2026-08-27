@@ -1,13 +1,12 @@
+import { describe, expect, test } from "bun:test";
 import {
-	describe,
-	expect,
-	test } from "bun:test";
-import { Context,
+	Context,
 	Effect,
 	Exit,
 	Fiber,
 	Layer,
-	Scope } from "effect";
+	Scope,
+} from "effect";
 import {
 	normalizeRuntimeFailure,
 	normalizeSessionEventWriterError,
@@ -23,8 +22,6 @@ import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import type {
 	RuntimeAcceptedInputState,
-} from "../../src/thread-loop/input/accepted-input.js";
-import type {
 	RuntimeAcceptedThreadMetadataState,
 } from "../../src/thread-loop/input/accepted-input.js";
 import type {
@@ -1852,77 +1849,6 @@ describe("SessionManager", () => {
 						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
 					),
 				).toMatchObject({ ok: true, observed: true, status: "idle" });
-			},
-		);
-	});
-
-	test("recovered-open projection failure evicts the resident thread before retry", async () => {
-		const sessionId = "sesn_recovered_projection_reload";
-		const threadId = `thrd_${sessionId}`;
-		const threadLoop = makeControlledThreadLoop({
-			closeRecoveredOpenRequestForInterrupt: (session) =>
-				Effect.succeed({
-					type: "failed" as const,
-					reloadHotState: true as const,
-					error: normalizeRuntimeFailure({
-						type: "runtime",
-						code: "runtime_invalid_sequence",
-						retryable: false,
-						fatal: true,
-						reason: "runtime_contract_validation",
-						sessionId: session.sessionId,
-					}),
-				}),
-		});
-		await withSessionManager(
-			sessionManagerLayer(threadLoop),
-			async (manager) => {
-				expect(
-					await Effect.runPromise(
-						manager.startTestRunThroughAcceptedInput(sessionId),
-					),
-				).toMatchObject({ ok: true, started: true });
-				await waitForRuns(threadLoop, 1);
-				const session = threadLoop.runs[0]?.session;
-				expect(session).toBeDefined();
-				threadLoop.runs[0]?.release();
-				await waitForThreadIdle(manager, sessionId, threadId);
-				session?.state.installThreadTurn(
-					{
-						pendingInputContextSequences: [],
-						request: {
-							modelRequestId: "mreq_recovered_projection_reload",
-							requestStartEventId: "sevt_recovered_projection_reload_start",
-							requestKind: "agent_provider_request",
-							contextThroughMessageSequence: 0,
-							toolMembers: [],
-						},
-					},
-					{ routes: [] },
-				);
-
-				const result = await Effect.runPromise(
-					manager.interruptControl(
-						sessionId,
-						threadControl(
-							sessionId,
-							"rin_recovered_projection_reload",
-							threadId,
-						),
-						testControlCommit({ sessionId }),
-					),
-				);
-				expect(result).toMatchObject({
-					ok: false,
-					reason: "context_load_failed",
-				});
-				expect(
-					await Effect.runPromise(
-						manager.inspectThread(
-							threadControl(sessionId, undefined, threadId),
-						),
-					),
-				).toMatchObject({ ok: true, observed: false });
 			},
 		);
 	});
