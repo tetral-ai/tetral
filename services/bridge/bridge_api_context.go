@@ -695,6 +695,8 @@ func loadOpenDurableTurnIDTx(
 	return &durableTurnID, nil
 }
 
+// loadThreadPendingAgentMailTx restores only mail already handed to Runtime.
+// Queued mail remains Queue-owned and must enter through its ordered delivery.
 func loadThreadPendingAgentMailTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -720,7 +722,7 @@ func loadThreadPendingAgentMailTx(
 			    AND inbox.runtime_input_id =
 			        'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
 			    AND inbox.input_kind = 'agent_mail'
-			    AND inbox.status IN ('queued', 'delivering', 'accepted')
+			    AND inbox.status IN ('delivering', 'accepted')
 			  WHERE sent.workspace_id = $1
 			    AND sent.session_id = $2
 			    AND sent.type = 'agent.thread_message_sent'

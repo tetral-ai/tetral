@@ -1650,36 +1650,9 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	case <-time.After(10 * time.Second):
 		t.Fatalf("committed closeout recovery did not finish delivery: %s", runtimeProcess.output.String())
 	}
-	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
-		"daytona": &bridgeMemoryProjectionProvider{},
-	})
-	if err != nil {
-		t.Fatalf("build closeout recovery output capture registry: %v", err)
-	}
-	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
-		Queue:     tetralqueue.NewServer(queueStore, nil),
-		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
-		Providers: registry,
-		BlobStore: blob.NewFakeBlobStore(),
-		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
-			WorkspaceID: "default", LeaseOwner: "interrupt-closeout-recovery-capture", MaxJobs: 1,
-			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
-		},
-	}
-	captureDeadline := time.Now().Add(10 * time.Second)
-	for {
-		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
-		if captureErr != nil {
-			t.Fatalf("complete recovered interrupt output capture: %v", captureErr)
-		}
-		if active {
-			break
-		}
-		if time.Now().After(captureDeadline) {
-			t.Fatalf("recovered interrupt closeout did not enqueue output capture: %s", runtimeProcess.output.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	completeInterruptCompositionOutputCapture(
+		t, client, queueStore, "interrupt-closeout-recovery-capture", &runtimeProcess.output,
+	)
 	idleDeadline := time.Now().Add(10 * time.Second)
 	for {
 		var idleEvents int
@@ -1730,7 +1703,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 	}
 }
 
-func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *testing.T) {
+func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCloseout(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID     = "sesn_interrupt_actor_production"
@@ -1830,7 +1803,17 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		bridgeServer.Stop()
 		_ = bridgeListener.Close()
 	})
-	runtimeProcess, paths := startInterruptRuntimeComposition(t, t.TempDir(), bridgeListener.Addr().String(), sessionID, siblingID, bindingID, 1, podUID)
+	runtimeProcess, paths := startInterruptRuntimeComposition(
+		t,
+		t.TempDir(),
+		bridgeListener.Addr().String(),
+		sessionID,
+		siblingID,
+		bindingID,
+		1,
+		podUID,
+		interruptRuntimeCompositionOptions{fastThreadText: "external sibling mail waits"},
+	)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'
 		WHERE workspace_id='default' AND session_id=$1 AND binding_id=$2`, sessionID, bindingID); err != nil {
 		t.Fatalf("align actor Runtime binding: %v", err)
@@ -1841,8 +1824,9 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
+	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
 		Config:    JobRunnerConfig{LeaseOwner: "interrupt-actor-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -1852,11 +1836,40 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("deliver released external sibling mail through Runtime = active:%t err:%v", active, err)
 	}
+	completeInterruptCompositionOutputCapture(
+		t, client, queueStore, "interrupt-actor-output-capture", &runtimeProcess.output,
+	)
+	requestEndDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var requestEnds int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			  AND type='span.model_request_end'`, sessionID, siblingID).Scan(&requestEnds); err != nil {
+			t.Fatalf("read released external sibling mail Request End: %v", err)
+		}
+		if requestEnds == 1 {
+			break
+		}
+		if time.Now().After(requestEndDeadline) {
+			t.Fatalf("released external sibling mail did not complete: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release actor Runtime composition: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if len(composed.InterruptResult) == 0 || composed.ProviderInvocations != 0 {
+	var interruptResult struct {
+		OK            bool `json:"ok"`
+		Interrupted   bool `json:"interrupted"`
+		IdleInterrupt bool `json:"idleInterrupt"`
+	}
+	if err := json.Unmarshal(composed.InterruptResult, &interruptResult); err != nil {
+		t.Fatalf("decode actor interrupt Runtime composition: %v", err)
+	}
+	if !interruptResult.OK || interruptResult.Interrupted || !interruptResult.IdleInterrupt ||
+		composed.ProviderInvocations != 1 || len(composed.ProviderContexts) != 1 ||
+		!bytes.Contains(composed.ProviderContexts[0], []byte("external sibling mail waits")) {
 		t.Fatalf("actor interrupt Runtime composition = %+v", composed)
 	}
 
@@ -1879,7 +1892,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleThroughTerminalCloseout(t *te
 		t.Fatalf("read actor terminal facts: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		mailInbox != "committed" || mailQueue != queue.StatusDeadLettered || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
+		mailInbox != "accepted" || mailQueue != queue.StatusAcknowledged || lateOperations != 0 || lateChildren != 0 || activeBarriers != 0 {
 		t.Fatalf("actor terminal facts = interrupt:%s/%s mail:%s/%s late:%d/%d barriers:%d Runtime:%s",
 			interruptInbox, interruptQueue, mailInbox, mailQueue, lateOperations, lateChildren, activeBarriers, composed.InterruptResult)
 	}
@@ -2155,6 +2168,46 @@ type interruptRuntimeCompositionPaths struct {
 	operationCompleted string
 	acceptResult       string
 	close              string
+}
+
+func completeInterruptCompositionOutputCapture(
+	t *testing.T,
+	client *dbconnect.Client,
+	queueStore *queue.PostgreSQLQueueStore,
+	leaseOwner string,
+	output *bytes.Buffer,
+) {
+	t.Helper()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build interrupt composition output capture registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: leaseOwner, MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete interrupt composition output capture: %v", captureErr)
+		}
+		if active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("interrupt composition did not enqueue output capture: %s", output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID string, options ...interruptRuntimeCompositionOptions) (*interruptRuntimeCompositionProcess, interruptRuntimeCompositionPaths) {
