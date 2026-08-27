@@ -1040,8 +1040,9 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	}}
 	baseSender := NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
 	captureSender := &interruptRequestCaptureSender{RuntimeCommandSender: baseSender}
+	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
+		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: captureSender},
 		Config: JobRunnerConfig{LeaseOwner: "interrupt-joined-replay", MaxJobs: 1,
 			LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -1076,12 +1077,58 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build joined replay output capture provider registry: %v", err)
+	}
+	captureRunner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "interrupt-joined-replay-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		active, captureErr := captureRunner.RunOnceWithActivity(context.Background())
+		if captureErr != nil {
+			t.Fatalf("complete joined replay output capture operation: %v", captureErr)
+		}
+		if active {
+			break
+		}
+		if time.Now().After(captureDeadline) {
+			t.Fatalf("joined replay did not enqueue output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	idleDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var idleEvents int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+			WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.status_idle'`,
+			sessionID, threadID).Scan(&idleEvents); err != nil {
+			t.Fatalf("read joined replay idle completion: %v", err)
+		}
+		if idleEvents == 1 {
+			break
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("joined replay did not finish idle after output capture: %s", runtimeProcess.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.WriteFile(paths.close, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release joined replay Runtime: %v", err)
 	}
 	composed := runtimeProcess.wait(t)
-	if composed.ProviderInvocations != 0 || composed.FinishIdleInvocations != 1 || len(composed.InterruptResults) != 2 {
-		t.Fatalf("joined replay Runtime output = %+v; want zero Provider, one failed FinishIdle, two interrupts", composed)
+	if composed.ProviderInvocations != 0 || composed.FinishIdleInvocations != 2 || len(composed.InterruptResults) != 2 {
+		t.Fatalf("joined replay Runtime output = %+v; want zero Provider, one failed and one committed FinishIdle, two interrupts", composed)
 	}
 	var snapshot struct {
 		Ok       bool              `json:"ok"`
@@ -1145,7 +1192,7 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		t.Fatalf("read joined replay durable facts: %v", err)
 	}
 	if inboxStatus != "committed" || queueStatus != queue.StatusAcknowledged || requestEnds != 1 ||
-		toolResults != 1 || receipts != 1 || idleEvents != 0 {
+		toolResults != 1 || receipts != 1 || idleEvents != 1 {
 		t.Fatalf("joined replay facts = Inbox:%s Queue:%s End:%d ToolResult:%d receipt:%d idle:%d",
 			inboxStatus, queueStatus, requestEnds, toolResults, receipts, idleEvents)
 	}
