@@ -219,6 +219,7 @@ import type {
 } from "./input/accepted-input.js";
 import type {
 	RuntimeControlInputCommit,
+	RuntimeControlInputCommitResult,
 	RuntimeInterruptCommandState,
 	RuntimeToolConfirmationState,
 } from "./input/control-input.js";
@@ -375,7 +376,7 @@ export type ThreadLoopSessionReleaseReason =
 /** Result of applying one committed idle-interrupt receipt inside the ThreadLoop owner. */
 export type IdleInterruptSettlementResult =
 	| { readonly type: "applied"; readonly wakeThread: boolean }
-	| { readonly type: "duplicate" }
+	| { readonly type: "duplicate"; readonly wakeThread: boolean }
 	| { readonly type: "stale" }
 	| { readonly type: "conflict" }
 	| {
@@ -458,6 +459,11 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
+	/** Reports one in-run interrupt attempt without turning retryable failure into replay state. */
+	readonly recordInterruptAttemptResult: (
+		runtimeInputId: string,
+		result: RuntimeControlInputCommitResult,
+	) => void;
 	readonly interruptLeaseRef: (
 		runtimeInputId: string,
 	) =>
@@ -1039,9 +1045,24 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		undefined,
 		undefined,
 		undefined,
-		{ command, interruptLeaseRef },
+		{
+			command,
+			interruptLeaseRef,
+			recordAttemptResult: (result) =>
+				custody.recordInterruptAttemptResult(command.runtimeInputId, result),
+		},
 	);
 	if (!end.ok) {
+		const attemptResult = {
+			ok: false as const,
+			retryable: end.error.retryable,
+			errorCode: end.error.code,
+		};
+		session.state.recordJoinedUserInterruptResult(
+			command.runtimeInputId,
+			attemptResult,
+			{ inputKind: "interrupt" },
+		);
 		return {
 			type: "failed",
 			error: end.error,
@@ -1049,6 +1070,10 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		};
 	}
 	if (end.type === "stale") {
+		custody.recordInterruptAttemptResult(command.runtimeInputId, {
+			ok: true,
+			stale: true,
+		});
 		session.state.recordJoinedUserInterruptResult(
 			command.runtimeInputId,
 			{ ok: true, stale: true },
@@ -1059,6 +1084,10 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 	if (!applyJoinedInterruptRequestEnd(session, end)) {
 		return failRecoveredOpenRequest(session, true);
 	}
+	custody.recordInterruptAttemptResult(command.runtimeInputId, {
+		ok: true,
+		joined: true,
+	});
 	const projectionFailure = applyFailedRequestProviderProjection(session);
 	if (projectionFailure !== undefined) {
 		return { type: "failed", error: projectionFailure, reloadHotState: true };
@@ -1109,14 +1138,17 @@ export function settleIdleInterrupt(
 			return { type: "stale" as const };
 		}
 		if ("joined" in committed) {
-			if (
+			const completedMatchingFence =
 				session.state.userInterruptCommand()?.runtimeInputId ===
-				command.runtimeInputId
-			) {
+				command.runtimeInputId;
+			if (completedMatchingFence) {
 				session.state.completeUserInterrupt(command.runtimeInputId);
 				session.state.finishThreadRunProjection();
 			}
-			return { type: "duplicate" as const };
+			return {
+				type: "duplicate" as const,
+				wakeThread: completedMatchingFence && threadNeedsRun(session),
+			};
 		}
 
 		const admitted = session.state.beginUserInterrupt(
@@ -1148,7 +1180,10 @@ export function settleIdleInterrupt(
 		if ("joined" in application.result) {
 			session.state.completeUserInterrupt(command.runtimeInputId);
 			session.state.finishThreadRunProjection();
-			return { type: "duplicate" as const };
+			return {
+				type: "duplicate" as const,
+				wakeThread: threadNeedsRun(session),
+			};
 		}
 
 		try {
@@ -3152,6 +3187,11 @@ function runOwnedCompactionSummaryAttemptEffect(
 							{
 								command: interruptCommand,
 								interruptLeaseRef,
+								recordAttemptResult: (result) =>
+									custody.recordInterruptAttemptResult(
+										interruptCommand.runtimeInputId,
+										result,
+									),
 							},
 							),
 						);
@@ -3399,6 +3439,8 @@ function closeStartedCompactionForUserInterruptEffect(
 				{
 					command,
 					interruptLeaseRef,
+					recordAttemptResult: (result) =>
+						custody.recordInterruptAttemptResult(command.runtimeInputId, result),
 				},
 			),
 		);
@@ -6364,22 +6406,29 @@ function settleRuntimeShutdownEffect(
 					{
 						command,
 						interruptLeaseRef,
+						recordAttemptResult: (result) =>
+							custody.recordInterruptAttemptResult(command.runtimeInputId, result),
 					},
 				),
 			);
 			if (!spanEndAppend.ok) {
+				const attemptResult = {
+					ok: false as const,
+					retryable: spanEndAppend.error.retryable,
+					errorCode: spanEndAppend.error.code,
+				};
 				session.state.recordJoinedUserInterruptResult(
 					command.runtimeInputId,
-					{
-						ok: false,
-						retryable: spanEndAppend.error.retryable,
-						errorCode: spanEndAppend.error.code,
-					},
+					attemptResult,
 					{ inputKind: "interrupt" },
 				);
 				return yield* failRequestCloseout(spanEndAppend.error);
 			}
 			if (spanEndAppend.type === "stale") {
+				custody.recordInterruptAttemptResult(command.runtimeInputId, {
+					ok: true,
+					stale: true,
+				});
 				session.state.recordJoinedUserInterruptResult(
 					command.runtimeInputId,
 					{ ok: true, stale: true },
@@ -6396,6 +6445,10 @@ function settleRuntimeShutdownEffect(
 				requestEndOutcome(spanEndAppend),
 			);
 			if (sealApplication.type === "stale_custody") {
+				custody.recordInterruptAttemptResult(command.runtimeInputId, {
+					ok: true,
+					stale: true,
+				});
 				if (
 					!session.state.recordJoinedUserInterruptResult(
 						command.runtimeInputId,
@@ -6478,6 +6531,10 @@ function settleRuntimeShutdownEffect(
 					}),
 				);
 			}
+			custody.recordInterruptAttemptResult(command.runtimeInputId, {
+				ok: true,
+				joined: true,
+			});
 			releaseInterruptedPendingTools(
 				session,
 				options,
@@ -7078,6 +7135,9 @@ async function appendModelRequestEndEvent(
 		readonly interruptLeaseRef: NonNullable<
 			SessionEventWriterRequestEndEnvelope["interruptSettlement"]
 		>["interruptLeaseRef"];
+		readonly recordAttemptResult: (
+			result: RuntimeControlInputCommitResult,
+		) => void;
 	},
 ): Promise<
 	| {
@@ -7195,7 +7255,13 @@ async function appendModelRequestEndEvent(
 	};
 	const result = await writeRequestEndWithRetry(options, envelope);
 	if (!result.ok) {
-		return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
+		const error = runtimeFailureFromEventWriter(result.error);
+		interrupt?.recordAttemptResult({
+			ok: false,
+			retryable: error.retryable,
+			errorCode: error.code,
+		});
+		return { ok: false, error };
 	}
 	if (result.type !== "stale" && interrupt === undefined) {
 		const acceptedReschedule =

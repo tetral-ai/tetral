@@ -2485,6 +2485,7 @@ describe("ThreadLoop", () => {
 		});
 		const custody = {
 			activeTurnId: () => durableTurnId,
+			recordInterruptAttemptResult: () => {},
 			interruptLeaseRef: () => undefined,
 		};
 		const loader = new QueuedContextLoader([], []);

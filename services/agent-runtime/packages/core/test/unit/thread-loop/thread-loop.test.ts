@@ -1895,7 +1895,7 @@ describe("ThreadState", () => {
 					async () => ({ ok: true, joined: true }),
 				),
 			),
-		).toEqual({ type: "duplicate" });
+		).toEqual({ type: "duplicate", wakeThread: true });
 		expect(closeouts).toBe(1);
 		expect(session.state.userInterruptRequested()).toBe(false);
 		expect(session.state.acceptedInputSnapshot()).toEqual([input]);
@@ -1941,6 +1941,37 @@ describe("ThreadState", () => {
 			(await state.commitUserInterruptInput({ inputKind: "interrupt" })).result,
 		).toMatchObject({ ok: true, type: "committed" });
 		expect(commitCalls).toBe(1);
+	});
+
+	test("joined interrupt without a matching resident fence is a wake-free no-op", async () => {
+		const session = new ThreadRuntime("sesn_unmatched_joined_interrupt");
+		const input = acceptedInput(
+			"rin_unmatched_joined_follower",
+			"sesn_unmatched_joined_interrupt",
+		);
+		session.state.enqueueAcceptedInput(input);
+		const command = {
+			workspaceId: "wksp_test",
+			sessionId: "sesn_unmatched_joined_interrupt",
+			sessionThreadId: "thrd_1",
+			bindingId: "bind_1",
+			bindingGeneration: 1,
+			targetPodUid: "pod_1",
+			runtimeInputId: "rin_unmatched_joined_interrupt",
+			origin: "user" as const,
+		};
+
+		expect(
+			await Effect.runPromise(
+				ThreadLoop.settleIdleInterrupt(
+					session,
+					command,
+					async () => ({ ok: true, joined: true }),
+				),
+			),
+		).toEqual({ type: "duplicate", wakeThread: false });
+		expect(session.state.acceptedInputSnapshot()).toEqual([input]);
+		expect(session.state.userInterruptRequested()).toBe(false);
 	});
 
 	test("successful request hints stay paired and an actual model change invalidates both", () => {

@@ -64,6 +64,7 @@ import type {
 } from "../thread-loop/input/accepted-input.js";
 import type {
 	RuntimeControlInputCommit,
+	RuntimeControlInputCommitResult,
 	RuntimeControlInputState,
 	RuntimeInterruptCommandState,
 	RuntimeToolConfirmationState,
@@ -500,6 +501,12 @@ interface ThreadRunSlot {
 	>;
 	readonly scope: Scope.Scope;
 	stopping: boolean;
+	interruptAttemptResult:
+		| {
+				readonly runtimeInputId: string;
+				readonly result: RuntimeControlInputCommitResult;
+		  }
+		| undefined;
 	readonly reviewerExecutionToken: ReviewerExecutionToken | undefined;
 }
 
@@ -1085,6 +1092,7 @@ export function layer(
 						>(),
 						scope: runScope,
 						stopping: false,
+						interruptAttemptResult: undefined,
 						reviewerExecutionToken:
 							reviewId === undefined
 								? undefined
@@ -1100,6 +1108,9 @@ export function layer(
 					const custody: ThreadLoop.ThreadLoopRunCustody = {
 						activeTurnId: (session) =>
 							session.state.threadTurnTransition().checkpoint.executionRunId,
+						recordInterruptAttemptResult: (runtimeInputId, result) => {
+							runSlot.interruptAttemptResult = { runtimeInputId, result };
+						},
 						interruptLeaseRef: (runtimeInputId) =>
 							threadEntry.runtimeThread.state.userInterruptCommand()
 								?.runtimeInputId === runtimeInputId
@@ -1162,6 +1173,7 @@ export function layer(
 				const custody: ThreadLoop.ThreadLoopRunCustody = {
 					activeTurnId: (session) =>
 						session.state.threadTurnTransition().checkpoint.executionRunId,
+					recordInterruptAttemptResult: () => {},
 					interruptLeaseRef: (runtimeInputId) =>
 						threadEntry.runtimeThread.state.userInterruptCommand()
 							?.runtimeInputId === runtimeInputId
@@ -1666,6 +1678,7 @@ export function layer(
 							{
 								activeTurnId: (session) =>
 									session.state.threadTurnTransition().checkpoint.executionRunId,
+								recordInterruptAttemptResult: () => {},
 								interruptLeaseRef: (runtimeInputId) =>
 									threadEntry.runtimeThread.state.userInterruptCommand()
 										?.runtimeInputId === runtimeInputId
@@ -1766,16 +1779,6 @@ export function layer(
 							stale: true,
 						} as const;
 					}
-					if (settlement.type === "duplicate") {
-						return {
-							ok: true,
-							sessionId,
-							created: false,
-							interrupted: false,
-							idleInterrupt: true,
-							duplicate: true,
-						} as const;
-					}
 					if (
 						settlement.wakeThread &&
 						threadEntry.runSlot === undefined &&
@@ -1793,6 +1796,9 @@ export function layer(
 						created: false,
 						interrupted: false,
 						idleInterrupt: true,
+						...(settlement.type === "duplicate"
+							? { duplicate: true as const }
+							: {}),
 					} as const;
 				});
 
@@ -1901,6 +1907,10 @@ export function layer(
 						yield* awaitRunSlot(runSlot);
 						const committed =
 							interruptCommitResult ??
+							(runSlot.interruptAttemptResult?.runtimeInputId ===
+							command.runtimeInputId
+								? runSlot.interruptAttemptResult.result
+								: undefined) ??
 							threadEntry.runtimeThread.state.userInterruptCommitResult(
 								command.runtimeInputId,
 							);

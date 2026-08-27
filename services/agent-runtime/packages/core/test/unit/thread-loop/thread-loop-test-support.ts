@@ -647,6 +647,7 @@ function testRunCustody(): ThreadLoop.ThreadLoopRunCustody {
 	return {
 		activeTurnId: (session) =>
 			session.state.threadTurnTransition().checkpoint.executionRunId,
+		recordInterruptAttemptResult: () => {},
 		interruptLeaseRef: (runtimeInputId) => ({
 			jobId: `qjob_${runtimeInputId}`,
 			leaseToken: `lease_${runtimeInputId}`,

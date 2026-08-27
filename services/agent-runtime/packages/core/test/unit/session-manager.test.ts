@@ -2442,6 +2442,210 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("in-run retryable interrupt closeout reports the current attempt without terminal memoization", async () => {
+		const attempts: string[] = [];
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session, custody) =>
+					Effect.never.pipe(
+						Effect.onInterrupt(() =>
+							Effect.sync(() => {
+								const runtimeInputId =
+									session.state.userInterruptCommand()?.runtimeInputId;
+								if (runtimeInputId === undefined) {
+									throw new Error("expected active interrupt command");
+								}
+								attempts.push(runtimeInputId);
+								const attemptResult = {
+									ok: false,
+									retryable: true,
+									errorCode: "bridge_request_end_unavailable",
+								} as const;
+								custody.recordInterruptAttemptResult(runtimeInputId, attemptResult);
+								session.state.recordJoinedUserInterruptResult(
+									runtimeInputId,
+									attemptResult,
+								);
+							}).pipe(
+								Effect.andThen(
+									Effect.die(new Error("retryable interrupt closeout failed")),
+								),
+							),
+						),
+					),
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_retryable_in_run_interrupt";
+				const threadId = "thrd_retryable_in_run_interrupt";
+				await Effect.runPromise(
+					manager.acceptInput(acceptedInput(sessionId, "rin_active", threadId)),
+				);
+				const interrupt = {
+					...threadControl(sessionId, "rin_retryable_interrupt", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							testControlCommit(interrupt),
+						),
+					),
+				).toEqual({
+					ok: false,
+					sessionId,
+					reason: "context_load_failed",
+					retryable: true,
+					errorCode: "bridge_request_end_unavailable",
+				});
+				expect(attempts).toEqual([interrupt.runtimeInputId]);
+			},
+		);
+	});
+
+	test("in-run non-retryable interrupt closeout reports terminal failure and releases hot state", async () => {
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session, custody) =>
+					Effect.never.pipe(
+						Effect.onInterrupt(() =>
+							Effect.sync(() => {
+								const runtimeInputId =
+									session.state.userInterruptCommand()?.runtimeInputId;
+								if (runtimeInputId === undefined) {
+									throw new Error("expected active interrupt command");
+								}
+								const attemptResult = {
+									ok: false,
+									retryable: false,
+									errorCode: "bridge_request_end_rejected",
+								} as const;
+								custody.recordInterruptAttemptResult(runtimeInputId, attemptResult);
+								session.state.recordJoinedUserInterruptResult(
+									runtimeInputId,
+									attemptResult,
+								);
+							}).pipe(
+								Effect.andThen(
+									Effect.die(new Error("non-retryable interrupt closeout failed")),
+								),
+							),
+						),
+					),
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_nonretryable_in_run_interrupt";
+				const threadId = "thrd_nonretryable_in_run_interrupt";
+				await Effect.runPromise(
+					manager.acceptInput(acceptedInput(sessionId, "rin_active", threadId)),
+				);
+				const interrupt = {
+					...threadControl(sessionId, "rin_nonretryable_interrupt", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(sessionId, interrupt, testControlCommit(interrupt)),
+					),
+				).toEqual({
+					ok: false,
+					sessionId,
+					reason: "context_load_failed",
+					retryable: false,
+					errorCode: "bridge_request_end_rejected",
+				});
+				expect(
+					await Effect.runPromise(
+						manager.inspectThread(threadControl(sessionId, undefined, threadId)),
+					),
+				).toMatchObject({ ok: true, observed: false });
+			},
+		);
+	});
+
+	test("joined idle interrupt wakes one successor only after releasing its matching fence", async () => {
+		const runs: ThreadRuntime.ThreadRuntime[] = [];
+		const layer = Layer.succeed(
+			ThreadLoop.Service,
+			threadLoopService({
+				run: (session) =>
+					Effect.sync(() => {
+						runs.push(session);
+						const input = session.state.peekAcceptedInput();
+						if (input !== undefined) {
+							session.state.acknowledgeAcceptedInput(input.runtimeInputId);
+						}
+						return { type: "completed" as const, modelMessageCount: 0 };
+					}),
+				settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+			}),
+		);
+		await withSessionManager(
+			sessionManagerLayer({ layer }),
+			async (manager) => {
+				const sessionId = "sesn_joined_idle_wake";
+				const threadId = "thrd_joined_idle_wake";
+				await Effect.runPromise(
+					manager.acceptInput(
+						acceptedInput(sessionId, "rin_initial_joined_idle", threadId),
+					),
+				);
+				await waitForCondition(() => runs.length === 1, "initial run");
+				const resident = runs[0];
+				if (resident === undefined) throw new Error("expected resident thread");
+				const input = acceptedInput(sessionId, "rin_after_joined_idle", threadId);
+				resident.state.enqueueAcceptedInput(input);
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_idle_wake", threadId),
+					inputOrder: 2,
+				};
+				resident.state.beginUserInterrupt(
+					interrupt,
+					async () => ({ ok: true, joined: true }),
+				);
+				resident.state.recordJoinedUserInterruptResult(interrupt.runtimeInputId);
+
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				await waitForCondition(() => runs.length === 2, "joined successor run");
+				expect(runs).toHaveLength(2);
+				expect(resident.state.acceptedInputCount()).toBe(0);
+
+				const unmatched = {
+					...threadControl(sessionId, "rin_unmatched_joined_idle", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							unmatched,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				expect(runs).toHaveLength(2);
+			},
+		);
+	});
+
 	test("idle config commands update shared hot state without starting ThreadLoop work", async () => {
 		const threadLoop = makeControlledThreadLoop();
 

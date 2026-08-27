@@ -1627,6 +1627,123 @@ describe("ThreadLoop", () => {
 			errorCode: "unavailable",
 		});
 	});
+	test("retryable interrupt Request End reports only the current run attempt", async () => {
+		const loader = new RecordingContextLoader([], { type: "empty" });
+		const streamStarted = deferred<void>();
+		const releaseStream = deferred<void>();
+		let requestEndCalls = 0;
+		const baseWriter = writerFrom((envelope) => ({
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			}));
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) => {
+				if (envelope.interruptSettlement === undefined) {
+					return requestEndResultForTest(envelope);
+				}
+				requestEndCalls += 1;
+				return {
+					ok: false,
+					error: {
+					type: "session-event-writer",
+					code: "unavailable",
+					message: "request end not ACKed",
+						retryable: true,
+						fatal: false,
+						sessionId: envelope.sessionId,
+					},
+				};
+			},
+		};
+		const managerLayer = SessionManager.layer({
+			maxLocalSessions: 4,
+			now: () => createdAt,
+		}).pipe(
+			Layer.provide(
+				runtimeThreadLoopLayer(loader, {
+					writer,
+					llmService: {
+						stream(_request, options) {
+							return Stream.fromAsyncIterable(
+								(async function* () {
+									streamStarted.resolve();
+									if (options?.abortSignal === undefined) {
+										throw new Error(
+											"provider stream requires an abort signal",
+										);
+									}
+									await waitForReleaseOrAbort(
+										releaseStream.promise,
+										options.abortSignal,
+									);
+								})(),
+								(error): LLMServiceError => ({
+									type: "llm-service",
+									error: runtimeFailureFromProviderError(
+										normalizeProviderError({
+											code: "provider_unknown",
+											retryable: false,
+											message: String(error),
+										}),
+									),
+								}),
+							);
+						},
+					},
+				}),
+			),
+		);
+		const { manager, scope } = await Effect.runPromise(
+			Effect.gen(function* () {
+				const layerScope = yield* Scope.make();
+				const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+				return {
+					manager: Context.get(context, SessionManager.Service),
+					scope: layerScope,
+				};
+			}),
+		);
+		try {
+			const input = acceptedInput("rin_retryable_interrupt_owner");
+			await Effect.runPromise(
+				manager.preloadThread({
+					...input,
+					runtimeBindingToken: "runtime-binding-token",
+					contextEntries: [],
+					thread: {
+						role: "main",
+						visibility: "public",
+						agentType: "general",
+						status: "idle",
+					},
+				}),
+			);
+			await Effect.runPromise(manager.acceptInput(input));
+			await streamStarted.promise;
+			const interrupt = interruptInput("rin_retryable_interrupt_attempt", 2);
+			expect(
+				await Effect.runPromise(
+					manager.interruptControl(
+						"sesn_1",
+						interrupt,
+						testControlCommit(interrupt),
+					),
+				),
+			).toEqual({
+				ok: false,
+				sessionId: "sesn_1",
+				reason: "context_load_failed",
+				retryable: true,
+				errorCode: "unavailable",
+			});
+			expect(requestEndCalls).toBeGreaterThan(0);
+		} finally {
+			releaseStream.resolve();
+			await Effect.runPromise(Scope.close(scope, Exit.void));
+		}
+	});
 	test("a stale interrupt request-end receipt performs no fallback idle closeout", async () => {
 		const session = new ThreadRuntime("sesn_stale_interrupt_end");
 		const loader = new RecordingContextLoader([], {
@@ -2340,6 +2457,7 @@ describe("ThreadLoop", () => {
 			session,
 			{
 				activeTurnId: () => durableTurnId,
+				recordInterruptAttemptResult: () => {},
 				interruptLeaseRef: () => undefined,
 			},
 			{
