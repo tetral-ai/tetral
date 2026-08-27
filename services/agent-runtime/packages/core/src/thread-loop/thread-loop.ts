@@ -1048,8 +1048,6 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		{
 			command,
 			interruptLeaseRef,
-			recordAttemptResult: (result) =>
-				custody.recordInterruptAttemptResult(command.runtimeInputId, result),
 		},
 	);
 	if (!end.ok) {
@@ -1070,10 +1068,6 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		};
 	}
 	if (end.type === "stale") {
-		custody.recordInterruptAttemptResult(command.runtimeInputId, {
-			ok: true,
-			stale: true,
-		});
 		session.state.recordJoinedUserInterruptResult(
 			command.runtimeInputId,
 			{ ok: true, stale: true },
@@ -1084,10 +1078,6 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 	if (!applyJoinedInterruptRequestEnd(session, end)) {
 		return failRecoveredOpenRequest(session, true);
 	}
-	custody.recordInterruptAttemptResult(command.runtimeInputId, {
-		ok: true,
-		joined: true,
-	});
 	releaseInterruptedPendingTools(
 		session,
 		options,
@@ -6440,34 +6430,6 @@ function settleRuntimeShutdownEffect(
 				undefined,
 				requestEndOutcome(spanEndAppend),
 			);
-			if (sealApplication.type === "stale_custody") {
-				custody.recordInterruptAttemptResult(command.runtimeInputId, {
-					ok: true,
-					stale: true,
-				});
-				if (
-					!session.state.recordJoinedUserInterruptResult(
-						command.runtimeInputId,
-						{ ok: true, stale: true },
-						{ inputKind: "interrupt" },
-					)
-				) {
-					return yield* failRequestCloseout(
-						normalizeRuntimeFailure({
-							type: "runtime",
-							code: "runtime_invalid_sequence",
-							retryable: false,
-							fatal: true,
-							reason: "runtime_contract_validation",
-							sessionId: session.sessionId,
-						}),
-					);
-				}
-				return requestEndCommitted(
-					providerTurnInterrupted(),
-					"discard_hot_state",
-				);
-			}
 			if (sealApplication.type === "failed") {
 				return yield* failRequestCloseout(sealApplication.error);
 			}
@@ -7131,7 +7093,7 @@ async function appendModelRequestEndEvent(
 		readonly interruptLeaseRef: NonNullable<
 			SessionEventWriterRequestEndEnvelope["interruptSettlement"]
 		>["interruptLeaseRef"];
-		readonly recordAttemptResult: (
+		readonly recordAttemptResult?: (
 			result: RuntimeControlInputCommitResult,
 		) => void;
 	},
@@ -7252,7 +7214,7 @@ async function appendModelRequestEndEvent(
 	const result = await writeRequestEndWithRetry(options, envelope);
 	if (!result.ok) {
 		const error = runtimeFailureFromEventWriter(result.error);
-		interrupt?.recordAttemptResult({
+		interrupt?.recordAttemptResult?.({
 			ok: false,
 			retryable: error.retryable,
 			errorCode: error.code,

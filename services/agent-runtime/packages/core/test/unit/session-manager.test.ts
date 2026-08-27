@@ -2572,6 +2572,80 @@ describe("SessionManager", () => {
 		);
 	});
 
+	test("joined interrupt wakes preserved input after releasing a completed run slot", async () => {
+		const threadLoop = makeControlledCrashThreadLoop("die", {
+			closeFailedRun: () =>
+				Effect.succeed({
+					type: "unrepairable" as const,
+					error: normalizeSessionEventWriterError({ code: "unrepairable" }),
+				}),
+			settleIdleInterrupt: ThreadLoop.settleIdleInterrupt,
+		});
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				const sessionId = "sesn_joined_completed_slot_wake";
+				const threadId = "thrd_joined_completed_slot_wake";
+				expect(
+					await Effect.runPromise(
+						manager.acceptInput(
+							acceptedInput(sessionId, "rin_completed_slot_owner", threadId),
+						),
+					),
+				).toMatchObject({ ok: true, started: true });
+				await waitForCrashRuns(threadLoop, 1);
+				const resident = threadLoop.runs[0]?.session;
+				if (resident === undefined) throw new Error("expected resident thread");
+				const follower = {
+					...acceptedInput(sessionId, "rin_completed_slot_follower", threadId),
+					inputOrder: 2,
+				};
+				expect(
+					await Effect.runPromise(manager.acceptInput(follower)),
+				).toMatchObject({ ok: true, started: false });
+				threadLoop.runs[0]?.releaseCrash();
+				expect(
+					await Effect.runPromise(
+						manager.waitThread(
+							threadControl(sessionId, undefined, threadId),
+							undefined,
+						),
+					),
+				).toMatchObject({ ok: true, timedOut: false });
+				resident.state.acknowledgeAcceptedInput("rin_completed_slot_owner");
+				const interrupt = {
+					...threadControl(sessionId, "rin_joined_completed_slot", threadId),
+					inputOrder: 3,
+				};
+				expect(
+					resident.state.beginUserInterrupt(
+						interrupt,
+						async () => ({ ok: true, joined: true }),
+					),
+				).toBe("applied");
+				expect(
+					resident.state.recordJoinedUserInterruptResult(interrupt.runtimeInputId),
+				).toBe(true);
+				expect(resident.state.acceptedInputSnapshot()).toEqual([follower]);
+				expect(
+					await Effect.runPromise(
+						manager.interruptControl(
+							sessionId,
+							interrupt,
+							async () => ({ ok: true, joined: true }),
+						),
+					),
+				).toMatchObject({ ok: true, duplicate: true });
+				expect(resident.state.peekAcceptedInput()).toMatchObject({
+					runtimeInputId: follower.runtimeInputId,
+				});
+				await waitForCrashRuns(threadLoop, 2);
+				expect(threadLoop.runs).toHaveLength(2);
+				expect(resident.state.acceptedInputCount()).toBe(1);
+			},
+		);
+	});
+
 	test("idle config commands update shared hot state without starting ThreadLoop work", async () => {
 		const threadLoop = makeControlledThreadLoop();
 

@@ -483,8 +483,10 @@ export class Service extends Context.Service<Service, Interface>()(
 //   | wake/new input | start run_slot(wake)      | install reducer-visible fact     | install reducer-visible fact  |
 //   | interrupt      | commit idle custody       | commit custody, stop, unwind     | reject concurrent custody     |
 //
-// On owner exit SessionManager clears the old slot, reduces the latest
+// On owner exit SessionManager normally clears the old slot, reduces the latest
 // ThreadState projection, and starts at most one successor for an active next step.
+// A deliberately retained completed slot remains a custody fence until its exact
+// lifecycle settlement releases it; that release may start the same single successor.
 // A cold thread is inserted in the
 // installing state before its sole LoadContext call and becomes command-ready only
 // after that install succeeds. Cleanup cannot release an installing ThreadEntry or a
@@ -1648,6 +1650,7 @@ export function layer(
 				commitInput: RuntimeControlInputCommit,
 				threadResult: ResidentThreadResult,
 				markReloadRequired: () => void,
+				completedRunSlot?: ThreadRunSlot,
 			): Effect.Effect<InterruptControlResult> =>
 				Effect.gen(function* () {
 					const threadEntry = threadResult.threadEntry;
@@ -1779,14 +1782,23 @@ export function layer(
 					}
 					if (
 						settlement.wakeThread &&
-						threadEntry.runSlot === undefined &&
 						threadResult.sessionEntry.threads.get(threadEntry.sessionThreadId) ===
 							threadEntry
 					) {
-						yield* startThreadRun(
-							threadResult.sessionEntry,
-							threadEntry,
-						).pipe(Effect.asVoid);
+						if (
+							completedRunSlot !== undefined &&
+							threadEntry.runSlot === completedRunSlot
+						) {
+							threadEntry.runSlot = undefined;
+							threadEntry.status = "idle";
+							recordHotStateMetrics();
+						}
+						if (threadEntry.runSlot === undefined) {
+							yield* startThreadRun(
+								threadResult.sessionEntry,
+								threadEntry,
+							).pipe(Effect.asVoid);
+						}
 					}
 					return {
 						ok: true,
@@ -1856,9 +1868,11 @@ export function layer(
 					const runSlot = threadEntry.runSlot;
 					const completedRunSlot =
 						runSlot === undefined
-							? false
-							: Option.isSome(yield* Deferred.poll(runSlot.doneDeferred));
-					if (runSlot?.ownerFiber !== undefined && !completedRunSlot) {
+							? undefined
+							: Option.isSome(yield* Deferred.poll(runSlot.doneDeferred))
+								? runSlot
+								: undefined;
+					if (runSlot?.ownerFiber !== undefined && completedRunSlot === undefined) {
 						let interruptCommitResult:
 							| Awaited<ReturnType<RuntimeControlInputCommit>>
 							| undefined;
@@ -1971,10 +1985,11 @@ export function layer(
 								() => {
 									reloadRequired = true;
 								},
+								completedRunSlot,
 							);
 							if (
 								settled.ok &&
-								completedRunSlot &&
+								completedRunSlot !== undefined &&
 								threadEntry.runSlot === runSlot
 							) {
 								threadEntry.runSlot = undefined;

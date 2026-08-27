@@ -710,8 +710,6 @@ func assertRuntimeHotColdToolComposition(
 	}
 	var composed struct {
 		ColdProductionPreloaded bool                       `json:"coldProductionPreloaded"`
-		Checkpoint              any                        `json:"checkpoint"`
-		ToolRouteView           any                        `json:"toolRouteView"`
 		NextStep                map[string]any             `json:"nextStep"`
 		ProviderComposition     runtimeProviderComposition `json:"providerComposition"`
 		Hot                     struct {

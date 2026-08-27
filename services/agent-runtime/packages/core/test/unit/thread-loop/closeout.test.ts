@@ -1944,6 +1944,64 @@ describe("ThreadLoop", () => {
 			stale: true,
 		});
 	});
+	test("interrupt projection mismatch cannot record benign stale attempt success", async () => {
+		const runtimeInputId = "rin_interrupt_projection_mismatch";
+		const session = new ThreadRuntime("sesn_interrupt_projection_mismatch");
+		const loader = new RecordingContextLoader([], {
+			type: "context",
+			entries: [userMessage("user-projection-mismatch", 0, "stop")],
+		});
+		const attemptResults: unknown[] = [];
+		let interrupted = false;
+		const baseWriter = writerFrom((envelope) => {
+			if (!interrupted && envelope.event.type === "span.model_request_start") {
+				interrupted = true;
+				beginTestUserInterrupt(session, runtimeInputId);
+			}
+			return {
+				ok: true,
+				eventId: `bridge-${envelope.writeId}`,
+				type: "committed",
+			};
+		});
+		const writer: SessionEventWriter = {
+			...baseWriter,
+			writeRequestEnd: async (envelope) =>
+				requestEndResultForTest(envelope, {
+					type: "ordinary",
+					sealedMessageSequence: 99,
+				}),
+		};
+		const runExit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.run(session, {
+					...testRunCustody(),
+					recordInterruptAttemptResult: (_inputId, result) => {
+						attemptResults.push(result);
+					},
+				});
+			}).pipe(
+				Effect.provide(
+					runtimeThreadLoopLayer(loader, {
+						writer,
+						llmService: {
+							stream() {
+								throw new Error("provider must not start");
+							},
+						},
+					}),
+				),
+			),
+		);
+		expect(Exit.isFailure(runExit)).toBe(true);
+		if (Exit.isFailure(runExit)) {
+			expect(
+				runExit.cause.reasons.find(Cause.isDieReason)?.defect,
+			).toMatchObject({ code: "schema_mismatch" });
+		}
+		expect(attemptResults).toEqual([]);
+	});
 	test("cooperative child cancellation closes an ACKed request before run release", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const attachment = {

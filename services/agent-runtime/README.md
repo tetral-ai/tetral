@@ -198,7 +198,9 @@ terminal replay memo. A joined duplicate is different: the durable operation
 already committed, so it completes only the matching resident interrupt fence
 and asks ordinary Reducer readiness whether one successor run must wake. Joined
 without a matching fence is a successful no-op; stale custody keeps its discard
-semantics.
+semantics. If a completed `ThreadRunSlot` is still retained as a custody fence,
+the matching settlement releases that exact slot before starting the successor;
+an active or replaced slot is never displaced by the wake.
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
