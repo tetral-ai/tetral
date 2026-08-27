@@ -918,7 +918,7 @@ describe("ThreadLoop", () => {
 		expect(await run).toEqual({ type: "completed", modelMessageCount: 0 });
 		expect(finishCalls).toBe(1);
 	});
-	test("user interruption during an accepted reschedule wait settles end_turn before unwind", async () => {
+	test("reschedule exit settles its Request before a later accepted input runs", async () => {
 		const session = new ThreadRuntime("sesn_1");
 		const loader = new RecordingContextLoader([], {
 			type: "context",
@@ -927,6 +927,7 @@ describe("ThreadLoop", () => {
 		const waitStarted = deferred<void>();
 		const appended: SessionEvent[] = [];
 		const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+		const providerRequests: LLMRequest[] = [];
 		const writer = writerFrom(
 			(envelope) => {
 				appended.push(envelope.event);
@@ -958,40 +959,71 @@ describe("ThreadLoop", () => {
 				return true;
 			},
 		} satisfies RuntimeDependencies;
+		const llmService = queuedLLMService(
+			[
+				[
+					{
+						type: "provider-error",
+						error: runtimeFailureFromProviderError(
+							normalizeProviderError({
+								code: "provider_unavailable",
+								message: "temporary provider failure",
+								retryable: true,
+								fatal: false,
+							}),
+						),
+					},
+				],
+				[
+					{ type: "text-start", id: "reschedule-successor" },
+					{
+						type: "text-delta",
+						id: "reschedule-successor",
+						text_delta: "accepted successor completed",
+					},
+					{ type: "text-end", id: "reschedule-successor" },
+					{ type: "finish", finishReason: "stop" },
+				],
+			],
+			providerRequests,
+		);
+		const layer = runtimeThreadLoopLayer(loader, {
+			llmService,
+			writer,
+			runtime,
+		});
 		const runFiber = Effect.runFork(
 			Effect.gen(function* () {
 				const threadLoop = yield* ThreadLoop.Service;
 				return yield* threadLoop.run(session, testRunCustody());
-			}).pipe(
-				Effect.provide(
-					runtimeThreadLoopLayer(loader, {
-						llmService: queuedLLMService([
-							[
-								{
-									type: "provider-error",
-									error: runtimeFailureFromProviderError(
-										normalizeProviderError({
-											code: "provider_unavailable",
-											message: "temporary provider failure",
-											retryable: true,
-											fatal: false,
-										}),
-									),
-								},
-							],
-						]),
-						writer,
-						runtime,
-					}),
-				),
-			),
+			}).pipe(Effect.provide(layer)),
 		);
 		await waitStarted.promise;
 		expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
+		const successorInput = {
+			...acceptedInput("rin_after_reschedule_exit"),
+			inputOrder: 2,
+			contentJson: JSON.stringify({
+				messages: [
+					userMessage(
+						"user-after-reschedule-exit",
+						1,
+						"RESCHEDULE_EXIT_SUCCESSOR_CANARY",
+					),
+				],
+			}),
+		};
+		expect(session.state.enqueueAcceptedInput(successorInput)).toBe("applied");
 		await Effect.runPromise(Fiber.interrupt(runFiber));
+		const firstExit = await Effect.runPromise(Fiber.await(runFiber));
+		expect(Exit.hasDies(firstExit)).toBe(false);
 		expect(appended.at(-1)).toEqual({
 			type: "session.status_idle",
 			stop_reason: { type: "end_turn" },
+		});
+		expect(session.state.threadTurnTransition().nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "rin_after_reschedule_exit",
 		});
 		expect(appended.filter((event) => event.type === "session.error")).toEqual([
 			expect.objectContaining({
@@ -1002,6 +1034,23 @@ describe("ThreadLoop", () => {
 				}),
 			}),
 		]);
+
+		const successor = await Effect.runPromise(
+			Effect.gen(function* () {
+				const threadLoop = yield* ThreadLoop.Service;
+				return yield* threadLoop.run(session, testRunCustody());
+			}).pipe(Effect.provide(layer)),
+		);
+		expect(successor).toMatchObject({ type: "completed" });
+		expect(
+			loader.commitCalls.filter(
+				(input) => input.runtimeInputId === "rin_after_reschedule_exit",
+			),
+		).toHaveLength(1);
+		expect(providerRequests).toHaveLength(2);
+		expect(JSON.stringify(providerRequests[1]?.context)).toContain(
+			"RESCHEDULE_EXIT_SUCCESSOR_CANARY",
+		);
 	});
 	test("runtime shutdown abandons active provider state without Runtime-owned idle or error", async () => {
 		const session = new ThreadRuntime("sesn_1");

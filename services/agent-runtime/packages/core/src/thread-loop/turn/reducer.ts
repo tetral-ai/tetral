@@ -730,6 +730,12 @@ export function reduceThreadTurn(
 				current.nextStep.action === "complete_reviewer" ||
 				current.nextStep.action === "close_interrupted" ||
 				current.nextStep.action === "apply_request_retry_or_reschedule" ||
+				(current.checkpoint.request?.requestEnd?.reschedule !== undefined &&
+					current.checkpoint.request.toolMembers.every(
+						(member) =>
+							member.memberKind !== "public_tool_use" ||
+							member.terminalResult !== undefined,
+					)) ||
 				(current.state.state === "idle" &&
 					current.nextStep.action === "await_input") ||
 				fact.stopReason.failedRun === true;

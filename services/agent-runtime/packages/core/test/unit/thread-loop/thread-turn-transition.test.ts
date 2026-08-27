@@ -264,6 +264,17 @@ describe("Thread-turn reducer", () => {
 			action: "await_tool_results",
 			toolUseEventIds: ["event_retry_tool"],
 		});
+		expect(() =>
+			apply(
+				retry,
+				{
+					fact: "finish_idle_committed",
+					eventId: "event_retry_premature_idle",
+					stopReason: { type: "end_turn" },
+				},
+				retryRoutes,
+			),
+		).toThrow(ThreadTurnContractError);
 		retry = apply(
 			retry,
 			{
@@ -471,6 +482,84 @@ describe("Thread-turn reducer", () => {
 			);
 			expect(cold).toEqual({ state: hot.state, nextStep: hot.nextStep });
 		}
+	});
+
+	test("rescheduled Request closeout preserves a later accepted input", () => {
+		const rescheduled = apply(startedRequest(), {
+			...requestEnded("event_rescheduled_input_end", "request_1", true),
+			reschedule: {
+				attempt: 1,
+				effectiveDeadline: "2026-08-27T00:00:00.000Z",
+				providerAttempts: 1,
+				compactionAttempts: 0,
+			},
+		});
+		const inputReady = deriveThreadTurnSnapshot(
+			rescheduled.checkpoint,
+			noRoutes,
+			["runtime_input_after_reschedule"],
+			noAttachments,
+		);
+		expect(inputReady.nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "runtime_input_after_reschedule",
+		});
+
+		const closed = apply(
+			{
+				checkpoint: rescheduled.checkpoint,
+				...inputReady,
+			},
+			{
+				fact: "finish_idle_committed",
+				eventId: "event_rescheduled_input_idle",
+				stopReason: { type: "end_turn" },
+			},
+			noRoutes,
+			["runtime_input_after_reschedule"],
+		);
+
+		expect(closed.checkpoint).toEqual({
+			pendingInputContextSequences: [],
+			idleCloseout: {
+				eventId: "event_rescheduled_input_idle",
+				stopReason: "end_turn",
+			},
+		});
+		expect(closed.nextStep).toEqual({
+			action: "commit_accepted_input",
+			runtimeInputId: "runtime_input_after_reschedule",
+		});
+	});
+
+	test("FinishIdle rejects a changed execution owner", () => {
+		const state = new ThreadState("session_finish_idle_owner");
+		const rescheduled = apply(startedRequest(), {
+			...requestEnded("event_finish_idle_owner_end", "request_1", true),
+			reschedule: {
+				attempt: 1,
+				effectiveDeadline: "2026-08-27T00:00:00.000Z",
+				providerAttempts: 1,
+				compactionAttempts: 0,
+			},
+		});
+		state.installThreadTurn(rescheduled.checkpoint, noRoutes);
+		const owner = state.threadTurnTransition();
+		state.installThreadTurn(
+			{
+				...rescheduled.checkpoint,
+				executionRunId: "event_replacement_run",
+			},
+			noRoutes,
+		);
+
+		expect(() =>
+			state.applyFinishIdleFact(owner, {
+				fact: "finish_idle_committed",
+				eventId: "event_stale_finish_idle",
+				stopReason: { type: "end_turn" },
+			}),
+		).toThrow("Thread turn changed while FinishIdle was in flight");
 	});
 
 	test("keeps Request Start dispatch stack-local across ordinary admission", () => {
