@@ -17,9 +17,11 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly workspaceId: string;
   readonly sessionId: string;
 };
-if (!/^tetral_test_[a-z0-9_]+$/.test(input.schema)) throw new Error("fixture schema is invalid");
+if (input.schema !== "public") throw new Error("fixture schema is invalid");
 const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
+const runtimeDatabaseURL = process.env.TETRAL_TEST_RUNTIME_DATABASE_URL;
 if (databaseURL === undefined) throw new Error("TETRAL_TEST_DATABASE_URL is required");
+if (runtimeDatabaseURL === undefined) throw new Error("TETRAL_TEST_RUNTIME_DATABASE_URL is required");
 
 const masterKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const vaultId = `vlt_${input.sessionId}`;
@@ -70,10 +72,7 @@ await admin`INSERT INTO credentials (
   ${publicAuth}, ${initialAuth.mcp_server_url}, ${expiredAt}, ${encryptedAuth}, ${now}, ${now}
 )`;
 
-const runtimeURL = new URL(databaseURL);
-runtimeURL.username = "tetral_runtime_test";
-runtimeURL.password = "tetral_runtime_test_pw";
-const runtime = new Bun.SQL({ url: runtimeURL.toString(), max: 4 });
+const runtime = new Bun.SQL({ url: runtimeDatabaseURL, max: 4 });
 const scopedSQL = {
   begin: async <T>(fn: (sql: McpCredentialSQL) => Promise<T>): Promise<T> =>
     await runtime.begin(async (tx) => {

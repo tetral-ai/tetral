@@ -17,7 +17,7 @@ type Store struct {
 }
 
 // NewStore constructs a Store backed by the given *sql.DB. The DB must already
-// be initialized through storage.InitializePostgreSQLSchema, but workspace rows
+// be initialized through storage.MigrateSchema, but workspace rows
 // are deployment/bootstrap data created through Seeder, not schema
 // initialization.
 func NewStore(db *sql.DB) *Store {

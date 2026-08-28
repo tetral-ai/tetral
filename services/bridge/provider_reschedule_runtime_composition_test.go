@@ -46,7 +46,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-production-signing-key")
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 	t.Cleanup(stopBridge)
-	process := startProviderTimeoutRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID)
+	process := startProviderTimeoutRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID)
 	firstCapturePending := make(chan string, 1)
 	releaseFirstCapture := make(chan struct{})
 	capturesSettled := make(chan error, 1)
@@ -157,7 +157,7 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-tool-signing-key")
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 	t.Cleanup(stopBridge)
-	process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_tool_route")
+	process := startProviderFailureRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_tool_route")
 
 	captureSettled := make(chan error, 1)
 	go func() {
@@ -273,7 +273,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			t.Cleanup(stopBridge)
 			repairCredential := seedProviderFailureCredential(t, runtimeDB, admin, sessionID, testCase.scenario)
 			activePodUID := podUID
-			process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
+			process := startProviderFailureRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
 			priorProviderInvocations := 0
 			priorFinishIdleInvocations := 0
 			priorFinishIdleCommitted := true
@@ -362,7 +362,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementBindingID, replacementGeneration); err != nil {
 					t.Fatalf("install replacement provider credential Runtime status: %v", err)
 				}
-				process = startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID,
+				process = startProviderFailureRuntimeForBinding(t, runtimeDB, admin, bridgeAddress, sessionID, threadID,
 					replacementBindingID, replacementGeneration, activePodUID, testCase.scenario)
 			}
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
@@ -465,15 +465,15 @@ type providerFailureRuntimeProcess struct {
 	toolReleasePath string
 }
 
-func startProviderTimeoutRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerFailureRuntimeProcess {
-	return startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_timeout")
+func startProviderTimeoutRuntime(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntime(t, runtime, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_timeout")
 }
 
-func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
-	return startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
+func startProviderFailureRuntime(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntimeForBinding(t, runtime, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
 }
 
-func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
+func startProviderFailureRuntimeForBinding(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -502,7 +502,10 @@ func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAd
 	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&databaseSchema); err != nil {
 		t.Fatalf("read provider composition database schema: %v", err)
 	}
-	process.command.Env = append(os.Environ(), "TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema)
+	process.command.Env = append(os.Environ(),
+		"TETRAL_TEST_DATABASE_URL="+storagetest.RuntimeDatabaseURL(t, runtime),
+		"TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema,
+	)
 	process.command.Stdout = &process.output
 	process.command.Stderr = &process.output
 	if err := process.command.Start(); err != nil {

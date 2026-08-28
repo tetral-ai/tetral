@@ -1,10 +1,11 @@
 # Bootstrap Tetral from zero
 
 Tetral needs one deployment-owned workspace row before Auth can register the
-bootstrap API key. The API service owns migrations, so a fresh installation
-must start far enough for API to create the schema before the workspace can be
-seeded. Auth crash-loops until that seed exists and then recovers through its
-normal restart backoff.
+bootstrap API key. Before starting workloads, the repository-owned PostgreSQL
+installer constructs the current schema, creates the separate migration and
+serving roles, and applies their exact grants. The API then performs an
+idempotent migration check under the migration owner. Auth crash-loops until
+the workspace seed exists and then recovers through its normal restart backoff.
 
 ## 1. Choose the workspace ID
 
@@ -59,7 +60,7 @@ workloads.
 
 | Secret | Required keys |
 | --- | --- |
-| `api-database` | `url` |
+| `api-database` | `url`, `migration-url` |
 | `api-secrets` | `engine-vault-key` |
 | `auth-bootstrap` | `engine-api-key` |
 | `auth-database` | `url` |
@@ -122,17 +123,36 @@ The blob key casing is intentionally documented as it exists:
 `TETRAL_BLOB_*` keys for the same logical settings. Unifying this surface is a
 registered follow-up, not part of bootstrap.
 
-Use restricted database roles for every workload. The API role can run the
-seed because API owns the `workspaces` table it created by running migrations.
-Tetral does not define a production `GRANT` for another role and operators
-must not use the PostgreSQL superuser for bootstrap.
+Before installing the platform, run the role installer from the exact source or
+image revision being installed. Give it an administrative connection only for
+this one-shot operation, and pipe one protected JSON declaration on stdin. The
+declaration must contain exactly the workload keys in `database/roles.json`,
+plus `migration`; every value supplies an operator-chosen `name` and
+`password`. Do not put the JSON or administrative DSN in the repository,
+command arguments, shell history, or Kubernetes manifest.
+
+```bash
+export TETRAL_DATABASE_ADMIN_URL
+go run ./services/api/cmd/tetral-postgresql-roles \
+  < /secure/path/tetral-postgresql-roles.json
+```
+
+The idempotent command constructs Version 1, revokes public database/schema
+access, assigns catalog ownership to the migration role, and grants each
+serving role only its declared operations. Use the resulting role DSNs in the
+Secret inventory above; `api-database/url` is the API serving role and
+`api-database/migration-url` is the migration owner. Runtime workloads reject
+superuser or BYPASSRLS credentials before readiness. The administrative
+credential is not a serving credential and must not be placed in a workload
+Secret.
 
 ## 4. Install the platform
 
 Set Helm's `bootstrapWorkspaceID` to the chosen ID, or set the corresponding
-environment value in the raw manifests, and install Tetral. The API starts and
-runs migrations. Auth fails its workspace lookup and crash-loops at this point
-by design.
+environment value in the raw manifests, and install Tetral. The API verifies
+and idempotently migrates through the dedicated owner, then starts through its
+restricted serving role. Auth fails its workspace lookup and crash-loops at
+this point by design.
 
 See the [Helm chart instructions](../deploy/helm/tetral/README.md) for the
 remaining cluster prerequisites and install command.

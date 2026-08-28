@@ -107,17 +107,22 @@ finishes bootstrap after API has created the schema.
    need no custom label; Kubernetes supplies their
    `kubernetes.io/metadata.name` labels.
 
-7. **Use restricted database roles.** The nine Go DB-connected containers
-   reject superusers and roles with row-security bypass privileges at startup.
-   The TypeScript `provider-gateway` and `mcp-connector` currently perform only
-   the schema check, so using a privileged DSN causes an asymmetric and unsafe
-   partial startup. Use non-superuser, non-bypass roles for every container.
-   The api role additionally needs DDL rights because api owns migrations.
+7. **Install the repository-owned database roles.** Use
+   `go run ./services/api/cmd/tetral-postgresql-roles` with an administrative connection in
+   `TETRAL_DATABASE_ADMIN_URL` and a JSON declaration on stdin containing the
+   operator-chosen role names and passwords for every workload key in
+   `database/roles.json`, plus `migration`. Run it before installing workloads.
+   The command idempotently constructs the current schema, revokes public access,
+   gives each serving workload only its declared tables and operations, and
+   assigns schema objects to the separate migration owner. Put the API serving
+   DSN in the `url` key of `api-database` and the schema-owner DSN in its
+   `migration-url` key. All serving processes reject superuser and row-security
+   bypass roles before readiness.
 
 8. **Seed the bootstrap workspace.** Auth resolves
    `bootstrapWorkspaceID` against the `workspaces` table during startup.
-   Set that value to the chosen ID, install the platform so API can migrate the
-   schema, allow Auth to crash-loop while the row is absent, then run the
+   Set that value to the chosen ID, install the platform after the database
+   contract is installed, allow Auth to crash-loop while the row is absent, then run the
    one-shot seed and let Auth self-heal. The default `existing-workspace-id` is
    a placeholder. Follow the complete
    [from-zero bootstrap sequence](../../../docs/bootstrap.md) for key
@@ -258,8 +263,8 @@ helm upgrade tetral ./deploy/helm/tetral -f values.yaml
 ```
 
 Helm applies every object at once. All eleven DB-connected containers validate
-schema state at boot. Api alone runs forward migrations under a
-pinned-connection advisory lock. During an upgrade, new non-api pods enter
+schema and serving-role state at boot. API alone uses the dedicated migration
+owner for forward migrations under a pinned-connection advisory lock. During an upgrade, new non-api pods enter
 `CrashLoopBackOff` until api completes migration; operators observe restart
 counts, not merely unready pods. Existing ReplicaSet pods continue serving. At
 the manifest scale of one or two replicas, the default RollingUpdate 25%
@@ -301,10 +306,8 @@ objects are not byte-identical to the files.
 
 ## Registered follow-ups
 
-Four follow-ups are intentionally outside this chart:
+Three follow-ups are intentionally outside this chart:
 
 1. Parameterize the two fixed namespaces as one security-reviewed change.
 2. Define migration compatibility or a documented stop-the-world upgrade mode.
 3. Drop stale `kustomize` managed-by labels from the canonical manifests.
-4. Port the runtime-role privilege check to the two TypeScript gateway
-   containers.

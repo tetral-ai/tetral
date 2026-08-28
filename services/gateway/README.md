@@ -309,12 +309,15 @@ it preserves the stated invariants and passes the named suites.
 
 ### Startup schema verification
 
-- **Contract.** `verifyPostgreSQLSchema` in `packages/schema/src/verify.ts`
-  checks the visible migration registry after SQL-client construction and before
-  any SQL-backed store or resolver is built.
-- **Invariants.** `api` is the sole migration owner; the gateway verifies
-  read-only and fails closed (through bounded errors that retain no driver
-  material) on a missing, behind, ahead, gapped, duplicate, or drifted history.
+- **Contract.** `verifyPostgreSQLReadiness` in `packages/schema/src/verify.ts`
+  checks the migration stamp, exact live Workspace-RLS catalog, and effective
+  serving role after SQL-client construction and before any SQL-backed store or
+  resolver is built.
+- **Invariants.** The separate migration owner constructs schema. Gateway and
+  MCP serving roles are NOSUPERUSER and NOBYPASSRLS; both fail closed through a
+  stable error that retains no role name, DSN, credential, or driver text when
+  the stamp, live policies, or role posture differs from the repository-owned
+  contract.
 - **Conformance.** `packages/provider-gateway/test/unit/schema-startup.test.ts`,
   and `static-boundaries.test.ts` for the cross-package import guardrails.
 

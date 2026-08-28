@@ -12,7 +12,6 @@ const (
 	PhaseParseConfig       Phase = "parse_config"
 	PhaseOpenConnection    Phase = "open_connection"
 	PhasePing              Phase = "ping"
-	PhaseInitializeSchema  Phase = "initialize_schema"
 	PhaseMigrateSchema     Phase = "migrate_schema"
 	PhaseVerifySchema      Phase = "verify_schema"
 	PhaseVerifyRuntimeRole Phase = "verify_runtime_role"
@@ -22,18 +21,17 @@ const (
 type Kind string
 
 const (
-	KindInvalidConfig              Kind = "invalid_config"
-	KindEndpointUnreachable        Kind = "endpoint_unreachable"
-	KindAuthenticationFailed       Kind = "authentication_failed"
-	KindTLSFailed                  Kind = "tls_failed"
-	KindPermissionDenied           Kind = "permission_denied"
-	KindSchemaInitializationFailed Kind = "schema_initialization_failed"
-	KindSchemaMigrationFailed      Kind = "schema_migration_failed"
-	KindSchemaVerificationFailed   Kind = "schema_verification_failed"
-	KindRuntimeRoleInvalid         Kind = "runtime_role_invalid"
-	KindTimeout                    Kind = "timeout"
-	KindCanceled                   Kind = "canceled"
-	KindInternalError              Kind = "internal_error"
+	KindInvalidConfig            Kind = "invalid_config"
+	KindEndpointUnreachable      Kind = "endpoint_unreachable"
+	KindAuthenticationFailed     Kind = "authentication_failed"
+	KindTLSFailed                Kind = "tls_failed"
+	KindPermissionDenied         Kind = "permission_denied"
+	KindSchemaMigrationFailed    Kind = "schema_migration_failed"
+	KindSchemaVerificationFailed Kind = "schema_verification_failed"
+	KindRuntimeRoleInvalid       Kind = "runtime_role_invalid"
+	KindTimeout                  Kind = "timeout"
+	KindCanceled                 Kind = "canceled"
+	KindInternalError            Kind = "internal_error"
 )
 
 const UnknownDescriptorField = "<unknown>"

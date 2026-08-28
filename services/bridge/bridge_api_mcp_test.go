@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -950,7 +951,11 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUn
 	)`); err != nil {
 		t.Fatalf("create deferred commit probe: %v", err)
 	}
-	if _, err := admin.ExecContext(context.Background(), `GRANT SELECT, REFERENCES ON mcp_commit_probe TO tetral_runtime_test`); err != nil {
+	var runtimeRole string
+	if err := runtime.QueryRowContext(context.Background(), `SELECT current_user`).Scan(&runtimeRole); err != nil {
+		t.Fatalf("read clone runtime role: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `GRANT SELECT, REFERENCES ON mcp_commit_probe TO `+pgx.Identifier{runtimeRole}.Sanitize()); err != nil {
 		t.Fatalf("grant deferred commit probe: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `ALTER TABLE session_transient_attachments

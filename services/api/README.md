@@ -22,15 +22,16 @@ not own their trees.
 
 ### Boot requirements
 
-Booting requires `TETRAL_DATABASE_URL`, `ENGINE_VAULT_KEY`,
+Booting requires `TETRAL_DATABASE_URL`, `TETRAL_MIGRATION_DATABASE_URL`, `ENGINE_VAULT_KEY`,
 `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64`, and
 `TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF`; the rest are optional or test-only
 as noted.
 
 | Variable | Purpose |
 |----------|---------|
-| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the control-plane database. TLS settings are honored verbatim; the engine never overrides `sslmode`. PostgreSQL 18 is the tested target. |
-| `TETRAL_TEST_DATABASE_URL` | Test-only. DSN for `go test`; not read by the running server. The test helper provisions an isolated schema per test under a least-privilege role. |
+| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. TLS settings are honored verbatim; the engine never overrides `sslmode`. PostgreSQL 18 is the tested target. |
+| `TETRAL_MIGRATION_DATABASE_URL` | PostgreSQL DSN for the schema owner. Startup closes it after migration, then verifies the live schema and serving role through `TETRAL_DATABASE_URL`. |
+| `TETRAL_TEST_DATABASE_URL` | Test-only administrative DSN for focused `go test`; not read by the running server. The helper clones one immutable schema template into a private database and unique NOBYPASSRLS login per test. |
 | `ENGINE_DATA_DIR` | Optional; defaults to `/var/tetral`. Local filesystem state root — control-plane records never live here, so moving it migrates no SQL data. |
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | Base64-encoded Ed25519 public key used to verify the signed internal principal injected by the auth service. |
@@ -58,6 +59,12 @@ primary key alone does not filter a predicate-less query. The engine refuses
 to start under a runtime role that can bypass those policies — a superuser or
 a role with the bypass attribute — so the guarantee cannot be silently
 disabled.
+
+Workspace is the sole PostgreSQL tenant boundary. Session and Thread IDs remain
+explicit keys, foreign keys, query predicates, and lifecycle ownership facts;
+they are not additional RLS settings. The canonical live-catalog verifier also
+rejects missing FORCE RLS, altered policies, extra permissive policies, or an
+unsafe effective serving role before readiness.
 
 ### Public `/v1` surface status
 

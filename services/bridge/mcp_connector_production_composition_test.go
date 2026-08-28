@@ -177,7 +177,11 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		oauthFailureToolUseEventID,
 	) //nolint:gosec // fixed repository fixture and test-owned arguments.
 	command.Dir = gatewayRoot
-	command.Env = append(os.Environ(), "TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema)
+	command.Env = append(os.Environ(),
+		"TETRAL_TEST_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin),
+		"TETRAL_TEST_RUNTIME_DATABASE_URL="+storagetest.RuntimeDatabaseURL(t, runtime),
+		"TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema,
+	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout

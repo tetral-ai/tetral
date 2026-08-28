@@ -34,6 +34,7 @@ const cancelledToolUseEventIdArgument = process.argv[7];
 const oauthSuccessToolUseEventIdArgument = process.argv[8];
 const oauthFailureToolUseEventIdArgument = process.argv[9];
 const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
+const runtimeDatabaseURL = process.env.TETRAL_TEST_RUNTIME_DATABASE_URL;
 const databaseSchema = process.env.TETRAL_TEST_DATABASE_SCHEMA;
 if (
 	bridgeAddress === undefined ||
@@ -45,10 +46,11 @@ if (
 	oauthSuccessToolUseEventIdArgument === undefined ||
 	oauthFailureToolUseEventIdArgument === undefined ||
 	databaseURL === undefined ||
+	runtimeDatabaseURL === undefined ||
 	databaseSchema === undefined
 ) {
 	throw new Error(
-		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id> with TETRAL_TEST_DATABASE_URL and TETRAL_TEST_DATABASE_SCHEMA",
+		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id> with test database URLs and TETRAL_TEST_DATABASE_SCHEMA",
 	);
 }
 const toolUseEventId: string = toolUseEventIdArgument;
@@ -424,10 +426,7 @@ async function createOAuthCredentialComposition(databaseURL: string, schema: str
 		keyHex,
 	);
 	const admin = new Bun.SQL({ url: databaseURL, max: 1 });
-	const appURL = new URL(databaseURL);
-	appURL.username = "tetral_runtime_test";
-	appURL.password = "tetral_runtime_test_pw";
-	const app = new Bun.SQL({ url: appURL.toString(), max: 1 });
+	const app = new Bun.SQL({ url: runtimeDatabaseURL, max: 1 });
 	await admin.unsafe(`SET search_path TO ${schema}, pg_catalog`);
 	await app.unsafe(`SET search_path TO ${schema}, pg_catalog`);
 	await admin`

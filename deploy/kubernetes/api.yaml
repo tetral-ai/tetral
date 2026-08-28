@@ -92,6 +92,11 @@ spec:
                 secretKeyRef:
                   name: api-database
                   key: url
+            - name: TETRAL_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: api-database
+                  key: migration-url
             - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
               valueFrom:
                 secretKeyRef:

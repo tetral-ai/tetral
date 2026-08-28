@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -69,7 +71,7 @@ func TestPostgreSQLVaultValidationRefreshIsDurableSingleFlightAcrossServices(t *
 	vaults := NewPostgreSQLVaultStore(dbconnect.NewClientForTesting(runtimeDB))
 	credentials := NewPostgreSQLCredentialStore(dbconnect.NewClientForTesting(runtimeDB), encryptor)
 	container, credential := createExpiredValidationCredential(ctx, t, vaults, credentials)
-	installCredentialUpdateAudit(t, adminDB)
+	installCredentialUpdateAudit(t, runtimeDB, adminDB)
 
 	issuer := &rotatingValidationIssuer{now: time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC), entered: make(chan struct{}), release: make(chan struct{})}
 	serviceOne := NewService(vaults, NewPostgreSQLCredentialStore(dbconnect.NewClientForTesting(runtimeDB), encryptor), WithMCPOAuthValidator(issuer))
@@ -173,7 +175,7 @@ func TestPostgreSQLVaultValidationRefreshFailureAndInactiveRowsWriteNothing(t *t
 					t.Fatalf("make inactive: %v", err)
 				}
 			}
-			installCredentialUpdateAudit(t, adminDB)
+			installCredentialUpdateAudit(t, runtimeDB, adminDB)
 			issuer := &rotatingValidationIssuer{now: time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC), refreshError: true}
 			service := NewService(vaults, credentials, WithMCPOAuthValidator(issuer))
 			validation, err := service.ValidateMCPOAuthCredential(ctx, workspace.DefaultID, container.ID, credential.ID)
@@ -229,12 +231,16 @@ func createExpiredValidationCredential(ctx context.Context, t *testing.T, vaults
 	return container, credential
 }
 
-func installCredentialUpdateAudit(t *testing.T, adminDB *sql.DB) {
+func installCredentialUpdateAudit(t *testing.T, runtimeDB, adminDB *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
+	var runtimeRole string
+	if err := runtimeDB.QueryRowContext(ctx, `SELECT current_user`).Scan(&runtimeRole); err != nil {
+		t.Fatalf("read clone runtime role: %v", err)
+	}
 	for _, statement := range []string{
 		`CREATE TABLE credential_update_audit (credential_id text NOT NULL)`,
-		`GRANT INSERT ON credential_update_audit TO tetral_runtime_test`,
+		`GRANT INSERT ON credential_update_audit TO ` + pgx.Identifier{runtimeRole}.Sanitize(),
 		`CREATE FUNCTION record_credential_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO credential_update_audit (credential_id) VALUES (NEW.id); RETURN NEW; END $$`,
 		`CREATE TRIGGER credential_update_audit_trigger AFTER UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION record_credential_update()`,
 	} {

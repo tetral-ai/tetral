@@ -1509,7 +1509,7 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 		t.Fatalf("seed installed MCP toolset: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"search"}]}`)
-	connector := startOAuthInitialManifestConnector(t, admin, sessionID)
+	connector := startOAuthInitialManifestConnector(t, runtime, admin, sessionID)
 
 	job := RuntimeJob{
 		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -1677,7 +1677,7 @@ type oauthInitialManifestStats struct {
 	} `json:"refreshOutcomes"`
 }
 
-func startOAuthInitialManifestConnector(t *testing.T, admin *sql.DB, sessionID string) *oauthInitialManifestConnector {
+func startOAuthInitialManifestConnector(t *testing.T, runtime, admin *sql.DB, sessionID string) *oauthInitialManifestConnector {
 	t.Helper()
 	var schema string
 	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
@@ -1694,6 +1694,10 @@ func startOAuthInitialManifestConnector(t *testing.T, admin *sql.DB, sessionID s
 	fixture := &oauthInitialManifestConnector{}
 	fixture.command = exec.Command("bun", "packages/mcp-connector/test/fixtures/oauth-initial-manifest-server.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	fixture.command.Dir = "../gateway"
+	fixture.command.Env = append(os.Environ(),
+		"TETRAL_TEST_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin),
+		"TETRAL_TEST_RUNTIME_DATABASE_URL="+storagetest.RuntimeDatabaseURL(t, runtime),
+	)
 	stdout, err := fixture.command.StdoutPipe()
 	if err != nil {
 		t.Fatalf("open OAuth Connector stdout: %v", err)

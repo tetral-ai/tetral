@@ -61,7 +61,7 @@ func runStorageSchemaTestWithTestDSN(t *testing.T, dsn string) ([]byte, error) {
 		"test",
 		"./internal/storage",
 		"-run",
-		"^TestInitializePostgreSQLSchemaCreatesVersionOneTables$",
+		"^TestMigrateSchemaCreatesVersionOneTables$",
 		"-count=1",
 	)
 	cmd.Dir = engineDir
@@ -78,7 +78,7 @@ func engineDirForSchemaTest(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..")
 }
 
-func TestInitializePostgreSQLSchemaHasNoRemovedRuntimeDropSteps(t *testing.T) {
+func TestVersionOneSchemaHasNoRemovedRuntimeDropSteps(t *testing.T) {
 	// The schema-step tuples are named-literal pairs in source. Pinning the
 	// absence by step-name prefix keeps this guard non-evasive: any reintroduced
 	// removed-table drop step would be named with this prefix and fail here.
@@ -88,7 +88,7 @@ func TestInitializePostgreSQLSchemaHasNoRemovedRuntimeDropSteps(t *testing.T) {
 	}
 }
 
-func TestInitializePostgreSQLSchemaDoesNotSeedHiddenDefaultWorkspace(t *testing.T) {
+func TestVersionOneSchemaDoesNotSeedHiddenDefaultWorkspace(t *testing.T) {
 	source := readPostgreSQLSchemaSource(t)
 	for _, forbidden := range []string{
 		"seedDefaultWorkspace",
@@ -116,16 +116,18 @@ func readPostgreSQLSchemaSource(t *testing.T) string {
 	return string(body)
 }
 
-func TestInitializePostgreSQLSchemaCreatesVersionOneTables(t *testing.T) {
+func TestMigrateSchemaCreatesVersionOneTables(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	if err := storage.InitializePostgreSQLSchema(context.Background(), db); err != nil {
-		t.Fatalf("InitializePostgreSQLSchema: %v", err)
+	if err := storage.MigrateSchema(context.Background(), db); err != nil {
+		t.Fatalf("MigrateSchema: %v", err)
 	}
 	var schema string
 	if err := db.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
 		t.Fatalf("current_schema: %v", err)
 	}
 	expected := expectedVersionOneControlPlaneTables()
+	expected = append(expected, "tetral_schema_migrations")
+	slices.Sort(expected)
 
 	got := readBaseTableNames(t, db, schema)
 	if !equalStringSlices(got, expected) {

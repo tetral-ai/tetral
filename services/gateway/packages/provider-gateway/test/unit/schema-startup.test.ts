@@ -181,6 +181,49 @@ describe("provider-gateway schema verification", () => {
 		});
 		expect(events).toEqual(["schema_verify", "close"]);
 	});
+
+	test("pool-close failure cannot replace or disclose the schema failure", async () => {
+		const behind = new SchemaVerificationError("schema_behind");
+		const secret = "postgres://private-role:private-password@db.internal/tetral";
+		const sql = schemaSQL([], []);
+		sql.close = async () => { throw new Error(secret); };
+		try {
+			await buildProviderGatewayCommandDependencies({
+				config: providerConfig(),
+				logger: { info: () => undefined, error: () => undefined },
+				builderOptions: {
+					tokenReviewClientFactory: () => ({
+						createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
+					}),
+					sqlFactory: () => sql as never,
+					schemaVerifier: async () => { throw behind; },
+				},
+			});
+			throw new Error("expected schema verification failure");
+		} catch (error) {
+			expect(error).toBe(behind);
+			expect(String(error)).not.toContain(secret);
+			expect(String(error)).not.toContain("postgres://");
+		}
+	});
+
+	test("default startup owner rejects a privileged runtime role before dependency construction", async () => {
+		const events: string[] = [];
+		const sql = schemaSQL(events, [[{ is_superuser: true, bypasses_rls: false }]]);
+		await expect(buildProviderGatewayCommandDependencies({
+			config: providerConfig(),
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				tokenReviewClientFactory: () => ({
+					createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
+				}),
+				sqlFactory: () => sql as never,
+			},
+		})).rejects.toMatchObject({ kind: "runtime_role_invalid" });
+		expect(events).toHaveLength(2);
+		expect(events[0]).toContain("pg_roles");
+		expect(events[1]).toBe("close");
+	});
 });
 
 function schemaSQL(

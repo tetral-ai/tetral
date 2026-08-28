@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -13,38 +14,124 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 const sensitiveSentinel = "do-not-leak-this-helper"
 
-func TestNewPostgreSQLDBProvidesIsolatedSchemas(t *testing.T) {
+func TestBaselineDigestBindsEveryCopiedAndReappliedInput(t *testing.T) {
+	base := baselineInputs{
+		helperFormat:       "format",
+		schemaChecksum:     "schema",
+		postgresqlContract: "postgresql-contract",
+		roleContract:       "role-contract",
+		seed:               "seed",
+		cloneRole:          "role-flags",
+		cloneGrants:        "grants",
+		owner:              "owner",
+		serverVersion:      "server-version",
+		provenance:         "provenance",
+	}
+	want := digestBaselineInputs(base)
+	tests := map[string]func(*baselineInputs){
+		"helper format":       func(inputs *baselineInputs) { inputs.helperFormat += "-changed" },
+		"schema checksum":     func(inputs *baselineInputs) { inputs.schemaChecksum += "-changed" },
+		"PostgreSQL contract": func(inputs *baselineInputs) { inputs.postgresqlContract += "-changed" },
+		"role contract":       func(inputs *baselineInputs) { inputs.roleContract += "-changed" },
+		"seed":                func(inputs *baselineInputs) { inputs.seed += "-changed" },
+		"clone role":          func(inputs *baselineInputs) { inputs.cloneRole += "-changed" },
+		"clone grants":        func(inputs *baselineInputs) { inputs.cloneGrants += "-changed" },
+		"owner":               func(inputs *baselineInputs) { inputs.owner += "-changed" },
+		"server version":      func(inputs *baselineInputs) { inputs.serverVersion += "-changed" },
+		"provenance":          func(inputs *baselineInputs) { inputs.provenance += "-changed" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			inputs := base
+			mutate(&inputs)
+			if got := digestBaselineInputs(inputs); got == want {
+				t.Fatalf("baseline digest did not bind %s", name)
+			}
+		})
+	}
+}
+
+func TestNewPostgreSQLDBProvidesIsolatedDatabasesAndRoles(t *testing.T) {
 	dbA := NewPostgreSQLDB(t)
 	dbB := NewPostgreSQLDB(t)
 
-	var schemaA, schemaB string
-	if err := dbA.QueryRow(`SELECT current_schema()`).Scan(&schemaA); err != nil {
-		t.Fatalf("dbA current_schema(): %v", err)
+	var databaseA, databaseB, roleA, roleB string
+	if err := dbA.QueryRow(`SELECT current_database(), current_user`).Scan(&databaseA, &roleA); err != nil {
+		t.Fatalf("dbA identity: %v", err)
 	}
-	if err := dbB.QueryRow(`SELECT current_schema()`).Scan(&schemaB); err != nil {
-		t.Fatalf("dbB current_schema(): %v", err)
+	if err := dbB.QueryRow(`SELECT current_database(), current_user`).Scan(&databaseB, &roleB); err != nil {
+		t.Fatalf("dbB identity: %v", err)
 	}
-	if schemaA == schemaB {
-		t.Fatalf("expected distinct schema names per helper call; got %q twice", schemaA)
+	if databaseA == databaseB {
+		t.Fatalf("expected distinct databases per helper call; got %q twice", databaseA)
 	}
-	for _, name := range []string{schemaA, schemaB} {
+	if roleA == roleB {
+		t.Fatalf("expected distinct runtime roles per helper call; got %q twice", roleA)
+	}
+	for _, name := range []string{databaseA, databaseB} {
 		if !strings.HasPrefix(name, "tetral_test_") {
-			t.Errorf("schema %q must start with tetral_test_", name)
+			t.Errorf("database %q must start with tetral_test_", name)
+		}
+	}
+	for _, name := range []string{roleA, roleB} {
+		if !strings.HasPrefix(name, "tetral_test_role_") {
+			t.Errorf("role %q must start with tetral_test_role_", name)
 		}
 	}
 }
 
-func TestNewPostgreSQLDBHidesRowsAcrossSchemas(t *testing.T) {
-	// Schema isolation is independent of RLS. Drive the inserts and
+func TestRuntimeCloneHandleSuppliesRealBunReadiness(t *testing.T) {
+	db, admin := NewPostgreSQLDBWithAdmin(t)
+	dsn := RuntimeDatabaseURL(t, db)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
+	if output, err := runBunReadiness(root, dsn); err != nil {
+		t.Fatalf("Bun readiness through clone handle failed: %v\n%s", err, output)
+	}
+	var role string
+	if err := db.QueryRow(`SELECT current_user`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{role}.Sanitize() + " BYPASSRLS"); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runBunReadiness(root, dsn)
+	if _, restoreErr := admin.Exec("ALTER ROLE " + pgx.Identifier{role}.Sanitize() + " NOBYPASSRLS"); restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if err == nil {
+		t.Fatal("Bun readiness accepted a BYPASSRLS clone role")
+	}
+	for _, secret := range []string{dsn, role} {
+		if strings.Contains(string(output), secret) {
+			t.Fatal("Bun readiness failure disclosed database identity")
+		}
+	}
+}
+
+func runBunReadiness(root, dsn string) ([]byte, error) {
+	command := exec.Command("bun", "packages/schema/test/fixtures/live-readiness.ts")
+	command.Dir = filepath.Join(root, "services", "gateway")
+	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_DATABASE_URL="+dsn)
+	return command.CombinedOutput()
+}
+
+func TestNewPostgreSQLDBHidesRowsAcrossDatabases(t *testing.T) {
+	// Database isolation is independent of RLS. Drive the inserts and
 	// reads through admin connections to bypass FORCE RLS — the
-	// assertion here is that two helper schemas truly are different
-	// schemas, not that RLS works.
+	// assertion here is that two helper databases have no shared
+	// writable state, not that RLS works.
 	_, adminA := NewPostgreSQLDBWithAdmin(t)
 	_, adminB := NewPostgreSQLDBWithAdmin(t)
 
@@ -61,17 +148,17 @@ func TestNewPostgreSQLDBHidesRowsAcrossSchemas(t *testing.T) {
 	}
 }
 
-func TestNewPostgreSQLDBInitializesSchemaIntoIsolatedSchemaNotPublic(t *testing.T) {
+func TestNewPostgreSQLDBInitializesCanonicalPublicSchemaInsideClone(t *testing.T) {
 	db := NewPostgreSQLDB(t)
 	var schema string
 	if err := db.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
 		t.Fatalf("current_schema: %v", err)
 	}
-	if schema == "public" {
-		t.Fatalf("helper schema must not be public; got %q", schema)
+	if schema != "public" {
+		t.Fatalf("clone must expose the canonical public schema; got %q", schema)
 	}
-	// All schema-owned tables must live in the helper schema, none in public
-	// (the helper must not pollute the shared default schema).
+	// The clone is a private database, so its canonical schema can use the same
+	// public name as production without polluting the control database.
 	var helperCount int
 	if err := db.QueryRow(
 		`SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_type='BASE TABLE'`,
@@ -80,7 +167,7 @@ func TestNewPostgreSQLDBInitializesSchemaIntoIsolatedSchemaNotPublic(t *testing.
 	}
 	expectedCount := expectedCurrentBaseTableCount(t)
 	if helperCount != expectedCount {
-		t.Errorf("helper schema %q has %d base tables; want %d", schema, helperCount, expectedCount)
+		t.Errorf("clone schema %q has %d base tables; want %d", schema, helperCount, expectedCount)
 	}
 }
 
@@ -92,6 +179,94 @@ func TestNewPostgreSQLDBInstallsDefaultWorkspaceOnlyAsTestFixture(t *testing.T) 
 	}
 	if name != "Default Test Fixture" {
 		t.Fatalf("default workspace fixture name = %q; want test-only fixture", name)
+	}
+}
+
+func TestTemplateCloneMatchesHelperBootstrapContract(t *testing.T) {
+	runtimeDB, adminDB := NewPostgreSQLDBWithAdmin(t)
+	var databaseName, runtimeRole, adminRole string
+	if err := runtimeDB.QueryRow(`SELECT current_database(), current_user`).Scan(&databaseName, &runtimeRole); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminDB.QueryRow(`SELECT current_user`).Scan(&adminRole); err != nil {
+		t.Fatal(err)
+	}
+	var publicConnect, runtimeConnect, superuser, bypassRLS, schemaUsage, schemaCreate bool
+	if err := adminDB.QueryRow(`SELECT
+		has_database_privilege('public', current_database(), 'CONNECT'),
+		has_database_privilege($1, current_database(), 'CONNECT'),
+		(SELECT rolsuper FROM pg_roles WHERE rolname=$1),
+		(SELECT rolbypassrls FROM pg_roles WHERE rolname=$1),
+		has_schema_privilege($1, 'public', 'USAGE'),
+		has_schema_privilege($1, 'public', 'CREATE')`, runtimeRole).Scan(
+		&publicConnect, &runtimeConnect, &superuser, &bypassRLS, &schemaUsage, &schemaCreate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if publicConnect || !runtimeConnect || superuser || bypassRLS || !schemaUsage || schemaCreate {
+		t.Fatalf("clone boundary database=%s public_connect=%v runtime_connect=%v superuser=%v bypass_rls=%v schema_usage=%v schema_create=%v",
+			databaseName, publicConnect, runtimeConnect, superuser, bypassRLS, schemaUsage, schemaCreate)
+	}
+	var unownedTables, missingTablePrivileges, missingSequencePrivileges int
+	if err := adminDB.QueryRow(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)<>$1`, adminRole).Scan(&unownedTables); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminDB.QueryRow(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT has_table_privilege($1, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')`, runtimeRole).Scan(&missingTablePrivileges); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminDB.QueryRow(`SELECT count(*) FROM information_schema.sequences
+		WHERE sequence_schema='public' AND NOT has_sequence_privilege($1, format('%I.%I', sequence_schema, sequence_name), 'USAGE')`, runtimeRole).Scan(&missingSequencePrivileges); err != nil {
+		t.Fatal(err)
+	}
+	if unownedTables != 0 || missingTablePrivileges != 0 || missingSequencePrivileges != 0 {
+		t.Fatalf("helper bootstrap drift: unowned_tables=%d missing_table_privileges=%d missing_sequence_privileges=%d", unownedTables, missingTablePrivileges, missingSequencePrivileges)
+	}
+	var workspaceName string
+	if err := runtimeDB.QueryRow(`SELECT name FROM workspaces WHERE id=$1`, string(workspace.DefaultID)).Scan(&workspaceName); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceName != "Default Test Fixture" {
+		t.Fatalf("template seed name = %q; want Default Test Fixture", workspaceName)
+	}
+}
+
+func TestConnectedTemplateRefusesClone(t *testing.T) {
+	_ = NewPostgreSQLDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	var template string
+	if err := control.QueryRowContext(ctx, `SELECT datname FROM pg_database WHERE datname LIKE $1 AND datistemplate AND NOT datallowconn ORDER BY datname LIMIT 1`, templatePrefix+"%").Scan(&template); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ExecContext(ctx, "ALTER DATABASE "+template+" WITH ALLOW_CONNECTIONS true IS_TEMPLATE false"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = control.ExecContext(context.Background(), "ALTER DATABASE "+template+" WITH ALLOW_CONNECTIONS false IS_TEMPLATE true")
+	}()
+	templateConfig := config.Copy()
+	templateConfig.Database = template
+	connected := openPool(templateConfig)
+	if err := connected.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connected.Close() }()
+	suffix, err := randomHex(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := clonePrefix + "connected_" + suffix
+	if _, err := control.ExecContext(ctx, "CREATE DATABASE "+target+" TEMPLATE "+template); err == nil {
+		_, _ = control.ExecContext(context.Background(), "DROP DATABASE "+target+" WITH (FORCE)")
+		t.Fatal("PostgreSQL cloned a template with an active connection")
 	}
 }
 
@@ -123,8 +298,8 @@ func TestNewPostgreSQLDBLeavesPublicFoundationTablesUnchanged(t *testing.T) {
 
 	before := publicFoundationTables(t, base)
 	t.Run("setup", func(inner *testing.T) {
-		db := NewPostgreSQLDB(inner)
-		afterSetup := publicFoundationTables(inner, db)
+		_ = NewPostgreSQLDB(inner)
+		afterSetup := publicFoundationTables(inner, base)
 		if !equalOrderedStrings(afterSetup, before) {
 			inner.Fatalf("public foundation tables changed after helper setup: before=%v after_setup=%v", before, afterSetup)
 		}
@@ -135,30 +310,247 @@ func TestNewPostgreSQLDBLeavesPublicFoundationTablesUnchanged(t *testing.T) {
 	}
 }
 
-func TestNewPostgreSQLDBDropsSchemaAfterCleanup(t *testing.T) {
-	// Capture the schema name from a sub-test, let the sub-test's
-	// t.Cleanup run, then assert in the parent that the schema is gone.
-	var capturedSchema string
+func TestNewPostgreSQLDBDropsDatabaseAndRoleAfterCleanup(t *testing.T) {
+	// Capture the clone identity from a sub-test, let t.Cleanup run, then
+	// inspect the control catalog and prove both capabilities are gone.
+	var capturedDatabase, capturedRole string
 	t.Run("inner", func(inner *testing.T) {
 		db := NewPostgreSQLDB(inner)
-		if err := db.QueryRow(`SELECT current_schema()`).Scan(&capturedSchema); err != nil {
-			inner.Fatalf("capture schema: %v", err)
+		if err := db.QueryRow(`SELECT current_database(), current_user`).Scan(&capturedDatabase, &capturedRole); err != nil {
+			inner.Fatalf("capture clone identity: %v", err)
 		}
 	})
-	if capturedSchema == "" {
-		t.Fatal("inner test failed to capture schema name")
+	if capturedDatabase == "" || capturedRole == "" {
+		t.Fatal("inner test failed to capture clone identity")
 	}
-	// Open a fresh helper connection, then verify the prior helper
-	// schema no longer exists. This keeps TETRAL_TEST_DATABASE_URL
-	// parsing inside NewPostgreSQLDB's sanitized boundary.
-	db := NewPostgreSQLDB(t)
+	control := openBasePostgreSQLDBForInspection(context.Background(), t)
+	defer func() { _ = control.Close() }()
+	var databaseExists, roleExists bool
+	if err := control.QueryRowContext(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)`, capturedDatabase).Scan(&databaseExists); err != nil {
+		t.Fatalf("check database existence: %v", err)
+	}
+	if err := control.QueryRowContext(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)`, capturedRole).Scan(&roleExists); err != nil {
+		t.Fatalf("check role existence: %v", err)
+	}
+	if databaseExists || roleExists {
+		t.Errorf("cleanup left capabilities: database_exists=%v role_exists=%v", databaseExists, roleExists)
+	}
+}
+
+func TestCleanupRecoversRegisteredCloneCreatedBeforeDatabaseAuthoritySeal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	if err := ensureRegistry(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := ensureProcessRun(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix, err := randomHex(6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := reserveClone(ctx, control, runID, "crash-proof", clonePrefix+runID[:8]+"_"+suffix, rolePrefix+runID[:8]+"_"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createCloneRole(ctx, control, registration, "test-password"); err != nil {
+		t.Fatal(err)
+	}
+	registration.phase = clonePhaseRole
+	if err := createDatabaseClone(ctx, control, registration.database, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupRegisteredClone(ctx, control, registration); err != nil {
+		t.Fatalf("recover unsealed registered clone: %v", err)
+	}
+	assertCloneCapabilitiesAbsent(t, control, registration)
+}
+
+func TestCleanupResumesAfterCapabilityRevocation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	provisioned, err := provisionDatabase(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = provisioned.runtime.Close()
+	_ = provisioned.admin.Close()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	registration := registrationForDatabase(t, control, provisioned.handle.database)
+	cleanupPhase := cloneCleanupPrefix + registration.phase
+	if _, err := control.ExecContext(ctx, "UPDATE "+cloneRegistryTable+" SET phase=$2 WHERE database_name=$1", registration.database, cleanupPhase); err != nil {
+		t.Fatal(err)
+	}
+	registration.phase = cleanupPhase
+	if _, err := control.ExecContext(ctx, "ALTER ROLE "+registration.role+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ExecContext(ctx, "REVOKE CONNECT ON DATABASE "+registration.database+" FROM "+registration.role); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupRegisteredClone(ctx, control, registration); err != nil {
+		t.Fatalf("resume cleanup after revocation: %v", err)
+	}
+	assertCloneCapabilitiesAbsent(t, control, registration)
+}
+
+func TestExpiredRunLeaseCannotBeRevivedByLateHeartbeat(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	if err := ensureRegistry(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := randomHex(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ExecContext(ctx, "INSERT INTO "+runRegistryTable+" (run_id, owner_pid, heartbeat_at, expires_at) VALUES ($1,$2,clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '1 minute')", runID, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = control.ExecContext(context.Background(), "DELETE FROM "+runRegistryTable+" WHERE run_id=$1", runID)
+	}()
+	if err := refreshRunLease(ctx, control, runID); err == nil {
+		t.Fatal("late heartbeat revived an expired run lease")
+	}
+	var expired bool
+	if err := control.QueryRowContext(ctx, "SELECT expires_at < clock_timestamp() FROM "+runRegistryTable+" WHERE run_id=$1", runID).Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	if !expired {
+		t.Fatal("late heartbeat changed the expired lease")
+	}
+}
+
+func TestTemplateNameCollisionFailsClosed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	digest := strings.Repeat("a", 64)
+	name := templatePrefix + digest[:20]
+	_, _ = control.ExecContext(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	if _, err := control.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = control.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	}()
+	if _, err := ensureTemplate(ctx, control, config, digest); err == nil {
+		t.Fatal("unowned template-name collision was accepted")
+	}
 	var exists bool
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1)`, capturedSchema).Scan(&exists); err != nil {
-		t.Fatalf("check schema existence: %v", err)
+	if err := control.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil {
+		t.Fatal(err)
 	}
-	if exists {
-		t.Errorf("schema %q must be dropped during t.Cleanup; still present", capturedSchema)
+	if !exists {
+		t.Fatal("unowned template-name collision was deleted")
+	}
+}
+
+func TestExpiredCloneCleanupHasOneConcurrentOwner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	if err := ensureRegistry(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := randomHex(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix, err := randomHex(6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := reserveClone(ctx, control, runID, "concurrent-cleanup", clonePrefix+runID[:8]+"_"+suffix, rolePrefix+runID[:8]+"_"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errors <- cleanupExpiredResources(ctx, control, config)
+		}()
+	}
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatalf("concurrent expired cleanup: %v", err)
+		}
+	}
+	var remains bool
+	if err := control.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM "+cloneRegistryTable+" WHERE database_name=$1)", registration.database).Scan(&remains); err != nil {
+		t.Fatal(err)
+	}
+	if remains {
+		t.Fatal("concurrent expired cleanup left the clone registration")
+	}
+}
+
+func TestCleanupRejectsCloneWhoseDurableAuthorityDoesNotMatchRegistry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	provisioned, err := provisionDatabase(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlConfig, err := parseControlConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := openPool(controlConfig)
+	defer func() { _ = control.Close() }()
+	registration := registrationForDatabase(t, control, provisioned.handle.database)
+	if _, err := control.ExecContext(ctx, "COMMENT ON DATABASE "+registration.database+" IS 'not-owned-by-storagetest'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupRegisteredClone(ctx, control, registration); err == nil {
+		t.Fatal("cleanup accepted a database whose authority comment did not match its registry")
+	}
+	var exists bool
+	if err := control.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", registration.database).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("authority mismatch deleted the database")
+	}
+	if _, err := control.ExecContext(ctx, "COMMENT ON DATABASE "+registration.database+" IS "+quoteLiteral(registration.databaseNote)); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioned.cleanup(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -210,22 +602,22 @@ func TestNewPostgreSQLDBReturnsNonSuperuserRuntimeRole(t *testing.T) {
 	}
 }
 
-// TestNewPostgreSQLDBWithAdminPinsBothToSameSchema pins that the
+// TestNewPostgreSQLDBWithAdminPinsBothToSameDatabase pins that the
 // admin and runtime DBs returned by NewPostgreSQLDBWithAdmin are
 // pinned to the same per-test schema; otherwise RLS proofs that
 // seed cross-workspace data through admin would not be visible to
 // the runtime read path.
-func TestNewPostgreSQLDBWithAdminPinsBothToSameSchema(t *testing.T) {
+func TestNewPostgreSQLDBWithAdminPinsBothToSameDatabase(t *testing.T) {
 	runtime, admin := NewPostgreSQLDBWithAdmin(t)
-	var runtimeSchema, adminSchema string
-	if err := runtime.QueryRow(`SELECT current_schema()`).Scan(&runtimeSchema); err != nil {
-		t.Fatalf("runtime current_schema: %v", err)
+	var runtimeDatabase, adminDatabase string
+	if err := runtime.QueryRow(`SELECT current_database()`).Scan(&runtimeDatabase); err != nil {
+		t.Fatalf("runtime current_database: %v", err)
 	}
-	if err := admin.QueryRow(`SELECT current_schema()`).Scan(&adminSchema); err != nil {
-		t.Fatalf("admin current_schema: %v", err)
+	if err := admin.QueryRow(`SELECT current_database()`).Scan(&adminDatabase); err != nil {
+		t.Fatalf("admin current_database: %v", err)
 	}
-	if runtimeSchema != adminSchema {
-		t.Errorf("runtime schema %q differs from admin schema %q", runtimeSchema, adminSchema)
+	if runtimeDatabase != adminDatabase {
+		t.Errorf("runtime database %q differs from admin database %q", runtimeDatabase, adminDatabase)
 	}
 }
 
@@ -270,38 +662,38 @@ func TestOpenIsolatedPostgreSQLDBRedactsMalformedDSN(t *testing.T) {
 	}
 }
 
-func TestOpenIsolatedPostgreSQLDBSchemaNameIsHelperGenerated(t *testing.T) {
-	// Schema name must be helper-generated; the env var name and any
+func TestOpenIsolatedPostgreSQLDBNameIsHelperGenerated(t *testing.T) {
+	// Database name must be helper-generated; the env var name and any
 	// test-controllable strings must not flow into it.
 	ctx := context.Background()
-	cleanup, schemaName, err := newSchemaForInspection(ctx, t)
+	cleanup, databaseName, err := newDatabaseForInspection(ctx, t)
 	if err != nil {
-		t.Fatalf("newSchemaForInspection: %v", err)
+		t.Fatalf("newDatabaseForInspection: %v", err)
 	}
 	defer cleanup()
-	if !strings.HasPrefix(schemaName, "tetral_test_") {
-		t.Errorf("schema name %q must use tetral_test_ prefix", schemaName)
+	if !strings.HasPrefix(databaseName, "tetral_test_") {
+		t.Errorf("database name %q must use tetral_test_ prefix", databaseName)
 	}
-	for _, r := range schemaName {
+	for _, r := range databaseName {
 		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
 		if !ok {
-			t.Errorf("schema name %q contains non-[a-z0-9_] character %q", schemaName, r)
+			t.Errorf("database name %q contains non-[a-z0-9_] character %q", databaseName, r)
 			break
 		}
 	}
 }
 
-// newSchemaForInspection wraps openIsolatedPostgreSQLDB so the test can
-// observe the generated schema name + base-DB cleanup hook without
+// newDatabaseForInspection wraps openIsolatedPostgreSQLDB so the test can
+// observe the generated database name + cleanup hook without
 // going through NewPostgreSQLDB (which would attach to t.Cleanup).
-func newSchemaForInspection(ctx context.Context, t *testing.T) (func(), string, error) {
+func newDatabaseForInspection(ctx context.Context, t *testing.T) (func(), string, error) {
 	t.Helper()
 	db, cleanup, err := openIsolatedPostgreSQLDB(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	var schema string
-	if err := db.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
+	var database string
+	if err := db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
 		_ = cleanup()
 		return nil, "", err
 	}
@@ -309,7 +701,7 @@ func newSchemaForInspection(ctx context.Context, t *testing.T) (func(), string, 
 		if cleanupErr := cleanup(); cleanupErr != nil {
 			t.Errorf("cleanup: %v", cleanupErr)
 		}
-	}, schema, nil
+	}, database, nil
 }
 
 // itoa is a tiny test-side strconv.Itoa replacement to keep the import
@@ -337,13 +729,11 @@ func itoa(i int) string {
 }
 
 // TestNewPostgreSQLDBPoolSizeIsParallelSafe pins that the helper does
-// not hand out a pool whose connections all share a single
-// per-connection state — every fresh connection from the pool must
-// observe the helper schema in search_path.
+// not hand out a pool whose connections can drift to another clone.
 func TestNewPostgreSQLDBPoolSizeIsParallelSafe(t *testing.T) {
 	db := NewPostgreSQLDB(t)
 	expected := ""
-	if err := db.QueryRow(`SELECT current_schema()`).Scan(&expected); err != nil {
+	if err := db.QueryRow(`SELECT current_database()`).Scan(&expected); err != nil {
 		t.Fatal(err)
 	}
 
@@ -360,7 +750,7 @@ func TestNewPostgreSQLDBPoolSizeIsParallelSafe(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var got string
-			if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&got); err != nil {
+			if err := db.QueryRowContext(ctx, `SELECT current_database()`).Scan(&got); err != nil {
 				mismatchMu.Lock()
 				mismatch = errors.Join(mismatch, err)
 				mismatchMu.Unlock()
@@ -368,14 +758,14 @@ func TestNewPostgreSQLDBPoolSizeIsParallelSafe(t *testing.T) {
 			}
 			if got != expected {
 				mismatchMu.Lock()
-				mismatch = errors.Join(mismatch, errors.New("connection observed schema "+got+", expected "+expected))
+				mismatch = errors.Join(mismatch, errors.New("connection observed database "+got+", expected "+expected))
 				mismatchMu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
 	if mismatch != nil {
-		t.Fatalf("pool connections did not all see the helper schema: %v", mismatch)
+		t.Fatalf("pool connections did not all see the owning clone: %v", mismatch)
 	}
 }
 
@@ -437,4 +827,26 @@ func equalOrderedStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func registrationForDatabase(t *testing.T, control *sql.DB, database string) cloneRegistration {
+	t.Helper()
+	var registration cloneRegistration
+	if err := control.QueryRow(`SELECT database_name, role_name, run_id, baseline_digest, phase, database_owner, database_comment, role_comment FROM `+cloneRegistryTable+` WHERE database_name=$1`, database).Scan(
+		&registration.database, &registration.role, &registration.runID, &registration.baseline, &registration.phase, &registration.databaseOwner, &registration.databaseNote, &registration.roleNote,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return registration
+}
+
+func assertCloneCapabilitiesAbsent(t *testing.T, control *sql.DB, registration cloneRegistration) {
+	t.Helper()
+	var databaseExists, roleExists, registryExists bool
+	if err := control.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1), EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$2), EXISTS(SELECT 1 FROM `+cloneRegistryTable+` WHERE database_name=$1)`, registration.database, registration.role).Scan(&databaseExists, &roleExists, &registryExists); err != nil {
+		t.Fatal(err)
+	}
+	if databaseExists || roleExists || registryExists {
+		t.Fatalf("clone cleanup left database=%v role=%v registry=%v", databaseExists, roleExists, registryExists)
+	}
 }

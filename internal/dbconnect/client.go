@@ -137,13 +137,6 @@ func (tx *Tx) QueryRowScanner(ctx context.Context, query string, args ...any) in
 	return tx.QueryRow(ctx, query, args...)
 }
 
-func (c *Client) InitializeSchema(ctx context.Context) error {
-	if err := storage.InitializePostgreSQLSchema(ctx, c.db); err != nil {
-		return diagnostic(c.provider, c.descriptor, PhaseInitializeSchema, KindSchemaInitializationFailed, "", "schema initialization failed", err)
-	}
-	return nil
-}
-
 func (c *Client) MigrateSchema(ctx context.Context) error {
 	if err := storage.MigrateSchema(ctx, c.db); err != nil {
 		return diagnostic(c.provider, c.descriptor, PhaseMigrateSchema, KindSchemaMigrationFailed, "", "schema migration failed", err)

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-var databaseEnvironmentPattern = regexp.MustCompile(`(?m)^\s*- name: (?:TETRAL_DATABASE_URL|TETRAL_POSTGRES_DSN|TETRAL_EVENT_STREAM_DATABASE_URL)\s*$`)
+var databaseEnvironmentPattern = regexp.MustCompile(`(?m)^\s*- name: (?:TETRAL_DATABASE_URL|TETRAL_MIGRATION_DATABASE_URL|TETRAL_POSTGRES_DSN|TETRAL_EVENT_STREAM_DATABASE_URL)\s*$`)
 var databaseConfigurationSourcePattern = regexp.MustCompile(`(?mi)^\s+name:\s*[A-Za-z0-9_.-]*(?:database|postgres)[A-Za-z0-9_.-]*\s*$`)
 var yamlNamePattern = regexp.MustCompile(`^(\s*)- name: ([A-Za-z0-9_.-]+)\s*$`)
 
@@ -58,25 +58,32 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 func TestSchemaOwnershipProductionWiringHasOneMigratorAndNoOtherDDL(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
 	entrypoints := map[string]struct {
-		path string
-		gate string
+		path     string
+		gate     string
+		roleGate string
 	}{
-		"api":              {path: "services/api/tetralapi.go", gate: ".MigrateSchema(ctx)"},
-		"auth":             {path: "services/auth/wiring.go", gate: ".VerifySchema(ctx)"},
-		"queue":            {path: "services/queue/cmd/tetral-queue/main.go", gate: "verifySchema(ctx"},
-		"sandbox":          {path: "services/sandbox/cmd/tetral-sandbox/main.go", gate: "verifySchema(ctx"},
-		"bridge-api":       {path: "services/bridge/cmd/bridge-api/main.go", gate: "verifySchema(ctx"},
-		"job-runner":       {path: "services/bridge/cmd/job-runner/main.go", gate: "verifySchema(ctx"},
-		"event-stream":     {path: "services/event-stream/cmd/event-stream/main.go", gate: ".VerifySchema(ctx)"},
-		"cleanup":          {path: "services/cleanup/cmd/tetral-cleanup/main.go", gate: "verifySchema(ctx"},
-		"git-proxy":        {path: "services/git-proxy/cmd/git-proxy/main.go", gate: "verifySchema(ctx"},
-		"provider-gateway": {path: "services/gateway/packages/provider-gateway/src/command.ts", gate: "verifyPostgreSQLSchema"},
-		"mcp-connector":    {path: "services/gateway/packages/mcp-connector/src/command.ts", gate: "verifyPostgreSQLSchema"},
+		"api":              {path: "services/api/tetralapi.go", gate: ".VerifySchema(ctx)", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"auth":             {path: "services/auth/wiring.go", gate: ".VerifySchema(ctx)", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"queue":            {path: "services/queue/cmd/tetral-queue/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"sandbox":          {path: "services/sandbox/cmd/tetral-sandbox/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"bridge-api":       {path: "services/bridge/cmd/bridge-api/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"job-runner":       {path: "services/bridge/cmd/job-runner/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"event-stream":     {path: "services/event-stream/cmd/event-stream/main.go", gate: ".VerifySchema(ctx)", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"cleanup":          {path: "services/cleanup/cmd/tetral-cleanup/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"git-proxy":        {path: "services/git-proxy/cmd/git-proxy/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"provider-gateway": {path: "services/gateway/packages/provider-gateway/src/command.ts", gate: "verifyPostgreSQLReadiness", roleGate: "verifyPostgreSQLReadiness"},
+		"mcp-connector":    {path: "services/gateway/packages/mcp-connector/src/command.ts", gate: "verifyPostgreSQLReadiness", roleGate: "verifyPostgreSQLReadiness"},
 	}
 	for name, entrypoint := range entrypoints {
 		text := readSchemaOwnershipFile(t, filepath.Join(root, entrypoint.path))
 		if !strings.Contains(text, entrypoint.gate) {
 			t.Errorf("%s startup missing schema gate %q in %s", name, entrypoint.gate, entrypoint.path)
+		}
+		if !strings.Contains(text, entrypoint.roleGate) {
+			t.Errorf("%s startup missing runtime-role gate %q in %s", name, entrypoint.roleGate, entrypoint.path)
+		}
+		if strings.Index(text, entrypoint.roleGate) < strings.Index(text, entrypoint.gate) {
+			t.Errorf("%s startup checks runtime role before schema in %s", name, entrypoint.path)
 		}
 		if name != "api" && strings.Contains(text, "MigrateSchema") {
 			t.Errorf("non-owner %s references MigrateSchema", name)

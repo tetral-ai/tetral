@@ -4,6 +4,7 @@ WORKDIR /app/services/gateway
 COPY services/gateway/package.json services/gateway/bun.lock services/gateway/tsconfig.json ./
 COPY services/gateway/packages ./packages
 COPY internal/ts-observability /app/internal/ts-observability
+COPY database /app/database
 RUN bun install --frozen-lockfile
 RUN bun run build
 

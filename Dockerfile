@@ -10,6 +10,7 @@ COPY . .
 # stay a declared set — a new cmd/ directory does not silently ship.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ \
       ./services/api/cmd/tetral-api \
+      ./services/api/cmd/tetral-postgresql-roles \
       ./services/auth/cmd/tetral-auth \
       ./services/auth/cmd/tetral-bootstrap \
       ./services/bridge/cmd/bridge-api \

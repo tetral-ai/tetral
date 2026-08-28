@@ -25,7 +25,7 @@ import {
 } from "./providers/credentials.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
-import { SchemaVerificationError, verifyPostgreSQLSchema } from "../../schema/src/verify.js";
+import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
 import type { ProviderGatewayConfig } from "./config.js";
@@ -128,9 +128,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
   const sqlOptions = databasePoolOptions(input.config);
   const sql = input.builderOptions?.sqlFactory?.(sqlOptions) ?? new Bun.SQL(sqlOptions);
   try {
-    await (input.builderOptions?.schemaVerifier ?? verifyPostgreSQLSchema)(sql);
+    await (input.builderOptions?.schemaVerifier ?? verifyPostgreSQLReadiness)(sql);
   } catch (error) {
-    await sql.close?.({ timeout: 1 });
+    await closeSQLAfterStartupFailure(sql);
     throw error;
   }
   const credentialStore = new SQLGatewayCredentialStore(sql);
@@ -194,6 +194,16 @@ export async function buildProviderGatewayCommandDependencies(input: {
       await sql.close?.({ timeout: 1 });
     },
   };
+}
+
+async function closeSQLAfterStartupFailure(
+	sql: { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> },
+): Promise<void> {
+	try {
+		await sql.close?.({ timeout: 1 });
+	} catch {
+		// The verified public-safe startup error remains authoritative.
+	}
 }
 
 function databasePoolOptions(config: ProviderGatewayConfig): Bun.SQL.PostgresOrMySQLOptions {

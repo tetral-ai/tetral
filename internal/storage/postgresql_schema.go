@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+
+	"github.com/tetral-ai/tetral/database"
 )
 
 // PostgreSQL DDL constants for the workspace/auth foundation: the `workspaces`
@@ -1756,58 +1758,19 @@ END $$`
 
 )
 
-// rlsTargets enumerates the workspace-owned tables on which Engine's
+// postgresqlContract enumerates the workspace-owned tables on which Engine's
 // runtime traffic must be subject to RLS. Each table is enabled with
 // FORCE ROW LEVEL SECURITY so even the table owner is subject to RLS
 // in normal connections; superuser/BYPASSRLS roles still bypass it,
 // which is why VerifyRuntimeRole rejects those roles before serving.
-var rlsTargets = []string{
-	"sessions",
-	"session_threads",
-	"session_sandbox_bindings",
-	"sandbox_lifecycle_operations",
-	"environment_artifacts",
-	"session_resources",
-	"session_file_resources",
-	"session_memory_store_resources",
-	"session_github_repository_resources",
-	"session_git_tickets",
-	"session_resource_prefix_gc",
-	"session_events",
-	"session_event_stream_changes",
-	"session_event_idempotency_keys",
-	"session_messages",
-	"session_mcp_manifests",
-	"session_thread_context_prefixes",
-	"session_turn_retries",
-	"session_pending_tool_uses",
-	"session_transient_attachments",
-	"session_background_tasks",
-	"session_runtime_inbox",
-	"session_runtime_status",
-	"session_runtime_bindings",
-	"session_bridge_operations",
-	"session_runtime_tool_results",
-	"session_output_captures",
-	"sandbox_output_capture_operations",
-	"sandbox_output_capture_blobs",
-	"request_usage_details",
-	"session_provider_auth",
-	"queue_partition_counters",
-	"queue_jobs",
-	"agents",
-	"agent_versions",
-	"environments",
-	"vaults",
-	"credentials",
-	"api_keys",
-	"skills",
-	"skill_versions",
-	"file_objects",
-	"files",
-	"memory_stores",
-	"memories",
-	"memory_versions",
+var postgresqlContract = mustLoadPostgreSQLContract()
+
+func mustLoadPostgreSQLContract() database.PostgreSQL {
+	contract, err := database.LoadPostgreSQL()
+	if err != nil {
+		panic(err)
+	}
+	return contract
 }
 
 // PostgreSQLSchemaError is the storage-local origin error for the
@@ -1833,26 +1796,6 @@ type postgresqlSchemaExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-// InitializePostgreSQLSchema creates or refreshes the PostgreSQL
-// control-plane surface required by Engine in the database referenced
-// by db. The function is idempotent: every step is safe to run a second
-// time against an already-initialized database.
-//
-// Steps run in order: tables (dependents follow parents), indexes and shape
-// refresh steps, then RLS enable+force+policies. The
-// caller-supplied schema must already be selected (e.g. through pgx
-// runtime parameter `search_path`); InitializePostgreSQLSchema does
-// not switch schemas.
-//
-// db must be opened by an admin/superuser role for the first run on a
-// fresh database. Subsequent calls under the runtime role are also
-// safe: every DDL statement is no-op on already-initialized state, and
-// RLS recreate uses DROP IF EXISTS + CREATE so policy ownership stays
-// with the original creator.
-func InitializePostgreSQLSchema(ctx context.Context, db *sql.DB) error {
-	return executePostgreSQLSchemaSteps(ctx, db, postgresqlBaselineSteps())
-}
-
 func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchemaExecutor, steps []postgresqlSchemaStep) error {
 	for _, step := range steps {
 		if _, err := executor.ExecContext(ctx, step.ddl); err != nil {
@@ -1862,8 +1805,8 @@ func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchema
 	return nil
 }
 
-// postgresqlBaselineSteps is the single ordered payload used by both the
-// low-level initializer and migration version 1. Before the first release,
+// postgresqlBaselineSteps is the single ordered payload owned by migration
+// version 1. Before the first release,
 // schema edits replace this clean baseline and its checksum together. After
 // that release, later schema changes belong in new migration versions.
 func postgresqlBaselineSteps() []postgresqlSchemaStep {
@@ -1924,9 +1867,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
 
-		// Environment shape cleanup. The service has no migration-compatibility
-		// obligation for old Environment rows, but schema initialization remains
-		// idempotent.
+		// Current-state trigger that fills the immutable Agent version reference
+		// for Session rows created through the public API.
 		{"create_sessions_agent_version_id_function", createPostgreSQLSessionsAgentVersionIDFunction},
 		{"create_sessions_agent_version_id_trigger", createPostgreSQLSessionsAgentVersionIDTrigger},
 
@@ -2014,7 +1956,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	// (re)create the workspace_isolation policy. Each ALTER TABLE is
 	// idempotent. Policy refresh uses DROP IF EXISTS + CREATE because
 	// CREATE POLICY does not have IF NOT EXISTS in PostgreSQL 18.
-	for _, table := range rlsTargets {
+	for _, table := range postgresqlContract.WorkspaceTables {
 		steps = append(steps,
 			postgresqlSchemaStep{
 				name: "rls_enable_" + table,

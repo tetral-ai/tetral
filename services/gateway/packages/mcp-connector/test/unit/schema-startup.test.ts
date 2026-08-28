@@ -33,6 +33,23 @@ describe("mcp-connector schema startup", () => {
     expect(events).toEqual(["schema_verify", "close"]);
   });
 
+  test("pool-close failure cannot replace or disclose the schema failure", async () => {
+    Object.assign(process.env, validEnv());
+    const behind = new SchemaVerificationError("schema_behind");
+    const secret = "postgres://private-role:private-password@db.internal/tetral";
+    const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & { close: () => Promise<void> });
+    sql.close = async () => { throw new Error(secret); };
+
+    try {
+      await runMcpConnectorCommand({ sql, schemaVerifier: async () => { throw behind; } });
+      throw new Error("expected schema verification failure");
+    } catch (error) {
+      expect(error).toBe(behind);
+      expect(String(error)).not.toContain(secret);
+      expect(String(error)).not.toContain("postgres://");
+    }
+  });
+
   test("constructs SQL with the validated pool and statement bounds", async () => {
     Object.assign(process.env, validEnv());
     const behind = new SchemaVerificationError("schema_behind");
@@ -56,6 +73,21 @@ describe("mcp-connector schema startup", () => {
       connectionTimeout: 30,
       connection: { statement_timeout: 30_000 },
     });
+  });
+
+  test("default startup owner rejects a privileged runtime role before listeners", async () => {
+    Object.assign(process.env, validEnv());
+    const events: string[] = [];
+    const sql = ((<T>(strings: TemplateStringsArray): PromiseLike<T> => {
+      events.push(strings.join(""));
+      return Promise.resolve([{ is_superuser: false, bypasses_rls: true }] as T);
+    }) as SchemaSQL & { close: () => Promise<void> });
+    sql.close = async () => { events.push("close"); };
+
+    await expect(runMcpConnectorCommand({ sql })).rejects.toMatchObject({ kind: "runtime_role_invalid" });
+    expect(events).toHaveLength(2);
+    expect(events[0]).toContain("pg_roles");
+    expect(events[1]).toBe("close");
   });
 
   test("successful startup emits one started record after both listeners bind", async () => {
