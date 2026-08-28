@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "repository",
+      "owner": "repository",
+      "kind": "repository-integrity",
+      "profiles": ["fast", "affected", "full"],
+      "dependencies": [],
+      "paths": ["**/*.go", "**/*.ts", "**/*.md", "Makefile"]
+    },
+    {
+      "id": "go",
+      "owner": "go",
+      "kind": "go",
+      "profiles": ["fast", "affected", "full"],
+      "dependencies": [],
+      "paths": ["**/*.go", "go.mod", "go.sum"]
+    },
+    {
+      "id": "runtime",
+      "owner": "services/agent-runtime",
+      "kind": "bun-runtime",
+      "profiles": ["fast", "affected", "full"],
+      "dependencies": [],
+      "paths": ["services/agent-runtime/**", "services/gateway/packages/protocol/**", "proto/**"]
+    },
+    {
+      "id": "gateway",
+      "owner": "services/gateway",
+      "kind": "bun-gateway",
+      "profiles": ["fast", "affected", "full"],
+      "dependencies": [],
+      "paths": ["services/gateway/**", "proto/**"]
+    },
+    {
+      "id": "protocol",
+      "owner": "proto",
+      "kind": "protocol",
+      "profiles": ["affected", "full"],
+      "dependencies": [],
+      "paths": ["proto/**", "buf.gen.yaml", "buf.yaml"]
+    },
+    {
+      "id": "deployment",
+      "owner": "deploy",
+      "kind": "deployment",
+      "profiles": ["affected", "full"],
+      "dependencies": [],
+      "paths": ["deploy/**"]
+    },
+    {
+      "id": "sandbox-image",
+      "owner": "services/sandbox",
+      "kind": "sandbox-image",
+      "profiles": ["affected", "full"],
+      "dependencies": ["docker"],
+      "paths": ["Dockerfile.sandbox", "services/sandbox/**", "internal/sandbox/**", "scripts/run-sandbox-local-image-smoke.sh", "scripts/run-helper-privilege-container.sh"]
+    }
+  ],
+  "full_fallback_paths": [
+    ".github/**",
+    "internal/testinfra/**",
+    "Makefile",
+    "go.mod",
+    "go.sum",
+    "**/bun.lock",
+    "proto/**",
+    "internal/storage/postgresql_schema.go",
+    "internal/storage/postgresql_migrator.go"
+  ]
+}

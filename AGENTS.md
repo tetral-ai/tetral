@@ -31,17 +31,23 @@ is restated here.
 
 ## Build and test
 
-Go (one module, run from `engine/`): `make build` / `make test` / `make lint` /
-`make integration-test` / `make vulncheck`; `make run-<workload>` boots one
-workload locally. `make test` and `make integration-test` need
-`TETRAL_TEST_DATABASE_URL` pointing at a disposable PostgreSQL — without it the
-store-backed packages fail rather than skip (see `services/api/README.md`).
+Go (one module, run from the repository root): `make build` / `make test` /
+`make test-affected` / `make test-full` / `make lint` / `make vulncheck`;
+`make run-<workload>` boots one workload locally. `make test` is the fast,
+no-infrastructure profile. `make test-affected` selects the current change's
+owners and starts only their declared dependencies, falling back to Full when
+ownership is unknown. `make test-full` is the complete hermetic pull-request
+profile. Focused database tests still accept `TETRAL_TEST_DATABASE_URL` as an
+administrative DSN; each test receives a private cloned database and runtime
+role rather than a shared writable schema.
 
 TypeScript (Bun; run inside `services/agent-runtime` or
 `services/gateway` package dirs): `bun install --frozen-lockfile`,
 `bun run typecheck`, `bun run test`, `bun run build`.
 
-CI is `.github/workflows/engine-ci.yml` (repo root). Repository-wide
+The legacy `.github/workflows/engine-ci.yml` remains the authoritative CI
+workflow until the repository completes its measured workflow cutover.
+Repository-wide
 architecture guards live in `integration/static`; when a check fails, the
 failing test is the rule's authoritative text — read it.
 

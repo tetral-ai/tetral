@@ -628,6 +628,11 @@ func TestProductionCommandsDoNotEmitPlainStartupStderr(t *testing.T) {
 			return nil
 		}
 		rel := finalArchitectureRel(t, engineRoot, path)
+		// Repository test commands are developer tooling, not production
+		// workloads with the structured startup-log contract enforced here.
+		if strings.HasPrefix(rel, "internal/testinfra/cmd/") {
+			return nil
+		}
 		if !strings.Contains(rel, "/cmd/") && !strings.HasPrefix(rel, "internal/workload/") {
 			return nil
 		}

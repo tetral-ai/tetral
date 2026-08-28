@@ -74,13 +74,14 @@ The first tagged release (`0.1.0-alpha`) publishes the images and the chart.
 Until then, build from source:
 
 ```bash
-make build && make test          # Go services
+make build && make test          # build plus fast no-infrastructure evidence
 bun install && bun run build     # services/agent-runtime, services/gateway
 ```
 
 Before the first install, follow the
 [from-zero bootstrap sequence](docs/bootstrap.md) to generate the required
-Secrets, let API migrate the schema, and seed the initial workspace.
+Secrets, install the database roles/schema contract, and seed the initial
+workspace.
 
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.

@@ -28,6 +28,21 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/sandbox ./internal/sandbox/helper/cmd/sandbox
 
+# Full repository verification targets this stage explicitly. The nonce is
+# runner-owned so Docker cannot satisfy a new evidence run from a cached test
+# layer; it does not affect the release image below.
+FROM helper AS helper-privilege-test
+ARG TETRAL_HELPER_PRIVILEGE_TEST_NONCE
+RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
+    && go test ./internal/sandbox/helper \
+      -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' \
+      -count=1 -v
+RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
+    && rm -rf /tmp/tetral-runtime \
+    && go test ./internal/sandbox/helper/internal/cli \
+      -run '^TestBuiltHelperDetachedExecReturnsPromptly$' \
+      -count=1 -v
+
 FROM ${SANDBOX_RUNTIME_BASE_IMAGE}
 
 # Tool execution runs arbitrary user commands, so this image keeps a real
