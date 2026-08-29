@@ -68,6 +68,13 @@ jobs:
           bun-version-file: services/gateway/package.json
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+      - name: Prepare Go integration host
+        run: |
+          set -euo pipefail
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur -m true
       - name: Collect ordinary coverage
         env:
           TETRAL_CI_PRODUCER: coverage

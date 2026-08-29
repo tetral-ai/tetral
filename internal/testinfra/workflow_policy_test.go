@@ -62,6 +62,28 @@ func TestMainWorkflowRejectsUnpreparedGoIntegrationHost(t *testing.T) {
 	}
 }
 
+func TestMainCoverageRejectsUnpreparedGoIntegrationHost(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := t.TempDir()
+	source := filepath.Join(root, ".github", "workflows", "main-branch-verification.yml")
+	body, err := os.ReadFile(source) //nolint:gosec // source is a repository-owned workflow fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "          unshare -Ur -m true\n", "", 1))
+	destination := filepath.Join(fixture, ".github", "workflows")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(destination, "main-branch-verification.yml")
+	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyMainBranchWorkflow(fixture); err == nil {
+		t.Fatal("unprepared main coverage Go integration host passed")
+	}
+}
+
 func TestPullRequestWorkflowRejectsMissingRaceShard(t *testing.T) {
 	root := testRepositoryRoot(t)
 	fixture := t.TempDir()
