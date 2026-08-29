@@ -11,14 +11,20 @@ func TestNormalizeShadowSnapshotAcceptsExactComparablePair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.LegacyRunnerMinutes <= 0 || row.ShadowRunnerMinutes <= 0 || row.RequiredCheckSHA != row.TestMergeSHA || row.SnapshotDigest == "" {
+	if row.LegacyRunnerMinutes <= 0 || row.ShadowRunnerMinutes <= 0 || row.RequiredCheckSHA != row.EventHeadSHA || row.SnapshotDigest == "" {
 		t.Fatalf("incomplete normalized row: %+v", row)
 	}
 }
 
 func TestNormalizeShadowSnapshotRejectsInvalidJoins(t *testing.T) {
 	tests := map[string]func(*ShadowSnapshot){
-		"carrier":              func(value *ShadowSnapshot) { value.Shadow.CheckHeadSHA = "wrong" },
+		"carrier": func(value *ShadowSnapshot) { value.Shadow.CheckHeadSHA = "wrong" },
+		"merge as carrier": func(value *ShadowSnapshot) {
+			value.Shadow.CheckHeadSHA = value.TestMergeSHA
+			for index := range value.Shadow.Checks {
+				value.Shadow.Checks[index].HeadSHA = value.TestMergeSHA
+			}
+		},
 		"source":               func(value *ShadowSnapshot) { value.Shadow.WorkflowSourceSHA = "wrong" },
 		"app":                  func(value *ShadowSnapshot) { value.Shadow.SourceAppID++ },
 		"attempt":              func(value *ShadowSnapshot) { value.Shadow.RunAttempt = 2 },
@@ -48,8 +54,8 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 		Repository: "tetral-ai/tetral", PullRequest: 101, HeadRepository: "tetral-ai/tetral", AuthorAssociation: "OWNER",
 		ChangedPaths: []string{"internal/testinfra/shadow.go"},
 		EventHeadSHA: "head", EventBaseSHA: "base", TestMergeSHA: "merge", CollectedAt: started.Add(20 * time.Minute),
-		Legacy: ShadowWorkflowExecution{Name: "engine-ci", Path: ".github/workflows/engine-ci.yml", RunID: 1001, RunAttempt: 1, CheckSuiteID: 2001, CheckHeadSHA: "merge", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "legacy-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(15 * time.Minute)},
-		Shadow: ShadowWorkflowExecution{Name: "Pull Request Verification", Path: ".github/workflows/pull-request-verification.yml", RunID: 1002, RunAttempt: 1, CheckSuiteID: 2002, CheckHeadSHA: "merge", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "shadow-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(8 * time.Minute)},
+		Legacy: ShadowWorkflowExecution{Name: "engine-ci", Path: ".github/workflows/engine-ci.yml", RunID: 1001, RunAttempt: 1, CheckSuiteID: 2001, CheckHeadSHA: "head", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "legacy-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(15 * time.Minute)},
+		Shadow: ShadowWorkflowExecution{Name: "Pull Request Verification", Path: ".github/workflows/pull-request-verification.yml", RunID: 1002, RunAttempt: 1, CheckSuiteID: 2002, CheckHeadSHA: "head", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "shadow-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(8 * time.Minute)},
 	}
 	jobID := int64(1)
 	for producer, name := range legacyShadowProducers {
@@ -57,7 +63,7 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 			{Name: "Record legacy verification metadata", Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Second)},
 			{Name: "Run legacy evidence", Status: "completed", Conclusion: "success", StartedAt: started.Add(time.Second), CompletedAt: started.Add(time.Minute)},
 		}}
-		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
+		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "head", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
 		snapshot.Legacy.Jobs = append(snapshot.Legacy.Jobs, job)
 		snapshot.Legacy.Checks = append(snapshot.Legacy.Checks, check)
 		snapshot.LegacyMetadata = append(snapshot.LegacyMetadata, LegacyWorkflowMetadata{
@@ -77,12 +83,12 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 		job := ShadowJob{ID: jobID, Name: name, Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute), Steps: []ShadowJobStep{
 			{Name: "Run shadow evidence", Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute)},
 		}}
-		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
+		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "head", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
 		snapshot.Shadow.Jobs = append(snapshot.Shadow.Jobs, job)
 		snapshot.Shadow.Checks = append(snapshot.Shadow.Checks, check)
 		snapshot.ShadowResults = append(snapshot.ShadowResults, Result{
 			Plan: Plan{Revision: Revision{Head: "merge"}}, Status: "pass",
-			Execution: ExecutionEnvelope{Repository: snapshot.Repository, EventHeadSHA: "head", EventBaseSHA: "base", TestMergeSHA: "merge", RequiredCheckSHA: "merge", WorkflowSourceSHA: "source", Workflow: "Pull Request Verification", RunID: "1002", RunAttempt: strconv.Itoa(snapshot.Shadow.RunAttempt), Job: PRProducerJobs()[producer], Producer: producer},
+			Execution: ExecutionEnvelope{Repository: snapshot.Repository, EventHeadSHA: "head", EventBaseSHA: "base", TestMergeSHA: "merge", RequiredCheckSHA: "head", WorkflowSourceSHA: "source", Workflow: "Pull Request Verification", RunID: "1002", RunAttempt: strconv.Itoa(snapshot.Shadow.RunAttempt), Job: PRProducerJobs()[producer], Producer: producer},
 			StartedAt: started, FinishedAt: started.Add(time.Minute), Steps: []StepResult{{Group: producer, Command: []string{"test"}, Status: "pass", Elapsed: time.Minute}},
 		})
 		jobID++
@@ -90,7 +96,7 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 	gateJob := ShadowJob{ID: jobID, Name: "Merge Gate", Status: "completed", Conclusion: "success", StartedAt: started.Add(7 * time.Minute), CompletedAt: started.Add(8 * time.Minute), Steps: []ShadowJobStep{
 		{Name: "Reconcile exact-head evidence", Status: "completed", Conclusion: "success", StartedAt: started.Add(7 * time.Minute), CompletedAt: started.Add(8 * time.Minute)},
 	}}
-	gateCheck := ShadowCheck{ID: jobID + 100, Name: "Merge Gate", HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
+	gateCheck := ShadowCheck{ID: jobID + 100, Name: "Merge Gate", HeadSHA: "head", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
 	snapshot.Shadow.Jobs = append(snapshot.Shadow.Jobs, gateJob)
 	snapshot.Shadow.Checks = append(snapshot.Shadow.Checks, gateCheck)
 	return snapshot

@@ -94,7 +94,7 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptance
 		if row.GateConclusion != "success" || row.ArtifactConclusion != "success" {
 			reliability.Reasons = append(reliability.Reasons, "Merge Gate or producer evidence did not reconcile successfully")
 		}
-		if row.RequiredCheckSHA != row.TestMergeSHA || row.SnapshotDigest == "" {
+		if row.RequiredCheckSHA != row.EventHeadSHA || row.SnapshotDigest == "" {
 			reliability.Reasons = append(reliability.Reasons, "execution identity is incomplete")
 		}
 		dependencies, err := validateShadowDependencyObservability(row)

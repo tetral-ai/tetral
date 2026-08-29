@@ -63,13 +63,13 @@ func acceptanceRow(t *testing.T, index int) ShadowLedgerRow {
 	snapshot.EventHeadSHA += suffix
 	snapshot.EventBaseSHA += suffix
 	snapshot.TestMergeSHA += suffix
-	snapshot.Legacy.CheckHeadSHA = snapshot.TestMergeSHA
-	snapshot.Shadow.CheckHeadSHA = snapshot.TestMergeSHA
+	snapshot.Legacy.CheckHeadSHA = snapshot.EventHeadSHA
+	snapshot.Shadow.CheckHeadSHA = snapshot.EventHeadSHA
 	for item := range snapshot.Legacy.Checks {
-		snapshot.Legacy.Checks[item].HeadSHA = snapshot.TestMergeSHA
+		snapshot.Legacy.Checks[item].HeadSHA = snapshot.EventHeadSHA
 	}
 	for item := range snapshot.Shadow.Checks {
-		snapshot.Shadow.Checks[item].HeadSHA = snapshot.TestMergeSHA
+		snapshot.Shadow.Checks[item].HeadSHA = snapshot.EventHeadSHA
 	}
 	for item := range snapshot.LegacyMetadata {
 		snapshot.LegacyMetadata[item].CheckedOutSHA = snapshot.TestMergeSHA
@@ -81,7 +81,7 @@ func acceptanceRow(t *testing.T, index int) ShadowLedgerRow {
 		snapshot.ShadowResults[item].Execution.EventHeadSHA = snapshot.EventHeadSHA
 		snapshot.ShadowResults[item].Execution.EventBaseSHA = snapshot.EventBaseSHA
 		snapshot.ShadowResults[item].Execution.TestMergeSHA = snapshot.TestMergeSHA
-		snapshot.ShadowResults[item].Execution.RequiredCheckSHA = snapshot.TestMergeSHA
+		snapshot.ShadowResults[item].Execution.RequiredCheckSHA = snapshot.EventHeadSHA
 		snapshot.ShadowResults[item].Plan.Revision.Head = snapshot.TestMergeSHA
 	}
 	row, err := NormalizeShadowSnapshot(snapshot)

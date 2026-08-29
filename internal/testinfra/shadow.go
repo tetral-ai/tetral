@@ -215,10 +215,10 @@ func NormalizeShadowSnapshot(snapshot ShadowSnapshot) (ShadowLedgerRow, error) {
 		snapshot.Shadow.Name != "Pull Request Verification" || snapshot.Shadow.Path != ".github/workflows/pull-request-verification.yml" {
 		return ShadowLedgerRow{}, fmt.Errorf("shadow snapshot has missing legacy or new workflow")
 	}
-	if err := validateShadowExecution(snapshot.Legacy, snapshot.TestMergeSHA); err != nil {
+	if err := validateShadowExecution(snapshot.Legacy, snapshot.EventHeadSHA); err != nil {
 		return ShadowLedgerRow{}, fmt.Errorf("legacy execution: %w", err)
 	}
-	if err := validateShadowExecution(snapshot.Shadow, snapshot.TestMergeSHA); err != nil {
+	if err := validateShadowExecution(snapshot.Shadow, snapshot.EventHeadSHA); err != nil {
 		return ShadowLedgerRow{}, fmt.Errorf("shadow execution: %w", err)
 	}
 	if snapshot.Legacy.WorkflowSourceSHA == "" || snapshot.Legacy.WorkflowSourceSHA != snapshot.Shadow.WorkflowSourceSHA {
@@ -242,7 +242,7 @@ func NormalizeShadowSnapshot(snapshot ShadowSnapshot) (ShadowLedgerRow, error) {
 	shadowJobs := mapValues(shadowProducerJobs)
 	shadowJobs = append(shadowJobs, "Merge Gate")
 	shadowDuration, shadowQueue, shadowMinutes, shadowIntervals := shadowExecutionMetrics(snapshot.Shadow, shadowJobs, false)
-	gateConclusion, err := mergeGateConclusion(snapshot.Shadow, snapshot.TestMergeSHA)
+	gateConclusion, err := mergeGateConclusion(snapshot.Shadow, snapshot.EventHeadSHA)
 	if err != nil {
 		return ShadowLedgerRow{}, err
 	}
@@ -307,14 +307,14 @@ func shadowSnapshotDigest(snapshot ShadowSnapshot) (string, error) {
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-func validateShadowExecution(execution ShadowWorkflowExecution, testMergeSHA string) error {
+func validateShadowExecution(execution ShadowWorkflowExecution, requiredCheckSHA string) error {
 	if execution.RunID <= 0 || execution.RunAttempt <= 0 || execution.CheckSuiteID <= 0 {
 		return fmt.Errorf("run identity is incomplete")
 	}
 	if execution.RunAttempt == 1 && execution.RerunOf != 0 || execution.RunAttempt > 1 && execution.RerunOf <= 0 {
 		return fmt.Errorf("rerun ancestry is inconsistent")
 	}
-	if execution.SourceAppID != githubActionsAppID || execution.CheckHeadSHA != testMergeSHA {
+	if execution.SourceAppID != githubActionsAppID || execution.CheckHeadSHA != requiredCheckSHA {
 		return fmt.Errorf("check carrier or source App does not match")
 	}
 	if execution.CreatedAt.IsZero() || execution.StartedAt.Before(execution.CreatedAt) || !execution.CompletedAt.After(execution.StartedAt) {
@@ -343,7 +343,7 @@ func validateShadowExecution(execution ShadowWorkflowExecution, testMergeSHA str
 			return fmt.Errorf("check identity is missing or duplicated")
 		}
 		checkIDs[check.ID], checkNames[check.Name] = true, true
-		if check.HeadSHA != testMergeSHA || check.AppID != execution.SourceAppID || check.Status != "completed" || check.Conclusion == "" {
+		if check.HeadSHA != requiredCheckSHA || check.AppID != execution.SourceAppID || check.Status != "completed" || check.Conclusion == "" {
 			return fmt.Errorf("check %q has the wrong carrier or result", check.Name)
 		}
 	}
@@ -431,7 +431,7 @@ func validateShadowResults(snapshot ShadowSnapshot) (string, string, error) {
 	return requiredCheckSHA, artifactConclusion, nil
 }
 
-func mergeGateConclusion(execution ShadowWorkflowExecution, testMergeSHA string) (string, error) {
+func mergeGateConclusion(execution ShadowWorkflowExecution, requiredCheckSHA string) (string, error) {
 	var job *ShadowJob
 	for index := range execution.Jobs {
 		if execution.Jobs[index].Name == "Merge Gate" {
@@ -450,7 +450,7 @@ func mergeGateConclusion(execution ShadowWorkflowExecution, testMergeSHA string)
 			check = &execution.Checks[index]
 		}
 	}
-	if job == nil || check == nil || check.HeadSHA != testMergeSHA || check.AppID != githubActionsAppID ||
+	if job == nil || check == nil || check.HeadSHA != requiredCheckSHA || check.AppID != githubActionsAppID ||
 		job.Status != "completed" || check.Status != "completed" || job.Conclusion == "" || job.Conclusion != check.Conclusion {
 		return "", fmt.Errorf("merge Gate job and check do not reconcile")
 	}
