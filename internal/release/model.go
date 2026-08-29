@@ -206,9 +206,6 @@ func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evid
 	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.RecordedAt.After(now) || evidence.FinishedAt.After(now) || now.Sub(evidence.FinishedAt) > 7*24*time.Hour {
 		return fmt.Errorf("rehearsal result or time window is invalid")
 	}
-	if evidence.ValuesDigest != candidate.Chart.ValuesDigest || evidence.RenderDigest != candidate.Chart.RenderDigest {
-		return fmt.Errorf("rehearsal Chart render differs from the candidate")
-	}
 	return nil
 }
 

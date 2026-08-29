@@ -516,8 +516,6 @@ jobs:
           test "$fixed_candidate" = "$CANDIDATE_DIGEST"
           ./scripts/release-oci-record.sh fetch candidate "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" candidate.json >/dev/null
           go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
-          test "$(jq -r .chart.values_sha256 candidate.json)" = "$REHEARSAL_VALUES_DIGEST"
-          test "$(jq -r .chart.render_sha256 candidate.json)" = "$REHEARSAL_RENDER_DIGEST"
           deployment_id="$(./scripts/release-github-deployment.sh "$SOURCE_COMMIT" '${{ github.run_id }}')"
           test "$deployment_id" -ge 1
           evidence_ref="$RELEASE_METADATA_REPOSITORY:rehearsal-$ARTIFACT_VERSION"

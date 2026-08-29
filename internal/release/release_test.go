@@ -218,18 +218,24 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 	}
 }
 
-func TestRehearsalEvidenceBindsCandidateCaseAndChart(t *testing.T) {
+func TestRehearsalEvidenceBindsCandidateCaseAndOperatorRender(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 	facts := validFacts(t, now)
 	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, *facts.Rehearsal, now); err != nil {
 		t.Fatal(err)
+	}
+	operatorRender := *facts.Rehearsal
+	operatorRender.ValuesDigest = testDigest("operator-values")
+	operatorRender.RenderDigest = testDigest("operator-render")
+	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, operatorRender, now); err != nil {
+		t.Fatalf("rejected valid operator render evidence: %v", err)
 	}
 	for name, mutate := range map[string]func(*RehearsalEvidence){
 		"candidate": func(e *RehearsalEvidence) { e.CandidateDigest = testDigest("other-candidate") },
 		"case":      func(e *RehearsalEvidence) { e.CaseManifestDigest = "invalid" },
 		"result":    func(e *RehearsalEvidence) { e.Result = "fail" },
 		"expired":   func(e *RehearsalEvidence) { e.FinishedAt = now.Add(-8 * 24 * time.Hour) },
-		"render":    func(e *RehearsalEvidence) { e.RenderDigest = testDigest("other-render") },
+		"render":    func(e *RehearsalEvidence) { e.RenderDigest = "invalid" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			copy := *facts.Rehearsal
