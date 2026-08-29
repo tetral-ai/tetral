@@ -166,6 +166,9 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 			return fmt.Errorf("prepare pinned SDK evidence: %w", err)
 		}
 	}
+	if err := installSDKDependencies(ctx, directory); err != nil {
+		return err
+	}
 	if err := verifySDKCheckout(ctx, directory); err != nil {
 		return err
 	}
@@ -174,6 +177,18 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 		"TETRAL_RUN_GO_BUN_GRPC_INTEROP=1",
 	)
 	m.evidence = append(m.evidence, DependencyEvidence{Name: "sdk", Source: "pinned-public-checkout", Identity: forkSDKCommit})
+	return nil
+}
+
+func installSDKDependencies(ctx context.Context, directory string) error {
+	if err := runQuietInDir(ctx, directory, "bun", "install", "--no-save", "--ignore-scripts"); err != nil {
+		return fmt.Errorf("install pinned SDK dependencies: %w", err)
+	}
+	for _, name := range []string{"bun.lock", "bun.lockb"} {
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove generated SDK lockfile: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -420,6 +435,14 @@ func runQuiet(ctx context.Context, name string, arguments ...string) error {
 	// Callers select executables and arguments from the runner's closed dependency inventory.
 	//nolint:gosec
 	command := exec.CommandContext(ctx, name, arguments...)
+	return command.Run()
+}
+
+func runQuietInDir(ctx context.Context, directory, name string, arguments ...string) error {
+	// Callers select the directory, executable, and arguments from the closed dependency inventory.
+	//nolint:gosec
+	command := exec.CommandContext(ctx, name, arguments...)
+	command.Dir = directory
 	return command.Run()
 }
 

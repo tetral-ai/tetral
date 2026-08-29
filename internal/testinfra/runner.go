@@ -39,6 +39,8 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	}
 	if options.OutputDir == "" {
 		options.OutputDir = filepath.Join(options.Root, ".test-results", result.StartedAt.Format("20060102T150405.000000000Z"))
+	} else if !filepath.IsAbs(options.OutputDir) {
+		options.OutputDir = filepath.Join(options.Root, options.OutputDir)
 	}
 	if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
 		return result, err
@@ -337,7 +339,10 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	if spec.Artifact != "" {
 		artifactPath = filepath.Join(outputDir, spec.Artifact)
 	}
-	logName := spec.Artifact + ".log"
+	logName := ""
+	if spec.Artifact != "" {
+		logName = spec.Artifact + ".log"
+	}
 	if spec.Kind == "go-json" {
 		logName = spec.Artifact
 	}

@@ -1,11 +1,40 @@
 package testinfra
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestRunnerAnchorsRelativeEvidencePathsAtRepositoryRoot(t *testing.T) {
+	root := t.TempDir()
+	result, err := Execute(context.Background(), Plan{}, RunOptions{Root: root, OutputDir: ".test-results/example"})
+	if err != nil || result.Status != "pass" {
+		t.Fatalf("empty evidence run = %s/%v", result.Status, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".test-results", "example", "result.json")); err != nil {
+		t.Fatalf("relative evidence output was not rooted at the repository: %v", err)
+	}
+}
+
+func TestStepWithoutStructuredArtifactUsesVisibleDiagnosticName(t *testing.T) {
+	output := t.TempDir()
+	manager := &dependencyManager{environment: os.Environ()}
+	step, err := runStep(context.Background(), t.TempDir(), "protocol", commandSpec{Arguments: []string{"go", "version"}}, manager, output)
+	if err != nil || step.Status != "pass" {
+		t.Fatalf("diagnostic step = %s/%v", step.Status, err)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || strings.HasPrefix(entries[0].Name(), ".") || !strings.HasSuffix(entries[0].Name(), ".log") {
+		t.Fatalf("diagnostic files = %v; want one visible log", entries)
+	}
+}
 
 func TestProcessAndStructuredReportProduceOneDecisiveVerdict(t *testing.T) {
 	processFailure := errors.New("exit status 1")
