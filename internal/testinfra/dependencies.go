@@ -128,7 +128,7 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 		case "bun-workspaces":
 			if root == "" {
 				_ = manager.stopBounded()
-				return nil, fmt.Errorf("Bun workspace dependency requires a repository root")
+				return nil, fmt.Errorf("bun workspace dependency requires a repository root")
 			}
 			identity, err := installBunWorkspaces(ctx, root)
 			if err != nil {
@@ -147,6 +147,8 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 func installBunWorkspaces(ctx context.Context, root string) (string, error) {
 	hash := sha256.New()
 	for _, directory := range []string{"services/agent-runtime", "services/gateway"} {
+		// Both directories are fixed repository-owned workspace roots.
+		//nolint:gosec
 		lockfile, err := os.ReadFile(filepath.Join(root, directory, "bun.lock"))
 		if err != nil {
 			return "", fmt.Errorf("read %s lockfile: %w", directory, err)
