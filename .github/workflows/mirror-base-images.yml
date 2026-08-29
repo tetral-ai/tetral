@@ -1,76 +1,103 @@
-name: mirror-base-images
+name: Base Image Maintenance
 
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        description: Immutable upstream image (repository@sha256:digest)
+        required: true
+        type: string
+      target_repository:
+        description: Approved mirror repository without a tag
+        required: true
+        default: ghcr.io/tetral-ai/mirror/manual
+        type: string
+      platform:
+        description: Explicit source platform
+        required: true
+        default: linux/amd64
+        type: choice
+        options:
+          - linux/amd64
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: mirror-base-images
+  group: base-image-maintenance-${{ inputs.target_repository }}-${{ inputs.source }}
   cancel-in-progress: false
 
 jobs:
   mirror:
+    name: Mirror immutable base
+    environment: release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - primary: public.ecr.aws/docker/library/golang:1.25.13
-            fallback: docker.io/library/golang:1.25.13
-            target: ghcr.io/tetral-ai/mirror/golang:1.25.13
-          - primary: public.ecr.aws/docker/library/ubuntu:24.04
-            fallback: docker.io/library/ubuntu:24.04
-            target: ghcr.io/tetral-ai/mirror/ubuntu:24.04
-          - primary: public.ecr.aws/docker/library/postgres:18-alpine
-            fallback: docker.io/library/postgres:18-alpine
-            target: ghcr.io/tetral-ai/mirror/postgres:18-alpine
-          - primary: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-            fallback: ""
-            target: ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z
     steps:
+      - name: Validate immutable identities
+        id: identity
+        env:
+          SOURCE: ${{ inputs.source }}
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "source must be repository@sha256:digest" >&2
+            exit 1
+          fi
+          if [[ ! "$TARGET_REPOSITORY" =~ ^ghcr\.io/tetral-ai/mirror/[a-z0-9._/-]+$ ]]; then
+            echo "target repository is outside the approved mirror namespace" >&2
+            exit 1
+          fi
+          test "$PLATFORM" = "linux/amd64"
+          source_digest="${SOURCE##*@sha256:}"
+          target_tag="sha256-$source_digest"
+          echo "target=$TARGET_REPOSITORY:$target_tag" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
-        # docker/login-action@v4.5.1
         uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror ${{ matrix.target }}
+      - name: Mirror without overwrite
         env:
-          PRIMARY: ${{ matrix.primary }}
-          FALLBACK: ${{ matrix.fallback }}
-          TARGET: ${{ matrix.target }}
+          SOURCE: ${{ inputs.source }}
+          PLATFORM: ${{ inputs.platform }}
+          TARGET: ${{ steps.identity.outputs.target }}
         run: |
-          if docker pull "$PRIMARY"; then
-            selected_source="$PRIMARY"
-          elif [ -n "$FALLBACK" ]; then
-            echo "primary mirror unavailable; falling back to Docker Hub"
-            docker pull "$FALLBACK"
-            selected_source="$FALLBACK"
-          else
-            echo "primary image unavailable and no fallback is configured" >&2
-            exit 1
+          set -euo pipefail
+          source_identity="$(docker buildx imagetools inspect "$SOURCE" --format '{{json .Manifest}}')"
+          if existing="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest}}' 2>/dev/null)"; then
+            test "$existing" = "$source_identity" || {
+              echo "target identity already exists with different bytes" >&2
+              exit 1
+            }
+            echo "target already contains the exact immutable identity"
+            exit 0
           fi
-
-          docker tag "$selected_source" "$TARGET"
-          push_output="$(docker push "$TARGET" 2>&1)"
-          printf '%s\n' "$push_output"
-          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' <<<"$push_output" | tail -n 1)"
-          if [ -z "$digest" ]; then
-            echo "mirror push did not report an image digest" >&2
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"
+          mirrored="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest}}')"
+          test "$mirrored" = "$source_identity" || {
+            echo "mirrored identity differs from the selected source" >&2
             exit 1
-          fi
+          }
 
+      - name: Report the Gate-protected source update
+        env:
+          SOURCE: ${{ inputs.source }}
+          TARGET: ${{ steps.identity.outputs.target }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
           {
-            echo "### $TARGET"
+            echo "### Immutable base image"
             echo
-            echo '```'
-            echo "$TARGET"
-            echo "$TARGET@$digest"
-            echo '```'
+            echo "- source: \`$SOURCE\`"
+            echo "- mirror: \`$TARGET\`"
+            echo "- platform: \`$PLATFORM\`"
+            echo
+            echo "Update the owning Dockerfile through a normal Merge Gate-protected pull request."
           } >> "$GITHUB_STEP_SUMMARY"
