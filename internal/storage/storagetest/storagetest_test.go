@@ -233,38 +233,30 @@ func TestTemplateCloneMatchesHelperBootstrapContract(t *testing.T) {
 }
 
 func TestConnectedTemplateRefusesClone(t *testing.T) {
-	_ = NewPostgreSQLDB(t)
+	source := NewPostgreSQLDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	sourceConn, err := source.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sourceConn.Close() }()
+	var sourceDatabase string
+	if err := sourceConn.QueryRowContext(ctx, "SELECT current_database()").Scan(&sourceDatabase); err != nil {
+		t.Fatal(err)
+	}
 	config, err := parseControlConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	control := openPool(config)
 	defer func() { _ = control.Close() }()
-	var template string
-	if err := control.QueryRowContext(ctx, `SELECT datname FROM pg_database WHERE datname LIKE $1 AND datistemplate AND NOT datallowconn ORDER BY datname LIMIT 1`, templatePrefix+"%").Scan(&template); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := control.ExecContext(ctx, "ALTER DATABASE "+template+" WITH ALLOW_CONNECTIONS true IS_TEMPLATE false"); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_, _ = control.ExecContext(context.Background(), "ALTER DATABASE "+template+" WITH ALLOW_CONNECTIONS false IS_TEMPLATE true")
-	}()
-	templateConfig := config.Copy()
-	templateConfig.Database = template
-	connected := openPool(templateConfig)
-	if err := connected.PingContext(ctx); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = connected.Close() }()
 	suffix, err := randomHex(5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	target := clonePrefix + "connected_" + suffix
-	if _, err := control.ExecContext(ctx, "CREATE DATABASE "+target+" TEMPLATE "+template); err == nil {
+	if err := createDatabaseClone(ctx, control, target, sourceDatabase); err == nil {
 		_, _ = control.ExecContext(context.Background(), "DROP DATABASE "+target+" WITH (FORCE)")
 		t.Fatal("PostgreSQL cloned a template with an active connection")
 	}
