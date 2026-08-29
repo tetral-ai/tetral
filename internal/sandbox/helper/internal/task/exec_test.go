@@ -380,7 +380,7 @@ func runPdeathsigHelper(t *testing.T) {
 		t.Fatal("TETRAL_PDEATHSIG_WORKSPACE is required")
 	}
 	input, err := json.Marshal(map[string]any{
-		"cmd":     `printf "$$" > child.pid; exec sleep 30`,
+		"cmd":     `printf "$$" > child.pid.tmp; mv child.pid.tmp child.pid; exec sleep 30`,
 		"cwd":     workspace,
 		"wait_ms": 50000,
 	})
@@ -405,7 +405,7 @@ func runPdeathsigDescendantHelper(t *testing.T) {
 		t.Fatal("TETRAL_PDEATHSIG_WORKSPACE is required")
 	}
 	input, err := json.Marshal(map[string]any{
-		"cmd":     `sleep 30 & printf "$!" > descendant.pid; wait`,
+		"cmd":     `sleep 30 & printf "$!" > descendant.pid.tmp; mv descendant.pid.tmp descendant.pid; wait`,
 		"cwd":     workspace,
 		"wait_ms": 50000,
 	})
