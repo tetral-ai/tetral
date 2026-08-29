@@ -138,7 +138,7 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 		switch exclusion.Capability {
 		case "postgresql", "minio", "docker", "bun-workspaces":
 			set[exclusion.Capability] = true
-		case "external-sdk-checkout":
+		case "external-sdk-checkout", "cross-language-integration":
 			set["sdk"] = true
 		}
 	}

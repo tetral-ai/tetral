@@ -215,6 +215,13 @@ func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
 	}
 }
 
+func TestCrossLanguageIntegrationDeclaresPinnedSDKDependency(t *testing.T) {
+	dependencies := dependenciesForCapabilities([]Exclusion{{Capability: "cross-language-integration"}})
+	if !slices.Equal(dependencies, []string{"sdk"}) {
+		t.Fatalf("cross-language dependencies = %v; want [sdk]", dependencies)
+	}
+}
+
 func TestPlanReconciliationRejectsOmittedAndDuplicateGoEvidence(t *testing.T) {
 	root := repositoryRootForTest(t)
 	inventory, err := LoadInventory()

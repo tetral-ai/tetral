@@ -59,6 +59,12 @@ func VerifyPullRequestWorkflow(root string) error {
 		if job == nil || scalar(mappingValue(job, "name")) != name {
 			return fmt.Errorf("pull request job %q is missing or misnamed", id)
 		}
+		if !jobChecksOutFullHistory(job) {
+			return fmt.Errorf("pull request job %q does not check out complete repository history", id)
+		}
+	}
+	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
+		return fmt.Errorf("go Race does not prepare its integration host")
 	}
 	gate := mappingValue(jobs, "merge-gate")
 	if scalar(mappingValue(gate, "if")) != "always()" {
@@ -85,6 +91,27 @@ func VerifyPullRequestWorkflow(root string) error {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
 	}
 	return nil
+}
+
+func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if scalar(mappingValue(step, "uses")) != "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" {
+			continue
+		}
+		inputs := mappingValue(step, "with")
+		return scalar(mappingValue(inputs, "fetch-depth")) == "0" && scalar(mappingValue(inputs, "persist-credentials")) == "false"
+	}
+	return false
+}
+
+func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
+			continue
+		}
+		return scalar(mappingValue(mappingValue(step, "with"), "needs-go-test-host")) == "true"
+	}
+	return false
 }
 
 func VerifyLegacyShadowSidecar(root string) error {

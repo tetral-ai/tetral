@@ -35,6 +35,10 @@ inputs:
     description: Install golangci-lint without running it outside the evidence runner
     required: false
     default: 'false'
+  needs-go-test-host:
+    description: Prepare host capabilities required by the complete Go integration suite
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -67,6 +71,21 @@ runs:
       with:
         version: v2.11.4
         install-only: true
+
+    - name: Prepare Go integration host
+      if: inputs.needs-go-test-host == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v rg >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep
+        fi
+        rg --version
+        if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+        unshare -Ur -m true
 
     - name: Run ${{ inputs.group }} evidence
       shell: bash
