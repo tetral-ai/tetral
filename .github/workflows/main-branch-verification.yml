@@ -81,7 +81,7 @@ jobs:
         run: go run ./internal/testinfra/cmd/tetral-coverage --output .test-results/coverage
       - name: Upload coverage reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: main-coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: .test-results/coverage

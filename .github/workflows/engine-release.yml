@@ -380,7 +380,7 @@ jobs:
           fi
           jq -n --arg image "$IMAGE" --arg digest "$DIGEST" --arg child "$child" --arg top_media "$top_media" --arg child_media "$child_media" '{image:$image,top_level_digest:$digest,child_digest:$child,top_level_media_type:$top_media,child_media_type:$child_media}' > "image-$IMAGE.json"
       - name: Transfer identity to candidate finalizer
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-image-${{ matrix.image }}
           path: image-${{ matrix.image }}.json
@@ -420,7 +420,7 @@ jobs:
       - name: Set up ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Download exact image identities
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: candidate-image-*
           path: image-identities
