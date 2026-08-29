@@ -81,10 +81,9 @@ edge:
 
 image:
   registry: ghcr.io/tetral-ai
-  # Local and source-checkout rendering uses this explicit development tag.
-  # A release Candidate Manifest supplies every digest below and overrides the
-  # Chart version, appVersion, and observability.serviceVersion together.
-  tag: 0.0.0-dev
+  # Empty means Chart.appVersion: 0.0.0-dev in a source checkout and the exact
+  # numbered version in a packaged release. Operators may still override it.
+  tag: ""
   digests:
     tetral: ""
     gateway: ""

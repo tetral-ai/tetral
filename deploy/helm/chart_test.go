@@ -493,17 +493,42 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	digest := "sha256:" + strings.Repeat("a", 64)
-	rendered := uniqueObjects(t, renderChart(
+	development := uniqueObjects(t, renderChart(t, helm, chart))
+	requireManifestPathString(
 		t,
-		helm,
-		chart,
-		"image.tag=0.1.0-alpha.7",
-		"image.digests.tetral="+digest,
-		"image.digests.gateway="+digest,
-		"image.digests.agent-runtime="+digest,
-		"image.digests.sandbox="+digest,
-	))
+		development["v1|ConfigMap|tetral-system|api-config"],
+		"ghcr.io/tetral-ai/sandbox:0.0.0-dev",
+		"data",
+		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
+	)
+
+	version := "0.1.0-alpha.7"
+	digest := "sha256:" + strings.Repeat("a", 64)
+	output := t.TempDir()
+	packageCommand := exec.Command(helm, "package", chart, "--version", version, "--app-version", version, "--destination", output) //nolint:gosec // Helm path, chart and version are test-owned.
+	if result, err := packageCommand.CombinedOutput(); err != nil {
+		t.Fatalf("helm package release chart: %v\n%s", err, result)
+	}
+	releaseValues := map[string]any{
+		"image": map[string]any{"digests": map[string]string{
+			"tetral": digest, "gateway": digest, "agent-runtime": digest, "sandbox": digest,
+		}},
+		"observability": map[string]string{"serviceVersion": version},
+	}
+	valuesBody, err := yaml.Marshal(releaseValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valuesPath := filepath.Join(output, "release-values.yaml")
+	if err := os.WriteFile(valuesPath, valuesBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	renderCommand := exec.Command(helm, "template", "tetral", filepath.Join(output, "tetral-"+version+".tgz"), "-f", valuesPath) //nolint:gosec // Helm path and test-owned package are fixed.
+	renderBody, err := renderCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template release chart: %v\n%s", err, renderBody)
+	}
+	rendered := uniqueObjects(t, decodeManifestObjects(t, bytes.NewReader(renderBody), "packaged release chart"))
 	for _, object := range rendered {
 		for _, value := range nestedFieldValues(object, "image") {
 			image, ok := value.(string)
@@ -516,7 +541,7 @@ func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *tes
 	requireManifestPathString(
 		t,
 		apiConfig,
-		"ghcr.io/tetral-ai/sandbox:0.1.0-alpha.7",
+		"ghcr.io/tetral-ai/sandbox:"+version,
 		"data",
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
 	)

@@ -224,6 +224,7 @@ func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
 
 func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.T) {
 	for _, invalid := range []string{
+		"ghcr.io/tetral-ai/new-service",
 		"ghcr.io/tetral-ai/new-service:latest",
 		"ghcr.io/tetral-ai/new-service:main",
 		"ghcr.io/tetral-ai/new-service:0.1.0-alpha",
@@ -237,6 +238,7 @@ func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.
 		"ghcr.io/tetral-ai/new-service:0.1.0-alpha.12",
 		"ghcr.io/tetral-ai/new-service@sha256:" + strings.Repeat("a", 64),
 		"ghcr.io/tetral-ai/new-service:<platform version>",
+		"oci://ghcr.io/tetral-ai/charts/tetral --version 0.1.0-alpha.12",
 	} {
 		if err := validateReleaseSurfaceIdentity(valid); err != nil {
 			t.Fatalf("fixed release identity %q failed: %v", valid, err)
@@ -281,7 +283,8 @@ var immutableDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 func validateReleaseSurfaceIdentity(text string) error {
 	text = strings.ReplaceAll(text, "<platform version>", "0.1.0-alpha.1")
 	text = digestPlaceholder.ReplaceAllString(text, "@sha256:"+strings.Repeat("a", 64))
-	for _, reference := range ownedOCIReference.FindAllString(text, -1) {
+	for _, location := range ownedOCIReference.FindAllStringIndex(text, -1) {
+		reference := text[location[0]:location[1]]
 		if before, digest, found := strings.Cut(reference, "@"); found {
 			if before == "" || !immutableDigest.MatchString(digest) {
 				return fmt.Errorf("owned OCI reference %q is not digest-addressed", reference)
@@ -291,7 +294,10 @@ func validateReleaseSurfaceIdentity(text string) error {
 		lastSlash := strings.LastIndex(reference, "/")
 		colon := strings.LastIndex(reference, ":")
 		if colon <= lastSlash {
-			continue
+			if location[0] >= len("oci://") && text[location[0]-len("oci://"):location[0]] == "oci://" {
+				continue
+			}
+			return fmt.Errorf("owned OCI reference %q has no explicit tag or digest", reference)
 		}
 		tag := reference[colon+1:]
 		if tag != "0.0.0-dev" && !numberedAlphaTag.MatchString(tag) {
