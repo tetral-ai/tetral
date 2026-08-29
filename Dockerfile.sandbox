@@ -71,7 +71,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG RCLONE_RELEASE=1.71.1
 ARG RCLONE_ARCHIVE_SHA256=417e3da236f3a12d292da4e7287d67b1df558b8c2b280d092e563958ed724be7
 RUN curl -fsSL -o /tmp/rclone.zip \
-      "https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip" \
+      "https://github.com/rclone/rclone/releases/download/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip" \
  && printf '%s  /tmp/rclone.zip\n' "${RCLONE_ARCHIVE_SHA256}" | sha256sum -c - \
  && unzip -q -j /tmp/rclone.zip "rclone-v${RCLONE_RELEASE}-linux-amd64/rclone" -d /usr/bin \
  && chmod 0755 /usr/bin/rclone \
