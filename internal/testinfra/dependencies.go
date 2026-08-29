@@ -3,6 +3,7 @@ package testinfra
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -124,12 +125,39 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 				_ = manager.stopBounded()
 				return nil, err
 			}
+		case "bun-workspaces":
+			if root == "" {
+				_ = manager.stopBounded()
+				return nil, fmt.Errorf("Bun workspace dependency requires a repository root")
+			}
+			identity, err := installBunWorkspaces(ctx, root)
+			if err != nil {
+				_ = manager.stopBounded()
+				return nil, err
+			}
+			manager.evidence = append(manager.evidence, DependencyEvidence{Name: "bun-workspaces", Source: "repository-lockfiles", Identity: identity})
 		default:
 			_ = manager.stopBounded()
 			return nil, fmt.Errorf("unknown test dependency %q", dependency)
 		}
 	}
 	return manager, nil
+}
+
+func installBunWorkspaces(ctx context.Context, root string) (string, error) {
+	hash := sha256.New()
+	for _, directory := range []string{"services/agent-runtime", "services/gateway"} {
+		lockfile, err := os.ReadFile(filepath.Join(root, directory, "bun.lock"))
+		if err != nil {
+			return "", fmt.Errorf("read %s lockfile: %w", directory, err)
+		}
+		_, _ = hash.Write([]byte(directory + "\x00"))
+		_, _ = hash.Write(lockfile)
+		if err := runQuietInDir(ctx, filepath.Join(root, directory), "bun", "install", "--frozen-lockfile"); err != nil {
+			return "", fmt.Errorf("install %s dependencies: %w", directory, err)
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (m *dependencyManager) startSDK(ctx context.Context) error {

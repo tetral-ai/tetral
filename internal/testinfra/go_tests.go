@@ -136,7 +136,7 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 	set := map[string]bool{}
 	for _, exclusion := range exclusions {
 		switch exclusion.Capability {
-		case "postgresql", "minio", "docker":
+		case "postgresql", "minio", "docker", "bun-workspaces":
 			set[exclusion.Capability] = true
 		case "external-sdk-checkout":
 			set["sdk"] = true
@@ -213,6 +213,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 			return nil, nil, err
 		}
 		infrastructureImports := map[string]string{}
+		commandImports := map[string]bool{}
 		for _, spec := range file.Imports {
 			importPath, _ := strconv.Unquote(spec.Path.Value)
 			if importPath == "github.com/tetral-ai/tetral/internal/storage/storagetest" {
@@ -221,6 +222,13 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 					name = spec.Name.Name
 				}
 				infrastructureImports[name] = "postgresql"
+			}
+			if importPath == "os/exec" {
+				name := "exec"
+				if spec.Name != nil {
+					name = spec.Name.Name
+				}
+				commandImports[name] = true
 			}
 		}
 		for _, declaration := range file.Decls {
@@ -253,6 +261,22 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 							item.infrastructure = true
 							item.capability = capability
 							item.reason = "calls the repository PostgreSQL test helper"
+						}
+						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext") {
+							argument := 0
+							if selector.Sel.Name == "CommandContext" {
+								argument = 1
+							}
+							if argument < len(call.Args) {
+								if literal, ok := call.Args[argument].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+									value, _ := strconv.Unquote(literal.Value)
+									if value == "bun" {
+										item.infrastructure = true
+										item.capability = "bun-workspaces"
+										item.reason = "executes a repository Bun composition fixture"
+									}
+								}
+							}
 						}
 					}
 					switch selector.Sel.Name {

@@ -194,6 +194,27 @@ func TestFastGoClassificationFollowsPostgreSQLHelperCallsAcrossFiles(t *testing.
 	t.Fatalf("indirect PostgreSQL test classification: selected=%v excluded=%#v", selected, excluded)
 }
 
+func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
+	root := repositoryRootForTest(t)
+	command := exec.Command("go", "list", "-json", "./services/bridge")
+	command.Dir = root
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkg listedPackage
+	if err := decodeOnePackage(output, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	dependencies, err := goPackageDependencies(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(dependencies, "bun-workspaces") {
+		t.Fatalf("Bridge dependencies = %v; want bun-workspaces", dependencies)
+	}
+}
+
 func TestPlanReconciliationRejectsOmittedAndDuplicateGoEvidence(t *testing.T) {
 	root := repositoryRootForTest(t)
 	inventory, err := LoadInventory()
