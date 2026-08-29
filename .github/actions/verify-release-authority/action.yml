@@ -1,0 +1,22 @@
+name: Verify Release Authority
+description: Read back the protected environment and GHCR package authority before a release write
+inputs:
+  package-creation-authorization-digest:
+    description: Exact authorization digest for verified not-found package targets
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Set up Go for release validation
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-version: '1.25.13'
+        cache-dependency-path: go.sum
+    - name: Read back protected GitHub authority
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_ACTOR_ID: ${{ github.actor_id }}
+        PACKAGE_CREATION_AUTHORIZATION_DIGEST: ${{ inputs.package-creation-authorization-digest }}
+      run: ./scripts/verify-release-github-authority.sh

@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|artifact|state|promotion-plan|cleanup-plan|verify-bases|environment-plan|package-preflight>")
+		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|state|promotion-plan|cleanup-plan|verify-bases|environment-plan|package-preflight>")
 	}
 	var err error
 	switch os.Args[1] {
@@ -21,6 +21,10 @@ func main() {
 		err = validateVersion(os.Args[2:])
 	case "validate-candidate":
 		err = validateCandidate(os.Args[2:])
+	case "validate-rehearsal":
+		err = validateRehearsal(os.Args[2:])
+	case "validate-authorization":
+		err = validateAuthorization(os.Args[2:])
 	case "artifact":
 		err = buildArtifact(os.Args[2:])
 	case "state":
@@ -70,6 +74,50 @@ func validateCandidate(arguments []string) error {
 		return err
 	}
 	return writeJSON(os.Stdout, candidate)
+}
+
+func validateRehearsal(arguments []string) error {
+	flags := flag.NewFlagSet("validate-rehearsal", flag.ContinueOnError)
+	candidatePath := flags.String("candidate", "", "candidate JSON")
+	candidateDigest := flags.String("candidate-digest", "", "Candidate Manifest digest")
+	evidencePath := flags.String("evidence", "", "rehearsal evidence JSON")
+	nowValue := flags.String("now", "", "RFC3339 decision time")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	var candidate releasecontract.CandidateManifest
+	var evidence releasecontract.RehearsalEvidence
+	if err := readJSON(*candidatePath, &candidate); err != nil {
+		return err
+	}
+	if err := readJSON(*evidencePath, &evidence); err != nil {
+		return err
+	}
+	now, err := parseTime(*nowValue)
+	if err != nil {
+		return err
+	}
+	return releasecontract.ValidateRehearsal(candidate, *candidateDigest, evidence, now)
+}
+
+func validateAuthorization(arguments []string) error {
+	flags := flag.NewFlagSet("validate-authorization", flag.ContinueOnError)
+	candidatePath := flags.String("candidate", "", "candidate JSON")
+	candidateDigest := flags.String("candidate-digest", "", "Candidate Manifest digest")
+	evidenceDigest := flags.String("evidence-digest", "", "Rehearsal Evidence digest")
+	authorizationPath := flags.String("authorization", "", "authorization JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	var candidate releasecontract.CandidateManifest
+	var authorization releasecontract.Authorization
+	if err := readJSON(*candidatePath, &candidate); err != nil {
+		return err
+	}
+	if err := readJSON(*authorizationPath, &authorization); err != nil {
+		return err
+	}
+	return releasecontract.ValidateAuthorization(candidate, *candidateDigest, *evidenceDigest, authorization)
 }
 
 func buildArtifact(arguments []string) error {

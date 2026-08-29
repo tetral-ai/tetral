@@ -62,9 +62,10 @@ type ImageIdentity struct {
 }
 
 type ChartIdentity struct {
-	PackageDigest string `json:"package_sha256"`
-	RenderDigest  string `json:"render_sha256"`
-	ValuesDigest  string `json:"values_sha256"`
+	CandidateManifestDigest string `json:"candidate_manifest_digest"`
+	PackageDigest           string `json:"package_sha256"`
+	RenderDigest            string `json:"render_sha256"`
+	ValuesDigest            string `json:"values_sha256"`
 }
 
 type BaseIdentity struct {
@@ -153,7 +154,7 @@ func ValidateCandidate(candidate CandidateManifest) error {
 			return fmt.Errorf("candidate image %q: %w", name, err)
 		}
 	}
-	if len(candidate.Images) != 4 || !digestPattern.MatchString(candidate.Chart.PackageDigest) || !digestPattern.MatchString(candidate.Chart.RenderDigest) || !digestPattern.MatchString(candidate.Chart.ValuesDigest) {
+	if len(candidate.Images) != 4 || !digestPattern.MatchString(candidate.Chart.CandidateManifestDigest) || !digestPattern.MatchString(candidate.Chart.PackageDigest) || !digestPattern.MatchString(candidate.Chart.RenderDigest) || !digestPattern.MatchString(candidate.Chart.ValuesDigest) {
 		return fmt.Errorf("candidate Chart identity is invalid")
 	}
 	if len(candidate.Bases) == 0 {
@@ -194,6 +195,19 @@ func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evid
 	}
 	if evidence.ValuesDigest != candidate.Chart.ValuesDigest || evidence.RenderDigest != candidate.Chart.RenderDigest {
 		return fmt.Errorf("rehearsal Chart render differs from the candidate")
+	}
+	return nil
+}
+
+func ValidateAuthorization(candidate CandidateManifest, candidateDigest, evidenceDigest string, authorization Authorization) error {
+	if err := ValidateCandidate(candidate); err != nil {
+		return err
+	}
+	if authorization.Schema != AuthorizationSchema || authorization.Version != candidate.Version || authorization.SourceCommit != candidate.SourceCommit || authorization.CandidateDigest != candidateDigest || authorization.EvidenceDigest != evidenceDigest {
+		return fmt.Errorf("authorization does not identify the rehearsed candidate")
+	}
+	if !digestPattern.MatchString(candidateDigest) || !digestPattern.MatchString(evidenceDigest) || authorization.WorkflowRunID < 1 || authorization.WorkflowRunAttempt < 1 || authorization.DeploymentID < 1 || authorization.AuthorizedAt.IsZero() {
+		return fmt.Errorf("authorization identity is incomplete")
 	}
 	return nil
 }

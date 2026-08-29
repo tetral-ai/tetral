@@ -146,6 +146,19 @@ func TestRehearsalEvidenceBindsCandidateCaseAndChart(t *testing.T) {
 	}
 }
 
+func TestAuthorizationBindsExactCandidateEvidenceAndRun(t *testing.T) {
+	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
+	facts := validFacts(t, now)
+	if err := ValidateAuthorization(*facts.Candidate, facts.CandidateDigest, facts.RehearsalDigest, *facts.Authorization); err != nil {
+		t.Fatal(err)
+	}
+	mutated := *facts.Authorization
+	mutated.EvidenceDigest = testDigest("other-evidence")
+	if err := ValidateAuthorization(*facts.Candidate, facts.CandidateDigest, facts.RehearsalDigest, mutated); err == nil {
+		t.Fatal("accepted authorization for another rehearsal")
+	}
+}
+
 func TestCleanupSelectsOnlyOldNonPromotableCandidates(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 	items := []CleanupCandidate{
@@ -253,7 +266,7 @@ func validCandidate(t *testing.T) CandidateManifest {
 	}
 	return CandidateManifest{
 		Schema: CandidateSchema, Version: version, SourceCommit: "0123456789abcdef0123456789abcdef01234567", Platform: PlatformLinuxAMD64,
-		Images: images, Chart: ChartIdentity{PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values")},
+		Images: images, Chart: ChartIdentity{CandidateManifestDigest: testDigest("chart-manifest"), PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values")},
 		SchemaVersion: 1, SchemaChecksum: testDigest("schema"), CreatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
 		Bases: []BaseIdentity{{Reference: "docker.io/library/golang:1.25.13-alpine", TopLevelDigest: testDigest("base-top"), ChildDigest: testDigest("base-child"), Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 	}

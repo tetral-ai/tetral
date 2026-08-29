@@ -1,239 +1,674 @@
-name: engine-release
-
-# One git tag, four images, one version. The tag is the release event; nothing
-# else publishes. Image tags carry the version without its leading `v`, and the
-# digests each build reports are what a deployment should pin.
+name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version to publish without the leading v (e.g. 0.1.0-alpha)'
+      mode:
+        description: Release transition
         required: true
+        type: choice
+        options:
+          - state
+          - candidate
+          - record-rehearsal
+          - promote
+          - retire-candidate
+          - cleanup-candidates
+      version:
+        description: Numeric Alpha Git version (v0.1.0-alpha.N)
+        required: true
+        type: string
+      source_commit:
+        description: Exact main commit owned by the candidate
+        required: true
+        type: string
+      candidate_digest:
+        description: Candidate Manifest digest for post-candidate transitions
+        required: false
+        type: string
+      evidence_digest:
+        description: Rehearsal Evidence digest for promotion
+        required: false
+        type: string
+      case_manifest_digest:
+        description: External rehearsal case-manifest SHA-256
+        required: false
+        type: string
+      case_count:
+        description: Number of externally rehearsed cases
+        required: false
+        type: number
+      local_evidence_digest:
+        description: External rehearsal evidence SHA-256
+        required: false
+        type: string
+      package_creation_authorization_digest:
+        description: Exact authorization digest for verified not-found package targets
+        required: false
+        type: string
+      rehearsal_started_at:
+        description: Rehearsal start time in RFC3339
+        required: false
+        type: string
+      rehearsal_finished_at:
+        description: Rehearsal finish time in RFC3339
+        required: false
+        type: string
+      rehearsal_result:
+        description: External rehearsal result
+        required: false
+        default: pass
+        type: choice
+        options: [pass, fail]
+      cleanup_apply:
+        description: Apply the exact printed cleanup set
+        required: false
+        default: false
+        type: boolean
+      cleanup_confirmation_digest:
+        description: SHA-256 of the exact cleanup dry-run set
+        required: false
         type: string
 
 permissions:
+  actions: read
   contents: read
-  packages: write
+  packages: read
 
 concurrency:
-  group: engine-release-${{ github.ref }}
+  group: tetral-release-version-${{ inputs.version }}
   cancel-in-progress: false
 
-jobs:
-  version:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      version: ${{ steps.resolve.outputs.version }}
-    steps:
-      - name: Resolve version
-        id: resolve
-        env:
-          DISPATCH_VERSION: ${{ inputs.version }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ -n "$DISPATCH_VERSION" ]; then
-            version="$DISPATCH_VERSION"
-          else
-            version="${REF_NAME#v}"
-          fi
-          # SemVer 2 core plus optional pre-release. Build metadata is excluded:
-          # the same value is an OCI image tag, where '+' is invalid.
-          prerelease_identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
-          semver="^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-${prerelease_identifier}(\\.${prerelease_identifier})*)?$"
-          if [[ ! "$version" =~ $semver ]]; then
-            echo "refusing to publish version '$version'; require SemVer 2 without build metadata" >&2
-            exit 1
-          fi
-          if (( ${#version} > 128 )); then
-            echo "refusing to publish version '$version'; OCI image tags are limited to 128 characters" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+env:
+  RELEASE_METADATA_REPOSITORY: ghcr.io/tetral-ai/tetral-release-metadata
 
-  sandbox-image:
-    needs: version
+jobs:
+  validate:
+    name: Validate immutable release input
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      artifact_version: ${{ steps.version.outputs.artifact_version }}
+      candidate_tag: ${{ steps.version.outputs.candidate_tag }}
     steps:
-      - name: Checkout
-        # actions/checkout@v6
+      - name: Check out the exact workflow revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up Buildx
-        # docker/setup-buildx-action@v4.2.0
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
-
-      - name: Log in to GitHub Container Registry
-        # docker/login-action@v4.5.1
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push sandbox
-        id: build
-        # docker/build-push-action@v7.3.0
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: .
-          file: Dockerfile.sandbox
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/sandbox:${{ needs.version.outputs.version }}
-          cache-from: type=gha,scope=sandbox
-          cache-to: type=gha,mode=max,scope=sandbox
-
-      - name: Report digest
+          go-version: '1.25.13'
+          cache-dependency-path: go.sum
+      - name: Validate source and numeric Alpha identity
+        id: version
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox
-          VERSION: ${{ needs.version.outputs.version }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          MODE: ${{ inputs.mode }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_COMMIT" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
+          version_json="$(go run ./internal/release/cmd/tetral-release validate-version --version "$VERSION")"
+          artifact_version="$(jq -r .artifact <<<"$version_json")"
+          test "$artifact_version" != "dev"
+          echo "artifact_version=$artifact_version" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-$artifact_version-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          go run ./internal/release/cmd/tetral-release verify-bases --repository-root . > base-images.json
+      - name: Validate transition-specific digests
+        env:
+          MODE: ${{ inputs.mode }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
+        run: |
+          set -euo pipefail
+          digest='^sha256:[0-9a-f]{64}$'
+          case "$MODE" in
+            state|candidate) ;;
+            record-rehearsal|retire-candidate|cleanup-candidates) [[ "$CANDIDATE_DIGEST" =~ $digest ]] ;;
+            promote) [[ "$CANDIDATE_DIGEST" =~ $digest && "$EVIDENCE_DIGEST" =~ $digest ]] ;;
+            *) exit 1 ;;
+          esac
+
+  state:
+    name: Reconstruct release state
+    if: inputs.mode == 'state'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report immutable discovery inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
         run: |
           {
-            echo "### $IMAGE"
-            echo
-            echo '```'
-            echo "$IMAGE:$VERSION"
-            echo "$IMAGE@$DIGEST"
-            echo '```'
+            echo "### Release state discovery"
+            echo "- version: $VERSION"
+            echo "- source: $SOURCE_COMMIT"
+            echo "- candidate: ${CANDIDATE_DIGEST:-absent}"
+            echo "- rehearsal: ${EVIDENCE_DIGEST:-absent}"
+            echo "No mutable current-state label is authoritative."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  images:
-    needs: version
+  reserve:
+    name: Reserve candidate identity
+    if: inputs.mode == 'candidate'
+    needs: validate
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.13'
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Publish immutable reservation
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
+        run: |
+          set -euo pipefail
+          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --arg now "$(date -u +%FT%TZ)" \
+            '{schema:"tetral.release-reservation/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,created_at:$now}' > reservation.json
+          result="$(go run ./internal/release/cmd/tetral-release artifact --kind reservation --input reservation.json --output reservation-layout)"
+          digest="$(jq -r .manifest_digest <<<"$result")"
+          oras cp --from-oci-layout "reservation-layout@$digest" "$RELEASE_METADATA_REPOSITORY:reservation-$ARTIFACT_VERSION"
+
+  candidate-images:
+    name: Build candidate image (${{ matrix.image }})
+    if: inputs.mode == 'candidate'
+    needs: [validate, reserve]
+    environment: release
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Every context is the repository root. Both TypeScript services carry
-          # file: dependencies that reach across service boundaries — the
-          # Gateway's protocol package and internal/ts-observability — so a
-          # narrower context cannot resolve them.
           - image: tetral
             dockerfile: Dockerfile
           - image: gateway
             dockerfile: services/gateway/Dockerfile
           - image: agent-runtime
             dockerfile: services/agent-runtime/Dockerfile
+          - image: sandbox
+            dockerfile: Dockerfile.sandbox
     steps:
-      - name: Checkout
-        # actions/checkout@v6
+      - name: Check out exact candidate source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
-
       - name: Set up Buildx
-        # docker/setup-buildx-action@v4.2.0
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
-
-      - name: Log in to GitHub Container Registry
-        # docker/login-action@v4.5.1
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - name: Log in to GHCR
         uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push ${{ matrix.image }}
+          password: ${{ github.token }}
+      - name: Build candidate exactly once
         id: build
-        # docker/build-push-action@v7.3.0
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
           push: true
-          # No `latest`: a moving tag makes a deployment unreproducible, and the
-          # manifests name an exact version.
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.version.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
-      - name: Report digest
+          tags: ghcr.io/tetral-ai/${{ matrix.image }}:${{ needs.validate.outputs.candidate_tag }}-${{ matrix.image }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.validate.outputs.artifact_version }}
+            org.opencontainers.image.revision=${{ inputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Record exact image identity
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          VERSION: ${{ needs.version.outputs.version }}
+          IMAGE: ${{ matrix.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          {
-            echo "### $IMAGE"
-            echo
-            echo '```'
-            echo "$IMAGE:$VERSION"
-            echo "$IMAGE@$DIGEST"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          repository="ghcr.io/tetral-ai/$IMAGE"
+          raw="$(docker buildx imagetools inspect "$repository@$DIGEST" --raw)"
+          top_media="$(jq -r .mediaType <<<"$raw")"
+          if test "$top_media" = application/vnd.oci.image.index.v1+json; then
+            child="$(jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest' <<<"$raw")"
+            child_media="$(jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .mediaType' <<<"$raw")"
+          else
+            child="$DIGEST"
+            child_media="$top_media"
+          fi
+          jq -n --arg image "$IMAGE" --arg digest "$DIGEST" --arg child "$child" --arg top_media "$top_media" --arg child_media "$child_media" '{image:$image,top_level_digest:$digest,child_digest:$child,top_level_media_type:$top_media,child_media_type:$child_media}' > "image-$IMAGE.json"
+      - name: Transfer identity to candidate finalizer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-image-${{ matrix.image }}
+          path: image-${{ matrix.image }}.json
+          if-no-files-found: error
 
-  daytona-release-smoke:
-    needs: sandbox-image
+  finalize-candidate:
+    name: Package chart and publish Candidate Manifest
+    if: inputs.mode == 'candidate'
+    needs: [validate, candidate-images]
     environment: release
     permissions:
+      actions: read
       contents: read
+      packages: write
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        # actions/checkout@v6
+      - name: Check out exact candidate source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
-
-      - name: Setup Go
-        # actions/setup-go@v6
+      - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: '1.25.13'
-          cache-dependency-path: go.sum
-
-      - name: Daytona published Sandbox image smoke
-        env:
-          TETRAL_DAYTONA_RELEASE_SMOKE: "1"
-          TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox@${{ needs.sandbox-image.outputs.digest }}
-          TETRAL_DAYTONA_RELEASE_SMOKE_OWNER: ${{ github.repository_id }}-${{ github.run_id }}
-          DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL }}
-          DAYTONA_TARGET: ${{ vars.DAYTONA_TARGET }}
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-        run: >-
-          go test -tags daytona_release_smoke ./services/sandbox
-          -run '^TestDaytonaPublishedImageProductionAdapterSmoke$' -count=1 -v
-
-  chart:
-    needs: [version, images, daytona-release-smoke]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        # actions/checkout@v6
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
         with:
-          persist-credentials: false
-
-      - name: Setup Helm
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - name: Set up Helm
         # azure/setup-helm@v5.0.1
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
         with:
           version: v4.2.0
-
-      - name: Log in to GitHub Container Registry
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Download exact image identities
+        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
+        with:
+          pattern: candidate-image-*
+          path: image-identities
+          merge-multiple: true
+      - name: Package and render the exact candidate chart once
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
-
-      - name: Package chart
+          VERSION: ${{ needs.validate.outputs.artifact_version }}
+        run: |
+          set -euo pipefail
+          jq -s 'map({key:.image,value:.}) | from_entries' image-identities/image-*.json > images.json
+          jq --arg version "$VERSION" '{image:{digests:(to_entries|map({key:.key,value:.value.top_level_digest})|from_entries)},observability:{serviceVersion:$version}}' images.json > release-values.json
+          helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION" --destination dist
+          helm template tetral "dist/tetral-$VERSION.tgz" -f release-values.json > rendered.yaml
+          sha256sum "dist/tetral-$VERSION.tgz" | awk '{print "sha256:"$1}' > chart.digest
+          sha256sum release-values.json | awk '{print "sha256:"$1}' > values.digest
+          sha256sum rendered.yaml | awk '{print "sha256:"$1}' > render.digest
+      - name: Build canonical Candidate Manifest
         env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"
-
-      - name: Push chart
+          VERSION: ${{ inputs.version }}
+          ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          bases="$(go run ./internal/release/cmd/tetral-release verify-bases --repository-root . | jq .bases)"
+          images="$(jq 'with_entries(.value={repository:("ghcr.io/tetral-ai/"+.key),top_level_digest:.value.top_level_digest,top_level_media_type:.value.top_level_media_type,linux_amd64_child_digest:.value.child_digest,linux_amd64_child_media_type:.value.child_media_type,platform:{os:"linux",architecture:"amd64"}})' images.json)"
+          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --argjson images "$images" --arg package "$(cat chart.digest)" --arg values "$(cat values.digest)" --arg render "$(cat render.digest)" --argjson bases "$bases" --arg now "$(date -u +%FT%TZ)" \
+            '{schema:"tetral.release-candidate/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,platform:"linux/amd64",images:$images,chart:{candidate_manifest_digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",package_sha256:$package,render_sha256:$render,values_sha256:$values},database_schema_version:1,database_schema_checksum:"sha256:d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6",base_images:$bases,created_at:$now}' > candidate.json
+      - name: Publish exact chart bytes and manifest records
         env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: helm push "tetral-$VERSION.tgz" oci://ghcr.io/tetral-ai/charts
+          VERSION: ${{ needs.validate.outputs.artifact_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          chart_result="$(go run ./internal/release/cmd/tetral-release artifact --kind helm-candidate --input "dist/tetral-$VERSION.tgz" --output chart-layout)"
+          chart_manifest="$(jq -r .manifest_digest <<<"$chart_result")"
+          oras cp --from-oci-layout "chart-layout@$chart_manifest" "$RELEASE_METADATA_REPOSITORY:helm-candidate-$VERSION-${{ github.run_id }}"
+          jq --arg digest "$chart_manifest" '.chart.candidate_manifest_digest=$digest' candidate.json > candidate.final.json
+          mv candidate.final.json candidate.json
+          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          candidate_result="$(go run ./internal/release/cmd/tetral-release artifact --kind candidate --input candidate.json --output candidate-layout)"
+          candidate_digest="$(jq -r .manifest_digest <<<"$candidate_result")"
+          oras cp --from-oci-layout "candidate-layout@$candidate_digest" "$RELEASE_METADATA_REPOSITORY:candidate-$VERSION-${{ github.run_id }}"
+          echo "Candidate Manifest: $RELEASE_METADATA_REPOSITORY@$candidate_digest" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate Chart: $RELEASE_METADATA_REPOSITORY@$chart_manifest" >> "$GITHUB_STEP_SUMMARY"
+
+  record-rehearsal:
+    name: Record bounded rehearsal attestation
+    if: inputs.mode == 'record-rehearsal'
+    needs: validate
+    environment: release
+    permissions:
+      contents: read
+      deployments: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Set up Go and ORAS
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.13'
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Validate and publish bounded evidence
+        env:
+          VERSION: ${{ inputs.version }}
+          ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          CASE_MANIFEST_DIGEST: ${{ inputs.case_manifest_digest }}
+          CASE_COUNT: ${{ inputs.case_count }}
+          LOCAL_EVIDENCE_DIGEST: ${{ inputs.local_evidence_digest }}
+          STARTED_AT: ${{ inputs.rehearsal_started_at }}
+          FINISHED_AT: ${{ inputs.rehearsal_finished_at }}
+          RESULT: ${{ inputs.rehearsal_result }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$RESULT" = pass
+          digest='^sha256:[0-9a-f]{64}$'
+          [[ "$CASE_MANIFEST_DIGEST" =~ $digest && "$LOCAL_EVIDENCE_DIGEST" =~ $digest ]]
+          test "$CASE_COUNT" -ge 1
+          candidate_ref="$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST"
+          oras manifest fetch "$candidate_ref" > candidate-manifest.json
+          candidate_layer="$(jq -r '.layers[0].digest' candidate-manifest.json)"
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$candidate_layer" --output candidate.json
+          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          deployment_id="$(gh api "repos/${{ github.repository }}/deployments?environment=release&ref=$SOURCE_COMMIT" --jq '.[0].id')"
+          test "$deployment_id" -ge 1
+          values_digest="$(jq -r .chart.values_sha256 candidate.json)"
+          render_digest="$(jq -r .chart.render_sha256 candidate.json)"
+          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --arg candidate "$CANDIDATE_DIGEST" --arg case_manifest "$CASE_MANIFEST_DIGEST" --argjson case_count "$CASE_COUNT" --arg local "$LOCAL_EVIDENCE_DIGEST" --arg values "$values_digest" --arg render "$render_digest" --arg result "$RESULT" --arg started "$STARTED_AT" --arg finished "$FINISHED_AT" --arg recorded "$(date -u +%FT%TZ)" --argjson run_id "${{ github.run_id }}" --argjson attempt "${{ github.run_attempt }}" --argjson deployment "$deployment_id" \
+            '{schema:"tetral.rehearsal-evidence/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,candidate_digest:$candidate,case_manifest_digest:$case_manifest,case_count:$case_count,local_evidence_digest:$local,values_digest:$values,render_digest:$render,result:$result,workflow_run_id:$run_id,workflow_run_attempt:$attempt,deployment_id:$deployment,started_at:$started,finished_at:$finished,recorded_at:$recorded}' > evidence.json
+          go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          evidence_result="$(go run ./internal/release/cmd/tetral-release artifact --kind rehearsal --input evidence.json --output evidence-layout)"
+          evidence_digest="$(jq -r .manifest_digest <<<"$evidence_result")"
+          oras cp --from-oci-layout "evidence-layout@$evidence_digest" "$RELEASE_METADATA_REPOSITORY:rehearsal-$ARTIFACT_VERSION-${{ github.run_id }}"
+          echo "Rehearsal Evidence: $RELEASE_METADATA_REPOSITORY@$evidence_digest" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Promote authorized candidate without rebuilding
+    if: inputs.mode == 'promote'
+    needs: validate
+    environment: release
+    permissions:
+      contents: write
+      deployments: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go, Buildx, Helm, and ORAS
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.13'
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+      - uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Validate protected records before mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
+        run: |
+          set -euo pipefail
+          oras manifest fetch "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" > candidate-manifest.json
+          oras manifest fetch "$RELEASE_METADATA_REPOSITORY@$EVIDENCE_DIGEST" > evidence-manifest.json
+          git merge-base --is-ancestor "${{ inputs.source_commit }}" origin/main
+          test -z "$(git tag -l '${{ inputs.version }}')"
+      - name: Publish exact recorded identities
+        env:
+          VERSION: ${{ needs.validate.outputs.artifact_version }}
+          GIT_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          # The promotion adapter reads the candidate payload and only adds
+          # version references to its recorded image digests. It must never
+          # invoke an image build or Chart packaging command.
+          candidate_layer="$(jq -r '.layers[0].digest' candidate-manifest.json)"
+          evidence_layer="$(jq -r '.layers[0].digest' evidence-manifest.json)"
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$candidate_layer" --output candidate.json
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$evidence_layer" --output evidence.json
+          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
+          deployment_id="$(gh api "repos/${{ github.repository }}/deployments?environment=release&ref=$SOURCE_COMMIT" --jq '.[0].id')"
+          jq -n --arg version "$GIT_VERSION" --arg artifact "$VERSION" --argjson sequence "${VERSION##*.}" --arg source "$SOURCE_COMMIT" --arg candidate "$CANDIDATE_DIGEST" --arg evidence "$EVIDENCE_DIGEST" --argjson run_id "${{ github.run_id }}" --argjson attempt "${{ github.run_attempt }}" --argjson deployment "$deployment_id" --arg now "$(date -u +%FT%TZ)" \
+            '{schema:"tetral.release-authorization/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,candidate_digest:$candidate,evidence_digest:$evidence,workflow_run_id:$run_id,workflow_run_attempt:$attempt,deployment_id:$deployment,authorized_at:$now}' > authorization.json
+          go run ./internal/release/cmd/tetral-release validate-authorization --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence-digest "$EVIDENCE_DIGEST" --authorization authorization.json
+          authorization_result="$(go run ./internal/release/cmd/tetral-release artifact --kind authorization --input authorization.json --output authorization-layout)"
+          authorization_digest="$(jq -r .manifest_digest <<<"$authorization_result")"
+          oras cp --from-oci-layout "authorization-layout@$authorization_digest" "$RELEASE_METADATA_REPOSITORY:authorization-$VERSION-${{ github.run_id }}"
+          for image in tetral gateway agent-runtime sandbox; do
+            digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
+            final="ghcr.io/tetral-ai/$image:$VERSION"
+            if existing="$(docker buildx imagetools inspect "$final" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+              test "$existing" = "$digest"
+            else
+              docker buildx imagetools create --tag "$final" "ghcr.io/tetral-ai/$image@$digest"
+            fi
+          done
+          chart_digest="$(jq -r .chart.package_sha256 candidate.json)"
+          chart_manifest="$(jq -r .chart.candidate_manifest_digest candidate.json)"
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY@$chart_manifest" "$chart_digest" --output "tetral-$VERSION.tgz"
+          test "sha256:$(sha256sum "tetral-$VERSION.tgz" | awk '{print $1}')" = "$chart_digest"
+          if chart_existing="$(oras manifest fetch "ghcr.io/tetral-ai/charts/tetral:$VERSION" --descriptor --format '{{.digest}}' 2>/dev/null)"; then
+            oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$chart_existing" > released-chart.json
+            test "$(jq -r '.layers[] | select(.mediaType=="application/vnd.cncf.helm.chart.content.v1.tar+gzip") | .digest' released-chart.json)" = "$chart_digest"
+          else
+            helm push "tetral-$VERSION.tgz" oci://ghcr.io/tetral-ai/charts
+          fi
+          if tag_sha="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GIT_VERSION" --jq .object.sha 2>/dev/null)"; then
+            tag_type="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GIT_VERSION" --jq .object.type)"
+            if test "$tag_type" = tag; then
+              tag_sha="$(gh api "repos/${{ github.repository }}/git/tags/$tag_sha" --jq .object.sha)"
+            fi
+            test "$tag_sha" = "$SOURCE_COMMIT"
+          else
+            annotated="$(gh api --method POST "repos/${{ github.repository }}/git/tags" -f tag="$GIT_VERSION" -f message="Tetral $GIT_VERSION" -f object="$SOURCE_COMMIT" -f type=commit --jq .sha)"
+            gh api --method POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$GIT_VERSION" -f sha="$annotated" >/dev/null
+          fi
+          if gh release view "$GIT_VERSION" >/dev/null 2>&1; then
+            gh release view "$GIT_VERSION" --json tagName --jq '.tagName' | grep -Fx "$GIT_VERSION"
+          else
+            gh release create "$GIT_VERSION" --verify-tag --prerelease --title "Tetral $GIT_VERSION" candidate.json evidence.json authorization.json
+          fi
+          {
+            echo "Candidate Manifest: $CANDIDATE_DIGEST"
+            echo "Rehearsal Evidence: $EVIDENCE_DIGEST"
+            echo "Authorization: $authorization_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  retire-candidate:
+    name: Retire candidate identity
+    if: inputs.mode == 'retire-candidate'
+    needs: validate
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Record immutable superseded disposition
+        env:
+          VERSION: ${{ inputs.version }}
+          ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          oras manifest fetch "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" > candidate-manifest.json
+          layer="$(jq -r '.layers[0].digest' candidate-manifest.json)"
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$layer" --output candidate.json
+          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          test "$(jq -r .source_commit candidate.json)" = "$SOURCE_COMMIT"
+          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg candidate "$CANDIDATE_DIGEST" --arg now "$(date -u +%FT%TZ)" '{schema:"tetral.release-disposition/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},candidate_digest:$candidate,kind:"superseded",recorded_at:$now}' > disposition.json
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          result="$(go run ./internal/release/cmd/tetral-release artifact --kind disposition --input disposition.json --output disposition-layout)"
+          digest="$(jq -r .manifest_digest <<<"$result")"
+          oras cp --from-oci-layout "disposition-layout@$digest" "$RELEASE_METADATA_REPOSITORY:disposition-$ARTIFACT_VERSION-${{ github.run_id }}"
+          echo "Disposition: $RELEASE_METADATA_REPOSITORY@$digest" >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup-candidates:
+    name: Cleanup exact old candidate digests
+    if: inputs.mode == 'cleanup-candidates'
+    needs: validate
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Verify protected environment and package authority
+        uses: ./.github/actions/verify-release-authority
+        with:
+          package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - name: Set up Buildx for read-only image inspection
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: Plan or apply exact digest cleanup
+        env:
+          APPLY: ${{ inputs.cleanup_apply }}
+          CONFIRMATION: ${{ inputs.cleanup_confirmation_digest }}
+          VERSION: ${{ needs.validate.outputs.artifact_version }}
+          CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          oras manifest fetch "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" > candidate-manifest.json
+          layer="$(jq -r '.layers[0].digest' candidate-manifest.json)"
+          oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$layer" --output candidate.json
+          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          created="$(jq -r .created_at candidate.json)"
+          test "$(date -u -d "$created +30 days" +%s)" -le "$(date -u +%s)"
+          test "$(jq -r .version.artifact candidate.json)" = "$VERSION"
+
+          # A rehearsed or authorized candidate is promotable and never cleanup
+          # eligible. Reconstruct that fact from every immutable metadata layer.
+          disposition_found=false
+          while IFS= read -r tag; do
+            case "$tag" in rehearsal-*|authorization-*|disposition-*) ;;
+              *) continue ;;
+            esac
+            oras manifest fetch "$RELEASE_METADATA_REPOSITORY:$tag" > record-manifest.json
+            record_layer="$(jq -r '.layers[0].digest' record-manifest.json)"
+            oras blob fetch "$RELEASE_METADATA_REPOSITORY" "$record_layer" --output record.json
+            if test "$(jq -r '.candidate_digest // empty' record.json)" = "$CANDIDATE_DIGEST"; then
+              case "$tag" in
+                rehearsal-*|authorization-*)
+                  echo "candidate has rehearsal or authorization record $tag" >&2
+                  exit 1
+                  ;;
+                disposition-*)
+                  case "$(jq -r .kind record.json)" in superseded|revoked) disposition_found=true ;; *) exit 1 ;; esac
+                  ;;
+              esac
+            fi
+          done < <(oras repo tags "$RELEASE_METADATA_REPOSITORY" --output json | jq -r '.tags[]')
+
+          : > deletion-set.txt
+          for image in tetral gateway agent-runtime sandbox; do
+            digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
+            if docker buildx imagetools inspect "ghcr.io/tetral-ai/$image:$VERSION" >/dev/null 2>&1; then
+              echo "candidate has a final image reference" >&2
+              exit 1
+            fi
+            echo "ghcr.io/tetral-ai/$image@$digest" >> deletion-set.txt
+          done
+          echo "$RELEASE_METADATA_REPOSITORY@$(jq -r .chart.candidate_manifest_digest candidate.json)" >> deletion-set.txt
+          sort -o deletion-set.txt deletion-set.txt
+          set_digest="sha256:$(sha256sum deletion-set.txt | awk '{print $1}')"
+          {
+            echo "### Candidate cleanup dry-run"
+            echo "- candidate: $CANDIDATE_DIGEST"
+            echo "- confirmation: $set_digest"
+            sed 's/^/- `/' deletion-set.txt | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if test "$APPLY" != true; then
+            exit 0
+          fi
+          test "$CONFIRMATION" = "$set_digest"
+          test "$disposition_found" = true || {
+            echo "apply requires an immutable superseded or revoked disposition from retire-candidate" >&2
+            exit 1
+          }
+          # Re-read the candidate immediately before deletion. Audit records
+          # remain in the metadata repository; only heavy candidate manifests
+          # selected above are removed.
+          oras manifest fetch "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" >/dev/null
+          while IFS= read -r reference; do
+            oras manifest delete --force "$reference"
+          done < deletion-set.txt
