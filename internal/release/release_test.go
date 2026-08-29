@@ -57,6 +57,32 @@ func TestOCIArtifactUsesExactMediaTypesAndBytes(t *testing.T) {
 	}
 }
 
+func TestOCILayoutReplaysExactCandidateAndChartBytes(t *testing.T) {
+	candidateArtifact, err := BuildJSONArtifact(CandidateType, validCandidate(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chartArtifact, err := BuildOCIArtifact(HelmCandidateType, HelmChartLayerType, []byte("exact chart package bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, artifact := range map[string]OCIArtifact{"candidate": candidateArtifact, "chart": chartArtifact} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := WriteOCILayout(root, artifact); err != nil {
+				t.Fatal(err)
+			}
+			replayed, err := ReadOCIArtifact(root, artifact.ManifestDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(replayed.ManifestJSON, artifact.ManifestJSON) || !bytes.Equal(replayed.Layer, artifact.Layer) || replayed.ManifestDigest != artifact.ManifestDigest {
+				t.Fatal("digest-addressed promotion changed candidate bytes")
+			}
+		})
+	}
+}
+
 func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 	facts := validFacts(t, now)
@@ -131,6 +157,61 @@ func TestCleanupSelectsOnlyOldNonPromotableCandidates(t *testing.T) {
 	selected, err := CleanupPlan(items, now)
 	if err != nil || len(selected) != 2 || selected[0].Version.Sequence != 1 || selected[1].Version.Sequence != 3 {
 		t.Fatalf("cleanup = %#v, %v", selected, err)
+	}
+}
+
+func TestReleaseEnvironmentBundleHasExactMainAndRestorablePreState(t *testing.T) {
+	pre := EnvironmentSnapshot{
+		Policy:      EnvironmentPolicy{CanAdminsBypass: true},
+		SecretNames: []string{"DAYTONA_API_KEY"}, VariableNames: []string{"DAYTONA_TARGET"},
+	}
+	bundle, err := BuildEnvironmentBundle("tetral-ai/tetral", EnvironmentReviewer{Type: "User", ID: 42}, pre)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyEnvironmentBundle(bundle); err != nil {
+		t.Fatal(err)
+	}
+	mutated := bundle
+	mutated.Mutation.Target.BranchPolicy.Branches = []string{"main", "feature"}
+	if err := VerifyEnvironmentBundle(mutated); err == nil {
+		t.Fatal("accepted a release environment that permits another branch")
+	}
+}
+
+func TestPackagePreflightRejectsPrivateWrongLinkedOrMovingPackage(t *testing.T) {
+	valid := PackageIdentity{
+		Found: true,
+		Name:  "tetral", Organization: "tetral-ai", Visibility: "public", LinkedRepositoryID: 7,
+		ActionsRepositoryIDs: []int64{7}, RepositoryTokenCanRead: true, RepositoryTokenCanWrite: true,
+	}
+	notFound := PackageIdentity{
+		Name: "new-package", Organization: "tetral-ai", CreationAuthorized: true,
+		RepositoryTokenCanRead: true, RepositoryTokenCanWrite: true,
+	}
+	if err := ValidatePackagePreflight(notFound, "tetral-ai", 7, true); err != nil {
+		t.Fatal(err)
+	}
+	notFound.Visibility = "public"
+	if err := ValidatePackagePreflight(notFound, "tetral-ai", 7, true); err == nil {
+		t.Fatal("accepted fabricated live identity for a not-found package")
+	}
+	if err := ValidatePackagePreflight(valid, "tetral-ai", 7, true); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*PackageIdentity){
+		"private": func(p *PackageIdentity) { p.Visibility = "private" },
+		"link":    func(p *PackageIdentity) { p.LinkedRepositoryID = 8 },
+		"access":  func(p *PackageIdentity) { p.ActionsRepositoryIDs = nil },
+		"latest":  func(p *PackageIdentity) { p.ExistingReferences = []string{"latest"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := valid
+			mutate(&copy)
+			if err := ValidatePackagePreflight(copy, "tetral-ai", 7, true); err == nil {
+				t.Fatal("accepted invalid package preflight")
+			}
+		})
 	}
 }
 

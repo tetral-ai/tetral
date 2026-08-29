@@ -2,6 +2,7 @@ package release
 
 import (
 	"bufio"
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -74,7 +75,7 @@ func VerifyBaseInventory(root string) error {
 		key := entry.Dockerfile + "\x00" + entry.Stage
 		base, ok := actual[key]
 		if !ok || base.Reference != entry.Reference {
-			return fmt.Errorf("Docker base %s/%s differs from the release inventory", entry.Dockerfile, entry.Stage)
+			return fmt.Errorf("docker base %s/%s differs from the release inventory", entry.Dockerfile, entry.Stage)
 		}
 	}
 	return nil
@@ -93,15 +94,16 @@ func CandidateBases() ([]BaseIdentity, error) {
 }
 
 func parseDockerfileBases(path, displayPath string) ([]DockerBase, error) {
-	file, err := os.Open(path)
+	// Paths are the fixed four repository Dockerfiles selected by VerifyBaseInventory.
+	//nolint:gosec
+	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 	args := map[string]string{}
 	aliases := map[string]bool{}
 	var result []DockerBase
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		fields := strings.Fields(line)
