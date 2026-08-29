@@ -351,7 +351,11 @@ func terminateRegisteredDescendants(path string) error {
 	if err != nil {
 		return err
 	}
-	var live bool
+	type registeredDescendant struct {
+		pid      int
+		identity string
+	}
+	var descendants []registeredDescendant
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
@@ -361,11 +365,30 @@ func terminateRegisteredDescendants(path string) error {
 		if err != nil {
 			return fmt.Errorf("malformed descendant registration")
 		}
-		if !processIdentityAlive(pid, parts[1]) {
+		descendants = append(descendants, registeredDescendant{pid: pid, identity: parts[1]})
+	}
+	// PostgreSQL capability cleanup runs before descendant cleanup. Give a
+	// cooperative process a short bounded window to observe that revocation and
+	// exit; a process that remains alive is killed and reported as apparatus
+	// leakage.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		live := false
+		for _, descendant := range descendants {
+			live = live || processIdentityAlive(descendant.pid, descendant.identity)
+		}
+		if !live {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var live bool
+	for _, descendant := range descendants {
+		if !processIdentityAlive(descendant.pid, descendant.identity) {
 			continue
 		}
 		live = true
-		if process, err := os.FindProcess(pid); err == nil {
+		if process, err := os.FindProcess(descendant.pid); err == nil {
 			_ = process.Kill()
 		}
 	}
