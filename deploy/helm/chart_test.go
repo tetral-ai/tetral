@@ -490,6 +490,38 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 	requireManifestPathString(t, gitProxy, "true", "spec", "rules", 0, "host")
 }
 
+func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	rendered := uniqueObjects(t, renderChart(
+		t,
+		helm,
+		chart,
+		"image.tag=0.1.0-alpha.7",
+		"image.digests.tetral="+digest,
+		"image.digests.gateway="+digest,
+		"image.digests.agent-runtime="+digest,
+		"image.digests.sandbox="+digest,
+	))
+	for _, object := range rendered {
+		for _, value := range nestedFieldValues(object, "image") {
+			image, ok := value.(string)
+			if !ok || !strings.HasSuffix(image, "@"+digest) {
+				t.Fatalf("release workload image = %v; want an immutable digest reference", value)
+			}
+		}
+	}
+	apiConfig := rendered["v1|ConfigMap|tetral-system|api-config"]
+	requireManifestPathString(
+		t,
+		apiConfig,
+		"ghcr.io/tetral-ai/sandbox:0.1.0-alpha.7",
+		"data",
+		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
+	)
+}
+
 func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	helm := requireHelm(t)
 	root := engineRoot(t)

@@ -14,7 +14,7 @@ data:
   TETRAL_DEPLOYMENT_ENVIRONMENT: {{ .Values.observability.deploymentEnvironment | quote }}
   TETRAL_SERVICE_VERSION: {{ .Values.observability.serviceVersion | quote }}
   ENGINE_DATA_DIR: /var/tetral/data
-  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: {{ include "tetral.image" (dict "root" . "name" "sandbox") }}
+  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: {{ include "tetral.sandboxSnapshot" . }}
 ---
 apiVersion: v1
 kind: ServiceAccount

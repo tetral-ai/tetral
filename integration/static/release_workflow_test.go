@@ -2,8 +2,10 @@ package static
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -119,6 +121,12 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 			t.Fatalf("release workflow retains unverified or non-resumable operation %q", forbidden)
 		}
 	}
+	if !strings.Contains(text, `if [[ "$MODE" = candidate ]]`) || !strings.Contains(text, `test "$SOURCE_COMMIT" = "$WORKFLOW_SHA"`) {
+		t.Fatal("candidate creation does not require the exact current main source")
+	}
+	if strings.Count(text, `test "$SOURCE_COMMIT" = "$(git rev-parse origin/main)"`) != 0 {
+		t.Fatal("post-candidate release modes still require the source to remain the main tip")
+	}
 	for _, forbidden := range []string{"push:\n    tags:", ":latest", "0.1.0-alpha\n", "DAYTONA_API_KEY", "daytona_release_smoke", "external-smoke", "secrets."} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("release workflow contains retired or mutable surface %q", forbidden)
@@ -214,6 +222,28 @@ func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
 	}
 }
 
+func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.T) {
+	for _, invalid := range []string{
+		"ghcr.io/tetral-ai/new-service:latest",
+		"ghcr.io/tetral-ai/new-service:main",
+		"ghcr.io/tetral-ai/new-service:0.1.0-alpha",
+	} {
+		if err := validateReleaseSurfaceIdentity(invalid); err == nil {
+			t.Fatalf("moving release identity %q passed", invalid)
+		}
+	}
+	for _, valid := range []string{
+		"ghcr.io/tetral-ai/new-service:0.0.0-dev",
+		"ghcr.io/tetral-ai/new-service:0.1.0-alpha.12",
+		"ghcr.io/tetral-ai/new-service@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/tetral-ai/new-service:<platform version>",
+	} {
+		if err := validateReleaseSurfaceIdentity(valid); err != nil {
+			t.Fatalf("fixed release identity %q failed: %v", valid, err)
+		}
+	}
+}
+
 func jobUsesLocalAction(job releaseWorkflowJob, action string) bool {
 	for _, step := range job.Steps {
 		if step["uses"] == action {
@@ -238,10 +268,35 @@ func checkReleaseSurface(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(body)
-	for _, forbidden := range []string{"ghcr.io/tetral-ai/tetral:latest", "ghcr.io/tetral-ai/gateway:latest", "ghcr.io/tetral-ai/agent-runtime:latest", "ghcr.io/tetral-ai/sandbox:latest", ":0.1.0-alpha"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("%s contains moving or unnumbered release identity %q", path, forbidden)
+	if err := validateReleaseSurfaceIdentity(string(body)); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+}
+
+var ownedOCIReference = regexp.MustCompile(`ghcr\.io/tetral-ai/[a-z0-9][a-z0-9._/-]*(?::[^\s\x60\"'<>\[\]{}(),]+|@[^\s\x60\"'<>\[\]{}(),]+)?`)
+var digestPlaceholder = regexp.MustCompile(`@sha256:<[a-z0-9-]+>`)
+var numberedAlphaTag = regexp.MustCompile(`^0\.1\.0-alpha\.[1-9][0-9]*$`)
+var immutableDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func validateReleaseSurfaceIdentity(text string) error {
+	text = strings.ReplaceAll(text, "<platform version>", "0.1.0-alpha.1")
+	text = digestPlaceholder.ReplaceAllString(text, "@sha256:"+strings.Repeat("a", 64))
+	for _, reference := range ownedOCIReference.FindAllString(text, -1) {
+		if before, digest, found := strings.Cut(reference, "@"); found {
+			if before == "" || !immutableDigest.MatchString(digest) {
+				return fmt.Errorf("owned OCI reference %q is not digest-addressed", reference)
+			}
+			continue
+		}
+		lastSlash := strings.LastIndex(reference, "/")
+		colon := strings.LastIndex(reference, ":")
+		if colon <= lastSlash {
+			continue
+		}
+		tag := reference[colon+1:]
+		if tag != "0.0.0-dev" && !numberedAlphaTag.MatchString(tag) {
+			return fmt.Errorf("owned OCI reference %q uses a moving or unnumbered tag", reference)
 		}
 	}
+	return nil
 }

@@ -120,10 +120,13 @@ jobs:
           WORKFLOW_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          test "$SOURCE_COMMIT" = "$(git rev-parse HEAD)"
-          test "$SOURCE_COMMIT" = "$WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
           test "$WORKFLOW_REF" = refs/heads/main
-          test "$SOURCE_COMMIT" = "$(git rev-parse origin/main)"
+          test "$WORKFLOW_SHA" = "$(git rev-parse origin/main)"
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
+          if [[ "$MODE" = candidate ]]; then
+            test "$SOURCE_COMMIT" = "$WORKFLOW_SHA"
+          fi
           version_json="$(go run ./internal/release/cmd/tetral-release validate-version --version "$VERSION")"
           artifact_version="$(jq -r .artifact <<<"$version_json")"
           test "$artifact_version" != "dev"
@@ -583,7 +586,6 @@ jobs:
           echo "$GH_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
           git fetch --force origin main
-          test "$SOURCE_COMMIT" = "$(git rev-parse origin/main)"
           target_sequence="${VERSION##*.}"
           while IFS= read -r existing; do
             [[ "$existing" =~ ^v0\.1\.0-alpha\.[0-9]+$ ]] || continue

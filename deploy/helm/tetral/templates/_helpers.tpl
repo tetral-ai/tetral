@@ -7,6 +7,10 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "tetral.sandboxSnapshot" -}}
+{{- printf "%s/sandbox:%s" .Values.image.registry (include "tetral.imageTag" .) -}}
+{{- end -}}
+
 {{- define "tetral.image" -}}
 {{- $root := .root -}}
 {{- $name := .name -}}
