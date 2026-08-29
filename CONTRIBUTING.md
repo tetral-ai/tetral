@@ -25,6 +25,10 @@ ownership expands to the full profile. `make test-full` is the complete local
 pull-request gate and may take materially longer. Native `go test` and
 `bun test` commands remain available for a single owning package.
 
+See [docs/testing.md](docs/testing.md) for the CI ownership model, structured
+evidence, and the current shadow status. The legacy required checks remain
+authoritative until a separately reviewed ruleset cutover.
+
 ## During the work, not after
 
 Keep an implementation-notes file while you work. Whenever reality forces you

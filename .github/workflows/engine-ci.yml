@@ -36,6 +36,11 @@ jobs:
           path: tetral-sdk-typescript
           persist-credentials: false
 
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: go-static
+
       - name: Setup Go
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
@@ -123,6 +128,11 @@ jobs:
           ref: 83ad546898bf9ac0369a4d214463c63fd4502586
           path: tetral-sdk-typescript
           persist-credentials: false
+
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: go-test-${{ matrix.shard }}
 
       - name: Setup Go
         # actions/setup-go@v6
@@ -333,6 +343,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: protocol
+
       - name: Setup Go
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
@@ -389,6 +404,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: agent-runtime-ts
+
       - name: Setup Bun
         # oven-sh/setup-bun@v2
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -438,6 +458,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: gateway-ts
 
       - name: Setup Bun
         # oven-sh/setup-bun@v2
@@ -530,6 +555,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: k8s-manifests
+
       - name: Setup Go
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
@@ -554,6 +584,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: helm-chart
 
       - name: Setup Go
         # actions/setup-go@v6
@@ -583,6 +618,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: security
 
       - name: Setup Go
         # actions/setup-go@v6
@@ -635,6 +675,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: sandbox-local-image-smoke
+
       - name: Setup Go
         # actions/setup-go@v6
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
@@ -662,6 +707,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Record legacy verification metadata
+        uses: ./.github/actions/legacy-shadow-sidecar
+        with:
+          producer: external-smoke
 
       - name: Setup Go
         # actions/setup-go@v6

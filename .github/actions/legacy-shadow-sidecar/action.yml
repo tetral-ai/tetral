@@ -1,0 +1,47 @@
+name: Legacy verification metadata
+description: Records the immutable checkout and workflow envelope without influencing legacy evidence.
+inputs:
+  producer:
+    description: Stable legacy job or shard identity
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Record checked-out revision
+      continue-on-error: true
+      shell: bash
+      env:
+        PRODUCER: ${{ inputs.producer }}
+      run: |
+        set -euo pipefail
+        directory=".ci-shadow/${PRODUCER}"
+        mkdir -p "${directory}"
+        started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        checked_out_sha="$(git rev-parse HEAD^{commit})"
+        jq -n \
+          --arg schema "tetral.ci-legacy-sidecar/v1" \
+          --arg repository "${GITHUB_REPOSITORY}" \
+          --arg producer "${PRODUCER}" \
+          --arg checked_out_sha "${checked_out_sha}" \
+          --arg event_head_sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+          --arg event_base_sha "${{ github.event.pull_request.base.sha || github.sha }}" \
+          --arg test_merge_sha "${GITHUB_SHA}" \
+          --arg workflow_source_sha "${{ github.workflow_sha }}" \
+          --arg workflow "${GITHUB_WORKFLOW}" \
+          --arg workflow_ref "${GITHUB_WORKFLOW_REF}" \
+          --arg run_id "${GITHUB_RUN_ID}" \
+          --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+          --arg job "${GITHUB_JOB}" \
+          --arg started_at "${started_at}" \
+          --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{schema:$schema,repository:$repository,producer:$producer,checked_out_sha:$checked_out_sha,event_head_sha:$event_head_sha,event_base_sha:$event_base_sha,test_merge_sha:$test_merge_sha,workflow_source_sha:$workflow_source_sha,workflow:$workflow,workflow_ref:$workflow_ref,run_id:$run_id,run_attempt:$run_attempt,job:$job,started_at:$started_at,completed_at:$completed_at}' \
+          > "${directory}/metadata.json"
+    - name: Upload immutable metadata
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: legacy-metadata-${{ inputs.producer }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .ci-shadow/${{ inputs.producer }}/metadata.json
+        if-no-files-found: error
+        retention-days: 14

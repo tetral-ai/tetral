@@ -86,6 +86,9 @@ workspace.
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.
 
+Repository test profiles, CI ownership, and evidence artifacts are documented
+in [docs/testing.md](docs/testing.md).
+
 ## Contributing
 
 Contributions are welcome from any authorship — human, AI, or both — as

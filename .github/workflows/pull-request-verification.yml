@@ -1,0 +1,236 @@
+name: Pull Request Verification
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-verification-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+env:
+  TETRAL_CI_REPOSITORY: ${{ github.repository }}
+  TETRAL_CI_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  TETRAL_CI_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+  TETRAL_CI_TEST_MERGE_SHA: ${{ github.sha }}
+  TETRAL_CI_REQUIRED_CHECK_SHA: ${{ github.sha }}
+  TETRAL_CI_WORKFLOW_SOURCE_SHA: ${{ github.workflow_sha }}
+  TETRAL_CI_WORKFLOW: ${{ github.workflow }}
+  TETRAL_CI_RUN_ID: ${{ github.run_id }}
+  TETRAL_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+  TETRAL_CI_JOB: ${{ github.job }}
+  TETRAL_CI_PULL_REQUEST: ${{ github.event.pull_request.number }}
+
+jobs:
+  repository-integrity:
+    name: Repository Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify repository integrity
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: repository
+          producer: repository
+          artifact-prefix: pr-evidence
+
+  go-static-analysis:
+    name: Go Static Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify Go build and static analysis
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: go-static
+          producer: go-static
+          artifact-prefix: pr-evidence
+          needs-lint: 'true'
+
+  go-race:
+    name: Go Race (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify all Go packages under Race
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: go
+          producer: go-${{ matrix.shard }}
+          artifact-prefix: pr-evidence
+          shard-index: ${{ matrix.shard }}
+          shard-count: '4'
+          needs-bun: 'true'
+          needs-buf: 'true'
+
+  agent-runtime:
+    name: Agent Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify the Runtime service
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: runtime
+          producer: runtime
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+
+  provider-gateway:
+    name: Provider Gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify the Gateway service
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: gateway
+          producer: gateway
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+
+  protocol-sdk:
+    name: Protocol and SDK Compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify protocol and SDK contracts
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: protocol
+          producer: protocol
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+          needs-buf: 'true'
+
+  deployment-definitions:
+    name: Deployment Definitions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify Kubernetes and Helm definitions
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: deployment
+          producer: deployment
+          artifact-prefix: pr-evidence
+          needs-helm: 'true'
+
+  sandbox-image:
+    name: Sandbox Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify the local Sandbox image
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: sandbox-image
+          producer: sandbox-image
+          artifact-prefix: pr-evidence
+
+  dependency-security:
+    name: Dependency Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify dependencies and redaction boundaries
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: security
+          producer: security
+          artifact-prefix: pr-evidence
+          needs-bun: 'true'
+
+  merge-gate:
+    name: Merge Gate
+    if: always()
+    needs:
+      - repository-integrity
+      - go-static-analysis
+      - go-race
+      - agent-runtime
+      - provider-gateway
+      - protocol-sdk
+      - deployment-definitions
+      - sandbox-image
+      - dependency-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TETRAL_CI_NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go for reconciliation
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.13'
+          cache-dependency-path: go.sum
+      - name: Download all evidence results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        continue-on-error: true
+        with:
+          pattern: pr-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .test-results/downloaded
+      - name: Reconcile exact-head evidence
+        run: >-
+          go run ./internal/testinfra/cmd/tetral-ci-gate
+          --artifacts .test-results/downloaded
+          --output .test-results/merge-gate.json
+      - name: Upload Merge Gate verdict
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-merge-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .test-results/merge-gate.json
+          if-no-files-found: error
+          retention-days: 14
