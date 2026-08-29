@@ -161,6 +161,17 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	if active, runErr := reconcileRunner.RunOnceWithActivity(context.Background()); runErr != nil || !active {
 		t.Fatalf("run initial background reconcile = %t/%v", active, runErr)
 	}
+	// Keep the periodic observer outside this command-control proof. Both jobs
+	// intentionally share a Queue partition, so a due observer owns the head.
+	result, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs
+		SET available_at=now()+interval '1 minute'
+		WHERE workspace_id=$1 AND kind=$2 AND status='pending'`, workspaceID, queue.KindSandboxBackgroundReconcile)
+	if err != nil {
+		t.Fatalf("park periodic background reconcile: %v", err)
+	}
+	if parked, rowsErr := result.RowsAffected(); rowsErr != nil || parked != 1 {
+		t.Fatalf("parked periodic background reconcile jobs = %d/%v; want one", parked, rowsErr)
+	}
 	var startMessageSequence int64
 	if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
