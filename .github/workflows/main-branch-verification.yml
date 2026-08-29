@@ -45,6 +45,7 @@ jobs:
           needs-buf: 'true'
           needs-helm: 'true'
           needs-lint: 'true'
+          needs-go-test-host: 'true'
 
   coverage:
     name: Report-only Coverage

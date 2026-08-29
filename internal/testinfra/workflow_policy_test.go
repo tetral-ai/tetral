@@ -15,8 +15,50 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 	if err := VerifyPullRequestWorkflow(root); err != nil {
 		t.Fatal(err)
 	}
+	if err := VerifyMainBranchWorkflow(root); err != nil {
+		t.Fatal(err)
+	}
 	if err := VerifyLegacyShadowSidecar(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPullRequestWorkflowRejectsMismatchedRaceShardCount(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := copyPullRequestWorkflowFixture(t, root)
+	path := filepath.Join(fixture, ".github", "workflows", "pull-request-verification.yml")
+	body, err := os.ReadFile(path) //nolint:gosec // fixture path is rooted in t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "          shard-count: '4'\n", "          shard-count: '5'\n", 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyPullRequestWorkflow(fixture); err == nil {
+		t.Fatal("mismatched Race shard count passed")
+	}
+}
+
+func TestMainWorkflowRejectsUnpreparedGoIntegrationHost(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := t.TempDir()
+	source := filepath.Join(root, ".github", "workflows", "main-branch-verification.yml")
+	body, err := os.ReadFile(source) //nolint:gosec // source is a repository-owned workflow fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "          needs-go-test-host: 'true'\n", "", 1))
+	destination := filepath.Join(fixture, ".github", "workflows")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(destination, "main-branch-verification.yml")
+	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyMainBranchWorkflow(fixture); err == nil {
+		t.Fatal("unprepared main Go integration host passed")
 	}
 }
 

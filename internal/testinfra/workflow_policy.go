@@ -98,6 +98,22 @@ func VerifyPullRequestWorkflow(root string) error {
 	return nil
 }
 
+func VerifyMainBranchWorkflow(root string) error {
+	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "main-branch-verification.yml"))
+	if err != nil {
+		return err
+	}
+	jobs := mappingValue(document.Content[0], "jobs")
+	integrated := mappingValue(jobs, "integrated-correctness")
+	if integrated == nil || !jobEvidenceInputEquals(integrated, "group", "all") {
+		return fmt.Errorf("main integrated correctness does not run the full evidence group")
+	}
+	if !jobEvidenceInputEquals(integrated, "needs-go-test-host", "true") {
+		return fmt.Errorf("main integrated correctness does not prepare its Go integration host")
+	}
+	return nil
+}
+
 func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if scalar(mappingValue(step, "uses")) != "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" {
@@ -110,11 +126,15 @@ func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 }
 
 func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
+	return jobEvidenceInputEquals(job, "needs-go-test-host", "true")
+}
+
+func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if scalar(mappingValue(step, "uses")) != "./.github/actions/run-test-evidence" {
 			continue
 		}
-		return scalar(mappingValue(mappingValue(step, "with"), "needs-go-test-host")) == "true"
+		return scalar(mappingValue(mappingValue(step, "with"), name)) == value
 	}
 	return false
 }
@@ -200,6 +220,9 @@ func workflowEvidenceProducers(jobs *workflowYAMLNode) ([]string, error) {
 			shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
 			if !sameStrings(shards, []string{"0", "1", "2", "3"}) || found != "go-${{ matrix.shard }}" {
 				return nil, fmt.Errorf("go Race does not own the exact four shards")
+			}
+			if !jobEvidenceInputEquals(job, "shard-count", fmt.Sprintf("%d", len(shards))) {
+				return nil, fmt.Errorf("go Race shard count does not match its matrix cardinality")
 			}
 			for _, shard := range shards {
 				producers = append(producers, "go-"+shard)
