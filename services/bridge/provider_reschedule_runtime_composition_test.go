@@ -1381,15 +1381,27 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if sandboxQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("recovered Sandbox execution = %s/%s/%s; want acknowledged", sandboxQueueStatus, sandboxQueueErrorKind, sandboxQueueErrorMessage)
 	}
-	var sandboxExecutionState, sandboxResultJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, COALESCE(result_json,'')
+	var sandboxExecutionState, sandboxResultJSON, consumedByTerminalEventID, consumptionReason string
+	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, COALESCE(result_json,''),
+		COALESCE(consumed_by_terminal_event_id,''), COALESCE(consumption_reason,'')
 		FROM session_runtime_tool_results
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
-		sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(&sandboxExecutionState, &sandboxResultJSON); err != nil {
+		sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(
+		&sandboxExecutionState, &sandboxResultJSON, &consumedByTerminalEventID, &consumptionReason,
+	); err != nil {
 		t.Fatalf("read recovered Sandbox result: %v", err)
 	}
-	if sandboxExecutionState != "terminal_unconsumed" || sandboxResultJSON == "" {
-		t.Fatalf("recovered Sandbox result = %s/%s; want terminal_unconsumed payload", sandboxExecutionState, sandboxResultJSON)
+	switch sandboxExecutionState {
+	case "terminal_unconsumed":
+		if sandboxResultJSON == "" || consumedByTerminalEventID != "" || consumptionReason != "" {
+			t.Fatalf("unconsumed Sandbox result = payload:%q terminal:%q reason:%q", sandboxResultJSON, consumedByTerminalEventID, consumptionReason)
+		}
+	case "consumed":
+		if sandboxResultJSON != "" || consumedByTerminalEventID == "" || consumptionReason != "conversation_tool_result" {
+			t.Fatalf("consumed Sandbox result = payload:%q terminal:%q reason:%q", sandboxResultJSON, consumedByTerminalEventID, consumptionReason)
+		}
+	default:
+		t.Fatalf("recovered Sandbox result state = %q; want terminal_unconsumed or consumed", sandboxExecutionState)
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	observedStarts, observedEnds, observedToolResults := 0, 0, 0
