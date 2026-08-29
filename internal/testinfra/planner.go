@@ -76,11 +76,37 @@ func BuildPlan(root string, profile Profile, base string) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	plan.Selections, plan.Excluded, err = expandRuntimeSelection(root, fullEvidencePlan(plan), plan.Selections, plan.Excluded)
+	if err != nil {
+		return Plan{}, err
+	}
 	plan.Dependencies = selectedDependencies(plan.Selections)
 	if err := reconcilePlan(root, inventory, plan); err != nil {
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+func expandRuntimeSelection(root string, full bool, selections []Selection, exclusions []Exclusion) ([]Selection, []Exclusion, error) {
+	for index := range selections {
+		if selections[index].Group != "runtime" {
+			continue
+		}
+		selected, excluded, err := runtimeTestFiles(filepath.Join(root, "services", "agent-runtime"), full)
+		if err != nil {
+			return nil, nil, err
+		}
+		selections[index].Tests = selected
+		for _, item := range excluded {
+			item.Group = "runtime"
+			exclusions = append(exclusions, item)
+		}
+	}
+	return selections, exclusions, nil
+}
+
+func fullEvidencePlan(plan Plan) bool {
+	return plan.Profile == ProfileFull || plan.Revision.FullFallbackCause != ""
 }
 
 func expandGatewaySelection(root string, profile Profile, selections []Selection, exclusions []Exclusion) ([]Selection, []Exclusion, error) {
@@ -152,6 +178,9 @@ func reconcilePlan(root string, inventory Inventory, plan Plan) error {
 		}
 	}
 	if plan.Profile == ProfileFast || plan.Profile == ProfileFull || plan.Revision.FullFallbackCause != "" {
+		if err := reconcileRuntimePlan(root, plan); err != nil {
+			return err
+		}
 		if err := reconcileGatewayPlan(root, plan); err != nil {
 			return err
 		}
@@ -199,14 +228,26 @@ func reconcilePlan(root string, inventory Inventory, plan Plan) error {
 	return nil
 }
 
+func reconcileRuntimePlan(root string, plan Plan) error {
+	all, err := allBunTestFiles(filepath.Join(root, "services", "agent-runtime"))
+	if err != nil {
+		return err
+	}
+	return reconcileBunTestPlan("runtime", all, plan)
+}
+
 func reconcileGatewayPlan(root string, plan Plan) error {
 	all, err := allBunTestFiles(filepath.Join(root, "services", "gateway"))
 	if err != nil {
 		return err
 	}
+	return reconcileBunTestPlan("gateway", all, plan)
+}
+
+func reconcileBunTestPlan(group string, all []string, plan Plan) error {
 	counts := map[string]int{}
 	for _, selection := range plan.Selections {
-		if selection.Group != "gateway" {
+		if selection.Group != group {
 			continue
 		}
 		for _, file := range selection.Tests {
@@ -214,19 +255,19 @@ func reconcileGatewayPlan(root string, plan Plan) error {
 		}
 	}
 	for _, exclusion := range plan.Excluded {
-		if exclusion.Group == "gateway" {
+		if exclusion.Group == group {
 			counts[exclusion.Runnable]++
 		}
 	}
 	for _, file := range all {
 		if counts[file] != 1 {
-			return fmt.Errorf("gateway test file %q has %d evidence dispositions", file, counts[file])
+			return fmt.Errorf("%s test file %q has %d evidence dispositions", group, file, counts[file])
 		}
 		delete(counts, file)
 	}
 	for file, count := range counts {
 		if count != 0 {
-			return fmt.Errorf("gateway plan contains unexpected test file %q", file)
+			return fmt.Errorf("%s plan contains unexpected test file %q", group, file)
 		}
 	}
 	return nil

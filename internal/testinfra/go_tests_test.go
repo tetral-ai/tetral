@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +78,69 @@ func TestGatewayProfilesReconcileOneCompleteTestUniverse(t *testing.T) {
 		if profile == ProfileFull && !slices.Contains(selected, "packages/schema/test/unit/readiness.test.ts") {
 			t.Fatal("Full Gateway universe omitted schema readiness")
 		}
+	}
+}
+
+func TestRuntimeProfilesReconcileOneCompleteTestUniverse(t *testing.T) {
+	root := filepath.Join(repositoryRootForTest(t), "services", "agent-runtime")
+	all, err := allBunTestFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []Profile{ProfileFast, ProfileFull} {
+		selected, excluded, err := runtimeTestFiles(root, profile == ProfileFull)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts := map[string]int{}
+		for _, file := range selected {
+			counts[file]++
+		}
+		for _, item := range excluded {
+			counts[item.Runnable]++
+		}
+		for _, file := range all {
+			if counts[file] != 1 {
+				t.Fatalf("profile %s disposition for %s = %d; want 1", profile, file, counts[file])
+			}
+		}
+	}
+}
+
+func TestRuntimeTestUniverseRejectsAnUnknownTestLocation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "packages", "new-runtime", "test", "other", "orphan.test.ts")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("import { test } from 'bun:test';\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimeTestFiles(root, true); err == nil {
+		t.Fatal("Runtime inventory accepted a test outside every execution class")
+	}
+}
+
+func TestAffectedFullFallbackRunsCompleteRuntimeEvidence(t *testing.T) {
+	root := repositoryRootForTest(t)
+	selected, _, err := runtimeTestFiles(filepath.Join(root, "services", "agent-runtime"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := Plan{Profile: ProfileAffected, Revision: Revision{FullFallbackCause: "test fallback"}}
+	commands, err := commandsForSelection(plan, Selection{Group: "runtime", Tests: selected}, root, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var integration, build bool
+	for _, command := range commands {
+		for _, argument := range command.Arguments {
+			integration = integration || strings.Contains(argument, "/test/integration/")
+		}
+		build = build || slices.Equal(command.Arguments, []string{"bun", "run", "build"})
+	}
+	if !integration || !build {
+		t.Fatalf("affected Full fallback commands: integration=%v build=%v commands=%v", integration, build, commands)
 	}
 }
 

@@ -204,24 +204,31 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil
 	case "runtime":
 		dir := "services/agent-runtime"
-		tests := []string{"packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}
-		expected, err := enumerateBunTestFiles(filepath.Join(root, dir), tests)
-		if err != nil {
-			return nil, err
+		var unitTests, integrationTests []string
+		for _, file := range selection.Tests {
+			switch {
+			case strings.Contains(file, "/test/unit/"):
+				unitTests = append(unitTests, file)
+			case strings.Contains(file, "/test/integration/"):
+				integrationTests = append(integrationTests, file)
+			default:
+				return nil, fmt.Errorf("runtime test file %q has no execution class", file)
+			}
+		}
+		if len(unitTests) == 0 {
+			return nil, fmt.Errorf("runtime selection contains no unit test files")
 		}
 		commands := []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: dir},
 			{Arguments: []string{"bun", "run", "typecheck"}, WorkingDir: dir},
-			{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "runtime-junit.xml")}, tests...), WorkingDir: dir, Artifact: "runtime-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: expected},
+			{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "runtime-junit.xml")}, unitTests...), WorkingDir: dir, Artifact: "runtime-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: unitTests},
 		}
-		if plan.Profile == ProfileFull {
-			integration := []string{"packages/runtime-pod/test/integration/"}
-			integrationFiles, err := enumerateBunTestFiles(filepath.Join(root, dir), integration)
-			if err != nil {
-				return nil, err
+		if fullEvidencePlan(plan) {
+			if len(integrationTests) == 0 {
+				return nil, fmt.Errorf("full runtime selection contains no integration test files")
 			}
 			commands = append(commands,
-				commandSpec{Arguments: []string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "runtime-integration-junit.xml"), integration[0]}, WorkingDir: dir, Artifact: "runtime-integration-junit.xml", Kind: "junit", ExpectedFiles: integrationFiles},
+				commandSpec{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "runtime-integration-junit.xml")}, integrationTests...), WorkingDir: dir, Artifact: "runtime-integration-junit.xml", Kind: "junit", ExpectedFiles: integrationTests},
 				commandSpec{Arguments: []string{"bun", "run", "build"}, WorkingDir: dir},
 			)
 		}
@@ -241,7 +248,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			{Arguments: []string{"bun", "run", "typecheck"}, WorkingDir: dir},
 			{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "gateway-junit.xml")}, testPaths...), WorkingDir: dir, Artifact: "gateway-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: expected},
 		}
-		if plan.Profile == ProfileFull {
+		if fullEvidencePlan(plan) {
 			commands = append(commands, commandSpec{Arguments: []string{"bun", "run", "build"}, WorkingDir: dir})
 		}
 		return commands, nil
@@ -671,6 +678,33 @@ func gatewayTestFiles(root string, profile Profile) ([]string, []Exclusion, erro
 			continue
 		}
 		selected = append(selected, file)
+	}
+	return selected, excluded, nil
+}
+
+func runtimeTestFiles(root string, full bool) ([]string, []Exclusion, error) {
+	all, err := allBunTestFiles(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	var selected []string
+	var excluded []Exclusion
+	for _, file := range all {
+		switch {
+		case strings.Contains(file, "/test/unit/"):
+			selected = append(selected, file)
+		case strings.Contains(file, "/test/integration/"):
+			if full {
+				selected = append(selected, file)
+			} else {
+				excluded = append(excluded, Exclusion{
+					Runnable: file, Capability: "runtime-integration", Disposition: "not-applicable",
+					Reason: "executed by the Full evidence profile",
+				})
+			}
+		default:
+			return nil, nil, fmt.Errorf("runtime test file %q has no evidence disposition", file)
+		}
 	}
 	return selected, excluded, nil
 }
