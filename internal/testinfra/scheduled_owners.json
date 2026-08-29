@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "owners": [
+    {
+      "package": "github.com/tetral-ai/tetral/internal/queue",
+      "reason": "lease, notification, and concurrent ownership history"
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/sessionevent",
+      "reason": "transactional inbox and queue birth history"
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "reason": "cross-service lifecycle and PostgreSQL concurrency history"
+    }
+  ]
+}

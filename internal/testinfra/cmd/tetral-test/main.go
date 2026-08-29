@@ -20,6 +20,9 @@ func main() {
 	planOnly := flag.Bool("plan-only", false, "print the selection plan without executing it")
 	output := flag.String("output", "", "result artifact directory")
 	workers := flag.Int("workers", 0, "maximum local package workers")
+	groups := flag.String("groups", "", "comma-separated evidence groups to execute from the selected profile")
+	shardIndex := flag.Int("shard-index", 0, "zero-based Go package shard index")
+	shardCount := flag.Int("shard-count", 1, "number of deterministic Go package shards")
 	flag.Parse()
 
 	root, err := repositoryRoot()
@@ -29,6 +32,12 @@ func main() {
 	plan, err := testinfra.BuildPlan(root, testinfra.Profile(*profileFlag), *base)
 	if err != nil {
 		fatal(err)
+	}
+	if *groups != "" || *shardCount != 1 || *shardIndex != 0 {
+		plan, err = testinfra.SelectPlan(plan, splitComma(*groups), *shardIndex, *shardCount)
+		if err != nil {
+			fatal(err)
+		}
 	}
 	printPlan(plan, *base)
 
@@ -45,6 +54,19 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("verification %s in %s\n", result.Status, result.FinishedAt.Sub(result.StartedAt).Round(1e6))
+}
+
+func splitComma(value string) []string {
+	if value == "" {
+		return nil
+	}
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func repositoryRoot() (string, error) {

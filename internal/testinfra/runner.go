@@ -29,7 +29,7 @@ type RunOptions struct {
 }
 
 func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error) {
-	result := Result{Plan: plan, StartedAt: time.Now().UTC(), Status: "pass"}
+	result := Result{Plan: plan, Execution: executionEnvelopeFromEnvironment(), StartedAt: time.Now().UTC(), Status: "pass"}
 	if options.PlanOnly {
 		result.FinishedAt = time.Now().UTC()
 		return result, nil
@@ -96,6 +96,22 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		runErr = errors.Join(runErr, writeErr)
 	}
 	return result, runErr
+}
+
+func executionEnvelopeFromEnvironment() ExecutionEnvelope {
+	return ExecutionEnvelope{
+		Repository:        os.Getenv("TETRAL_CI_REPOSITORY"),
+		EventHeadSHA:      os.Getenv("TETRAL_CI_EVENT_HEAD_SHA"),
+		EventBaseSHA:      os.Getenv("TETRAL_CI_EVENT_BASE_SHA"),
+		TestMergeSHA:      os.Getenv("TETRAL_CI_TEST_MERGE_SHA"),
+		RequiredCheckSHA:  os.Getenv("TETRAL_CI_REQUIRED_CHECK_SHA"),
+		WorkflowSourceSHA: os.Getenv("TETRAL_CI_WORKFLOW_SOURCE_SHA"),
+		Workflow:          os.Getenv("TETRAL_CI_WORKFLOW"),
+		RunID:             os.Getenv("TETRAL_CI_RUN_ID"),
+		RunAttempt:        os.Getenv("TETRAL_CI_RUN_ATTEMPT"),
+		Job:               os.Getenv("TETRAL_CI_JOB"),
+		Producer:          os.Getenv("TETRAL_CI_PRODUCER"),
+	}
 }
 
 func executeSelection(ctx context.Context, plan Plan, selection Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
@@ -191,6 +207,12 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 	switch selection.Group {
 	case "repository":
 		return []commandSpec{{Arguments: []string{"go", "run", "./internal/testinfra/cmd/tetral-format-check"}}}, nil
+	case "go-static":
+		return []commandSpec{
+			{Arguments: []string{"go", "build", "./..."}},
+			{Arguments: []string{"go", "vet", "./..."}},
+			{Arguments: []string{"golangci-lint", "run", "--config", ".golangci.yml", "./..."}},
+		}, nil
 	case "go":
 		packages := selection.Packages
 		if len(packages) == 0 {
@@ -219,6 +241,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			return nil, fmt.Errorf("runtime selection contains no unit test files")
 		}
 		commands := []commandSpec{
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: dir},
 			{Arguments: []string{"bun", "run", "typecheck"}, WorkingDir: dir},
 			{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "runtime-junit.xml")}, unitTests...), WorkingDir: dir, Artifact: "runtime-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: unitTests},
@@ -244,6 +267,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			return nil, err
 		}
 		commands := []commandSpec{
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: dir},
 			{Arguments: []string{"bun", "run", "typecheck"}, WorkingDir: dir},
 			{Arguments: append([]string{"bun", "test", "--reporter=junit", "--reporter-outfile=" + filepath.Join(outputDir, "gateway-junit.xml")}, testPaths...), WorkingDir: dir, Artifact: "gateway-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: expected},
@@ -253,13 +277,39 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		return commands, nil
 	case "protocol":
-		return []commandSpec{{Arguments: []string{"buf", "lint"}}}, nil
+		return []commandSpec{
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"buf", "lint"}},
+			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness|TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal|TestGitHubIntegrationRuntimeEventsTrackForkSDKShapes|TestForkSDKAgentModelUnionTracksDraftPinnedCatalog|TestPublicEventProjectionTracksFrozenForkSDKUnion", "-count=1"}},
+			{Arguments: []string{"go", "test", "-race", "-count=1", "./integration/grpcinterop"}},
+			{Arguments: []string{"./scripts/check-sdk-compatibility-traceability.sh"}},
+		}, nil
 	case "deployment":
-		return []commandSpec{{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}}}, nil
+		return []commandSpec{
+			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes"}},
+			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
+		}, nil
+	case "security":
+		return []commandSpec{
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"bun", "audit"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"bun", "audit"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}},
+		}, nil
 	case "sandbox-image":
 		return []commandSpec{
 			{Arguments: []string{"./scripts/run-helper-privilege-container.sh"}},
 			{Arguments: []string{"./scripts/run-sandbox-local-image-smoke.sh"}},
+		}, nil
+	case "coverage":
+		return []commandSpec{
+			{Arguments: []string{"go", "test", "-count=1", "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "gateway-coverage"), "packages/protocol/test/unit/", "packages/lowering/test/", "packages/provider-gateway/test/unit/", "packages/provider-gateway/test/golden/", "packages/mcp-connector/test/unit/"}, WorkingDir: "services/gateway"},
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown evidence group %q", selection.Group)

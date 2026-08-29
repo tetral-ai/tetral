@@ -50,6 +50,7 @@ type Selection struct {
 
 type Result struct {
 	Plan         Plan                 `json:"plan"`
+	Execution    ExecutionEnvelope    `json:"execution"`
 	StartedAt    time.Time            `json:"started_at"`
 	FinishedAt   time.Time            `json:"finished_at"`
 	Status       string               `json:"status"`
@@ -57,6 +58,23 @@ type Result struct {
 	Steps        []StepResult         `json:"steps"`
 	Setup        time.Duration        `json:"setup_elapsed_ns"`
 	Teardown     time.Duration        `json:"teardown_elapsed_ns"`
+}
+
+// ExecutionEnvelope identifies the exact local or CI process that produced a
+// result. GitHub check identities are joined from the API by the shadow
+// collector because they are not exposed to the running job environment.
+type ExecutionEnvelope struct {
+	Repository        string `json:"repository,omitempty"`
+	EventHeadSHA      string `json:"event_head_sha,omitempty"`
+	EventBaseSHA      string `json:"event_base_sha,omitempty"`
+	TestMergeSHA      string `json:"test_merge_sha,omitempty"`
+	RequiredCheckSHA  string `json:"required_check_sha,omitempty"`
+	WorkflowSourceSHA string `json:"workflow_source_sha,omitempty"`
+	Workflow          string `json:"workflow,omitempty"`
+	RunID             string `json:"run_id,omitempty"`
+	RunAttempt        string `json:"run_attempt,omitempty"`
+	Job               string `json:"job,omitempty"`
+	Producer          string `json:"producer,omitempty"`
 }
 
 type DependencyEvidence struct {

@@ -18,6 +18,14 @@
       "paths": ["**/*.go", "go.mod", "go.sum"]
     },
     {
+      "id": "go-static",
+      "owner": "go",
+      "kind": "go-static",
+      "profiles": ["full"],
+      "dependencies": [],
+      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml"]
+    },
+    {
       "id": "runtime",
       "owner": "services/agent-runtime",
       "kind": "bun-runtime",
@@ -38,7 +46,7 @@
       "owner": "proto",
       "kind": "protocol",
       "profiles": ["affected", "full"],
-      "dependencies": [],
+      "dependencies": ["sdk"],
       "paths": ["proto/**", "buf.gen.yaml", "buf.yaml"]
     },
     {
@@ -56,6 +64,14 @@
       "profiles": ["affected", "full"],
       "dependencies": ["docker"],
       "paths": ["Dockerfile.sandbox", "services/sandbox/**", "internal/sandbox/**", "scripts/run-sandbox-local-image-smoke.sh", "scripts/run-helper-privilege-container.sh"]
+    },
+    {
+      "id": "security",
+      "owner": "repository",
+      "kind": "dependency-security",
+      "profiles": ["full"],
+      "dependencies": [],
+      "paths": ["go.mod", "go.sum", "**/package.json", "**/bun.lock", "integration/static/**"]
     }
   ],
   "full_fallback_paths": [

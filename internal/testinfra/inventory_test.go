@@ -43,7 +43,7 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"internal/queue/postgresql_store.go":              {"go", "repository"},
+		"internal/queue/postgresql_store.go":              {"go", "go-static", "repository"},
 		"services/agent-runtime/packages/core/src/run.ts": {"repository", "runtime"},
 		"services/gateway/packages/schema/src/verify.ts":  {"gateway", "repository"},
 		"proto/tetral/bridge/v1/bridge.proto":             {"gateway", "protocol", "runtime"},
