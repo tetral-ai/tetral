@@ -199,7 +199,7 @@ hands Daytona the environment's artifact reference verbatim as the snapshot
 name (`internal/sandbox/driver/provider.go`). The release chart renders the
 stable, numbered lookup name from `image.registry`, `/sandbox:`, and the
 released platform version. A snapshot named
-`ghcr.io/tetral-ai/sandbox:<platform version>` — must exist in the Daytona
+`ghcr.io/tetral-ai/sandbox:<platform version>` must exist in the Daytona
 organization that owns `sandbox-daytona/DAYTONA_API_KEY` before the first
 tool runs. This lookup name is distinct from the immutable sandbox image
 digest from which Daytona builds the snapshot.

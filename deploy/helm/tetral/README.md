@@ -162,14 +162,16 @@ is outside this chart.
 
 The chart parameterizes only axes already present in the canonical manifests:
 
-- `image.registry` and `image.tag` select development images from a source
-  checkout. `image.digests` selects the four release image families:
+- `image.registry` and the effective image tag select development images from a
+  source checkout. An empty `image.tag` uses the Chart `appVersion`; an explicit
+  value overrides it. `image.digests` selects the four release image families:
   `tetral`, `gateway`, `agent-runtime`, and `sandbox`. A non-empty digest takes
   precedence for workload images. Published release values supply all four
   digests together. The API separately uses
-  `image.registry/sandbox:image.tag` as the stable Daytona snapshot lookup
-  name; operators register that name from the matching immutable sandbox
-  image digest before rollout.
+  `image.registry/sandbox:<effective image tag>` as the stable Daytona snapshot
+  lookup name. A packaged release therefore uses its numbered `appVersion`;
+  operators register that name from the matching immutable sandbox image digest
+  before rollout.
 - `secrets.*` selects the names of operator-created Secrets; no Secret content
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
