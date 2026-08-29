@@ -28,8 +28,8 @@ func TestSandboxImageInstallsUpstreamRclone(t *testing.T) {
 				"the archived version predates --vfs-cache-min-free-space")
 		}
 	}
-	if !strings.Contains(text, "downloads.rclone.org") {
-		t.Fatal("Dockerfile.sandbox does not install rclone from upstream")
+	if !strings.Contains(text, "github.com/rclone/rclone/releases/download/v${RCLONE_RELEASE}") {
+		t.Fatal("Dockerfile.sandbox does not install rclone from the project's official release archive")
 	}
 	if !strings.Contains(text, "sha256sum -c -") {
 		t.Fatal("the upstream rclone download is not checksum-verified")
