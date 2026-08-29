@@ -159,14 +159,15 @@ remaining cluster prerequisites and install command.
 
 ## 5. Seed the workspace
 
-Use the same Tetral image version as the installation. Reference the API role's
+Use the same immutable Tetral image digest recorded by the selected GitHub
+Release. Reference the API role's
 DSN directly from `api-database/url` so it never becomes a literal command-line
 argument or Pod-spec value, and remove the one-shot pod when it exits:
 
 ```bash
 kubectl -n tetral-system run tetral-bootstrap \
   --rm -i --restart=Never \
-  --image=ghcr.io/tetral-ai/tetral:0.1.0-alpha \
+  --image=ghcr.io/tetral-ai/tetral@sha256:<tetral-image-digest> \
   --override-type=strategic \
   --overrides='{
     "apiVersion": "v1",

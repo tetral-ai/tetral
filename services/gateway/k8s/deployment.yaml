@@ -21,7 +21,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: provider-gateway
-          image: ghcr.io/tetral-ai/gateway:0.1.0-alpha
+          image: ghcr.io/tetral-ai/gateway:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - bun
@@ -105,7 +105,7 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
         - name: mcp-connector
-          image: ghcr.io/tetral-ai/gateway:0.1.0-alpha
+          image: ghcr.io/tetral-ai/gateway:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - bun
@@ -191,7 +191,7 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
         - name: web-connector
-          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          image: ghcr.io/tetral-ai/tetral:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/web-connector

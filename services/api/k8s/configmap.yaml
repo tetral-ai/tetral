@@ -14,4 +14,4 @@ data:
   TETRAL_DEPLOYMENT_ENVIRONMENT: local
   TETRAL_SERVICE_VERSION: dev
   ENGINE_DATA_DIR: /var/tetral/data
-  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.1.0-alpha
+  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev

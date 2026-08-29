@@ -14,7 +14,7 @@ data:
   TETRAL_DEPLOYMENT_ENVIRONMENT: local
   TETRAL_SERVICE_VERSION: dev
   ENGINE_DATA_DIR: /var/tetral/data
-  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.1.0-alpha
+  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -55,7 +55,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: api
-          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          image: ghcr.io/tetral-ai/tetral:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/tetral-api

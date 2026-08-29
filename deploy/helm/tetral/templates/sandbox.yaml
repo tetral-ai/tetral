@@ -12,7 +12,7 @@ data:
   # Environment artifact builds start FROM this image; it must be the same
   # sandbox image this release deploys, or every packages build fails at its
   # first Dockerfile line.
-  TETRAL_SANDBOX_BASE_IMAGE: {{ .Values.image.registry }}/sandbox:{{ include "tetral.imageTag" . }}
+  TETRAL_SANDBOX_BASE_IMAGE: {{ include "tetral.image" (dict "root" . "name" "sandbox") }}
   TETRAL_QUEUE_GRPC_ADDR: queue.tetral-system.svc.cluster.local:9090
   TETRAL_GIT_PROXY_HOST: {{ .Values.gitProxyHost | quote }}
   TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL: 15s
@@ -70,7 +70,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: sandbox
-          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/tetral-sandbox

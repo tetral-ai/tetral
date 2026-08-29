@@ -66,12 +66,15 @@ Two install paths, one platform version:
 - **Helm** — reproducible, versioned installs: one `values.yaml` carries the
   whole configuration contract; use plain `helm upgrade`, and roll back only
   between releases with no schema migration.
-- **kubectl** — the raw manifests in
-  [`deploy/kubernetes/`](deploy/kubernetes/), for operators who want every
-  object auditable and editable.
+- **Source examples** — the raw manifests in
+  [`deploy/kubernetes/`](deploy/kubernetes/) use an explicit development
+  image identity. They are auditable deployment examples, not a versioned
+  release channel.
 
-The first tagged release (`0.1.0-alpha`) publishes the images and the chart.
-Until then, build from source:
+Numbered Alpha releases use `v0.1.0-alpha.N`. GitHub Releases is the sole
+availability lookup: if no numbered Alpha appears there, no public Alpha is
+available yet. A release page records the exact source, four image digests,
+and Helm artifact to install. Until then, build from source:
 
 ```bash
 make build && make test          # build plus fast no-infrastructure evidence

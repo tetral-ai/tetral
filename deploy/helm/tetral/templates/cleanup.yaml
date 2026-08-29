@@ -32,7 +32,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: cleanup
-              image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+              image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
               imagePullPolicy: IfNotPresent
               command:
                 - /usr/local/bin/tetral-cleanup

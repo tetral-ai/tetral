@@ -2,5 +2,5 @@ apiVersion: v2
 name: tetral
 description: Tetral agent control-plane
 type: application
-version: 0.1.0-alpha
-appVersion: 0.1.0-alpha
+version: 0.0.0-dev
+appVersion: 0.0.0-dev

@@ -141,9 +141,13 @@ Published releases install from GHCR:
 
 ```bash
 helm install tetral oci://ghcr.io/tetral-ai/charts/tetral \
-  --version 0.1.0-alpha \
+  --version <version-without-leading-v> \
   -f values.yaml
 ```
+
+Choose the version from GitHub Releases. If no `v0.1.0-alpha.N` release is
+listed, no public Alpha is available. The release's Candidate Manifest names
+the exact four image digests; use those values rather than moving tags.
 
 Every object has an explicit namespace. `helm install -n another-namespace`
 does not relocate the platform.
@@ -156,9 +160,11 @@ is outside this chart.
 
 The chart parameterizes only axes already present in the canonical manifests:
 
-- `image.registry` and `image.tag` select all four image families:
+- `image.registry` and `image.tag` select development images from a source
+  checkout. `image.digests` selects the four release image families:
   `tetral`, `gateway`, `agent-runtime`, and the `sandbox` artifact reference.
-  An empty `image.tag` resolves to `.Chart.AppVersion`.
+  A non-empty digest takes precedence over the development tag. Published
+  release values supply all four digests together.
 - `secrets.*` selects the names of operator-created Secrets; no Secret content
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
@@ -244,7 +250,7 @@ The Sandbox over-limit reconciler, expired output-capture sweep, and
 resource-prefix garbage collector are deliberate poll-only maintenance loops;
 latency-relevant business Queue runners receive the PostgreSQL wake hint.
 
-The following remain deliberately fixed for `0.1.0-alpha`:
+The following remain deliberately fixed for the initial numbered Alpha line:
 
 - `tetral-system` and `tetral-agent-runtime`, including every service FQDN,
   NetworkPolicy namespace selector, RBAC subject, and service-account

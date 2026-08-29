@@ -394,7 +394,7 @@ func TestKubernetesManifestDeploymentTargetsCorrectWorkloadBinary(t *testing.T) 
 			requireContains(t, deployment, "        - name: web-connector")
 			requireContains(t, deployment, "command:\n            - "+metadata.Tetral.ProviderGateway.ContainerCommand[0]+"\n            - "+metadata.Tetral.ProviderGateway.ContainerCommand[1])
 			requireContains(t, deployment, "command:\n            - "+metadata.Tetral.MCPConnector.ContainerCommand[0]+"\n            - "+metadata.Tetral.MCPConnector.ContainerCommand[1])
-			requireContains(t, deployment, "image: ghcr.io/tetral-ai/tetral:0.1.0-alpha")
+			requireContains(t, deployment, "image: ghcr.io/tetral-ai/tetral:0.0.0-dev")
 			requireContains(t, deployment, "command:\n            - /usr/local/bin/web-connector")
 			if err := validateContainerCount(deployment.text, 3); err != nil {
 				t.Fatalf("%s Deployment %v", workload.file, err)
@@ -439,7 +439,7 @@ func TestKubernetesManifestSingleContainerGuardScopesToContainersBlock(t *testin
 
 	// A second container entry inside the containers: block must be rejected.
 	secondContainer := "        - name: sidecar\n" +
-		"          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha\n"
+		"          image: ghcr.io/tetral-ai/tetral:0.0.0-dev\n"
 	withSidecar := strings.Replace(
 		base.text,
 		"      containers:\n        - name: api\n",
@@ -1865,7 +1865,7 @@ func TestKubernetesManifestAgentRuntimeBuildArtifactMapping(t *testing.T) {
 	if !strings.Contains(metadata.Scripts["build"], metadata.Tetral.AgentRuntimePod.Entrypoint) {
 		t.Fatalf("build script does not include runtime pod entrypoint %q", metadata.Tetral.AgentRuntimePod.Entrypoint)
 	}
-	if metadata.Tetral.AgentRuntimePod.Image != "ghcr.io/tetral-ai/agent-runtime:0.1.0-alpha" {
+	if metadata.Tetral.AgentRuntimePod.Image != "ghcr.io/tetral-ai/agent-runtime:0.0.0-dev" {
 		t.Fatalf("agent runtime package image = %q", metadata.Tetral.AgentRuntimePod.Image)
 	}
 	for _, fragment := range []string{
@@ -2055,7 +2055,7 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 
 	webContainer := requireDeploymentContainerBlock(t, deployment, "web-connector")
 	for _, required := range []string{
-		"image: ghcr.io/tetral-ai/tetral:0.1.0-alpha",
+		"image: ghcr.io/tetral-ai/tetral:0.0.0-dev",
 		"command:\n            - /usr/local/bin/web-connector",
 		"name: TETRAL_WEB_CONNECTOR_GRPC_ADDR\n              value: 0.0.0.0:9092",
 		"name: TETRAL_WEB_CONNECTOR_METRICS_ADDR\n              value: 0.0.0.0:9464",
@@ -2197,7 +2197,7 @@ func TestKubernetesManifestGatewayServiceBuildArtifactMapping(t *testing.T) {
 	if !strings.Contains(metadata.Scripts["build"], metadata.Tetral.MCPConnector.Entrypoint) {
 		t.Fatalf("build script does not include MCP connector entrypoint %q", metadata.Tetral.MCPConnector.Entrypoint)
 	}
-	if metadata.Tetral.ProviderGateway.Image != "ghcr.io/tetral-ai/gateway:0.1.0-alpha" {
+	if metadata.Tetral.ProviderGateway.Image != "ghcr.io/tetral-ai/gateway:0.0.0-dev" {
 		t.Fatalf("provider gateway package image = %q", metadata.Tetral.ProviderGateway.Image)
 	}
 	if metadata.Tetral.MCPConnector.Image != metadata.Tetral.ProviderGateway.Image {

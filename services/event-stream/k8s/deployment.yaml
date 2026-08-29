@@ -25,7 +25,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: event-stream
-          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          image: ghcr.io/tetral-ai/tetral:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/event-stream

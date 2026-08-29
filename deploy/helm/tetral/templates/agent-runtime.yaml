@@ -32,7 +32,7 @@ spec:
       terminationGracePeriodSeconds: 15
       containers:
         - name: agent-runtime
-          image: {{ .Values.image.registry }}/agent-runtime:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "agent-runtime") }}
           imagePullPolicy: IfNotPresent
           command:
             - bun
