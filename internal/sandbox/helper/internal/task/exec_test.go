@@ -457,10 +457,11 @@ func linuxProcessRunning(pid int) bool {
 	return true
 }
 
-func startPipeDrainCPUSpinners(t *testing.T) {
+func startPipeDrainCPUSpinners(t *testing.T) func() {
 	t.Helper()
 	var stop atomic.Bool
 	var wait sync.WaitGroup
+	var once sync.Once
 	wait.Add(2 * runtime.NumCPU())
 	for i := 0; i < 2*runtime.NumCPU(); i++ {
 		go func() {
@@ -472,10 +473,14 @@ func startPipeDrainCPUSpinners(t *testing.T) {
 			}
 		}()
 	}
-	t.Cleanup(func() {
-		stop.Store(true)
-		wait.Wait()
-	})
+	stopPressure := func() {
+		once.Do(func() {
+			stop.Store(true)
+			wait.Wait()
+		})
+	}
+	t.Cleanup(stopPressure)
+	return stopPressure
 }
 
 func writePipeDrainGuardFill(t *testing.T) string {
@@ -495,6 +500,14 @@ func pipeDrainGuardCommand(fillPath string, sentinel string) string {
 		shellQuoteForTaskTest(fillPath),
 		pipeDrainGuardFillBytes,
 		shellQuoteForTaskTest(sentinel+"\n"),
+	)
+}
+
+func pipeDrainGuardCommandAfterFile(releasePath string, fillPath string, sentinel string) string {
+	return fmt.Sprintf(
+		"while [ ! -e %s ]; do sleep 0.01; done; %s",
+		shellQuoteForTaskTest(releasePath),
+		pipeDrainGuardCommand(fillPath, sentinel),
 	)
 }
 

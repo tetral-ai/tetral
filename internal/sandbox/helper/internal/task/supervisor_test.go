@@ -53,22 +53,27 @@ func TestDetachedExecPollsTerminalIdempotently(t *testing.T) {
 func TestSupervisorGuardDrainsFinalPipeBytesBeforeWait(t *testing.T) {
 	fs := newExecFixture(t)
 	withTestSupervisor(t)
-	startPipeDrainCPUSpinners(t)
 	fillPath := writePipeDrainGuardFill(t)
 
 	for i := 0; i < 50; i++ {
 		taskID := fmt.Sprintf("task_pipe_drain_guard_%02d", i)
 		sentinel := fmt.Sprintf("supervisor-final-sentinel-%02d", i)
+		releasePath := filepath.Join(t.TempDir(), "release")
 		response := RunExec(fs.payload(map[string]any{
-			"cmd":            pipeDrainGuardCommand(fillPath, sentinel),
+			"cmd":            pipeDrainGuardCommandAfterFile(releasePath, fillPath, sentinel),
 			"on_wait_expiry": "detach",
 			"task_id":        taskID,
 			"wait_ms":        250,
 		}))
-		if response.Status != protocol.ToolStatusRunning && response.Status != protocol.ToolStatusSuccess {
-			t.Fatalf("iteration %d response = %+v; want running or terminal success", i, response)
+		if response.Status != protocol.ToolStatusRunning {
+			t.Fatalf("iteration %d response = %+v; want running before release", i, response)
+		}
+		stopPressure := startPipeDrainCPUSpinners(t)
+		if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+			t.Fatalf("iteration %d release supervisor command: %v", i, err)
 		}
 		waitForExitRecord(t, taskID)
+		stopPressure()
 		exitBody, err := os.ReadFile(exitPath(taskID))
 		if err != nil {
 			t.Fatalf("iteration %d read exit record: %v", i, err)
