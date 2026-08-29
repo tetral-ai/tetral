@@ -192,7 +192,56 @@ The command reports either `created` or `already present`; rerunning it is
 safe. Auth then finds the row, registers the bootstrap API key from
 `auth-bootstrap/engine-api-key`, and self-heals within its restart backoff.
 
-## 6. Add a model provider key
+## 6. Register the sandbox snapshot with Daytona
+
+Tool execution runs inside Daytona-managed sandboxes. The sandbox service
+hands Daytona the environment's artifact reference verbatim as the snapshot
+name (`internal/sandbox/driver/provider.go`), so a snapshot named exactly
+like the sandbox image reference the chart renders — `image.registry` plus
+`/sandbox:` plus the released platform version, i.e.
+`ghcr.io/tetral-ai/sandbox:<platform version>` — must exist in the Daytona
+organization that owns `sandbox-daytona/DAYTONA_API_KEY` before the first
+tool runs.
+
+Nothing earlier verifies this. An environment with no custom packages never
+touches Daytona at admission: it is marked ready with the configured default
+reference as-is (`internal/environment/postgresql_store.go`,
+`createEnvironmentArtifactAdmission`). A missing snapshot therefore fails
+neither installation, bootstrap, session creation, nor environment
+readiness — it surfaces only when the first tool call cannot create its
+sandbox. On a fresh install where sessions answer but every command
+execution fails, check this step first.
+
+Environments *with* custom packages are different and need no manual
+snapshot: the platform derives a deterministic snapshot per package set and
+creates it in Daytona automatically, building `FROM` the sandbox image — for
+those, Daytona must be able to pull the image itself (see the registry note
+below).
+
+Register the snapshot in the Daytona dashboard (Snapshots → Create), or
+through the API, giving the full image reference as both the name and the
+image:
+
+```bash
+REF="ghcr.io/tetral-ai/sandbox:<platform version>"
+curl -sS -X POST https://app.daytona.io/api/snapshots \
+  -H "Authorization: Bearer ${DAYTONA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"${REF}\", \"imageName\": \"${REF}\"}"
+```
+
+Then poll `GET https://app.daytona.io/api/snapshots` until the entry whose
+`name` equals the reference reports `state: "active"`; creation takes up to
+a few minutes. A snapshot that reaches an error state, or never appears,
+means Daytona could not pull the image — if the image is not publicly
+pullable, register the registry credential with Daytona first (one-time per
+organization, in the dashboard or via `POST /api/docker-registry`).
+
+Every platform version needs its own snapshot, because the reference embeds
+the version: registering the new reference is part of every upgrade, before
+the sandbox service rolls to the new tag.
+
+## 7. Add a model provider key
 
 After Auth is healthy, add the first model credential with
 [`services/gateway/scripts/platform-key.ts`](../services/gateway/scripts/platform-key.ts).

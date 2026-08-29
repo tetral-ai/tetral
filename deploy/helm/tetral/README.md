@@ -126,7 +126,9 @@ finishes bootstrap after API has created the schema.
    one-shot seed and let Auth self-heal. The default `existing-workspace-id` is
    a placeholder. Follow the complete
    [from-zero bootstrap sequence](../../../docs/bootstrap.md) for key
-   generation, the Secret inventory, and the seed command.
+   generation, the Secret inventory, the seed command, and the Daytona
+   sandbox-snapshot registration that must happen before the first tool
+   execution.
 
 ## Install
 
@@ -267,6 +269,11 @@ Use plain `helm upgrade` as the supported upgrade mode:
 ```bash
 helm upgrade tetral ./deploy/helm/tetral -f values.yaml
 ```
+
+Before upgrading, register the new version's sandbox snapshot with Daytona
+(the reference embeds the tag, so every version needs its own — see the
+bootstrap sequence). A skipped registration does not fail the upgrade; it
+fails the first tool execution afterwards.
 
 Helm applies every object at once. All eleven DB-connected containers validate
 schema and serving-role state at boot. API alone uses the dedicated migration
