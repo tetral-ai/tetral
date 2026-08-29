@@ -99,6 +99,42 @@ The shadow gate is currently pending. Until its report is green and a separate
 repository-policy change is explicitly authorized, the legacy workflow and
 required checks remain authoritative.
 
+Once the measured gate is green, the repository can prepare an offline policy
+bundle from read-only GitHub captures and an exact Git archive:
+
+```bash
+gh api repos/tetral-ai/tetral/rulesets/<ruleset-id> > ruleset.json
+gh api repos/tetral-ai/tetral > repository.json
+gh api repos/tetral-ai/tetral/actions/permissions > actions.json
+git archive --format=tar HEAD > legacy-capable-source.tar
+go run ./internal/testinfra/cmd/tetral-policy-plan \
+  --repository tetral-ai/tetral \
+  --ruleset ruleset.json \
+  --repository-settings repository.json \
+  --actions actions.json \
+  --legacy-archive legacy-capable-source.tar \
+  --source-commit "$(git rev-parse HEAD)" \
+  --tree-sha "$(git rev-parse HEAD^{tree})" \
+  --output github-policy-cutover.json
+```
+
+This command validates the captured legacy protections, binds the rollback
+archive to the named commit and tree, and rehearses every policy-transition and
+recovery failure point. It only writes a mode-`0600` plan; it never calls a
+GitHub mutation API. Applying that byte-identical bundle requires separate
+Owner authorization and readback after every step.
+
+Final-state recovery has two explicit paths. The normal path restores the
+legacy workflow through an exact-head, Merge-Gate-protected pull request before
+restoring its required contexts. If Merge Gate cannot report, recovery requires
+a separately authorized exclusive maintenance window: automatic merge stays
+disabled, all open pull requests and the sole restore head are recorded, the
+required-check rule is removed temporarily while pull-request, deletion, and
+non-fast-forward protections remain, and only that restore head may merge. The
+eleven legacy contexts must report before the captured legacy ruleset is
+restored and the window closes. Permanent administrator bypass is not a
+recovery mechanism.
+
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
 classify apparatus failures separately from product failures, and use the
 printed focused reproduction command for diagnosis.
