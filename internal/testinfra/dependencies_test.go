@@ -93,3 +93,23 @@ func TestNextRunnerPreservesDependencyContainerOwnedByLiveProcess(t *testing.T) 
 		t.Fatal("active runner's dependency container was removed")
 	}
 }
+
+func TestRunnerOwnedPostgreSQLIsHostReadyBeforeStartupReturns(t *testing.T) {
+	if os.Getenv("TETRAL_TEST_DOCKER_AVAILABLE") == "" {
+		t.Skip("requires runner-owned Docker dependency")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	manager := &dependencyManager{environment: os.Environ()}
+	if err := manager.startPostgreSQL(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := manager.stopBounded(); err != nil {
+			t.Errorf("stop PostgreSQL dependency: %v", err)
+		}
+	}()
+	if err := verifyPostgreSQLConnection(ctx, manager.postgresDSN); err != nil {
+		t.Fatalf("PostgreSQL dependency was not reachable through its published DSN: %v", err)
+	}
+}

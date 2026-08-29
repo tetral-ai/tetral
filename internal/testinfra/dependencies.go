@@ -265,6 +265,10 @@ func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {
 				return err
 			}
 			dsn := "postgres://tetral:tetral@127.0.0.1:" + port + "/tetral?sslmode=disable"
+			if err := verifyPostgreSQLConnection(ctx, dsn); err != nil {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
 			identity, err := dockerImageDigest(ctx, postgresImage)
 			if err != nil {
 				return err
@@ -417,14 +421,8 @@ func (m *dependencyManager) recordExternalPostgreSQL(ctx context.Context, dsn st
 	parsed.User = nil
 	parsed.RawQuery = ""
 	identity := "external:" + parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
-	connection, err := pgx.Connect(ctx, dsn)
+	version, err := postgreSQLVersion(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("external PostgreSQL verification failed")
-	}
-	var version string
-	queryErr := connection.QueryRow(ctx, "SHOW server_version_num").Scan(&version)
-	closeErr := connection.Close(ctx)
-	if queryErr != nil || closeErr != nil {
 		return fmt.Errorf("external PostgreSQL verification failed")
 	}
 	if err := m.ensureRunID(); err != nil {
@@ -436,6 +434,28 @@ func (m *dependencyManager) recordExternalPostgreSQL(ctx context.Context, dsn st
 	)
 	m.evidence = append(m.evidence, DependencyEvidence{Name: "postgresql", Source: "external", Identity: identity, Version: version, RunID: m.runID})
 	return nil
+}
+
+func verifyPostgreSQLConnection(ctx context.Context, dsn string) error {
+	_, err := postgreSQLVersion(ctx, dsn)
+	return err
+}
+
+func postgreSQLVersion(ctx context.Context, dsn string) (string, error) {
+	connection, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return "", err
+	}
+	var version string
+	queryErr := connection.QueryRow(ctx, "SHOW server_version_num").Scan(&version)
+	closeErr := connection.Close(ctx)
+	if queryErr != nil {
+		return "", queryErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return version, nil
 }
 
 func dockerAvailable(ctx context.Context) error {
