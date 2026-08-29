@@ -227,7 +227,7 @@ func validateShadowShardBalance(row ShadowLedgerRow) error {
 	median := medianDuration(durations)
 	for _, duration := range durations {
 		if median > 0 && float64(duration)/float64(median) > 1.5 {
-			return fmt.Errorf("Go Race shard exceeds 150 percent of shard median")
+			return fmt.Errorf("go Race shard exceeds 150 percent of shard median")
 		}
 	}
 	return nil

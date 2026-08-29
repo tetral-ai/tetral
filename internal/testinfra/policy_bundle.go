@@ -154,7 +154,7 @@ func BuildGitHubPolicyBundle(repository string, pre PolicyState, archive LegacyW
 		Actions:    RepositoryActionsPolicy{Enabled: pre.Actions.Enabled, AllowedActions: pre.Actions.AllowedActions, SHAPinningRequired: true},
 	}
 	if !final.Actions.Enabled || final.Actions.AllowedActions == "" {
-		return GitHubPolicyBundle{}, fmt.Errorf("Actions pre-state is disabled or incomplete")
+		return GitHubPolicyBundle{}, fmt.Errorf("actions pre-state is disabled or incomplete")
 	}
 
 	rulesetEndpoint := fmt.Sprintf("repos/%s/rulesets/%d", repository, rulesetID)
@@ -266,10 +266,7 @@ func VerifyGitHubPolicyBundle(bundle GitHubPolicyBundle) error {
 			return fmt.Errorf("policy bundle final %s state mismatch", surface)
 		}
 	}
-	if err := verifyFinalStateRecovery(bundle); err != nil {
-		return err
-	}
-	return nil
+	return verifyFinalStateRecovery(bundle)
 }
 
 func RehearseGitHubPolicyRollback(bundle GitHubPolicyBundle, failAfter int) error {

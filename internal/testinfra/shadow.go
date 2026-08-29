@@ -452,7 +452,7 @@ func mergeGateConclusion(execution ShadowWorkflowExecution, testMergeSHA string)
 	}
 	if job == nil || check == nil || check.HeadSHA != testMergeSHA || check.AppID != githubActionsAppID ||
 		job.Status != "completed" || check.Status != "completed" || job.Conclusion == "" || job.Conclusion != check.Conclusion {
-		return "", fmt.Errorf("Merge Gate job and check do not reconcile")
+		return "", fmt.Errorf("merge Gate job and check do not reconcile")
 	}
 	return job.Conclusion, nil
 }
