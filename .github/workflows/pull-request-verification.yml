@@ -18,7 +18,7 @@ env:
   TETRAL_CI_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   TETRAL_CI_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
   TETRAL_CI_TEST_MERGE_SHA: ${{ github.sha }}
-  TETRAL_CI_REQUIRED_CHECK_SHA: ${{ github.sha }}
+  TETRAL_CI_REQUIRED_CHECK_SHA: ${{ github.event.pull_request.head.sha }}
   TETRAL_CI_WORKFLOW_SOURCE_SHA: ${{ github.workflow_sha }}
   TETRAL_CI_WORKFLOW: ${{ github.workflow }}
   TETRAL_CI_RUN_ID: ${{ github.run_id }}

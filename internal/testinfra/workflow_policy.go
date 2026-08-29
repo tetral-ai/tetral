@@ -50,6 +50,11 @@ func VerifyPullRequestWorkflow(root string) error {
 	if strings.Contains(allScalars(workflow), "secrets.") {
 		return fmt.Errorf("pull request workflow references secrets")
 	}
+	environment := mappingValue(workflow, "env")
+	if scalar(mappingValue(environment, "TETRAL_CI_TEST_MERGE_SHA")) != "${{ github.sha }}" ||
+		scalar(mappingValue(environment, "TETRAL_CI_REQUIRED_CHECK_SHA")) != "${{ github.event.pull_request.head.sha }}" {
+		return fmt.Errorf("pull request workflow conflates the tested merge revision with the required-check carrier")
+	}
 	jobs := mappingValue(workflow, "jobs")
 	if jobs == nil || jobs.Kind != workflowYAMLMapping {
 		return fmt.Errorf("pull request workflow has no jobs")

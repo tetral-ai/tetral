@@ -32,9 +32,10 @@ func TestVerifyMergeGateRejectsEveryNonAcceptedResultClass(t *testing.T) {
 		{name: "apparatus", mutate: func(result *Result) { result.Status = "apparatus-failed" }},
 		{name: "stale head", mutate: func(result *Result) { result.Execution.EventHeadSHA = strings.Repeat("1", 40) }},
 		{name: "wrong merge", mutate: func(result *Result) { result.Execution.TestMergeSHA = strings.Repeat("2", 40) }},
+		{name: "wrong check carrier", mutate: func(result *Result) { result.Execution.RequiredCheckSHA = strings.Repeat("3", 40) }},
 		{name: "wrong run", mutate: func(result *Result) { result.Execution.RunID = "42" }},
 		{name: "wrong attempt", mutate: func(result *Result) { result.Execution.RunAttempt = "2" }},
-		{name: "wrong workflow source", mutate: func(result *Result) { result.Execution.WorkflowSourceSHA = strings.Repeat("3", 40) }},
+		{name: "wrong workflow source", mutate: func(result *Result) { result.Execution.WorkflowSourceSHA = strings.Repeat("4", 40) }},
 		{name: "wrong job", mutate: func(result *Result) { result.Execution.Job = "other-job" }},
 		{name: "undeclared not applicable", mutate: func(result *Result) { result.Status = "not-applicable" }},
 	}
@@ -116,7 +117,7 @@ func TestVerifyMergeGateRejectsMissingMalformedDuplicateAndUnexpectedArtifacts(t
 func gateFixtureExpectation() GateExpectation {
 	return GateExpectation{
 		Repository: "tetral-ai/tetral", EventHeadSHA: strings.Repeat("a", 40), EventBaseSHA: strings.Repeat("b", 40),
-		TestMergeSHA: strings.Repeat("c", 40), RequiredCheckSHA: strings.Repeat("c", 40), WorkflowSourceSHA: strings.Repeat("d", 40),
+		TestMergeSHA: strings.Repeat("c", 40), RequiredCheckSHA: strings.Repeat("d", 40), WorkflowSourceSHA: strings.Repeat("e", 40),
 		Workflow: "Pull Request Verification", RunID: "123", RunAttempt: "1", Producers: []string{"repository", "go-0"},
 		ProducerJobs: map[string]string{"repository": "repository-integrity", "go-0": "go-race"},
 	}

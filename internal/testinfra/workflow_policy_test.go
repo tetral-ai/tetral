@@ -84,6 +84,30 @@ func TestPullRequestWorkflowRejectsUnpreparedGoIntegrationHost(t *testing.T) {
 	}
 }
 
+func TestPullRequestWorkflowRejectsMergeRevisionAsRequiredCheckCarrier(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := copyPullRequestWorkflowFixture(t, root)
+	path := filepath.Join(fixture, ".github", "workflows", "pull-request-verification.yml")
+	body, err := os.ReadFile(path) //nolint:gosec // fixture path is rooted in t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(
+		string(body),
+		"TETRAL_CI_REQUIRED_CHECK_SHA: ${{ github.event.pull_request.head.sha }}",
+		"TETRAL_CI_REQUIRED_CHECK_SHA: ${{ github.sha }}",
+		1,
+	))
+	// path is rooted in t.TempDir and uses a fixed repository-owned filename.
+	//nolint:gosec
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPullRequestWorkflow(fixture); err == nil {
+		t.Fatal("merge revision passed as the required-check carrier")
+	}
+}
+
 func copyPullRequestWorkflowFixture(t *testing.T, root string) string {
 	t.Helper()
 	fixture := t.TempDir()
