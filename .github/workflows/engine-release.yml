@@ -159,7 +159,7 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: '1.25.13'
-      - uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Reconstruct immutable release state
         env:
           VERSION: ${{ needs.validate.outputs.artifact_version }}
@@ -207,7 +207,7 @@ jobs:
           package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
           package-permission: write
       - name: Set up ORAS
-        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Log in to GHCR
         env:
           GH_TOKEN: ${{ github.token }}
@@ -377,7 +377,7 @@ jobs:
           fi
           jq -n --arg image "$IMAGE" --arg digest "$DIGEST" --arg child "$child" --arg top_media "$top_media" --arg child_media "$child_media" '{image:$image,top_level_digest:$digest,child_digest:$child,top_level_media_type:$top_media,child_media_type:$child_media}' > "image-$IMAGE.json"
       - name: Transfer identity to candidate finalizer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: candidate-image-${{ matrix.image }}
           path: image-${{ matrix.image }}.json
@@ -415,9 +415,9 @@ jobs:
         with:
           version: v4.2.0
       - name: Set up ORAS
-        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Download exact image identities
-        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: candidate-image-*
           path: image-identities
@@ -487,7 +487,7 @@ jobs:
         with:
           package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
           package-permission: write
-      - uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Validate and publish bounded evidence
         env:
           VERSION: ${{ inputs.version }}
@@ -567,7 +567,7 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
-      - uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Publish exact recorded identities
         env:
           VERSION: ${{ needs.validate.outputs.artifact_version }}
@@ -755,7 +755,7 @@ jobs:
           package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
           package-permission: write
       - name: Set up ORAS
-        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Record immutable superseded disposition
         env:
           VERSION: ${{ inputs.version }}
@@ -820,7 +820,7 @@ jobs:
           package-creation-authorization-digest: ${{ inputs.package_creation_authorization_digest }}
           package-permission: write
       - name: Set up ORAS
-        uses: oras-project/setup-oras@8fb134d3ffae70fde00fa608ff83311dda675fa5
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Set up Buildx for read-only image inspection
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
       - name: Plan or apply exact digest cleanup

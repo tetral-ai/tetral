@@ -1,12 +1,13 @@
 package static
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
 type releaseWorkflow struct {
@@ -37,7 +38,7 @@ func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	var workflow releaseWorkflow
-	if err := yaml.Unmarshal(body, &workflow); err != nil {
+	if err := testinfra.DecodeWorkflowYAML(body, path, &workflow); err != nil {
 		t.Fatal(err)
 	}
 	if workflow.Name != "Release" || len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
@@ -78,13 +79,13 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 		t.Fatal(err)
 	}
 	var workflow releaseWorkflow
-	if err := yaml.Unmarshal(body, &workflow); err != nil {
+	if err := testinfra.DecodeWorkflowYAML(body, "engine-release.yml", &workflow); err != nil {
 		t.Fatal(err)
 	}
 	candidate := marshalWorkflowJob(t, workflow.Jobs["candidate-images"])
 	finalize := marshalWorkflowJob(t, workflow.Jobs["finalize-candidate"])
 	promote := marshalWorkflowJob(t, workflow.Jobs["promote"])
-	for _, token := range []string{"docker/build-push-action@", "platforms: linux/amd64", "Build candidate exactly once"} {
+	for _, token := range []string{"docker/build-push-action@", `"platforms":"linux/amd64"`, "Build candidate exactly once"} {
 		if !strings.Contains(candidate, token) {
 			t.Fatalf("candidate build is missing %q", token)
 		}
@@ -132,7 +133,7 @@ func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
 		t.Fatal(err)
 	}
 	var workflow releaseWorkflow
-	if err := yaml.Unmarshal(body, &workflow); err != nil {
+	if err := testinfra.DecodeWorkflowYAML(body, "mirror-base-images.yml", &workflow); err != nil {
 		t.Fatal(err)
 	}
 	if workflow.Name != "Base Image Maintenance" || len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
@@ -224,7 +225,7 @@ func jobUsesLocalAction(job releaseWorkflowJob, action string) bool {
 
 func marshalWorkflowJob(t *testing.T, job releaseWorkflowJob) string {
 	t.Helper()
-	body, err := yaml.Marshal(job)
+	body, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
 	}

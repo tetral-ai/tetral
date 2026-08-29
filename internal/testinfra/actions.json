@@ -11,6 +11,7 @@
     {"repository": "docker/login-action", "sha": "abd2ef45e78c5afb21d64d4ca52ee8550d9572c7", "release_tag": "v4.5.1", "object_type": "commit", "target_sha": "abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"},
     {"repository": "docker/setup-buildx-action", "sha": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c", "release_tag": "v4.2.0", "object_type": "commit", "target_sha": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"},
     {"repository": "golangci/golangci-lint-action", "sha": "63c23d5020da8f97005b6de340504130bdbe42c7", "release_tag": "v9.2.1", "object_type": "annotated_tag", "target_sha": "82606bf257cbaff209d206a39f5134f0cfbfd2ee"},
-    {"repository": "oven-sh/setup-bun", "sha": "0c5077e51419868618aeaa5fe8019c62421857d6", "release_tag": "v2.2.0", "object_type": "commit", "target_sha": "0c5077e51419868618aeaa5fe8019c62421857d6"}
+    {"repository": "oven-sh/setup-bun", "sha": "0c5077e51419868618aeaa5fe8019c62421857d6", "release_tag": "v2.2.0", "object_type": "commit", "target_sha": "0c5077e51419868618aeaa5fe8019c62421857d6"},
+    {"repository": "oras-project/setup-oras", "sha": "1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d", "release_tag": "v2.0.1", "object_type": "commit", "target_sha": "1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d"}
   ]
 }
