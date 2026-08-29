@@ -111,6 +111,13 @@ func VerifyMainBranchWorkflow(root string) error {
 	if !jobEvidenceInputEquals(integrated, "needs-go-test-host", "true") {
 		return fmt.Errorf("main integrated correctness does not prepare its Go integration host")
 	}
+	coverage := mappingValue(jobs, "coverage")
+	if !jobRunContainsAll(coverage,
+		"apparmor_restrict_unprivileged_userns=0",
+		"unshare -Ur -m true",
+	) {
+		return fmt.Errorf("main coverage does not prepare its Go integration host")
+	}
 	return nil
 }
 
@@ -127,6 +134,20 @@ func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 
 func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
 	return jobEvidenceInputEquals(job, "needs-go-test-host", "true")
+}
+
+func jobRunContainsAll(job *workflowYAMLNode, fragments ...string) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		run := scalar(mappingValue(step, "run"))
+		matched := true
+		for _, fragment := range fragments {
+			matched = matched && strings.Contains(run, fragment)
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
