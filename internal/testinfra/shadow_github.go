@@ -271,9 +271,20 @@ type githubWorkflowRun struct {
 	RunStartedAt       time.Time `json:"run_started_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	PreviousAttemptURL *string   `json:"previous_attempt_url"`
-	PullRequests       []struct {
+	HeadBranch         string    `json:"head_branch"`
+	HeadRepository     struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
+	PullRequests []struct {
 		Number int `json:"number"`
 	} `json:"pull_requests"`
+}
+
+type githubPullReference struct {
+	Number int `json:"number"`
+	Head   struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
 }
 
 func EnumerateLiveShadowUniverse(ctx context.Context, repository string, eligibleAfter time.Time) (ShadowObservationUniverse, error) {
@@ -289,6 +300,7 @@ func enumerateShadowUniverse(ctx context.Context, client ghShadowClient, reposit
 		latest time.Time
 	}
 	byHead := map[string]pairedRuns{}
+	resolvedPullRequests := map[string]int{}
 	for _, workflow := range []string{"engine-ci.yml", "pull-request-verification.yml"} {
 		for page := 1; ; page++ {
 			query := url.Values{}
@@ -307,12 +319,16 @@ func enumerateShadowUniverse(ctx context.Context, client ghShadowClient, reposit
 				if !run.CreatedAt.After(eligibleAfter) {
 					continue
 				}
-				if len(run.PullRequests) != 1 || run.PullRequests[0].Number <= 0 || run.HeadSHA == "" || run.ID <= 0 || run.RunAttempt <= 0 {
+				if run.HeadSHA == "" || run.ID <= 0 || run.RunAttempt <= 0 {
 					return ShadowObservationUniverse{}, fmt.Errorf("shadow workflow run %d has incomplete pull-request identity", run.ID)
 				}
-				identity := fmt.Sprintf("%d/%s", run.PullRequests[0].Number, run.HeadSHA)
+				pullRequest, err := resolveWorkflowRunPullRequest(ctx, client, repository, run, resolvedPullRequests)
+				if err != nil {
+					return ShadowObservationUniverse{}, err
+				}
+				identity := fmt.Sprintf("%d/%s", pullRequest, run.HeadSHA)
 				pair := byHead[identity]
-				pair.member.PullRequest = run.PullRequests[0].Number
+				pair.member.PullRequest = pullRequest
 				pair.member.EventHeadSHA = run.HeadSHA
 				if run.CreatedAt.After(pair.latest) {
 					pair.latest = run.CreatedAt
@@ -353,6 +369,75 @@ func enumerateShadowUniverse(ctx context.Context, client ghShadowClient, reposit
 		Version: 1, Repository: repository, EligibleAfter: eligibleAfter.UTC(),
 		EnumeratedAt: enumeratedAt.UTC(), Members: members,
 	}, nil
+}
+
+func resolveWorkflowRunPullRequest(ctx context.Context, client ghShadowClient, repository string, run githubWorkflowRun, resolved map[string]int) (int, error) {
+	if len(run.PullRequests) == 1 && run.PullRequests[0].Number > 0 {
+		return run.PullRequests[0].Number, nil
+	}
+	if len(run.PullRequests) != 0 {
+		return 0, fmt.Errorf("shadow workflow run %d has ambiguous pull-request identity", run.ID)
+	}
+	if pullRequest := resolved[run.HeadSHA]; pullRequest > 0 {
+		return pullRequest, nil
+	}
+
+	candidates, err := listGitHubPullReferences(ctx, client, fmt.Sprintf("repos/%s/commits/%s/pulls", repository, url.PathEscape(run.HeadSHA)), nil)
+	if err != nil {
+		return 0, err
+	}
+	matching := exactHeadPullRequests(candidates, run.HeadSHA)
+	if len(matching) == 0 && run.HeadRepository.FullName != "" && run.HeadBranch != "" {
+		owner, _, ok := strings.Cut(run.HeadRepository.FullName, "/")
+		if !ok || owner == "" {
+			return 0, fmt.Errorf("shadow workflow run %d has incomplete fork head identity", run.ID)
+		}
+		query := url.Values{"head": {owner + ":" + run.HeadBranch}, "state": {"all"}}
+		candidates, err = listGitHubPullReferences(ctx, client, fmt.Sprintf("repos/%s/pulls", repository), query)
+		if err != nil {
+			return 0, err
+		}
+		matching = exactHeadPullRequests(candidates, run.HeadSHA)
+	}
+	if len(matching) != 1 {
+		return 0, fmt.Errorf("shadow workflow run %d resolves to %d exact pull requests", run.ID, len(matching))
+	}
+	var pullRequest int
+	for candidate := range matching {
+		pullRequest = candidate
+	}
+	resolved[run.HeadSHA] = pullRequest
+	return pullRequest, nil
+}
+
+func listGitHubPullReferences(ctx context.Context, client ghShadowClient, endpoint string, query url.Values) ([]githubPullReference, error) {
+	var result []githubPullReference
+	for page := 1; ; page++ {
+		pageQuery := url.Values{}
+		for key, values := range query {
+			pageQuery[key] = append([]string(nil), values...)
+		}
+		pageQuery.Set("page", strconv.Itoa(page))
+		pageQuery.Set("per_page", "100")
+		var pulls []githubPullReference
+		if err := client.JSON(ctx, endpoint+"?"+pageQuery.Encode(), &pulls); err != nil {
+			return nil, err
+		}
+		result = append(result, pulls...)
+		if len(pulls) < 100 {
+			return result, nil
+		}
+	}
+}
+
+func exactHeadPullRequests(candidates []githubPullReference, headSHA string) map[int]struct{} {
+	matching := map[int]struct{}{}
+	for _, candidate := range candidates {
+		if candidate.Number > 0 && candidate.Head.SHA == headSHA {
+			matching[candidate.Number] = struct{}{}
+		}
+	}
+	return matching
 }
 
 func selectWorkflowRun(runs []githubWorkflowRun, name string) (githubWorkflowRun, error) {

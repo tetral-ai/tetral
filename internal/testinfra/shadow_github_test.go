@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 )
@@ -39,16 +40,65 @@ func TestEnumerateShadowUniverseOwnsEveryPullRequestHead(t *testing.T) {
 	}
 }
 
-func TestEnumerateShadowUniverseRejectsRunWithoutPullRequestIdentity(t *testing.T) {
+func TestEnumerateShadowUniverseResolvesEmptyForkAssociationByExactHead(t *testing.T) {
 	start := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
 	legacyEndpoint := "repos/tetral-ai/tetral/actions/workflows/engine-ci.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	shadowEndpoint := "repos/tetral-ai/tetral/actions/workflows/pull-request-verification.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	commitPullsEndpoint := "repos/tetral-ai/tetral/commits/head-a/pulls?page=1&per_page=100"
+	headPullsEndpoint := "repos/tetral-ai/tetral/pulls?head=external%3Afeature&page=1&per_page=100&state=all"
+	emptyAssociation := map[string]any{
+		"head_sha": "head-a", "head_branch": "feature", "head_repository": map[string]string{"full_name": "external/tetral"},
+		"run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{},
+	}
+	legacyRun := maps.Clone(emptyAssociation)
+	legacyRun["id"] = 1001
+	shadowRun := maps.Clone(emptyAssociation)
+	shadowRun["id"] = 1002
 	client := fixtureGHClient{json: map[string]any{
-		legacyEndpoint: map[string]any{"workflow_runs": []map[string]any{
-			{"id": 1001, "head_sha": "head-a", "run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{}},
-		}},
+		legacyEndpoint:      map[string]any{"workflow_runs": []any{legacyRun}},
+		shadowEndpoint:      map[string]any{"workflow_runs": []any{shadowRun}},
+		commitPullsEndpoint: []map[string]any{},
+		headPullsEndpoint:   []map[string]any{{"number": 42, "head": map[string]string{"sha": "head-a"}}},
 	}, bytes: map[string][]byte{}}
-	if _, err := enumerateShadowUniverse(context.Background(), client, "tetral-ai/tetral", start, start.Add(2*time.Hour)); err == nil {
-		t.Fatal("workflow run without pull-request identity passed")
+	universe, err := enumerateShadowUniverse(context.Background(), client, "tetral-ai/tetral", start, start.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(universe.Members) != 1 || universe.Members[0].PullRequest != 42 || universe.Members[0].LegacyRunID != 1001 || universe.Members[0].ShadowRunID != 1002 {
+		t.Fatalf("resolved fork universe = %+v", universe)
+	}
+}
+
+func TestEnumerateShadowUniverseRejectsMissingOrAmbiguousRecoveredPullRequest(t *testing.T) {
+	start := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	legacyEndpoint := "repos/tetral-ai/tetral/actions/workflows/engine-ci.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	commitPullsEndpoint := "repos/tetral-ai/tetral/commits/head-a/pulls?page=1&per_page=100"
+	headPullsEndpoint := "repos/tetral-ai/tetral/pulls?head=external%3Afeature&page=1&per_page=100&state=all"
+	run := map[string]any{
+		"id": 1001, "head_sha": "head-a", "head_branch": "feature", "head_repository": map[string]string{"full_name": "external/tetral"},
+		"run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{},
+	}
+	for _, test := range []struct {
+		name      string
+		commitPRs []map[string]any
+		headPRs   []map[string]any
+	}{
+		{name: "missing"},
+		{name: "ambiguous", commitPRs: []map[string]any{
+			{"number": 42, "head": map[string]string{"sha": "head-a"}},
+			{"number": 43, "head": map[string]string{"sha": "head-a"}},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := fixtureGHClient{json: map[string]any{
+				legacyEndpoint:      map[string]any{"workflow_runs": []any{run}},
+				commitPullsEndpoint: test.commitPRs,
+				headPullsEndpoint:   test.headPRs,
+			}, bytes: map[string][]byte{}}
+			if _, err := enumerateShadowUniverse(context.Background(), client, "tetral-ai/tetral", start, start.Add(2*time.Hour)); err == nil {
+				t.Fatal("unresolved workflow run passed")
+			}
+		})
 	}
 }
 
