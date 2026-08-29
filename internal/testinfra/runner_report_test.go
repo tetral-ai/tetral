@@ -5,9 +5,35 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
+	commands, err := commandsForSelection(
+		Plan{},
+		Selection{Group: "coverage"},
+		t.TempDir(),
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) < 3 {
+		t.Fatalf("coverage commands = %v; want dependency setup before tests", commands)
+	}
+	wantInstall := []string{"bun", "install", "--frozen-lockfile"}
+	if commands[0].WorkingDir != "services/agent-runtime" || !slices.Equal(commands[0].Arguments, wantInstall) {
+		t.Fatalf("first coverage command = %v in %q; want Runtime dependency install", commands[0].Arguments, commands[0].WorkingDir)
+	}
+	if commands[1].WorkingDir != "services/gateway" || !slices.Equal(commands[1].Arguments, wantInstall) {
+		t.Fatalf("second coverage command = %v in %q; want Gateway dependency install", commands[1].Arguments, commands[1].WorkingDir)
+	}
+	if !slices.Equal(commands[2].Arguments[:2], []string{"go", "test"}) {
+		t.Fatalf("third coverage command = %v; want Go tests after dependency setup", commands[2].Arguments)
+	}
+}
 
 func TestRunnerAnchorsRelativeEvidencePathsAtRepositoryRoot(t *testing.T) {
 	root := t.TempDir()
