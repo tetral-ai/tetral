@@ -46,6 +46,9 @@ func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {
 	if workflow.Permissions["contents"] != "read" || workflow.Permissions["packages"] != "read" || workflow.Concurrency.CancelInProgress {
 		t.Fatalf("release default authority = permissions:%v concurrency:%+v", workflow.Permissions, workflow.Concurrency)
 	}
+	if workflow.Concurrency.Group != "tetral-release-version-owner" {
+		t.Fatalf("release concurrency owner = %q; want one global version owner", workflow.Concurrency.Group)
+	}
 	writeJobs := []string{"reserve", "candidate-images", "finalize-candidate", "record-rehearsal", "promote", "retire-candidate", "cleanup-candidates"}
 	for _, name := range writeJobs {
 		job, ok := workflow.Jobs[name]
@@ -86,7 +89,7 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 			t.Fatalf("candidate build is missing %q", token)
 		}
 	}
-	for _, token := range []string{"helm package", "artifact --kind helm-candidate", "artifact --kind candidate"} {
+	for _, token := range []string{"helm package", "release-oci-record.sh publish helm-candidate", "release-oci-record.sh publish candidate", "render_command"} {
 		if !strings.Contains(finalize, token) {
 			t.Fatalf("candidate finalizer is missing %q", token)
 		}
@@ -96,12 +99,25 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 			t.Fatalf("promotion rebuilds or repackages through %q", forbidden)
 		}
 	}
-	for _, required := range []string{"docker buildx imagetools create", "candidate_manifest_digest", "helm push", "validate-authorization", "git/tags", "gh release create"} {
+	for _, required := range []string{"docker buildx imagetools create", "candidate_manifest_digest", "helm push", "publish authorization", "fetch authorization", "validate-authorization", "promotion-plan", "reconstruct_release pre-images", "reconstruct_release pre-chart", "reconstruct_release pre-tag", "reconstruct_release pre-github-release", "git/tags", "gh release create", "gh release upload"} {
 		if !strings.Contains(promote, required) {
 			t.Fatalf("promotion is missing digest-preserving step %q", required)
 		}
 	}
 	text := string(body)
+	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "rehearsal_values_digest", "rehearsal_render_digest", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "authorization-$VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("release workflow is missing immutable boundary %q", required)
+		}
+	}
+	if strings.Count(text, `^v0\.1\.0-alpha\.[0-9]+$`) != 2 || strings.Count(text, `^reservation-0\.1\.0-alpha\.[0-9]+$`) != 2 {
+		t.Fatal("candidate and promotion must exclude the historical alpha.rc tag from numeric monotonicity")
+	}
+	for _, forbidden := range []string{"oras blob fetch \"$RELEASE_METADATA_REPOSITORY\"", "--output json", "git merge-base --is-ancestor", "test -z \"$(git tag"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("release workflow retains unverified or non-resumable operation %q", forbidden)
+		}
+	}
 	for _, forbidden := range []string{"push:\n    tags:", ":latest", "0.1.0-alpha\n", "DAYTONA_API_KEY", "daytona_release_smoke", "external-smoke", "secrets."} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("release workflow contains retired or mutable surface %q", forbidden)
@@ -123,7 +139,7 @@ func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
 		t.Fatalf("base-image triggers = %#v", workflow.On)
 	}
 	text := string(body)
-	for _, required := range []string{"repository@sha256:digest", "linux/amd64", "Mirror without overwrite", "source_identity", "Update the owning Dockerfile"} {
+	for _, required := range []string{"repository@sha256:digest", "linux/amd64", "Mirror without overwrite", "source_identity", "selected_digest", "TARGET_REPOSITORY: ${{ inputs.target_repository }}", "--prefer-index=false", "target_digest", "internal/release/base_images.json", "Update the owning Dockerfile"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("base-image maintenance is missing %q", required)
 		}
@@ -134,6 +150,38 @@ func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
 		}
 	}
 	requireWorkflowActionsUseFullSHAs(t, "mirror-base-images.yml", text)
+}
+
+func TestReleaseAuthorityUsesPaginatedFactsWithoutFabricatedTokenCapabilities(t *testing.T) {
+	root := finalArchitectureEngineRoot(t)
+	for _, relative := range []string{"scripts/verify-release-github-authority.sh", "scripts/release-github-deployment.sh", "scripts/release-oci-record.sh", "scripts/release-state.sh"} {
+		body, err := os.ReadFile(filepath.Join(root, relative)) //nolint:gosec // Repository-owned release adapter.
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(body)
+		if strings.Contains(text, "repository_token_can_read") || strings.Contains(text, "repository_token_can_write") {
+			t.Fatalf("%s fabricates package-token capability", relative)
+		}
+	}
+	authority, err := os.ReadFile(filepath.Join(root, "scripts", "verify-release-github-authority.sh")) //nolint:gosec // Repository-owned release adapter.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"--paginate --slurp", "DECLARED_PACKAGE_PERMISSION", "readback_complete:true", "declared_job_permission"} {
+		if !strings.Contains(string(authority), required) {
+			t.Fatalf("release authority readback is missing %q", required)
+		}
+	}
+	oci, err := os.ReadFile(filepath.Join(root, "scripts", "release-oci-record.sh")) //nolint:gosec // Repository-owned release adapter.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"--to-oci-layout", "validate-layout", "--from-oci-layout"} {
+		if !strings.Contains(string(oci), required) {
+			t.Fatalf("release OCI adapter is missing %q", required)
+		}
+	}
 }
 
 func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {

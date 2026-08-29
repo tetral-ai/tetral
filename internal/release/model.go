@@ -66,6 +66,7 @@ type ChartIdentity struct {
 	PackageDigest           string `json:"package_sha256"`
 	RenderDigest            string `json:"render_sha256"`
 	ValuesDigest            string `json:"values_sha256"`
+	RenderCommand           string `json:"render_command"`
 }
 
 type BaseIdentity struct {
@@ -153,8 +154,12 @@ func ValidateCandidate(candidate CandidateManifest) error {
 		if err := ValidateImageIdentity(image); err != nil {
 			return fmt.Errorf("candidate image %q: %w", name, err)
 		}
+		if image.Repository != "ghcr.io/tetral-ai/"+name {
+			return fmt.Errorf("candidate image %q has repository %q", name, image.Repository)
+		}
 	}
-	if len(candidate.Images) != 4 || !digestPattern.MatchString(candidate.Chart.CandidateManifestDigest) || !digestPattern.MatchString(candidate.Chart.PackageDigest) || !digestPattern.MatchString(candidate.Chart.RenderDigest) || !digestPattern.MatchString(candidate.Chart.ValuesDigest) {
+	expectedRenderCommand := "helm template tetral dist/tetral-" + candidate.Version.Artifact + ".tgz -f release-values.json"
+	if len(candidate.Images) != 4 || !digestPattern.MatchString(candidate.Chart.CandidateManifestDigest) || !digestPattern.MatchString(candidate.Chart.PackageDigest) || !digestPattern.MatchString(candidate.Chart.RenderDigest) || !digestPattern.MatchString(candidate.Chart.ValuesDigest) || candidate.Chart.RenderCommand != expectedRenderCommand {
 		return fmt.Errorf("candidate Chart identity is invalid")
 	}
 	if len(candidate.Bases) == 0 {
@@ -169,13 +174,21 @@ func ValidateCandidate(candidate CandidateManifest) error {
 }
 
 func ValidateImageIdentity(image ImageIdentity) error {
-	if image.Repository == "" || !digestPattern.MatchString(image.TopLevelDigest) || !digestPattern.MatchString(image.ChildDigest) || image.TopLevelMedia == "" || image.ChildMedia == "" {
+	if image.Repository == "" || !digestPattern.MatchString(image.TopLevelDigest) || !digestPattern.MatchString(image.ChildDigest) || !isImageMediaType(image.TopLevelMedia) || !isManifestMediaType(image.ChildMedia) {
 		return fmt.Errorf("image digest or media identity is incomplete")
 	}
 	if image.Platform != (Platform{OS: "linux", Architecture: "amd64"}) {
 		return fmt.Errorf("image platform must be linux/amd64")
 	}
 	return nil
+}
+
+func isImageMediaType(value string) bool {
+	return value == OCIManifestMediaType || value == OCIImageIndexMediaType || value == DockerManifestMediaType || value == DockerManifestListMediaType
+}
+
+func isManifestMediaType(value string) bool {
+	return value == OCIManifestMediaType || value == DockerManifestMediaType
 }
 
 func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evidence RehearsalEvidence, now time.Time) error {
@@ -190,7 +203,7 @@ func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evid
 			return fmt.Errorf("rehearsal contains an invalid digest")
 		}
 	}
-	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.FinishedAt.After(now) || now.Sub(evidence.FinishedAt) > 7*24*time.Hour {
+	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.RecordedAt.After(now) || evidence.FinishedAt.After(now) || now.Sub(evidence.FinishedAt) > 7*24*time.Hour {
 		return fmt.Errorf("rehearsal result or time window is invalid")
 	}
 	if evidence.ValuesDigest != candidate.Chart.ValuesDigest || evidence.RenderDigest != candidate.Chart.RenderDigest {

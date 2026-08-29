@@ -5,6 +5,9 @@ inputs:
     description: Exact authorization digest for verified not-found package targets
     required: false
     default: ''
+  package-permission:
+    description: Job-scoped packages permission declared by the calling job
+    required: true
 runs:
   using: composite
   steps:
@@ -19,4 +22,5 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GITHUB_ACTOR_ID: ${{ github.actor_id }}
         PACKAGE_CREATION_AUTHORIZATION_DIGEST: ${{ inputs.package-creation-authorization-digest }}
+        DECLARED_PACKAGE_PERMISSION: ${{ inputs.package-permission }}
       run: ./scripts/verify-release-github-authority.sh

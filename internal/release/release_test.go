@@ -2,8 +2,11 @@ package release
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +60,37 @@ func TestOCIArtifactUsesExactMediaTypesAndBytes(t *testing.T) {
 	}
 }
 
+func TestRemoteJSONArtifactRequiresCanonicalBytesAndExactEnvelope(t *testing.T) {
+	artifact, err := BuildOCIArtifact(CandidateType, CandidateType, []byte("{\n  \"schema\": \"tetral.release-candidate/v1\"\n}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateOCIArtifact(artifact, CandidateType, CandidateType); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCanonicalJSONLayer(artifact); err == nil {
+		t.Fatal("accepted noncanonical remote JSON bytes")
+	}
+	artifact.Manifest.ArtifactType = RehearsalType
+	if err := ValidateOCIArtifact(artifact, CandidateType, CandidateType); err == nil {
+		t.Fatal("accepted a candidate under another OCI artifact type")
+	}
+	artifact, err = BuildJSONArtifact(CandidateType, map[string]string{"schema": CandidateSchema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.ConfigJSON = []byte("{\"not\":\"empty\"}")
+	artifact.Manifest.Config = descriptor(OCIEmptyConfigType, artifact.ConfigJSON)
+	artifact.ManifestJSON, err = json.Marshal(artifact.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.ManifestDigest = digestBytes(artifact.ManifestJSON)
+	if err := ValidateOCIArtifact(artifact, CandidateType, CandidateType); err == nil {
+		t.Fatal("accepted a nonempty OCI empty-config payload")
+	}
+}
+
 func TestOCILayoutReplaysExactCandidateAndChartBytes(t *testing.T) {
 	candidateArtifact, err := BuildJSONArtifact(CandidateType, validCandidate(t))
 	if err != nil {
@@ -72,12 +106,51 @@ func TestOCILayoutReplaysExactCandidateAndChartBytes(t *testing.T) {
 			if err := WriteOCILayout(root, artifact); err != nil {
 				t.Fatal(err)
 			}
-			replayed, err := ReadOCIArtifact(root, artifact.ManifestDigest)
+			replayed, err := ReadSingleOCIArtifact(root)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(replayed.ManifestJSON, artifact.ManifestJSON) || !bytes.Equal(replayed.Layer, artifact.Layer) || replayed.ManifestDigest != artifact.ManifestDigest {
 				t.Fatal("digest-addressed promotion changed candidate bytes")
+			}
+		})
+	}
+	root := t.TempDir()
+	if err := WriteOCILayout(root, candidateArtifact); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "oci-layout"), []byte(`{"imageLayoutVersion":"2.0.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSingleOCIArtifact(root); err == nil {
+		t.Fatal("accepted an unsupported OCI layout version")
+	}
+}
+
+func TestCandidateRejectsWrongRepositoryMediaAndRenderRecipe(t *testing.T) {
+	for name, mutate := range map[string]func(*CandidateManifest){
+		"repository": func(candidate *CandidateManifest) {
+			image := candidate.Images["tetral"]
+			image.Repository = "ghcr.io/elsewhere/tetral"
+			candidate.Images["tetral"] = image
+		},
+		"top-media": func(candidate *CandidateManifest) {
+			image := candidate.Images["tetral"]
+			image.TopLevelMedia = "text/plain"
+			candidate.Images["tetral"] = image
+		},
+		"child-media": func(candidate *CandidateManifest) {
+			image := candidate.Images["tetral"]
+			image.ChildMedia = OCIImageIndexMediaType
+			candidate.Images["tetral"] = image
+		},
+		"render-command": func(candidate *CandidateManifest) { candidate.Chart.RenderCommand = "helm template another chart" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := validCandidate(t)
+			mutate(&candidate)
+			if err := ValidateCandidate(candidate); err == nil {
+				t.Fatal("accepted a candidate with conflicting publication identity")
 			}
 		})
 	}
@@ -105,9 +178,17 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 			}
 		case 2:
 			facts.Final.ChartManifest = testDigest("released-chart-manifest")
+			facts.Final.ChartPackageDigest = facts.Candidate.Chart.PackageDigest
 		case 3:
 			facts.Final.GitTagCommit = facts.Candidate.SourceCommit
-			facts.Final.GitHubRelease = true
+			candidatePayloadDigest, _ := ContentDigest(facts.Candidate)
+			evidencePayloadDigest, _ := ContentDigest(facts.Rehearsal)
+			authorizationPayloadDigest, _ := ContentDigest(facts.Authorization)
+			facts.Final.GitHubReleaseAssets = map[string]string{
+				"candidate.json":     candidatePayloadDigest,
+				"evidence.json":      evidencePayloadDigest,
+				"authorization.json": authorizationPayloadDigest,
+			}
 		case 4:
 			if len(steps) != 0 {
 				t.Fatalf("released plan = %v; want empty", steps)
@@ -120,6 +201,20 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 	conflict.Final.Images["tetral"] = testDigest("different-image")
 	if _, err := Reconstruct(conflict, now); err == nil {
 		t.Fatal("accepted a conflicting promoted image")
+	}
+	disposed := validFacts(t, now)
+	disposed.Authorization = nil
+	disposed.AuthorizationDigest = ""
+	disposed.Rehearsal = nil
+	disposed.RehearsalDigest = ""
+	disposed.Disposition = &Disposition{Schema: DispositionSchema, Version: disposed.Candidate.Version, CandidateDigest: disposed.CandidateDigest, Kind: string(StateSuperseded), RecordedAt: now}
+	if state, err := Reconstruct(disposed, now); err != nil || state != StateSuperseded {
+		t.Fatalf("disposed state = %q, %v", state, err)
+	}
+	disposed.Rehearsal = facts.Rehearsal
+	disposed.RehearsalDigest = facts.RehearsalDigest
+	if _, err := Reconstruct(disposed, now); err == nil {
+		t.Fatal("accepted a disposition that conflicts with rehearsal evidence")
 	}
 }
 
@@ -176,6 +271,7 @@ func TestCleanupSelectsOnlyOldNonPromotableCandidates(t *testing.T) {
 func TestReleaseEnvironmentBundleHasExactMainAndRestorablePreState(t *testing.T) {
 	pre := EnvironmentSnapshot{
 		Policy:      EnvironmentPolicy{CanAdminsBypass: true},
+		Branches:    []DeploymentBranchEntry{{ID: 9, Name: "release/*", Type: "branch"}},
 		SecretNames: []string{"DAYTONA_API_KEY"}, VariableNames: []string{"DAYTONA_TARGET"},
 	}
 	bundle, err := BuildEnvironmentBundle("tetral-ai/tetral", EnvironmentReviewer{Type: "User", ID: 42}, pre)
@@ -185,10 +281,60 @@ func TestReleaseEnvironmentBundleHasExactMainAndRestorablePreState(t *testing.T)
 	if err := VerifyEnvironmentBundle(bundle); err != nil {
 		t.Fatal(err)
 	}
+	if bundle.ApplyOperations[0].Name != "disallow-administrator-bypass" || bundle.ApplyOperations[1].Name != "set-environment-policy" || bundle.ApplyOperations[len(bundle.ApplyOperations)-1].Name != "create-main-branch-policy" || bundle.RestoreOperations[0].Name != "remove-main-branch-policy" || bundle.RestoreOperations[1].Name != "restore-environment-policy" || bundle.RestoreOperations[len(bundle.RestoreOperations)-1].Name != "restore-administrator-bypass" {
+		t.Fatalf("environment operations are not ordered: %#v / %#v", bundle.ApplyOperations, bundle.RestoreOperations)
+	}
 	mutated := bundle
-	mutated.Mutation.Target.BranchPolicy.Branches = []string{"main", "feature"}
+	mutated.TargetState.Branches = append(mutated.TargetState.Branches, DeploymentBranchEntry{Name: "feature", Type: "branch"})
 	if err := VerifyEnvironmentBundle(mutated); err == nil {
 		t.Fatal("accepted a release environment that permits another branch")
+	}
+}
+
+func TestPackagePreflightRequiresCompleteReadbackAndDeclaredPermission(t *testing.T) {
+	preflight := PackagePreflight{
+		Schema: "tetral.release-package-preflight/v1", Organization: "tetral-ai", RepositoryID: 7,
+		RequireWrite: true, DeclaredJobPermission: "write", ReadbackComplete: true,
+		Packages: []PackageIdentity{{Found: true, Name: "tetral", Organization: "tetral-ai", Visibility: "public", LinkedRepositoryID: 7, ActionsRepositoryIDs: []int64{7}}},
+	}
+	if err := ValidatePackagePreflights(preflight); err != nil {
+		t.Fatal(err)
+	}
+	preflight.ReadbackComplete = false
+	if err := ValidatePackagePreflights(preflight); err == nil {
+		t.Fatal("accepted an incomplete package readback")
+	}
+	preflight.ReadbackComplete = true
+	preflight.DeclaredJobPermission = "read"
+	if err := ValidatePackagePreflights(preflight); err == nil {
+		t.Fatal("accepted a write transition under read-only declared authority")
+	}
+}
+
+func TestGitHubDeploymentAdapterJoinsApprovalAndStatusToCurrentRun(t *testing.T) {
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = filepath.Clean(filepath.Join(root, "..", ".."))
+	bin := t.TempDir()
+	fake := `#!/usr/bin/env bash
+case "$*" in
+  *actions/runs/42/approvals*) echo '[{"state":"approved","user":{"id":7},"environments":[{"name":"release"}]}]' ;;
+  *deployments/11/statuses*) echo '[{"log_url":"https://github.com/tetral-ai/tetral/actions/runs/42/job/99"}]' ;;
+  *deployments?environment=release*) echo '[[{"id":11,"sha":"0123456789abcdef0123456789abcdef01234567"}]]' ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join(root, "scripts", "release-github-deployment.sh"), "0123456789abcdef0123456789abcdef01234567", "42", "7") //nolint:gosec // Repository-owned script under a bounded fake CLI.
+	command.Dir = root
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "GH_TOKEN=test", "GITHUB_REPOSITORY=tetral-ai/tetral")
+	output, err := command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "11" {
+		t.Fatalf("deployment adapter = %q, %v", output, err)
 	}
 }
 
@@ -196,11 +342,10 @@ func TestPackagePreflightRejectsPrivateWrongLinkedOrMovingPackage(t *testing.T) 
 	valid := PackageIdentity{
 		Found: true,
 		Name:  "tetral", Organization: "tetral-ai", Visibility: "public", LinkedRepositoryID: 7,
-		ActionsRepositoryIDs: []int64{7}, RepositoryTokenCanRead: true, RepositoryTokenCanWrite: true,
+		ActionsRepositoryIDs: []int64{7},
 	}
 	notFound := PackageIdentity{
 		Name: "new-package", Organization: "tetral-ai", CreationAuthorized: true,
-		RepositoryTokenCanRead: true, RepositoryTokenCanWrite: true,
 	}
 	if err := ValidatePackagePreflight(notFound, "tetral-ai", 7, true); err != nil {
 		t.Fatal(err)
@@ -266,7 +411,7 @@ func validCandidate(t *testing.T) CandidateManifest {
 	}
 	return CandidateManifest{
 		Schema: CandidateSchema, Version: version, SourceCommit: "0123456789abcdef0123456789abcdef01234567", Platform: PlatformLinuxAMD64,
-		Images: images, Chart: ChartIdentity{CandidateManifestDigest: testDigest("chart-manifest"), PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values")},
+		Images: images, Chart: ChartIdentity{CandidateManifestDigest: testDigest("chart-manifest"), PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values"), RenderCommand: "helm template tetral dist/tetral-0.1.0-alpha.1.tgz -f release-values.json"},
 		SchemaVersion: 1, SchemaChecksum: testDigest("schema"), CreatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
 		Bases: []BaseIdentity{{Reference: "docker.io/library/golang:1.25.13-alpine", TopLevelDigest: testDigest("base-top"), ChildDigest: testDigest("base-child"), Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 	}

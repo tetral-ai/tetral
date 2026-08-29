@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|state|promotion-plan|cleanup-plan|verify-bases|environment-plan|package-preflight>")
+		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan|package-preflight>")
 	}
 	var err error
 	switch os.Args[1] {
@@ -27,6 +27,8 @@ func main() {
 		err = validateAuthorization(os.Args[2:])
 	case "artifact":
 		err = buildArtifact(os.Args[2:])
+	case "validate-layout":
+		err = validateLayout(os.Args[2:])
 	case "state":
 		err = printState(os.Args[2:])
 	case "promotion-plan":
@@ -136,6 +138,16 @@ func buildArtifact(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if *kind != "helm-candidate" {
+		var value any
+		if err := json.Unmarshal(body, &value); err != nil {
+			return fmt.Errorf("decode JSON artifact layer: %w", err)
+		}
+		body, err = releasecontract.CanonicalJSON(value)
+		if err != nil {
+			return err
+		}
+	}
 	artifact, err := releasecontract.BuildOCIArtifact(artifactType, layerType, body)
 	if err != nil {
 		return err
@@ -153,6 +165,39 @@ func buildArtifact(arguments []string) error {
 		return err
 	}
 	return writeJSON(os.Stdout, map[string]string{"manifest_digest": artifact.ManifestDigest, "layout": filepath.Clean(*output)})
+}
+
+func validateLayout(arguments []string) error {
+	flags := flag.NewFlagSet("validate-layout", flag.ContinueOnError)
+	kind := flags.String("kind", "", "reservation, candidate, rehearsal, authorization, disposition, or helm-candidate")
+	root := flags.String("root", "", "OCI layout root")
+	output := flags.String("output-layer", "", "validated layer output")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	artifactType, layerType, err := artifactMedia(*kind)
+	if err != nil {
+		return err
+	}
+	artifact, err := releasecontract.ReadSingleOCIArtifact(*root)
+	if err != nil {
+		return err
+	}
+	if err := releasecontract.ValidateOCIArtifact(artifact, artifactType, layerType); err != nil {
+		return err
+	}
+	if *kind != "helm-candidate" {
+		if err := releasecontract.ValidateCanonicalJSONLayer(artifact); err != nil {
+			return err
+		}
+	}
+	if *output == "" {
+		return fmt.Errorf("validated layer output is required")
+	}
+	if err := os.WriteFile(*output, artifact.Layer, 0o600); err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, map[string]string{"manifest_digest": artifact.ManifestDigest, "layer_digest": artifact.Manifest.Layers[0].Digest})
 }
 
 func printState(arguments []string) error {

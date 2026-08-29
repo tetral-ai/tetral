@@ -64,32 +64,57 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mirror without overwrite
+        id: mirror
         env:
           SOURCE: ${{ inputs.source }}
           PLATFORM: ${{ inputs.platform }}
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
           TARGET: ${{ steps.identity.outputs.target }}
         run: |
           set -euo pipefail
-          source_identity="$(docker buildx imagetools inspect "$SOURCE" --format '{{json .Manifest}}')"
+          source_repository="${SOURCE%@*}"
+          source_raw="$(docker buildx imagetools inspect "$SOURCE" --raw)"
+          source_media="$(jq -r .mediaType <<<"$source_raw")"
+          if test "$source_media" = application/vnd.oci.image.index.v1+json || test "$source_media" = application/vnd.docker.distribution.manifest.list.v2+json; then
+            selected_digest="$(jq -r '[.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64")] | if length == 1 then .[0].digest else error("linux/amd64 child is not unique") end' <<<"$source_raw")"
+            selected_media="$(jq -r --arg digest "$selected_digest" '.manifests[] | select(.digest==$digest) | .mediaType' <<<"$source_raw")"
+            selected_source="$source_repository@$selected_digest"
+          else
+            selected_digest="${SOURCE##*@}"
+            selected_media="$source_media"
+            selected_source="$SOURCE"
+          fi
+          source_identity="$(docker buildx imagetools inspect "$selected_source" --raw)"
           if existing="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest}}' 2>/dev/null)"; then
-            test "$existing" = "$source_identity" || {
+            existing_digest="$(jq -r .digest <<<"$existing")"
+            test "$existing_digest" = "$selected_digest" || {
               echo "target identity already exists with different bytes" >&2
               exit 1
             }
-            echo "target already contains the exact immutable identity"
-            exit 0
+          else
+            docker buildx imagetools create --prefer-index=false --tag "$TARGET" "$selected_source"
           fi
-          docker buildx imagetools create --tag "$TARGET" "$SOURCE"
-          mirrored="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest}}')"
-          test "$mirrored" = "$source_identity" || {
+          mirrored="$(docker buildx imagetools inspect "$TARGET" --raw)"
+          mirrored_descriptor="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest}}')"
+          mirrored_digest="$(jq -r .digest <<<"$mirrored_descriptor")"
+          test "$mirrored_digest" = "$selected_digest" && test "$mirrored" = "$source_identity" || {
             echo "mirrored identity differs from the selected source" >&2
             exit 1
           }
+          {
+            echo "selected_source=$selected_source"
+            echo "selected_digest=$selected_digest"
+            echo "selected_media=$selected_media"
+            echo "target_digest=$TARGET_REPOSITORY@$mirrored_digest"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Report the Gate-protected source update
         env:
           SOURCE: ${{ inputs.source }}
           TARGET: ${{ steps.identity.outputs.target }}
+          TARGET_DIGEST: ${{ steps.mirror.outputs.target_digest }}
+          SELECTED_DIGEST: ${{ steps.mirror.outputs.selected_digest }}
+          SELECTED_MEDIA: ${{ steps.mirror.outputs.selected_media }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           {
@@ -97,7 +122,9 @@ jobs:
             echo
             echo "- source: \`$SOURCE\`"
             echo "- mirror: \`$TARGET\`"
+            echo "- immutable mirror: \`$TARGET_DIGEST\`"
             echo "- platform: \`$PLATFORM\`"
+            echo "- selected child: \`$SELECTED_DIGEST\` ($SELECTED_MEDIA)"
             echo
-            echo "Update the owning Dockerfile through a normal Merge Gate-protected pull request."
+            echo "Update the owning Dockerfile and internal/release/base_images.json through a normal Merge Gate-protected pull request using the exact mirror digest above."
           } >> "$GITHUB_STEP_SUMMARY"

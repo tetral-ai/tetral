@@ -101,6 +101,36 @@ func ReadOCIArtifact(root, manifestDigest string) (OCIArtifact, error) {
 	return artifact, nil
 }
 
+func ReadSingleOCIArtifact(root string) (OCIArtifact, error) {
+	layoutBody, err := os.ReadFile(filepath.Join(root, "oci-layout")) //nolint:gosec // Explicit OCI layout input.
+	if err != nil {
+		return OCIArtifact{}, err
+	}
+	var layout map[string]string
+	if err := json.Unmarshal(layoutBody, &layout); err != nil || len(layout) != 1 || layout["imageLayoutVersion"] != OCILayoutVersion {
+		return OCIArtifact{}, fmt.Errorf("OCI layout version is invalid")
+	}
+	indexBody, err := os.ReadFile(filepath.Join(root, "index.json")) //nolint:gosec // Explicit OCI layout input.
+	if err != nil {
+		return OCIArtifact{}, err
+	}
+	var index OCIIndex
+	if err := json.Unmarshal(indexBody, &index); err != nil {
+		return OCIArtifact{}, fmt.Errorf("decode OCI index: %w", err)
+	}
+	if index.SchemaVersion != 2 || index.MediaType != OCIImageIndexMediaType || len(index.Manifests) != 1 || index.Manifests[0].MediaType != OCIManifestMediaType {
+		return OCIArtifact{}, fmt.Errorf("OCI layout index must identify exactly one image manifest")
+	}
+	artifact, err := ReadOCIArtifact(root, index.Manifests[0].Digest)
+	if err != nil {
+		return OCIArtifact{}, err
+	}
+	if index.Manifests[0] != descriptor(OCIManifestMediaType, artifact.ManifestJSON) {
+		return OCIArtifact{}, fmt.Errorf("OCI layout index descriptor differs from manifest bytes")
+	}
+	return artifact, nil
+}
+
 func ociBlobPath(root, digest string) (string, error) {
 	if !digestPattern.MatchString(digest) {
 		return "", fmt.Errorf("invalid OCI digest %q", digest)

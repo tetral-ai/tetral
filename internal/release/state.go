@@ -21,10 +21,11 @@ const (
 )
 
 type FinalReferences struct {
-	Images        map[string]string `json:"images,omitempty"`
-	ChartManifest string            `json:"chart_manifest,omitempty"`
-	GitTagCommit  string            `json:"git_tag_commit,omitempty"`
-	GitHubRelease bool              `json:"github_release,omitempty"`
+	Images              map[string]string `json:"images,omitempty"`
+	ChartManifest       string            `json:"chart_manifest,omitempty"`
+	ChartPackageDigest  string            `json:"chart_package_digest,omitempty"`
+	GitTagCommit        string            `json:"git_tag_commit,omitempty"`
+	GitHubReleaseAssets map[string]string `json:"github_release_assets,omitempty"`
 }
 
 type Facts struct {
@@ -41,6 +42,15 @@ type Facts struct {
 
 func Reconstruct(facts Facts, now time.Time) (State, error) {
 	if facts.Disposition != nil {
+		if facts.Disposition.Schema != DispositionSchema || facts.Disposition.RecordedAt.IsZero() || !digestPattern.MatchString(facts.Disposition.CandidateDigest) {
+			return "", fmt.Errorf("release disposition is invalid")
+		}
+		if facts.Rehearsal != nil || facts.Authorization != nil || hasFinalReferences(facts.Final) {
+			return "", fmt.Errorf("release disposition conflicts with later release facts")
+		}
+		if facts.Candidate == nil || facts.CandidateDigest != facts.Disposition.CandidateDigest || facts.Candidate.Version != facts.Disposition.Version {
+			return "", fmt.Errorf("release disposition does not identify its candidate")
+		}
 		switch facts.Disposition.Kind {
 		case string(StateSuperseded):
 			return StateSuperseded, nil
@@ -77,7 +87,11 @@ func Reconstruct(facts Facts, now time.Time) (State, error) {
 		}
 		return StateCandidate, nil
 	}
-	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, *facts.Rehearsal, now); err != nil || !digestPattern.MatchString(facts.RehearsalDigest) {
+	rehearsalDecisionTime := now
+	if facts.Authorization != nil {
+		rehearsalDecisionTime = facts.Authorization.AuthorizedAt
+	}
+	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, *facts.Rehearsal, rehearsalDecisionTime); err != nil || !digestPattern.MatchString(facts.RehearsalDigest) {
 		return "", fmt.Errorf("rehearsal evidence is invalid")
 	}
 	if facts.Authorization == nil {
@@ -125,7 +139,7 @@ func PromotionPlan(facts Facts, now time.Time) ([]string, error) {
 	if facts.Final.GitTagCommit == "" {
 		steps = append(steps, "create-git-tag")
 	}
-	if !facts.Final.GitHubRelease {
+	if len(facts.Final.GitHubReleaseAssets) != 3 {
 		steps = append(steps, "create-github-release")
 	}
 	return steps, nil
@@ -174,6 +188,9 @@ func validateAuthorization(facts Facts) error {
 
 func validateFinalReferences(facts Facts) (bool, int, error) {
 	count := 0
+	if facts.Final.ChartManifest == "" && facts.Final.ChartPackageDigest != "" {
+		return false, 0, fmt.Errorf("final Chart package exists without a Chart manifest")
+	}
 	for name, digest := range facts.Final.Images {
 		expected, ok := facts.Candidate.Images[name]
 		if !ok || digest != expected.TopLevelDigest {
@@ -182,7 +199,7 @@ func validateFinalReferences(facts Facts) (bool, int, error) {
 		count++
 	}
 	if facts.Final.ChartManifest != "" {
-		if !digestPattern.MatchString(facts.Final.ChartManifest) {
+		if !digestPattern.MatchString(facts.Final.ChartManifest) || facts.Final.ChartPackageDigest != facts.Candidate.Chart.PackageDigest {
 			return false, 0, fmt.Errorf("final Chart manifest digest is invalid")
 		}
 		count++
@@ -193,13 +210,40 @@ func validateFinalReferences(facts Facts) (bool, int, error) {
 		}
 		count++
 	}
-	if facts.Final.GitHubRelease {
+	releaseAssetsComplete := false
+	if len(facts.Final.GitHubReleaseAssets) > 0 {
+		candidatePayloadDigest, err := ContentDigest(facts.Candidate)
+		if err != nil {
+			return false, 0, err
+		}
+		evidencePayloadDigest, err := ContentDigest(facts.Rehearsal)
+		if err != nil {
+			return false, 0, err
+		}
+		authorizationPayloadDigest, err := ContentDigest(facts.Authorization)
+		if err != nil {
+			return false, 0, err
+		}
+		expectedAssets := map[string]string{
+			"candidate.json":     candidatePayloadDigest,
+			"evidence.json":      evidencePayloadDigest,
+			"authorization.json": authorizationPayloadDigest,
+		}
+		if len(facts.Final.GitHubReleaseAssets) > len(expectedAssets) {
+			return false, 0, fmt.Errorf("GitHub Release contains unexpected assets")
+		}
+		for name, digest := range facts.Final.GitHubReleaseAssets {
+			if expectedAssets[name] != digest {
+				return false, 0, fmt.Errorf("GitHub Release asset %q conflicts with authorized records", name)
+			}
+		}
+		releaseAssetsComplete = len(facts.Final.GitHubReleaseAssets) == len(expectedAssets)
 		count++
 	}
 	want := len(facts.Candidate.Images) + 3
-	return count == want, count, nil
+	return count == want && releaseAssetsComplete, count, nil
 }
 
 func hasFinalReferences(references FinalReferences) bool {
-	return len(references.Images) > 0 || references.ChartManifest != "" || references.GitTagCommit != "" || references.GitHubRelease
+	return len(references.Images) > 0 || references.ChartManifest != "" || references.ChartPackageDigest != "" || references.GitTagCommit != "" || len(references.GitHubReleaseAssets) > 0
 }

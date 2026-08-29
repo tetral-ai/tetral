@@ -1,6 +1,7 @@
 package release
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,15 +10,17 @@ import (
 )
 
 const (
-	OCIManifestMediaType = "application/vnd.oci.image.manifest.v1+json"
-	OCIEmptyConfigType   = "application/vnd.oci.empty.v1+json"
-	ReservationType      = "application/vnd.tetral.release-reservation.v1+json"
-	CandidateType        = "application/vnd.tetral.release-candidate.v1+json"
-	HelmCandidateType    = "application/vnd.tetral.release-helm-candidate.v1"
-	HelmChartLayerType   = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-	RehearsalType        = "application/vnd.tetral.rehearsal-evidence.v1+json"
-	AuthorizationType    = "application/vnd.tetral.release-authorization.v1+json"
-	DispositionType      = "application/vnd.tetral.release-disposition.v1+json"
+	OCIManifestMediaType        = "application/vnd.oci.image.manifest.v1+json"
+	DockerManifestMediaType     = "application/vnd.docker.distribution.manifest.v2+json"
+	DockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
+	OCIEmptyConfigType          = "application/vnd.oci.empty.v1+json"
+	ReservationType             = "application/vnd.tetral.release-reservation.v1+json"
+	CandidateType               = "application/vnd.tetral.release-candidate.v1+json"
+	HelmCandidateType           = "application/vnd.tetral.release-helm-candidate.v1"
+	HelmChartLayerType          = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+	RehearsalType               = "application/vnd.tetral.rehearsal-evidence.v1+json"
+	AuthorizationType           = "application/vnd.tetral.release-authorization.v1+json"
+	DispositionType             = "application/vnd.tetral.release-disposition.v1+json"
 )
 
 type Descriptor struct {
@@ -76,9 +79,27 @@ func ValidateOCIArtifact(artifact OCIArtifact, artifactType, layerType string) e
 	if artifact.Manifest.Config != descriptor(OCIEmptyConfigType, artifact.ConfigJSON) || artifact.Manifest.Layers[0] != descriptor(layerType, artifact.Layer) || artifact.ManifestDigest != digestBytes(artifact.ManifestJSON) {
 		return fmt.Errorf("OCI artifact descriptor digest differs from its bytes")
 	}
+	if !bytes.Equal(artifact.ConfigJSON, []byte("{}")) {
+		return fmt.Errorf("OCI artifact config is not empty")
+	}
 	var parsed OCIArtifactManifest
 	if err := json.Unmarshal(artifact.ManifestJSON, &parsed); err != nil || !reflect.DeepEqual(parsed, artifact.Manifest) {
 		return fmt.Errorf("OCI artifact manifest bytes differ from the declared manifest")
+	}
+	return nil
+}
+
+func ValidateCanonicalJSONLayer(artifact OCIArtifact) error {
+	var value any
+	if err := json.Unmarshal(artifact.Layer, &value); err != nil {
+		return fmt.Errorf("decode OCI JSON layer: %w", err)
+	}
+	canonical, err := CanonicalJSON(value)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(canonical, artifact.Layer) {
+		return fmt.Errorf("OCI JSON layer is not canonical")
 	}
 	return nil
 }
