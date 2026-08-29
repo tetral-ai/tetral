@@ -306,10 +306,10 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}, nil
 	case "coverage":
 		return []commandSpec{
-			{Arguments: []string{"go", "test", "-count=1", "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
-			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"go", "test", "-count=1", "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
+			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "gateway-coverage"), "packages/protocol/test/unit/", "packages/lowering/test/", "packages/provider-gateway/test/unit/", "packages/provider-gateway/test/golden/", "packages/mcp-connector/test/unit/"}, WorkingDir: "services/gateway"},
 		}, nil
 	default:
