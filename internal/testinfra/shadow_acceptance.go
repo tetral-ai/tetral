@@ -32,6 +32,13 @@ type ShadowAcceptanceReport struct {
 	ReliabilityRows      []ShadowReliability `json:"reliability_rows"`
 }
 
+type ShadowAcceptanceAuthority struct {
+	IntroductionPullRequest int       `json:"introduction_pull_request"`
+	IntroducedByCommit      string    `json:"introduced_by_commit"`
+	WorkflowSourceSHA       string    `json:"workflow_source_sha"`
+	EligibleAfter           time.Time `json:"eligible_after"`
+}
+
 type ShadowReliability struct {
 	PullRequest      int      `json:"pull_request"`
 	TestMergeSHA     string   `json:"test_merge_sha"`
@@ -41,15 +48,25 @@ type ShadowReliability struct {
 	Reasons          []string `json:"reasons,omitempty"`
 }
 
-func EvaluateShadowAcceptance(rows []ShadowLedgerRow, excludedPullRequest int) ShadowAcceptanceReport {
+func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptanceAuthority) ShadowAcceptanceReport {
 	report := ShadowAcceptanceReport{EstimatorVersion: ShadowEstimatorVersion}
+	if authority.IntroductionPullRequest <= 0 || authority.IntroducedByCommit == "" || authority.WorkflowSourceSHA == "" || authority.EligibleAfter.IsZero() ||
+		authority.IntroducedByCommit != authority.WorkflowSourceSHA {
+		report.Blockers = append(report.Blockers, "shadow observation authority is incomplete")
+		report.Ready = false
+		return report
+	}
 	seen := map[string]bool{}
 	covered := map[string]bool{}
+	observedDependencies := map[string]bool{}
 	var legacyWalls, shadowWalls []time.Duration
 	var legacyMinutes, shadowMinutes []float64
 
 	for _, row := range rows {
-		if row.PullRequest == excludedPullRequest {
+		if row.PullRequest == authority.IntroductionPullRequest {
+			continue
+		}
+		if !row.ShadowExecution.CreatedAt.After(authority.EligibleAfter) {
 			continue
 		}
 		identity := fmt.Sprintf("%s/%d/%s/%s/%s/%s", row.Repository, row.PullRequest, row.EventHeadSHA, row.EventBaseSHA, row.TestMergeSHA, row.WorkflowSourceSHA)
@@ -62,21 +79,34 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, excludedPullRequest int) S
 		}
 		seen[identity] = true
 		report.DistinctTuples++
+		if row.WorkflowSourceSHA != authority.WorkflowSourceSHA {
+			reliability.Reasons = append(reliability.Reasons, "workflow source is outside the approved observation window")
+		}
+		if len(row.ChangedPaths) == 0 || len(row.ChangeClasses) == 0 {
+			reliability.Reasons = append(reliability.Reasons, "head has no classified meaningful source change")
+		}
 		if row.LegacyRunAttempt != 1 || row.ShadowRunAttempt != 1 {
 			reliability.Reasons = append(reliability.Reasons, "not a paired first attempt")
 		}
 		if row.LegacyConclusion != "success" || row.ShadowConclusion != "success" {
 			reliability.Reasons = append(reliability.Reasons, "old and new workflows are not both successful")
 		}
+		if row.GateConclusion != "success" || row.ArtifactConclusion != "success" {
+			reliability.Reasons = append(reliability.Reasons, "Merge Gate or producer evidence did not reconcile successfully")
+		}
 		if row.RequiredCheckSHA != row.TestMergeSHA || row.SnapshotDigest == "" {
 			reliability.Reasons = append(reliability.Reasons, "execution identity is incomplete")
 		}
-		if err := validateShadowDependencyObservability(row); err != nil {
+		dependencies, err := validateShadowDependencyObservability(row)
+		if err != nil {
 			reliability.Reasons = append(reliability.Reasons, err.Error())
 		}
 		if err := validateShadowShardBalance(row); err != nil {
 			reliability.Reasons = append(reliability.Reasons, err.Error())
 			report.Blockers = append(report.Blockers, fmt.Sprintf("PR %d: %v", row.PullRequest, err))
+		}
+		if len(reliability.Reasons) > 0 && !validShadowDisposition(row.Disposition) {
+			report.Blockers = append(report.Blockers, fmt.Sprintf("PR %d has unexplained shadow evidence: %v", row.PullRequest, reliability.Reasons))
 		}
 		if len(reliability.Reasons) == 0 {
 			reliability.Eligible = true
@@ -88,7 +118,11 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, excludedPullRequest int) S
 			for _, class := range row.ChangeClasses {
 				covered[class] = true
 			}
-			if isRealExternalFork(row) && validForkApproval(row.ForkApproval) {
+			for dependency := range dependencies {
+				observedDependencies[dependency] = true
+			}
+			if isRealExternalFork(row) && validForkApproval(row.ForkApproval) &&
+				row.ForkApproval.HeadSHA == row.EventHeadSHA && row.ForkApproval.RunID == row.ShadowRunID {
 				report.RealForkObserved = true
 			}
 		}
@@ -107,6 +141,11 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, excludedPullRequest int) S
 	}
 	if !report.RealForkObserved {
 		report.Blockers = append(report.Blockers, "missing real external-fork approval observation")
+	}
+	for _, dependency := range []string{"postgresql", "minio"} {
+		if !observedDependencies[dependency] {
+			report.Blockers = append(report.Blockers, "missing separately measured "+dependency+" lifecycle")
+		}
 	}
 	if report.EligibleTuples > 0 {
 		report.LegacyMedian = medianDuration(legacyWalls)
@@ -131,18 +170,43 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, excludedPullRequest int) S
 	return report
 }
 
-func validateShadowDependencyObservability(row ShadowLedgerRow) error {
+func validateShadowDependencyObservability(row ShadowLedgerRow) (map[string]bool, error) {
+	if row.EstimatorVersion != ShadowEstimatorVersion || len(row.LegacyIntervals) == 0 || len(row.ShadowIntervals) == 0 {
+		return nil, fmt.Errorf("row lacks the versioned substantive-step estimator")
+	}
+	observed := map[string]bool{}
 	for _, result := range row.ShadowResults {
 		if result.StartedAt.IsZero() || !result.FinishedAt.After(result.StartedAt) || len(result.Steps) == 0 {
-			return fmt.Errorf("producer %q lacks bounded setup/test/teardown evidence", result.Execution.Producer)
+			return nil, fmt.Errorf("producer %q lacks bounded setup/test/teardown evidence", result.Execution.Producer)
 		}
+		expected := map[string]bool{}
+		for _, dependency := range result.Plan.Dependencies {
+			expected[dependency] = true
+		}
+		actual := map[string]bool{}
 		for _, dependency := range result.Dependencies {
-			if dependency.Name == "" || dependency.Identity == "" {
-				return fmt.Errorf("producer %q has incomplete dependency identity", result.Execution.Producer)
+			if dependency.Name == "" || dependency.Identity == "" || dependency.SetupElapsed <= 0 {
+				return nil, fmt.Errorf("producer %q has incomplete dependency setup evidence", result.Execution.Producer)
+			}
+			if dependency.Source == "runner-container" && dependency.TeardownElapsed <= 0 {
+				return nil, fmt.Errorf("producer %q has incomplete dependency teardown evidence", result.Execution.Producer)
+			}
+			if dependency.Name == "postgresql" && (dependency.TemplateIdentity == "" || dependency.TemplateSetupElapsed <= 0) {
+				return nil, fmt.Errorf("producer %q lacks PostgreSQL template setup evidence", result.Execution.Producer)
+			}
+			actual[dependency.Name] = true
+			observed[dependency.Name] = true
+		}
+		if !sameStringSet(expected, actual) {
+			return nil, fmt.Errorf("producer %q dependency plan and evidence differ", result.Execution.Producer)
+		}
+		for _, step := range result.Steps {
+			if step.Status == "" || step.Elapsed <= 0 || len(step.Command) == 0 {
+				return nil, fmt.Errorf("producer %q has incomplete test-step evidence", result.Execution.Producer)
 			}
 		}
 	}
-	return nil
+	return observed, nil
 }
 
 func validateShadowShardBalance(row ShadowLedgerRow) error {
@@ -182,7 +246,29 @@ func isRealExternalFork(row ShadowLedgerRow) bool {
 }
 
 func validForkApproval(value *ShadowForkApproval) bool {
-	return value != nil && !value.PendingObservedAt.IsZero() && value.ApprovedAt.After(value.PendingObservedAt)
+	return value != nil && value.HeadSHA != "" && value.RunID > 0 && value.PendingStatus == "action_required" &&
+		!value.PendingObservedAt.IsZero() && value.PendingCaptureSHA256 != "" && value.ApprovalState == "approved" &&
+		value.ApprovalActorID > 0 && value.ApprovalCaptureSHA256 != "" && value.AgreedIssueNumber > 0 &&
+		value.AgreementCommentID > 0 && value.AgreementCaptureSHA256 != "" &&
+		(value.CleanupState == "closed" || value.CleanupState == "merged") &&
+		value.CleanupObservedAt.After(value.PendingObservedAt) && value.CleanupCaptureSHA256 != ""
+}
+
+func validShadowDisposition(value *ShadowDisposition) bool {
+	return value != nil && value.Classification != "" && value.Explanation != "" && len(value.ReproductionCommand) > 0 &&
+		value.ReproductionResultDigest != "" && value.ResolvedByHeadSHA != ""
+}
+
+func sameStringSet(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if !right[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func medianDuration(values []time.Duration) time.Duration {

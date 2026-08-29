@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,23 +45,38 @@ func (commandGHClient) Bytes(ctx context.Context, endpoint string) ([]byte, erro
 }
 
 func CollectLiveShadowSnapshot(ctx context.Context, repository string, pullRequest int) (ShadowSnapshot, error) {
-	return collectShadowSnapshot(ctx, commandGHClient{}, repository, pullRequest)
+	return collectShadowSnapshot(ctx, commandGHClient{}, repository, pullRequest, ShadowCollectionOptions{})
 }
 
-func collectShadowSnapshot(ctx context.Context, client ghShadowClient, repository string, pullRequest int) (ShadowSnapshot, error) {
-	var pull struct {
-		Head struct {
-			SHA  string `json:"sha"`
-			Repo struct {
-				FullName string `json:"full_name"`
-			} `json:"repo"`
-		} `json:"head"`
-		Base struct {
-			SHA string `json:"sha"`
-		} `json:"base"`
-		AuthorAssociation string `json:"author_association"`
-		ChangedFiles      int    `json:"changed_files"`
-	}
+type ShadowCollectionOptions struct {
+	ForkPendingCapture []byte
+	AgreedIssueNumber  int
+	AgreementCommentID int64
+}
+
+type githubPullSnapshot struct {
+	Head struct {
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"head"`
+	Base struct {
+		SHA string `json:"sha"`
+	} `json:"base"`
+	AuthorAssociation string     `json:"author_association"`
+	ChangedFiles      int        `json:"changed_files"`
+	State             string     `json:"state"`
+	ClosedAt          time.Time  `json:"closed_at"`
+	MergedAt          *time.Time `json:"merged_at"`
+}
+
+func CollectLiveShadowSnapshotWithOptions(ctx context.Context, repository string, pullRequest int, options ShadowCollectionOptions) (ShadowSnapshot, error) {
+	return collectShadowSnapshot(ctx, commandGHClient{}, repository, pullRequest, options)
+}
+
+func collectShadowSnapshot(ctx context.Context, client ghShadowClient, repository string, pullRequest int, options ShadowCollectionOptions) (ShadowSnapshot, error) {
+	var pull githubPullSnapshot
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/pulls/%d", repository, pullRequest), &pull); err != nil {
 		return ShadowSnapshot{}, err
 	}
@@ -127,7 +143,104 @@ func collectShadowSnapshot(ctx context.Context, client ghShadowClient, repositor
 		TestMergeSHA: shadowResults[0].Execution.TestMergeSHA, CollectedAt: time.Now().UTC(),
 		Legacy: legacyExecution, Shadow: shadowExecution, LegacyMetadata: legacyMetadata, ShadowResults: shadowResults,
 	}
+	if pull.Head.Repo.FullName != repository {
+		snapshot.ForkApproval, err = collectForkApproval(ctx, client, repository, pullRequest, pull, shadowRun, options)
+		if err != nil {
+			return ShadowSnapshot{}, err
+		}
+	}
 	return snapshot, nil
+}
+
+func collectForkApproval(ctx context.Context, client ghShadowClient, repository string, pullRequest int, pull githubPullSnapshot, shadowRun githubWorkflowRun, options ShadowCollectionOptions) (*ShadowForkApproval, error) {
+	if len(options.ForkPendingCapture) == 0 || options.AgreedIssueNumber <= 0 || options.AgreementCommentID <= 0 {
+		return nil, fmt.Errorf("external fork collection requires pending-run, agreed-Issue, and agreement-comment evidence")
+	}
+	var pending githubWorkflowRun
+	if err := json.Unmarshal(options.ForkPendingCapture, &pending); err != nil {
+		return nil, fmt.Errorf("decode fork pending-run capture: %w", err)
+	}
+	if pending.ID != shadowRun.ID || pending.HeadSHA != pull.Head.SHA || pending.RunAttempt != shadowRun.RunAttempt || pending.Status != "action_required" || pending.Conclusion != "" || pending.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("fork pending-run capture does not match the exact shadow run")
+	}
+	var approvals []struct {
+		State string `json:"state"`
+		User  struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
+	}
+	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/approvals", repository, shadowRun.ID), &approvals); err != nil {
+		return nil, err
+	}
+	var approvalActorID int64
+	for _, approval := range approvals {
+		if approval.State == "approved" && approval.User.ID > 0 {
+			approvalActorID = approval.User.ID
+			break
+		}
+	}
+	if approvalActorID == 0 {
+		return nil, fmt.Errorf("fork workflow has no approved review-history entry")
+	}
+	var issue struct {
+		Number int    `json:"number"`
+		State  string `json:"state"`
+	}
+	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/issues/%d", repository, options.AgreedIssueNumber), &issue); err != nil {
+		return nil, err
+	}
+	var comment struct {
+		ID                int64     `json:"id"`
+		IssueURL          string    `json:"issue_url"`
+		AuthorAssociation string    `json:"author_association"`
+		Body              string    `json:"body"`
+		CreatedAt         time.Time `json:"created_at"`
+	}
+	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/issues/comments/%d", repository, options.AgreementCommentID), &comment); err != nil {
+		return nil, err
+	}
+	expectedIssueURL := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d", repository, options.AgreedIssueNumber)
+	if issue.Number != options.AgreedIssueNumber || comment.ID != options.AgreementCommentID || comment.IssueURL != expectedIssueURL ||
+		strings.TrimSpace(comment.Body) == "" || !maintainerAssociation(comment.AuthorAssociation) || comment.CreatedAt.IsZero() {
+		return nil, fmt.Errorf("fork Issue agreement evidence is incomplete")
+	}
+	cleanupState := ""
+	if pull.State == "closed" && !pull.ClosedAt.IsZero() {
+		cleanupState = "closed"
+		if pull.MergedAt != nil {
+			cleanupState = "merged"
+		}
+	}
+	if cleanupState == "" || !pull.ClosedAt.After(pending.UpdatedAt) {
+		return nil, fmt.Errorf("fork pull request cleanup is not complete")
+	}
+	approvalBody, _ := json.Marshal(approvals)
+	agreementBody, _ := json.Marshal(struct {
+		Issue   any `json:"issue"`
+		Comment any `json:"comment"`
+	}{Issue: issue, Comment: comment})
+	cleanupBody, _ := json.Marshal(struct {
+		PullRequest int       `json:"pull_request"`
+		HeadSHA     string    `json:"head_sha"`
+		State       string    `json:"state"`
+		ClosedAt    time.Time `json:"closed_at"`
+	}{PullRequest: pullRequest, HeadSHA: pull.Head.SHA, State: cleanupState, ClosedAt: pull.ClosedAt})
+	return &ShadowForkApproval{
+		HeadSHA: pull.Head.SHA, RunID: shadowRun.ID, PendingStatus: pending.Status, PendingObservedAt: pending.UpdatedAt,
+		PendingCaptureSHA256: digestBytes(options.ForkPendingCapture), ApprovalState: "approved", ApprovalActorID: approvalActorID,
+		ApprovalCaptureSHA256: digestBytes(approvalBody), AgreedIssueNumber: issue.Number, AgreementCommentID: comment.ID,
+		AgreementCaptureSHA256: digestBytes(agreementBody), CleanupState: cleanupState, CleanupObservedAt: pull.ClosedAt,
+		CleanupCaptureSHA256: digestBytes(cleanupBody),
+	}, nil
+}
+
+func maintainerAssociation(value string) bool {
+	return value == "OWNER" || value == "MEMBER" || value == "COLLABORATOR"
+}
+
+func digestBytes(value []byte) string {
+	digest := sha256.Sum256(value)
+	return fmt.Sprintf("sha256:%x", digest[:])
 }
 
 func readWorkflowBlobSHA(ctx context.Context, client ghShadowClient, repository, path, sourceSHA string) (string, error) {

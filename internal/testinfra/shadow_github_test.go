@@ -45,7 +45,7 @@ func TestCollectShadowSnapshotUsesAPICarriersAndArtifactEnvelopes(t *testing.T) 
 	if err != nil || len(shadowResults) != len(expected.ShadowResults) {
 		t.Fatalf("shadow artifact fixture = %d/%v", len(shadowResults), err)
 	}
-	actual, err := collectShadowSnapshot(context.Background(), client, expected.Repository, expected.PullRequest)
+	actual, err := collectShadowSnapshot(context.Background(), client, expected.Repository, expected.PullRequest, ShadowCollectionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,8 +63,40 @@ func TestCollectShadowSnapshotRejectsMissingSourceBlobIdentity(t *testing.T) {
 	client := shadowFixtureClient(t, expected)
 	endpoint := "repos/tetral-ai/tetral/contents/.github/workflows/pull-request-verification.yml?ref=source"
 	client.json[endpoint] = map[string]string{"sha": ""}
-	if _, err := collectShadowSnapshot(context.Background(), client, expected.Repository, expected.PullRequest); err == nil {
+	if _, err := collectShadowSnapshot(context.Background(), client, expected.Repository, expected.PullRequest, ShadowCollectionOptions{}); err == nil {
 		t.Fatal("missing workflow blob identity passed")
+	}
+}
+
+func TestCollectShadowSnapshotBindsExternalForkApprovalAndCleanup(t *testing.T) {
+	expected := validShadowSnapshot(t)
+	expected.HeadRepository = "external/example"
+	expected.AuthorAssociation = "CONTRIBUTOR"
+	client := shadowFixtureClient(t, expected)
+	pullEndpoint := "repos/tetral-ai/tetral/pulls/101"
+	pull := client.json[pullEndpoint].(map[string]any)
+	pull["state"] = "closed"
+	pull["closed_at"] = expected.CollectedAt
+	client.json[fmt.Sprintf("repos/%s/actions/runs/%d/approvals", expected.Repository, expected.Shadow.RunID)] = []map[string]any{{"state": "approved", "user": map[string]any{"id": 42}}}
+	client.json["repos/tetral-ai/tetral/issues/7"] = map[string]any{"number": 7, "state": "open"}
+	client.json["repos/tetral-ai/tetral/issues/comments/8"] = map[string]any{
+		"id": 8, "issue_url": "https://api.github.com/repos/tetral-ai/tetral/issues/7", "author_association": "OWNER",
+		"body": "This bounded change is agreed.", "created_at": expected.Legacy.CreatedAt,
+	}
+	pending := githubWorkflowRun{ID: expected.Shadow.RunID, HeadSHA: expected.EventHeadSHA, RunAttempt: 1, Status: "action_required", UpdatedAt: expected.Legacy.CreatedAt}
+	pendingBody, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := collectShadowSnapshot(context.Background(), client, expected.Repository, expected.PullRequest, ShadowCollectionOptions{
+		ForkPendingCapture: pendingBody, AgreedIssueNumber: 7, AgreementCommentID: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := NormalizeShadowSnapshot(actual)
+	if err != nil || !validForkApproval(row.ForkApproval) || row.ForkApproval.HeadSHA != expected.EventHeadSHA {
+		t.Fatalf("fork approval evidence = %+v/%v", row.ForkApproval, err)
 	}
 }
 
@@ -76,7 +108,7 @@ func shadowFixtureClient(t *testing.T, snapshot ShadowSnapshot) fixtureGHClient 
 	client.json["repos/tetral-ai/tetral/pulls/101"] = map[string]any{
 		"head": map[string]any{"sha": snapshot.EventHeadSHA, "repo": map[string]string{"full_name": snapshot.HeadRepository}},
 		"base": map[string]string{"sha": snapshot.EventBaseSHA}, "author_association": snapshot.AuthorAssociation,
-		"changed_files": len(snapshot.ChangedPaths),
+		"changed_files": len(snapshot.ChangedPaths), "state": "open",
 	}
 	files := make([]map[string]string, 0, len(snapshot.ChangedPaths))
 	for _, path := range snapshot.ChangedPaths {

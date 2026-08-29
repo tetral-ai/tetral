@@ -82,7 +82,10 @@ estimator. The pull request that introduced shadow collection is excluded:
 ```bash
 go run ./internal/testinfra/cmd/tetral-shadow-evaluate \
   --input shadow-ledger.json \
-  --exclude-pull-request <shadow-workflow-pr> \
+  --introduction-pull-request <shadow-workflow-pr> \
+  --introduced-by-commit <merged-introduction-commit> \
+  --workflow-source-sha <eligible-workflow-source> \
+  --eligible-after <introduction-merge-time-rfc3339> \
   --output shadow-acceptance.json
 ```
 
@@ -90,10 +93,15 @@ The evaluator fails closed until it has ten distinct, first-attempt,
 all-successful old/new integration tuples with the required change classes, a
 real external-fork approval observation, acceptable wall and runner cost, and
 balanced Go shards. Reruns and incomplete rows remain in the reliability and
-cost record but cannot improve the acceptance medians. For an external fork,
-the collector additionally requires the operator-observed pending and approval
-times through `--fork-pending-observed-at` and `--fork-approved-at`; a
-same-repository or organization-member fixture is not equivalent evidence.
+cost record but cannot improve the acceptance medians. Any unexplained failed,
+missing, skipped, or disagreeing row blocks acceptance even when ten other rows
+are green. For an external fork, capture the exact workflow-run JSON while its
+status is `action_required`, then pass that file with `--fork-pending-capture`,
+the agreed Issue number with `--agreed-issue`, and the maintainer agreement
+comment ID with `--agreement-comment`. The collector joins those facts to
+GitHub's read-only approval history, exact fork head, and closed or merged PR;
+two operator-entered timestamps are not approval evidence. A same-repository or
+organization-member fixture is not equivalent evidence.
 
 The shadow gate is currently pending. Until its report is green and a separate
 repository-policy change is explicitly authorized, the legacy workflow and
@@ -107,12 +115,14 @@ gh api repos/tetral-ai/tetral/rulesets/<ruleset-id> > ruleset.json
 gh api repos/tetral-ai/tetral > repository.json
 gh api repos/tetral-ai/tetral/actions/permissions > actions.json
 git archive --format=tar HEAD > legacy-capable-source.tar
+make test-full
 go run ./internal/testinfra/cmd/tetral-policy-plan \
   --repository tetral-ai/tetral \
   --ruleset ruleset.json \
   --repository-settings repository.json \
   --actions actions.json \
   --legacy-archive legacy-capable-source.tar \
+  --legacy-proof-result <full-result-for-this-clean-head.json> \
   --source-commit "$(git rev-parse HEAD)" \
   --tree-sha "$(git rev-parse HEAD^{tree})" \
   --output github-policy-cutover.json

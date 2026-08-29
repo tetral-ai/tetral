@@ -28,6 +28,7 @@ func TestNormalizeShadowSnapshotRejectsInvalidJoins(t *testing.T) {
 		"duration":             func(value *ShadowSnapshot) { value.Shadow.CompletedAt = value.Shadow.StartedAt },
 		"wrong run":            func(value *ShadowSnapshot) { value.ShadowResults[0].Execution.RunID = "999" },
 		"wrong result attempt": func(value *ShadowSnapshot) { value.ShadowResults[0].Execution.RunAttempt = "2" },
+		"missing Merge Gate":   func(value *ShadowSnapshot) { value.Shadow.Jobs = value.Shadow.Jobs[:len(value.Shadow.Jobs)-1] },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -52,7 +53,10 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 	}
 	jobID := int64(1)
 	for producer, name := range legacyShadowProducers {
-		job := ShadowJob{ID: jobID, Name: name, Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute)}
+		job := ShadowJob{ID: jobID, Name: name, Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute), Steps: []ShadowJobStep{
+			{Name: "Record legacy verification metadata", Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Second)},
+			{Name: "Run legacy evidence", Status: "completed", Conclusion: "success", StartedAt: started.Add(time.Second), CompletedAt: started.Add(time.Minute)},
+		}}
 		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
 		snapshot.Legacy.Jobs = append(snapshot.Legacy.Jobs, job)
 		snapshot.Legacy.Checks = append(snapshot.Legacy.Checks, check)
@@ -70,7 +74,9 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 	}
 	for _, producer := range producers {
 		name := shadowProducerJobs[producer]
-		job := ShadowJob{ID: jobID, Name: name, Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute)}
+		job := ShadowJob{ID: jobID, Name: name, Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute), Steps: []ShadowJobStep{
+			{Name: "Run shadow evidence", Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(time.Minute)},
+		}}
 		check := ShadowCheck{ID: jobID + 100, Name: name, HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
 		snapshot.Shadow.Jobs = append(snapshot.Shadow.Jobs, job)
 		snapshot.Shadow.Checks = append(snapshot.Shadow.Checks, check)
@@ -81,5 +87,11 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 		})
 		jobID++
 	}
+	gateJob := ShadowJob{ID: jobID, Name: "Merge Gate", Status: "completed", Conclusion: "success", StartedAt: started.Add(7 * time.Minute), CompletedAt: started.Add(8 * time.Minute), Steps: []ShadowJobStep{
+		{Name: "Reconcile exact-head evidence", Status: "completed", Conclusion: "success", StartedAt: started.Add(7 * time.Minute), CompletedAt: started.Add(8 * time.Minute)},
+	}}
+	gateCheck := ShadowCheck{ID: jobID + 100, Name: "Merge Gate", HeadSHA: "merge", AppID: githubActionsAppID, Status: "completed", Conclusion: "success"}
+	snapshot.Shadow.Jobs = append(snapshot.Shadow.Jobs, gateJob)
+	snapshot.Shadow.Checks = append(snapshot.Shadow.Checks, gateCheck)
 	return snapshot
 }

@@ -95,6 +95,52 @@ func TestGitHubPolicyBundleRequiresCompleteRulesetFoundation(t *testing.T) {
 	}
 }
 
+func TestGitHubPolicyMutationNormalizesRealReadbackShape(t *testing.T) {
+	bundle, err := BuildGitHubPolicyBundle("tetral-ai/tetral", validPolicyPreState(t), validLegacyArchive())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readback map[string]any
+	if err := json.Unmarshal(bundle.Transitions[0].Payload, &readback); err != nil {
+		t.Fatal(err)
+	}
+	readback["id"] = float64(bundle.RulesetID)
+	readback["node_id"] = "response-only-metadata"
+	body, err := json.Marshal(readback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPolicyMutationReadback(bundle.Transitions[0], body); err != nil {
+		t.Fatal(err)
+	}
+	readback["enforcement"] = "evaluate"
+	body, _ = json.Marshal(readback)
+	if err := VerifyPolicyMutationReadback(bundle.Transitions[0], body); err == nil {
+		t.Fatal("drifted GitHub readback passed")
+	}
+}
+
+func TestGateUnavailableRecoveryRejectsUnsafeMaintenanceState(t *testing.T) {
+	bundle, err := BuildGitHubPolicyBundle("tetral-ai/tetral", validPolicyPreState(t), validLegacyArchive())
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := bundle.FinalStateRecovery.GateUnavailable
+	for name, mutate := range map[string]func(*recoveryFixture){
+		"automatic merge":    func(value *recoveryFixture) { value.AutoMerge = true },
+		"other mergeable PR": func(value *recoveryFixture) { value.OtherMergeablePRs = 1 },
+		"unexpected merge":   func(value *recoveryFixture) { value.UnexpectedMerge = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := defaultRecoveryFixture("gate-unavailable")
+			mutate(&fixture)
+			if err := rehearseRecoveryCompletion(bundle, "gate-unavailable", steps, fixture); err == nil {
+				t.Fatal("unsafe maintenance fixture passed")
+			}
+		})
+	}
+}
+
 func validPolicyPreState(t *testing.T) PolicyState {
 	t.Helper()
 	var ruleset GitHubRuleset
@@ -133,7 +179,10 @@ func validPolicyPreState(t *testing.T) PolicyState {
 }
 
 func validLegacyArchive() LegacyWorkflowArchive {
-	return LegacyWorkflowArchive{SourceCommit: "commit", TreeSHA: "tree", Path: ".github/workflows/engine-ci.yml", BlobSHA: "blob", ArchiveSHA: "sha256:archive"}
+	return LegacyWorkflowArchive{
+		SourceCommit: "commit", TreeSHA: "tree", Path: ".github/workflows/engine-ci.yml", BlobSHA: "blob", ArchiveSHA: "sha256:archive",
+		ProofResultSHA: "sha256:proof", ProofCommand: []string{"make", "test-full"}, RequiredContexts: append([]string(nil), legacyRequiredChecks...),
+	}
 }
 
 func recoveryStepIDs(steps []PolicyRecoveryStep) []string {

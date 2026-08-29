@@ -5,13 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
 func main() {
 	input := flag.String("input", "shadow-ledger.json", "normalized shadow ledger")
-	excludedPullRequest := flag.Int("exclude-pull-request", 0, "pull request that introduced shadow collection")
+	introductionPullRequest := flag.Int("introduction-pull-request", 0, "pull request that introduced shadow collection")
+	introducedByCommit := flag.String("introduced-by-commit", "", "exact merged commit that introduced shadow collection")
+	workflowSourceSHA := flag.String("workflow-source-sha", "", "exact workflow source revision eligible for comparison")
+	eligibleAfter := flag.String("eligible-after", "", "RFC3339 time of the first eligible event after introduction merged")
 	output := flag.String("output", "shadow-acceptance.json", "acceptance report")
 	flag.Parse()
 	body, err := os.ReadFile(*input) //nolint:gosec // explicit operator-owned ledger path.
@@ -25,7 +29,16 @@ func main() {
 	if err := json.Unmarshal(body, &ledger); err != nil || ledger.Version != 1 {
 		fatal(fmt.Errorf("decode supported shadow ledger: %w", err))
 	}
-	report := testinfra.EvaluateShadowAcceptance(ledger.Rows, *excludedPullRequest)
+	eligibleAfterTime, err := time.Parse(time.RFC3339, *eligibleAfter)
+	if err != nil {
+		fatal(fmt.Errorf("eligible-after must be RFC3339: %w", err))
+	}
+	report := testinfra.EvaluateShadowAcceptance(ledger.Rows, testinfra.ShadowAcceptanceAuthority{
+		IntroductionPullRequest: *introductionPullRequest,
+		IntroducedByCommit:      *introducedByCommit,
+		WorkflowSourceSHA:       *workflowSourceSHA,
+		EligibleAfter:           eligibleAfterTime,
+	})
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		fatal(err)

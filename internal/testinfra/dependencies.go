@@ -29,13 +29,15 @@ const (
 )
 
 type dependencyManager struct {
-	environment []string
-	containers  []string
-	directories []string
-	evidence    []DependencyEvidence
-	postgresDSN string
-	runID       string
-	root        string
+	environment           []string
+	containers            []string
+	containerDependencies []string
+	directories           []string
+	directoryDependencies []string
+	evidence              []DependencyEvidence
+	postgresDSN           string
+	runID                 string
+	root                  string
 }
 
 type dependencyStarters struct {
@@ -96,6 +98,8 @@ func startDependenciesWith(ctx context.Context, dependencies, environment []stri
 func startDependenciesWithRoot(ctx context.Context, dependencies, environment []string, starters dependencyStarters, root string) (*dependencyManager, error) {
 	manager := &dependencyManager{environment: environment, root: root}
 	for _, dependency := range dependencies {
+		started := time.Now()
+		evidenceStart := len(manager.evidence)
 		switch dependency {
 		case "postgresql":
 			if dsn := os.Getenv(storagetest.EnvTestDatabaseURL); dsn == "" {
@@ -113,6 +117,8 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 					_ = manager.stopBounded()
 					return nil, err
 				}
+			} else {
+				manager.evidence = append(manager.evidence, DependencyEvidence{Name: "minio", Source: "external", Identity: "external-minio"})
 			}
 		case "docker":
 			if err := starters.docker(ctx); err != nil {
@@ -120,6 +126,7 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 				return nil, err
 			}
 			manager.environment = append(withoutEnvironmentVariable(manager.environment, "TETRAL_TEST_DOCKER_AVAILABLE"), "TETRAL_TEST_DOCKER_AVAILABLE=1")
+			manager.evidence = append(manager.evidence, DependencyEvidence{Name: "docker", Source: "host-daemon", Identity: "available"})
 		case "sdk":
 			if err := starters.sdk(ctx, manager); err != nil {
 				_ = manager.stopBounded()
@@ -139,6 +146,25 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 		default:
 			_ = manager.stopBounded()
 			return nil, fmt.Errorf("unknown test dependency %q", dependency)
+		}
+		for index := evidenceStart; index < len(manager.evidence); index++ {
+			if manager.evidence[index].Name == dependency {
+				manager.evidence[index].SetupElapsed = time.Since(started)
+			}
+		}
+		if dependency == "postgresql" {
+			templateStarted := time.Now()
+			digest, err := storagetest.PrepareTemplate(ctx, manager.postgresDSN)
+			if err != nil {
+				_ = manager.stopBounded()
+				return nil, fmt.Errorf("prepare PostgreSQL test template: %w", err)
+			}
+			for index := evidenceStart; index < len(manager.evidence); index++ {
+				if manager.evidence[index].Name == dependency {
+					manager.evidence[index].TemplateIdentity = digest
+					manager.evidence[index].TemplateSetupElapsed = time.Since(templateStarted)
+				}
+			}
 		}
 	}
 	return manager, nil
@@ -185,6 +211,7 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 		return err
 	}
 	m.directories = append(m.directories, directory)
+	m.directoryDependencies = append(m.directoryDependencies, "sdk")
 	commands := [][]string{
 		{"git", "init", "-q", directory},
 		{"git", "-C", directory, "remote", "add", "origin", "https://github.com/tetral-ai/tetral-sdk-typescript.git"},
@@ -258,6 +285,7 @@ func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {
 		return fmt.Errorf("start PostgreSQL dependency: %w", err)
 	}
 	m.containers = append(m.containers, name)
+	m.containerDependencies = append(m.containerDependencies, "postgresql")
 	for attempt := 0; attempt < 60; attempt++ {
 		if runQuiet(ctx, "docker", "exec", name, "pg_isready", "-U", "tetral", "-d", "tetral") == nil {
 			port, err := dockerPort(ctx, name, "5432/tcp")
@@ -314,6 +342,7 @@ func (m *dependencyManager) startMinIO(ctx context.Context) error {
 		return fmt.Errorf("start MinIO dependency: %w", err)
 	}
 	m.containers = append(m.containers, name)
+	m.containerDependencies = append(m.containerDependencies, "minio")
 	port, err := dockerPort(ctx, name, "9000/tcp")
 	if err != nil {
 		return err
@@ -395,16 +424,28 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 func (m *dependencyManager) stop(ctx context.Context) error {
 	var first error
 	for index := len(m.containers) - 1; index >= 0; index-- {
+		started := time.Now()
 		if err := runQuiet(ctx, "docker", "rm", "-f", m.containers[index]); err != nil && first == nil {
 			first = err
 		}
+		m.recordDependencyTeardown(m.containerDependencies[index], time.Since(started))
 	}
 	for index := len(m.directories) - 1; index >= 0; index-- {
+		started := time.Now()
 		if err := os.RemoveAll(m.directories[index]); err != nil && first == nil {
 			first = err
 		}
+		m.recordDependencyTeardown(m.directoryDependencies[index], time.Since(started))
 	}
 	return first
+}
+
+func (m *dependencyManager) recordDependencyTeardown(name string, elapsed time.Duration) {
+	for index := range m.evidence {
+		if m.evidence[index].Name == name {
+			m.evidence[index].TeardownElapsed += elapsed
+		}
+	}
 }
 
 func (m *dependencyManager) stopBounded() error {

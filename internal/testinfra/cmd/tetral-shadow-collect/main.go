@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
@@ -24,8 +23,9 @@ func main() {
 	input := flag.String("input", "", "captured GitHub API snapshot; omit for read-only live collection")
 	repository := flag.String("repository", "", "owner/repository for read-only live collection")
 	pullRequest := flag.Int("pull-request", 0, "pull request number for read-only live collection")
-	forkPendingAt := flag.String("fork-pending-observed-at", "", "RFC3339 time when an external fork run was observed pending approval")
-	forkApprovedAt := flag.String("fork-approved-at", "", "RFC3339 time when the external fork run was approved")
+	forkPendingCapture := flag.String("fork-pending-capture", "", "GitHub workflow-run JSON captured while the external fork awaited approval")
+	agreedIssue := flag.Int("agreed-issue", 0, "repository Issue number containing the agreed external change")
+	agreementComment := flag.Int64("agreement-comment", 0, "maintainer Issue-comment ID agreeing to the external change")
 	output := flag.String("output", "shadow-ledger.json", "normalized append-only ledger")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -35,20 +35,21 @@ func main() {
 	if *input != "" {
 		snapshot, err = readSnapshot(*input)
 	} else if *repository != "" && *pullRequest > 0 {
-		snapshot, err = testinfra.CollectLiveShadowSnapshot(ctx, *repository, *pullRequest)
+		var pendingCapture []byte
+		if *forkPendingCapture != "" {
+			pendingCapture, err = os.ReadFile(*forkPendingCapture) //nolint:gosec // explicit operator-owned GitHub capture.
+			if err != nil {
+				fatal(err)
+			}
+		}
+		snapshot, err = testinfra.CollectLiveShadowSnapshotWithOptions(ctx, *repository, *pullRequest, testinfra.ShadowCollectionOptions{
+			ForkPendingCapture: pendingCapture, AgreedIssueNumber: *agreedIssue, AgreementCommentID: *agreementComment,
+		})
 	} else {
 		err = fmt.Errorf("provide --input or both --repository and --pull-request")
 	}
 	if err != nil {
 		fatal(err)
-	}
-	if *forkPendingAt != "" || *forkApprovedAt != "" {
-		pending, pendingErr := time.Parse(time.RFC3339, *forkPendingAt)
-		approved, approvedErr := time.Parse(time.RFC3339, *forkApprovedAt)
-		if pendingErr != nil || approvedErr != nil || !approved.After(pending) {
-			fatal(fmt.Errorf("fork approval evidence must contain ordered RFC3339 timestamps"))
-		}
-		snapshot.ForkApproval = &testinfra.ShadowForkApproval{PendingObservedAt: pending, ApprovedAt: approved}
 	}
 	row, err := testinfra.NormalizeShadowSnapshot(snapshot)
 	if err != nil {

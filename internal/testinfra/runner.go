@@ -55,8 +55,6 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		_ = writeJSON(filepath.Join(options.OutputDir, "result.json"), result)
 		return result, err
 	}
-	result.Dependencies = append(result.Dependencies, dependencies.evidence...)
-
 	var runErr error
 	goSelections := make([]Selection, 0)
 	for _, selection := range plan.Selections {
@@ -80,6 +78,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	teardownStart := time.Now()
 	stopErr := dependencies.stopBounded()
 	result.Teardown = time.Since(teardownStart)
+	result.Dependencies = append(result.Dependencies, dependencies.evidence...)
 	if stopErr != nil {
 		result.Status = "apparatus-failed"
 		runErr = errors.Join(runErr, stopErr)

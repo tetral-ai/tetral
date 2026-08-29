@@ -150,6 +150,23 @@ func NewPostgreSQLAdminDB(t testing.TB) *sql.DB {
 	return admin
 }
 
+// PrepareTemplate initializes the same immutable template used by ordinary
+// tests and returns its content digest. Repository test infrastructure calls it
+// once before package execution so template setup has its own measured phase.
+func PrepareTemplate(ctx context.Context, controlDSN string) (string, error) {
+	config, err := pgx.ParseConfig(controlDSN)
+	if err != nil {
+		return "", &DatabaseSetupError{Stage: "parse_control_dsn"}
+	}
+	control := openPool(config)
+	defer func() { _ = control.Close() }()
+	if err := control.PingContext(ctx); err != nil {
+		return "", &DatabaseSetupError{Stage: "connect_control_database"}
+	}
+	_, digest, err := ensureProcessTemplate(ctx, control, config)
+	return digest, err
+}
+
 // NewEmptyPostgreSQLAdminDB creates an independent empty database. Migration
 // tests intentionally bypass template reuse so they exercise the production
 // migrator from the exact pre-migration state they declare.

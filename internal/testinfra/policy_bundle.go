@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 )
 
 const githubPolicyBundleSchema = "tetral.github-policy-cutover/v1"
@@ -23,6 +24,10 @@ var legacyRequiredChecks = []string{
 	"k8s-manifests",
 	"sandbox-local-image-smoke",
 	"security",
+}
+
+func LegacyRequiredChecks() []string {
+	return append([]string(nil), legacyRequiredChecks...)
 }
 
 type GitHubRuleset struct {
@@ -49,11 +54,14 @@ type RepositoryActionsPolicy struct {
 }
 
 type LegacyWorkflowArchive struct {
-	SourceCommit string `json:"source_commit"`
-	TreeSHA      string `json:"tree_sha"`
-	Path         string `json:"workflow_path"`
-	BlobSHA      string `json:"workflow_blob_sha"`
-	ArchiveSHA   string `json:"archive_sha256"`
+	SourceCommit     string   `json:"source_commit"`
+	TreeSHA          string   `json:"tree_sha"`
+	Path             string   `json:"workflow_path"`
+	BlobSHA          string   `json:"workflow_blob_sha"`
+	ArchiveSHA       string   `json:"archive_sha256"`
+	ProofResultSHA   string   `json:"proof_result_sha256"`
+	ProofCommand     []string `json:"proof_command"`
+	RequiredContexts []string `json:"required_contexts"`
 }
 
 type PolicyState struct {
@@ -63,28 +71,33 @@ type PolicyState struct {
 }
 
 type PolicyMutation struct {
-	ID               string          `json:"id"`
-	Surface          string          `json:"surface"`
-	Method           string          `json:"method"`
-	Endpoint         string          `json:"endpoint"`
-	ExpectedPreHash  string          `json:"expected_pre_state_sha256"`
-	Payload          json.RawMessage `json:"payload"`
-	ExpectedReadback string          `json:"expected_readback_sha256"`
-	RequiredEvidence []string        `json:"required_evidence,omitempty"`
-	Compensation     json.RawMessage `json:"compensation_payload"`
-	CompensationHash string          `json:"compensation_readback_sha256"`
+	ID                 string          `json:"id"`
+	Surface            string          `json:"surface"`
+	Method             string          `json:"method"`
+	Endpoint           string          `json:"endpoint"`
+	ExpectedPreHash    string          `json:"expected_pre_state_sha256"`
+	Payload            json.RawMessage `json:"payload"`
+	ExpectedReadback   string          `json:"expected_readback_sha256"`
+	ReadbackProjection string          `json:"readback_projection"`
+	RequiredEvidence   []string        `json:"required_evidence,omitempty"`
+	Compensation       json.RawMessage `json:"compensation_payload"`
+	CompensationHash   string          `json:"compensation_readback_sha256"`
 }
 
 type PolicyRecoveryStep struct {
-	ID               string          `json:"id"`
-	Action           string          `json:"action"`
-	Surface          string          `json:"surface,omitempty"`
-	Method           string          `json:"method,omitempty"`
-	Endpoint         string          `json:"endpoint,omitempty"`
-	ExpectedPreHash  string          `json:"expected_pre_state_sha256,omitempty"`
-	Payload          json.RawMessage `json:"payload,omitempty"`
-	ExpectedReadback string          `json:"expected_readback_sha256,omitempty"`
-	RequiredEvidence []string        `json:"required_evidence"`
+	ID                 string          `json:"id"`
+	Action             string          `json:"action"`
+	Surface            string          `json:"surface,omitempty"`
+	Method             string          `json:"method,omitempty"`
+	Endpoint           string          `json:"endpoint,omitempty"`
+	ExpectedPreHash    string          `json:"expected_pre_state_sha256,omitempty"`
+	Payload            json.RawMessage `json:"payload,omitempty"`
+	ExpectedReadback   string          `json:"expected_readback_sha256,omitempty"`
+	ReadbackProjection string          `json:"readback_projection,omitempty"`
+	RequiredEvidence   []string        `json:"required_evidence"`
+	CompensationAction string          `json:"compensation_action,omitempty"`
+	Compensation       json.RawMessage `json:"compensation_payload,omitempty"`
+	CompensationHash   string          `json:"compensation_readback_sha256,omitempty"`
 }
 
 type FinalStateRecovery struct {
@@ -108,7 +121,8 @@ func BuildGitHubPolicyBundle(repository string, pre PolicyState, archive LegacyW
 	if repository == "" || pre.Ruleset.ID <= 0 || pre.Ruleset.Name == "" || pre.Ruleset.Target != "branch" || pre.Ruleset.Enforcement != "active" {
 		return GitHubPolicyBundle{}, fmt.Errorf("repository or active branch ruleset pre-state is incomplete")
 	}
-	if archive.SourceCommit == "" || archive.TreeSHA == "" || archive.Path != ".github/workflows/engine-ci.yml" || archive.BlobSHA == "" || archive.ArchiveSHA == "" {
+	if archive.SourceCommit == "" || archive.TreeSHA == "" || archive.Path != ".github/workflows/engine-ci.yml" || archive.BlobSHA == "" || archive.ArchiveSHA == "" ||
+		archive.ProofResultSHA == "" || !sameOrderedStrings(archive.ProofCommand, []string{"make", "test-full"}) || !sameStrings(archive.RequiredContexts, legacyRequiredChecks) {
 		return GitHubPolicyBundle{}, fmt.Errorf("legacy workflow archive identity is incomplete")
 	}
 	if err := verifyLegacyRequiredChecks(pre.Ruleset); err != nil {
@@ -170,7 +184,8 @@ func BuildGitHubPolicyBundle(repository string, pre PolicyState, archive LegacyW
 		}
 		transitions = append(transitions, PolicyMutation{ID: id, Surface: surface, Method: method, Endpoint: endpoint,
 			ExpectedPreHash: beforeHash, Payload: afterBody, ExpectedReadback: afterHash,
-			RequiredEvidence: evidence, Compensation: compensationBody, CompensationHash: compensationHash})
+			ReadbackProjection: policyReadbackProjection(surface), RequiredEvidence: evidence,
+			Compensation: compensationBody, CompensationHash: compensationHash})
 		return nil
 	}
 	if err := appendMutation("add-merge-gate", "ruleset", "PUT", rulesetEndpoint, pre.Ruleset, intermediate, pre.Ruleset); err != nil {
@@ -218,6 +233,9 @@ func VerifyGitHubPolicyBundle(bundle GitHubPolicyBundle) error {
 		before, exists := current[transition.Surface]
 		if !exists {
 			return fmt.Errorf("transition %q has unknown surface", transition.ID)
+		}
+		if transition.ReadbackProjection != policyReadbackProjection(transition.Surface) {
+			return fmt.Errorf("transition %q has the wrong readback projection", transition.ID)
 		}
 		hash, err := canonicalHash(before)
 		if err != nil || hash != transition.ExpectedPreHash {
@@ -296,36 +314,158 @@ func RehearseFinalStateRecovery(bundle GitHubPolicyBundle) error {
 		"normal":           bundle.FinalStateRecovery.Normal,
 		"gate-unavailable": bundle.FinalStateRecovery.GateUnavailable,
 	} {
-		current := any(bundle.FinalState.Ruleset)
-		for _, step := range steps {
-			if step.Action != "update-ruleset" {
-				continue
-			}
-			hash, err := canonicalHash(current)
-			if err != nil || hash != step.ExpectedPreHash {
-				return fmt.Errorf("%s recovery step %q pre-state mismatch", name, step.ID)
-			}
-			var next any
-			if err := json.Unmarshal(step.Payload, &next); err != nil {
-				return fmt.Errorf("%s recovery step %q payload: %w", name, step.ID, err)
-			}
-			hash, err = canonicalHash(next)
-			if err != nil || hash != step.ExpectedReadback {
-				return fmt.Errorf("%s recovery step %q readback mismatch", name, step.ID)
-			}
-			current = next
+		if err := rehearseRecoveryCompletion(bundle, name, steps, defaultRecoveryFixture(name)); err != nil {
+			return err
 		}
-		got, err := canonicalHash(current)
-		want, wantErr := canonicalHash(bundle.PreState.Ruleset)
-		if err != nil || wantErr != nil || got != want {
-			return fmt.Errorf("%s recovery did not restore the legacy ruleset", name)
+		for failurePoint := 0; failurePoint <= len(steps); failurePoint++ {
+			if err := rehearseRecoveryFailure(bundle, name, steps, failurePoint, defaultRecoveryFixture(name)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
+type recoveryFixture struct {
+	Ruleset           any
+	GateAvailable     bool
+	WorkflowPresent   bool
+	RestorePROpen     bool
+	Exclusive         bool
+	AutoMerge         bool
+	OtherMergeablePRs int
+	AuthorizedHead    string
+	MergedHead        string
+	UnexpectedMerge   bool
+	LegacyContexts    int
+}
+
+func defaultRecoveryFixture(name string) recoveryFixture {
+	return recoveryFixture{GateAvailable: name == "normal", AuthorizedHead: "restore-head"}
+}
+
+func rehearseRecoveryCompletion(bundle GitHubPolicyBundle, name string, steps []PolicyRecoveryStep, fixture recoveryFixture) error {
+	fixture.Ruleset = bundle.FinalState.Ruleset
+	for _, step := range steps {
+		if err := applyRecoveryStep(&fixture, step); err != nil {
+			return fmt.Errorf("%s recovery step %q: %w", name, step.ID, err)
+		}
+	}
+	got, err := canonicalHash(fixture.Ruleset)
+	want, wantErr := canonicalHash(bundle.PreState.Ruleset)
+	if err != nil || wantErr != nil || got != want || !fixture.WorkflowPresent || fixture.Exclusive || fixture.RestorePROpen || fixture.LegacyContexts != len(legacyRequiredChecks) {
+		return fmt.Errorf("%s recovery did not reach the complete legacy state", name)
+	}
+	return nil
+}
+
+func rehearseRecoveryFailure(bundle GitHubPolicyBundle, name string, steps []PolicyRecoveryStep, failAfter int, fixture recoveryFixture) error {
+	fixture.Ruleset = bundle.FinalState.Ruleset
+	completed := steps[:failAfter]
+	for _, step := range completed {
+		if err := applyRecoveryStep(&fixture, step); err != nil {
+			return fmt.Errorf("%s failure rehearsal step %q: %w", name, step.ID, err)
+		}
+	}
+	for index := len(completed) - 1; index >= 0; index-- {
+		if err := compensateRecoveryStep(&fixture, completed[index]); err != nil {
+			return fmt.Errorf("%s failure compensation %q: %w", name, completed[index].ID, err)
+		}
+	}
+	want, _ := canonicalHash(bundle.FinalState.Ruleset)
+	got, err := canonicalHash(fixture.Ruleset)
+	if err != nil || got != want || fixture.Exclusive || fixture.RestorePROpen {
+		return fmt.Errorf("%s failure point %d did not return to a safe Gate-protected state", name, failAfter)
+	}
+	return nil
+}
+
+func applyRecoveryStep(fixture *recoveryFixture, step PolicyRecoveryStep) error {
+	switch step.Action {
+	case "open-exact-restore-pr":
+		if fixture.RestorePROpen || fixture.AuthorizedHead == "" {
+			return fmt.Errorf("restore PR identity is unavailable")
+		}
+		fixture.RestorePROpen = true
+	case "verify-restore-head":
+		if !fixture.RestorePROpen || !fixture.GateAvailable {
+			return fmt.Errorf("restore head lacks an available Merge Gate")
+		}
+		fixture.LegacyContexts = len(legacyRequiredChecks)
+	case "begin-exclusive-maintenance":
+		if fixture.AutoMerge || fixture.OtherMergeablePRs != 0 || fixture.UnexpectedMerge || fixture.AuthorizedHead == "" {
+			return fmt.Errorf("exclusive maintenance preconditions are false")
+		}
+		fixture.Exclusive = true
+	case "merge-exact-restore-head":
+		if fixture.MergedHead != "" || fixture.UnexpectedMerge || !fixture.RestorePROpen && !fixture.Exclusive {
+			return fmt.Errorf("restore merge is not exclusive")
+		}
+		if fixture.RestorePROpen && !fixture.GateAvailable {
+			return fmt.Errorf("normal restore merge lacks Merge Gate")
+		}
+		fixture.MergedHead = fixture.AuthorizedHead
+		fixture.WorkflowPresent = true
+		fixture.RestorePROpen = false
+	case "verify-legacy-contexts":
+		if !fixture.WorkflowPresent || !fixture.Exclusive || fixture.UnexpectedMerge {
+			return fmt.Errorf("legacy contexts cannot be attributed to the restore")
+		}
+		fixture.LegacyContexts = len(legacyRequiredChecks)
+	case "update-ruleset":
+		hash, err := canonicalHash(fixture.Ruleset)
+		if err != nil || hash != step.ExpectedPreHash {
+			return fmt.Errorf("ruleset pre-state mismatch")
+		}
+		if strings.Contains(step.ID, "restore-legacy") && (!fixture.WorkflowPresent || fixture.LegacyContexts != len(legacyRequiredChecks)) {
+			return fmt.Errorf("legacy ruleset restored before its workflow can emit every context")
+		}
+		var next any
+		if err := json.Unmarshal(step.Payload, &next); err != nil {
+			return err
+		}
+		hash, err = canonicalHash(next)
+		if err != nil || hash != step.ExpectedReadback {
+			return fmt.Errorf("ruleset readback mismatch")
+		}
+		fixture.Ruleset = next
+	case "end-exclusive-maintenance":
+		if !fixture.Exclusive || fixture.UnexpectedMerge {
+			return fmt.Errorf("exclusive maintenance state drifted")
+		}
+		fixture.Exclusive = false
+	default:
+		return fmt.Errorf("unknown recovery action %q", step.Action)
+	}
+	return nil
+}
+
+func compensateRecoveryStep(fixture *recoveryFixture, step PolicyRecoveryStep) error {
+	switch step.CompensationAction {
+	case "":
+		return nil
+	case "close-restore-pr":
+		fixture.RestorePROpen = false
+	case "end-exclusive-maintenance":
+		fixture.Exclusive = false
+	case "update-ruleset":
+		var restored any
+		if err := json.Unmarshal(step.Compensation, &restored); err != nil {
+			return err
+		}
+		hash, err := canonicalHash(restored)
+		if err != nil || hash != step.CompensationHash {
+			return fmt.Errorf("ruleset compensation mismatch")
+		}
+		fixture.Ruleset = restored
+	default:
+		return fmt.Errorf("unknown compensation action %q", step.CompensationAction)
+	}
+	return nil
+}
+
 func buildFinalStateRecovery(repository, rulesetEndpoint string, pre, final PolicyState) (FinalStateRecovery, error) {
-	updateStep := func(id string, before, after GitHubRuleset, evidence ...string) (PolicyRecoveryStep, error) {
+	updateStep := func(id string, before, after, compensation GitHubRuleset, evidence ...string) (PolicyRecoveryStep, error) {
 		preHash, err := canonicalHash(before)
 		if err != nil {
 			return PolicyRecoveryStep{}, err
@@ -338,16 +478,25 @@ func buildFinalStateRecovery(repository, rulesetEndpoint string, pre, final Poli
 		if err != nil {
 			return PolicyRecoveryStep{}, err
 		}
+		compensationBody, err := canonicalJSON(compensation)
+		if err != nil {
+			return PolicyRecoveryStep{}, err
+		}
+		compensationHash, err := canonicalHash(compensation)
+		if err != nil {
+			return PolicyRecoveryStep{}, err
+		}
 		return PolicyRecoveryStep{
 			ID: id, Action: "update-ruleset", Surface: "ruleset", Method: "PUT", Endpoint: rulesetEndpoint,
-			ExpectedPreHash: preHash, Payload: payload, ExpectedReadback: readbackHash, RequiredEvidence: evidence,
+			ExpectedPreHash: preHash, Payload: payload, ExpectedReadback: readbackHash, ReadbackProjection: policyReadbackProjection("ruleset"),
+			RequiredEvidence: evidence, CompensationAction: "update-ruleset", Compensation: compensationBody, CompensationHash: compensationHash,
 		}, nil
 	}
 	step := func(id, action string, evidence ...string) PolicyRecoveryStep {
 		return PolicyRecoveryStep{ID: id, Action: action, RequiredEvidence: evidence}
 	}
 
-	normalRestore, err := updateStep("normal-restore-legacy-ruleset", final.Ruleset, pre.Ruleset,
+	normalRestore, err := updateStep("normal-restore-legacy-ruleset", final.Ruleset, pre.Ruleset, final.Ruleset,
 		"restore commit is merged on main", "all eleven legacy contexts report on the restored workflow")
 	if err != nil {
 		return FinalStateRecovery{}, err
@@ -361,17 +510,18 @@ func buildFinalStateRecovery(repository, rulesetEndpoint string, pre, final Poli
 			"reviewed restore head is unchanged", "Merge Gate is successful on that exact head"),
 		normalRestore,
 	}
+	normal[0].CompensationAction = "close-restore-pr"
 
 	temporary := cloneRuleset(final.Ruleset)
 	if err := removeRequiredChecks(&temporary); err != nil {
 		return FinalStateRecovery{}, err
 	}
-	removeGate, err := updateStep("emergency-remove-merge-gate", final.Ruleset, temporary,
+	removeGate, err := updateStep("emergency-remove-merge-gate", final.Ruleset, temporary, final.Ruleset,
 		"separate Owner authorization is recorded", "exclusive maintenance preconditions remain true")
 	if err != nil {
 		return FinalStateRecovery{}, err
 	}
-	restoreLegacy, err := updateStep("emergency-restore-legacy-ruleset", temporary, pre.Ruleset,
+	restoreLegacy, err := updateStep("emergency-restore-legacy-ruleset", temporary, pre.Ruleset, final.Ruleset,
 		"restore commit is merged on main", "all eleven legacy contexts report on the restored workflow")
 	if err != nil {
 		return FinalStateRecovery{}, err
@@ -391,6 +541,7 @@ func buildFinalStateRecovery(repository, rulesetEndpoint string, pre, final Poli
 			"legacy ruleset readback matches the captured pre-state", "temporary no-Gate payload is absent",
 			"no unexpected merge or settings drift occurred"),
 	}
+	emergency[0].CompensationAction = "end-exclusive-maintenance"
 	return FinalStateRecovery{Normal: normal, GateUnavailable: emergency}, nil
 }
 
@@ -426,6 +577,51 @@ func ReadPolicyPreState(rulesetPath, repositoryPath, actionsPath string) (Policy
 		}
 	}
 	return state, nil
+}
+
+func VerifyPolicyMutationReadback(mutation PolicyMutation, body []byte) error {
+	value, err := normalizePolicyReadback(mutation.Surface, body)
+	if err != nil {
+		return err
+	}
+	if mutation.ReadbackProjection != policyReadbackProjection(mutation.Surface) {
+		return fmt.Errorf("policy mutation uses the wrong readback projection")
+	}
+	hash, err := canonicalHash(value)
+	if err != nil || hash != mutation.ExpectedReadback {
+		return fmt.Errorf("policy mutation readback does not match the expected state")
+	}
+	return nil
+}
+
+func policyReadbackProjection(surface string) string {
+	return "tetral.github-" + surface + "-readback/v1"
+}
+
+func normalizePolicyReadback(surface string, body []byte) (any, error) {
+	switch surface {
+	case "ruleset":
+		var value GitHubRuleset
+		if err := json.Unmarshal(body, &value); err != nil {
+			return nil, fmt.Errorf("decode ruleset readback: %w", err)
+		}
+		value.ID = 0
+		return value, nil
+	case "repository":
+		var value RepositoryMergePolicy
+		if err := json.Unmarshal(body, &value); err != nil {
+			return nil, fmt.Errorf("decode repository readback: %w", err)
+		}
+		return value, nil
+	case "actions":
+		var value RepositoryActionsPolicy
+		if err := json.Unmarshal(body, &value); err != nil {
+			return nil, fmt.Errorf("decode Actions readback: %w", err)
+		}
+		return value, nil
+	default:
+		return nil, fmt.Errorf("unknown policy readback surface %q", surface)
+	}
 }
 
 func verifyLegacyRequiredChecks(ruleset GitHubRuleset) error {
@@ -560,6 +756,18 @@ func cloneRuleset(value GitHubRuleset) GitHubRuleset {
 	var result GitHubRuleset
 	_ = json.Unmarshal(body, &result)
 	return result
+}
+
+func sameOrderedStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalJSON(value any) (json.RawMessage, error) {
