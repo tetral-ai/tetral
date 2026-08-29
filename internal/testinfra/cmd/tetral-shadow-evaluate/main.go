@@ -12,6 +12,7 @@ import (
 
 func main() {
 	input := flag.String("input", "shadow-ledger.json", "normalized shadow ledger")
+	universePath := flag.String("universe", "shadow-universe.json", "enumerated GitHub observation window")
 	introductionPullRequest := flag.Int("introduction-pull-request", 0, "pull request that introduced shadow collection")
 	introducedByCommit := flag.String("introduced-by-commit", "", "exact merged commit that introduced shadow collection")
 	workflowSourceSHA := flag.String("workflow-source-sha", "", "exact workflow source revision eligible for comparison")
@@ -29,6 +30,14 @@ func main() {
 	if err := json.Unmarshal(body, &ledger); err != nil || ledger.Version != 1 {
 		fatal(fmt.Errorf("decode supported shadow ledger: %w", err))
 	}
+	universeBody, err := os.ReadFile(*universePath) //nolint:gosec // explicit operator-owned universe path.
+	if err != nil {
+		fatal(err)
+	}
+	var universe testinfra.ShadowObservationUniverse
+	if err := json.Unmarshal(universeBody, &universe); err != nil {
+		fatal(fmt.Errorf("decode shadow observation universe: %w", err))
+	}
 	eligibleAfterTime, err := time.Parse(time.RFC3339, *eligibleAfter)
 	if err != nil {
 		fatal(fmt.Errorf("eligible-after must be RFC3339: %w", err))
@@ -38,7 +47,7 @@ func main() {
 		IntroducedByCommit:      *introducedByCommit,
 		WorkflowSourceSHA:       *workflowSourceSHA,
 		EligibleAfter:           eligibleAfterTime,
-	})
+	}, universe)
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		fatal(err)

@@ -7,11 +7,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 )
 
 type fixtureGHClient struct {
 	json  map[string]any
 	bytes map[string][]byte
+}
+
+func TestEnumerateShadowUniverseOwnsEveryPullRequestHead(t *testing.T) {
+	start := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	legacyEndpoint := "repos/tetral-ai/tetral/actions/workflows/engine-ci.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	shadowEndpoint := "repos/tetral-ai/tetral/actions/workflows/pull-request-verification.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	client := fixtureGHClient{json: map[string]any{
+		legacyEndpoint: map[string]any{"workflow_runs": []map[string]any{
+			{"id": 901, "head_sha": "head-a", "run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{{"number": 20}}},
+			{"id": 902, "head_sha": "head-b", "run_attempt": 1, "created_at": start.Add(2 * time.Hour), "pull_requests": []map[string]any{{"number": 21}}},
+		}},
+		shadowEndpoint: map[string]any{"workflow_runs": []map[string]any{
+			{"id": 1001, "head_sha": "head-a", "run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{{"number": 20}}},
+			{"id": 1002, "head_sha": "head-b", "run_attempt": 1, "created_at": start.Add(2 * time.Hour), "pull_requests": []map[string]any{{"number": 21}}},
+			{"id": 1002, "head_sha": "head-b", "run_attempt": 2, "created_at": start.Add(2 * time.Hour), "pull_requests": []map[string]any{{"number": 21}}},
+		}},
+	}, bytes: map[string][]byte{}}
+	universe, err := enumerateShadowUniverse(context.Background(), client, "tetral-ai/tetral", start, start.Add(3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(universe.Members) != 2 || universe.Members[0].PullRequest != 20 || universe.Members[1].PullRequest != 21 || universe.Members[1].LegacyRunID != 902 || universe.Members[1].ShadowRunAttempt != 2 {
+		t.Fatalf("enumerated universe = %+v", universe)
+	}
+}
+
+func TestEnumerateShadowUniverseRejectsRunWithoutPullRequestIdentity(t *testing.T) {
+	start := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	legacyEndpoint := "repos/tetral-ai/tetral/actions/workflows/engine-ci.yml/runs?created=%3E%3D2026-08-28T10%3A00%3A00Z&event=pull_request&page=1&per_page=100"
+	client := fixtureGHClient{json: map[string]any{
+		legacyEndpoint: map[string]any{"workflow_runs": []map[string]any{
+			{"id": 1001, "head_sha": "head-a", "run_attempt": 1, "created_at": start.Add(time.Hour), "pull_requests": []map[string]any{}},
+		}},
+	}, bytes: map[string][]byte{}}
+	if _, err := enumerateShadowUniverse(context.Background(), client, "tetral-ai/tetral", start, start.Add(2*time.Hour)); err == nil {
+		t.Fatal("workflow run without pull-request identity passed")
+	}
 }
 
 func (client fixtureGHClient) JSON(_ context.Context, endpoint string, target any) error {

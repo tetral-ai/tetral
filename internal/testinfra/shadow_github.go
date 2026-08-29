@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -270,6 +271,88 @@ type githubWorkflowRun struct {
 	RunStartedAt       time.Time `json:"run_started_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	PreviousAttemptURL *string   `json:"previous_attempt_url"`
+	PullRequests       []struct {
+		Number int `json:"number"`
+	} `json:"pull_requests"`
+}
+
+func EnumerateLiveShadowUniverse(ctx context.Context, repository string, eligibleAfter time.Time) (ShadowObservationUniverse, error) {
+	return enumerateShadowUniverse(ctx, commandGHClient{}, repository, eligibleAfter, time.Now().UTC())
+}
+
+func enumerateShadowUniverse(ctx context.Context, client ghShadowClient, repository string, eligibleAfter, enumeratedAt time.Time) (ShadowObservationUniverse, error) {
+	if repository == "" || eligibleAfter.IsZero() || !enumeratedAt.After(eligibleAfter) {
+		return ShadowObservationUniverse{}, fmt.Errorf("shadow observation window is incomplete")
+	}
+	type pairedRuns struct {
+		member ShadowObservationMember
+		latest time.Time
+	}
+	byHead := map[string]pairedRuns{}
+	for _, workflow := range []string{"engine-ci.yml", "pull-request-verification.yml"} {
+		for page := 1; ; page++ {
+			query := url.Values{}
+			query.Set("created", ">="+eligibleAfter.UTC().Format(time.RFC3339))
+			query.Set("event", "pull_request")
+			query.Set("page", strconv.Itoa(page))
+			query.Set("per_page", "100")
+			var list struct {
+				Runs []githubWorkflowRun `json:"workflow_runs"`
+			}
+			endpoint := fmt.Sprintf("repos/%s/actions/workflows/%s/runs?%s", repository, workflow, query.Encode())
+			if err := client.JSON(ctx, endpoint, &list); err != nil {
+				return ShadowObservationUniverse{}, err
+			}
+			for _, run := range list.Runs {
+				if !run.CreatedAt.After(eligibleAfter) {
+					continue
+				}
+				if len(run.PullRequests) != 1 || run.PullRequests[0].Number <= 0 || run.HeadSHA == "" || run.ID <= 0 || run.RunAttempt <= 0 {
+					return ShadowObservationUniverse{}, fmt.Errorf("shadow workflow run %d has incomplete pull-request identity", run.ID)
+				}
+				identity := fmt.Sprintf("%d/%s", run.PullRequests[0].Number, run.HeadSHA)
+				pair := byHead[identity]
+				pair.member.PullRequest = run.PullRequests[0].Number
+				pair.member.EventHeadSHA = run.HeadSHA
+				if run.CreatedAt.After(pair.latest) {
+					pair.latest = run.CreatedAt
+				}
+				if workflow == "engine-ci.yml" {
+					if run.ID > pair.member.LegacyRunID || run.ID == pair.member.LegacyRunID && run.RunAttempt > pair.member.LegacyRunAttempt {
+						pair.member.LegacyRunID, pair.member.LegacyRunAttempt = run.ID, run.RunAttempt
+					}
+				} else if run.ID > pair.member.ShadowRunID || run.ID == pair.member.ShadowRunID && run.RunAttempt > pair.member.ShadowRunAttempt {
+					pair.member.ShadowRunID, pair.member.ShadowRunAttempt, pair.member.ShadowCreatedAt = run.ID, run.RunAttempt, run.CreatedAt
+				}
+				byHead[identity] = pair
+			}
+			if len(list.Runs) < 100 {
+				break
+			}
+		}
+	}
+	latestByPullRequest := map[int]pairedRuns{}
+	for _, pair := range byHead {
+		previous, exists := latestByPullRequest[pair.member.PullRequest]
+		if !exists || pair.latest.After(previous.latest) || pair.latest.Equal(previous.latest) && pair.member.EventHeadSHA > previous.member.EventHeadSHA {
+			latestByPullRequest[pair.member.PullRequest] = pair
+		}
+	}
+	members := make([]ShadowObservationMember, 0, len(latestByPullRequest))
+	for _, pair := range latestByPullRequest {
+		member := pair.member
+		members = append(members, member)
+	}
+	sort.Slice(members, func(i, j int) bool {
+		if members[i].PullRequest != members[j].PullRequest {
+			return members[i].PullRequest < members[j].PullRequest
+		}
+		return members[i].EventHeadSHA < members[j].EventHeadSHA
+	})
+	return ShadowObservationUniverse{
+		Version: 1, Repository: repository, EligibleAfter: eligibleAfter.UTC(),
+		EnumeratedAt: enumeratedAt.UTC(), Members: members,
+	}, nil
 }
 
 func selectWorkflowRun(runs []githubWorkflowRun, name string) (githubWorkflowRun, error) {

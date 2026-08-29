@@ -17,7 +17,7 @@ func TestShadowAcceptanceRequiresCompleteMeasuredGate(t *testing.T) {
 	rows[9].AuthorAssociation = "CONTRIBUTOR"
 	rows[9].ForkApproval = validForkEvidence(rows[9])
 
-	report := EvaluateShadowAcceptance(rows, acceptanceAuthority())
+	report := EvaluateShadowAcceptance(rows, acceptanceAuthority(), acceptanceUniverse(rows))
 	if !report.Ready || report.EligibleTuples != 10 || !report.RealForkObserved || report.WallRatio > 0.75 || report.RunnerRatio > 1.10 {
 		t.Fatalf("complete shadow gate = %+v", report)
 	}
@@ -31,9 +31,10 @@ func TestShadowAcceptanceRejectsMissingForkDuplicateAndPerformanceRegression(t *
 		rows[index].ChangeClasses = []string{classes[index%len(classes)]}
 		rows[index].ShadowDuration = 14 * time.Minute
 	}
+	universe := acceptanceUniverse(rows)
 	rows[9] = rows[8]
-	report := EvaluateShadowAcceptance(rows, acceptanceAuthority())
-	if report.Ready || report.DistinctTuples != 9 || len(report.Blockers) < 3 {
+	report := EvaluateShadowAcceptance(rows, acceptanceAuthority(), universe)
+	if report.Ready || len(report.Blockers) < 2 {
 		t.Fatalf("incomplete shadow gate passed: %+v", report)
 	}
 }
@@ -49,9 +50,39 @@ func TestShadowAcceptanceRejectsOneDisagreementAmongTenGreenRows(t *testing.T) {
 	rows[9].AuthorAssociation = "CONTRIBUTOR"
 	rows[9].ForkApproval = validForkEvidence(rows[9])
 	rows[10].ShadowConclusion = "failure"
-	report := EvaluateShadowAcceptance(rows, acceptanceAuthority())
+	report := EvaluateShadowAcceptance(rows, acceptanceAuthority(), acceptanceUniverse(rows))
 	if report.Ready || len(report.Blockers) == 0 {
 		t.Fatalf("unexplained disagreement passed: %+v", report)
+	}
+}
+
+func TestShadowAcceptanceRejectsMissingAndUnenumeratedRows(t *testing.T) {
+	rows := make([]ShadowLedgerRow, 10)
+	classes := []string{"database-heavy-go", "runtime-or-gateway", "protocol-generated", "ci-test-infrastructure"}
+	for index := range rows {
+		rows[index] = acceptanceRow(t, index)
+		rows[index].ChangeClasses = []string{classes[index%len(classes)]}
+	}
+	universe := acceptanceUniverse(rows)
+	if report := EvaluateShadowAcceptance(rows[:9], acceptanceAuthority(), universe); report.Ready || len(report.Blockers) == 0 {
+		t.Fatalf("ledger missing an enumerated row passed: %+v", report)
+	}
+	extra := append(append([]ShadowLedgerRow{}, rows...), acceptanceRow(t, 11))
+	if report := EvaluateShadowAcceptance(extra, acceptanceAuthority(), universe); report.Ready || len(report.Blockers) == 0 {
+		t.Fatalf("ledger with an unenumerated row passed: %+v", report)
+	}
+}
+
+func TestShadowAcceptanceRejectsRunIdentityOutsideEnumeration(t *testing.T) {
+	rows := make([]ShadowLedgerRow, 10)
+	for index := range rows {
+		rows[index] = acceptanceRow(t, index)
+		rows[index].ChangeClasses = []string{"ci-test-infrastructure"}
+	}
+	universe := acceptanceUniverse(rows)
+	rows[0].ShadowRunID++
+	if report := EvaluateShadowAcceptance(rows, acceptanceAuthority(), universe); report.Ready || len(report.Blockers) == 0 {
+		t.Fatalf("ledger with the wrong enumerated run passed: %+v", report)
 	}
 }
 
@@ -109,6 +140,23 @@ func acceptanceAuthority() ShadowAcceptanceAuthority {
 		WorkflowSourceSHA:       "source",
 		EligibleAfter:           time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC),
 	}
+}
+
+func acceptanceUniverse(rows []ShadowLedgerRow) ShadowObservationUniverse {
+	authority := acceptanceAuthority()
+	universe := ShadowObservationUniverse{
+		Version: 1, Repository: "tetral-ai/tetral", EligibleAfter: authority.EligibleAfter,
+		EnumeratedAt: authority.EligibleAfter.Add(24 * time.Hour),
+	}
+	for _, row := range rows {
+		universe.Members = append(universe.Members, ShadowObservationMember{
+			PullRequest: row.PullRequest, EventHeadSHA: row.EventHeadSHA,
+			LegacyRunID: row.LegacyRunID, LegacyRunAttempt: row.LegacyRunAttempt,
+			ShadowRunID: row.ShadowRunID, ShadowRunAttempt: row.ShadowRunAttempt,
+			ShadowCreatedAt: row.ShadowExecution.CreatedAt,
+		})
+	}
+	return universe
 }
 
 func validForkEvidence(row ShadowLedgerRow) *ShadowForkApproval {

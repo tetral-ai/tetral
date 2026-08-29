@@ -63,7 +63,17 @@ provenance.
 
 Structured results include the exact tested revision, selection, dependency
 identity, command outcome, duration, first failure, and CI execution envelope.
-The shadow collector is read-only:
+The shadow collector and observation-window enumerator are read-only. Enumerate
+the complete GitHub window before collecting individual rows:
+
+```bash
+go run ./internal/testinfra/cmd/tetral-shadow-enumerate \
+  --repository tetral-ai/tetral \
+  --eligible-after <RFC3339-window-start> \
+  --output shadow-universe.json
+```
+
+Then collect every enumerated PR head:
 
 ```bash
 go run ./internal/testinfra/cmd/tetral-shadow-collect \
@@ -82,6 +92,7 @@ estimator. The pull request that introduced shadow collection is excluded:
 ```bash
 go run ./internal/testinfra/cmd/tetral-shadow-evaluate \
   --input shadow-ledger.json \
+  --universe shadow-universe.json \
   --introduction-pull-request <shadow-workflow-pr> \
   --introduced-by-commit <merged-introduction-commit> \
   --workflow-source-sha <eligible-workflow-source> \

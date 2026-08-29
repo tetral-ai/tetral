@@ -39,6 +39,24 @@ type ShadowAcceptanceAuthority struct {
 	EligibleAfter           time.Time `json:"eligible_after"`
 }
 
+type ShadowObservationUniverse struct {
+	Version       int                       `json:"version"`
+	Repository    string                    `json:"repository"`
+	EligibleAfter time.Time                 `json:"eligible_after"`
+	EnumeratedAt  time.Time                 `json:"enumerated_at"`
+	Members       []ShadowObservationMember `json:"members"`
+}
+
+type ShadowObservationMember struct {
+	PullRequest      int       `json:"pull_request"`
+	EventHeadSHA     string    `json:"event_head_sha"`
+	LegacyRunID      int64     `json:"legacy_run_id"`
+	LegacyRunAttempt int       `json:"legacy_run_attempt"`
+	ShadowRunID      int64     `json:"shadow_run_id"`
+	ShadowRunAttempt int       `json:"shadow_run_attempt"`
+	ShadowCreatedAt  time.Time `json:"shadow_created_at"`
+}
+
 type ShadowReliability struct {
 	PullRequest      int      `json:"pull_request"`
 	TestMergeSHA     string   `json:"test_merge_sha"`
@@ -48,7 +66,7 @@ type ShadowReliability struct {
 	Reasons          []string `json:"reasons,omitempty"`
 }
 
-func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptanceAuthority) ShadowAcceptanceReport {
+func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptanceAuthority, universe ShadowObservationUniverse) ShadowAcceptanceReport {
 	report := ShadowAcceptanceReport{EstimatorVersion: ShadowEstimatorVersion}
 	if authority.IntroductionPullRequest <= 0 || authority.IntroducedByCommit == "" || authority.WorkflowSourceSHA == "" || authority.EligibleAfter.IsZero() ||
 		authority.IntroducedByCommit != authority.WorkflowSourceSHA {
@@ -56,6 +74,13 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptance
 		report.Ready = false
 		return report
 	}
+	selectedRows, blockers := reconcileShadowUniverse(rows, authority, universe)
+	if len(blockers) > 0 {
+		report.Blockers = append(report.Blockers, blockers...)
+		report.Ready = false
+		return report
+	}
+	rows = selectedRows
 	seen := map[string]bool{}
 	covered := map[string]bool{}
 	observedDependencies := map[string]bool{}
@@ -168,6 +193,64 @@ func EvaluateShadowAcceptance(rows []ShadowLedgerRow, authority ShadowAcceptance
 	sort.Strings(report.Blockers)
 	report.Ready = len(report.Blockers) == 0
 	return report
+}
+
+func reconcileShadowUniverse(rows []ShadowLedgerRow, authority ShadowAcceptanceAuthority, universe ShadowObservationUniverse) ([]ShadowLedgerRow, []string) {
+	if universe.Version != 1 || universe.Repository == "" || !universe.EligibleAfter.Equal(authority.EligibleAfter) || !universe.EnumeratedAt.After(universe.EligibleAfter) {
+		return nil, []string{"shadow observation universe is incomplete"}
+	}
+	expected := map[int]ShadowObservationMember{}
+	var blockers []string
+	for _, member := range universe.Members {
+		if member.PullRequest <= 0 || member.EventHeadSHA == "" {
+			return nil, []string{"shadow observation universe contains an invalid member"}
+		}
+		if member.PullRequest == authority.IntroductionPullRequest {
+			continue
+		}
+		if _, exists := expected[member.PullRequest]; exists {
+			return nil, []string{"shadow observation universe contains a duplicate pull request"}
+		}
+		expected[member.PullRequest] = member
+		if member.LegacyRunID <= 0 || member.LegacyRunAttempt <= 0 || member.ShadowRunID <= 0 || member.ShadowRunAttempt <= 0 || !member.ShadowCreatedAt.After(authority.EligibleAfter) {
+			blockers = append(blockers, fmt.Sprintf("shadow universe lacks a paired workflow run for PR %d head %s", member.PullRequest, member.EventHeadSHA))
+		}
+	}
+	actual := map[int]ShadowLedgerRow{}
+	for _, row := range rows {
+		if row.PullRequest == authority.IntroductionPullRequest || !row.ShadowExecution.CreatedAt.After(authority.EligibleAfter) {
+			continue
+		}
+		member, exists := expected[row.PullRequest]
+		if !exists {
+			blockers = append(blockers, fmt.Sprintf("shadow ledger contains unenumerated PR %d head %s", row.PullRequest, row.EventHeadSHA))
+			continue
+		}
+		if row.EventHeadSHA != member.EventHeadSHA {
+			continue
+		}
+		if _, exists := actual[row.PullRequest]; exists {
+			blockers = append(blockers, fmt.Sprintf("shadow ledger duplicates enumerated PR %d head %s", row.PullRequest, row.EventHeadSHA))
+			continue
+		}
+		actual[row.PullRequest] = row
+		if row.Repository != universe.Repository || row.LegacyRunID != member.LegacyRunID || row.LegacyRunAttempt != member.LegacyRunAttempt ||
+			row.ShadowRunID != member.ShadowRunID || row.ShadowRunAttempt != member.ShadowRunAttempt || !row.ShadowExecution.CreatedAt.Equal(member.ShadowCreatedAt) {
+			blockers = append(blockers, fmt.Sprintf("shadow ledger identity differs from enumeration for PR %d head %s", row.PullRequest, row.EventHeadSHA))
+		}
+	}
+	selected := make([]ShadowLedgerRow, 0, len(expected))
+	for pullRequest, member := range expected {
+		row, exists := actual[pullRequest]
+		if !exists {
+			blockers = append(blockers, fmt.Sprintf("shadow ledger is missing enumerated PR %d head %s", member.PullRequest, member.EventHeadSHA))
+			continue
+		}
+		selected = append(selected, row)
+	}
+	sort.Strings(blockers)
+	sort.Slice(selected, func(i, j int) bool { return selected[i].PullRequest < selected[j].PullRequest })
+	return selected, blockers
 }
 
 func validateShadowDependencyObservability(row ShadowLedgerRow) (map[string]bool, error) {
