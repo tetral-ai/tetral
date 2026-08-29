@@ -173,31 +173,6 @@ func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
 	}
 }
 
-func TestMigrateSchemaBaselinesLegacyInitializerWithoutChangingSentinel(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.InitializePostgreSQLSchema(ctx, db); err != nil {
-		t.Fatalf("InitializePostgreSQLSchema: %v", err)
-	}
-	const sentinelID = "ws_schema_migration_sentinel"
-	const sentinelName = "durable sentinel"
-	if _, err := db.ExecContext(ctx, `INSERT INTO workspaces (id, type, name, created_at) VALUES ($1, 'workspace', $2, '2026-07-13T00:00:00Z')`, sentinelID, sentinelName); err != nil {
-		t.Fatalf("insert sentinel: %v", err)
-	}
-	assertTableExists(t, db, "tetral_schema_migrations", false)
-
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	var got string
-	if err := db.QueryRowContext(ctx, `SELECT name FROM workspaces WHERE id = $1`, sentinelID).Scan(&got); err != nil {
-		t.Fatalf("read sentinel: %v", err)
-	}
-	if got != sentinelName {
-		t.Fatalf("sentinel name = %q, want %q", got, sentinelName)
-	}
-}
-
 func TestMigrateSchemaRerunKeepsAllStampsUnchanged(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
@@ -377,8 +352,11 @@ func TestMigrateSchemaLateFailureRollsBackSchemaAndStampAndReleasesLock(t *testi
 func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
-	if err := storage.InitializePostgreSQLSchema(ctx, db); err != nil {
-		t.Fatalf("InitializePostgreSQLSchema: %v", err)
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("initial MigrateSchema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM tetral_schema_migrations`); err != nil {
+		t.Fatalf("make version one pending for cancellation proof: %v", err)
 	}
 	blocker, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -407,7 +385,14 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatalf("database after cancellation: %v", err)
 	}
-	assertTableExists(t, db, "tetral_schema_migrations", false)
+	assertTableExists(t, db, "tetral_schema_migrations", true)
+	var migrationRows int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&migrationRows); err != nil {
+		t.Fatalf("read migration rows after cancellation: %v", err)
+	}
+	if migrationRows != 0 {
+		t.Fatalf("migration rows after cancellation = %d; want 0", migrationRows)
+	}
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema after cancellation (lock must be released): %v", err)
 	}

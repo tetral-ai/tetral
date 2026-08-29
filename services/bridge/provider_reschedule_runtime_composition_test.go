@@ -46,7 +46,7 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-production-signing-key")
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 	t.Cleanup(stopBridge)
-	process := startProviderTimeoutRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID)
+	process := startProviderTimeoutRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID)
 	firstCapturePending := make(chan string, 1)
 	releaseFirstCapture := make(chan struct{})
 	capturesSettled := make(chan error, 1)
@@ -157,7 +157,7 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-tool-signing-key")
 	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
 	t.Cleanup(stopBridge)
-	process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_tool_route")
+	process := startProviderFailureRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_tool_route")
 
 	captureSettled := make(chan error, 1)
 	go func() {
@@ -244,7 +244,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 		{name: "platform billing after progress", scenario: "platform_billing_post_progress", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantKeySelections: []string{"pfk_provider_failure_bad", "pfk_provider_failure_healthy"}},
 		{name: "platform billing exhausted", scenario: "platform_billing_exhausted", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 2, wantKeySelections: []string{"pfk_provider_failure_bad"}, wantPublicStatuses: "exhausted,exhausted", wantPublicTypes: "model_overloaded_error,model_overloaded_error"},
 		{name: "statusless transport", scenario: "statusless_transport", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 2, wantAssistants: 1, wantPublicStatuses: "retrying,exhausted", wantPublicTypes: "model_request_failed_error,model_overloaded_error"},
-		{name: "provider rate limited", scenario: "provider_rate_limited", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantReschedules: 1, wantErrorEnds: 1, wantAssistants: 2, wantOutputCaptures: 1, wantFinishIdle: 1, wantPublicStatuses: "retrying", wantPublicTypes: "model_rate_limited_error"},
+		{name: "provider rate limited", scenario: "provider_rate_limited", wantProviderCalls: 3, wantTurns: 2, wantRequestEnds: 3, wantReschedules: 1, wantErrorEnds: 1, wantAssistants: 3, wantPublicStatuses: "retrying", wantPublicTypes: "model_rate_limited_error"},
 		{name: "invalid Kimi API key", scenario: "invalid_kimi_byok", wantProviderCalls: 2, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error"},
 		{name: "OpenAI OAuth refresh rejected", scenario: "invalid_openai_oauth", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "OpenAI OAuth credential refresh failed; re-authorization is required."},
 		{name: "missing Kimi credential", scenario: "missing_kimi_credential", wantProviderCalls: 1, wantTurns: 2, wantRequestEnds: 2, wantErrorEnds: 1, wantAssistants: 1, wantPublicStatuses: "exhausted", wantPublicTypes: "model_request_failed_error", wantPublicMessage: "This provider requires an explicit session credential."},
@@ -273,7 +273,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			t.Cleanup(stopBridge)
 			repairCredential := seedProviderFailureCredential(t, runtimeDB, admin, sessionID, testCase.scenario)
 			activePodUID := podUID
-			process := startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
+			process := startProviderFailureRuntime(t, runtimeDB, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, testCase.scenario)
 			priorProviderInvocations := 0
 			priorFinishIdleInvocations := 0
 			priorFinishIdleCommitted := true
@@ -362,7 +362,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementBindingID, replacementGeneration); err != nil {
 					t.Fatalf("install replacement provider credential Runtime status: %v", err)
 				}
-				process = startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID,
+				process = startProviderFailureRuntimeForBinding(t, runtimeDB, admin, bridgeAddress, sessionID, threadID,
 					replacementBindingID, replacementGeneration, activePodUID, testCase.scenario)
 			}
 			appendMessage("idem_provider_failure_second_"+suffix, "continue on the same session")
@@ -465,15 +465,15 @@ type providerFailureRuntimeProcess struct {
 	toolReleasePath string
 }
 
-func startProviderTimeoutRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerFailureRuntimeProcess {
-	return startProviderFailureRuntime(t, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_timeout")
+func startProviderTimeoutRuntime(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntime(t, runtime, admin, bridgeAddress, sessionID, threadID, bindingID, podUID, "semantic_timeout")
 }
 
-func startProviderFailureRuntime(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
-	return startProviderFailureRuntimeForBinding(t, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
+func startProviderFailureRuntime(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID, podUID, scenario string) *providerFailureRuntimeProcess {
+	return startProviderFailureRuntimeForBinding(t, runtime, admin, bridgeAddress, sessionID, threadID, bindingID, 1, podUID, scenario)
 }
 
-func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
+func startProviderFailureRuntimeForBinding(t *testing.T, runtime, admin *sql.DB, bridgeAddress, sessionID, threadID, bindingID string, bindingGeneration int64, podUID, scenario string) *providerFailureRuntimeProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
@@ -502,7 +502,10 @@ func startProviderFailureRuntimeForBinding(t *testing.T, admin *sql.DB, bridgeAd
 	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&databaseSchema); err != nil {
 		t.Fatalf("read provider composition database schema: %v", err)
 	}
-	process.command.Env = append(os.Environ(), "TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema)
+	process.command.Env = append(os.Environ(),
+		"TETRAL_TEST_DATABASE_URL="+storagetest.RuntimeDatabaseURL(t, runtime),
+		"TETRAL_TEST_DATABASE_SCHEMA="+databaseSchema,
+	)
 	process.command.Stdout = &process.output
 	process.command.Stderr = &process.output
 	if err := process.command.Start(); err != nil {
@@ -1378,15 +1381,27 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if sandboxQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("recovered Sandbox execution = %s/%s/%s; want acknowledged", sandboxQueueStatus, sandboxQueueErrorKind, sandboxQueueErrorMessage)
 	}
-	var sandboxExecutionState, sandboxResultJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, COALESCE(result_json,'')
+	var sandboxExecutionState, sandboxResultJSON, consumedByTerminalEventID, consumptionReason string
+	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, COALESCE(result_json,''),
+		COALESCE(consumed_by_terminal_event_id,''), COALESCE(consumption_reason,'')
 		FROM session_runtime_tool_results
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
-		sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(&sandboxExecutionState, &sandboxResultJSON); err != nil {
+		sessionID, threadID, toolUse.GetCommitted().GetEventId()).Scan(
+		&sandboxExecutionState, &sandboxResultJSON, &consumedByTerminalEventID, &consumptionReason,
+	); err != nil {
 		t.Fatalf("read recovered Sandbox result: %v", err)
 	}
-	if sandboxExecutionState != "terminal_unconsumed" || sandboxResultJSON == "" {
-		t.Fatalf("recovered Sandbox result = %s/%s; want terminal_unconsumed payload", sandboxExecutionState, sandboxResultJSON)
+	switch sandboxExecutionState {
+	case "terminal_unconsumed":
+		if sandboxResultJSON == "" || consumedByTerminalEventID != "" || consumptionReason != "" {
+			t.Fatalf("unconsumed Sandbox result = payload:%q terminal:%q reason:%q", sandboxResultJSON, consumedByTerminalEventID, consumptionReason)
+		}
+	case "consumed":
+		if sandboxResultJSON != "" || consumedByTerminalEventID == "" || consumptionReason != "conversation_tool_result" {
+			t.Fatalf("consumed Sandbox result = payload:%q terminal:%q reason:%q", sandboxResultJSON, consumedByTerminalEventID, consumptionReason)
+		}
+	default:
+		t.Fatalf("recovered Sandbox result state = %q; want terminal_unconsumed or consumed", sandboxExecutionState)
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	observedStarts, observedEnds, observedToolResults := 0, 0, 0

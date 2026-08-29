@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "workspace_tables": [
+    "sessions",
+    "session_threads",
+    "session_sandbox_bindings",
+    "sandbox_lifecycle_operations",
+    "environment_artifacts",
+    "session_resources",
+    "session_file_resources",
+    "session_memory_store_resources",
+    "session_github_repository_resources",
+    "session_git_tickets",
+    "session_resource_prefix_gc",
+    "session_events",
+    "session_event_stream_changes",
+    "session_event_idempotency_keys",
+    "session_messages",
+    "session_mcp_manifests",
+    "session_thread_context_prefixes",
+    "session_turn_retries",
+    "session_pending_tool_uses",
+    "session_transient_attachments",
+    "session_background_tasks",
+    "session_runtime_inbox",
+    "session_runtime_status",
+    "session_runtime_bindings",
+    "session_bridge_operations",
+    "session_runtime_tool_results",
+    "session_output_captures",
+    "sandbox_output_capture_operations",
+    "sandbox_output_capture_blobs",
+    "request_usage_details",
+    "session_provider_auth",
+    "queue_partition_counters",
+    "queue_jobs",
+    "agents",
+    "agent_versions",
+    "environments",
+    "vaults",
+    "credentials",
+    "api_keys",
+    "skills",
+    "skill_versions",
+    "file_objects",
+    "files",
+    "memory_stores",
+    "memories",
+    "memory_versions"
+  ],
+  "append_only_workspace_table": "session_file_attachment_consumptions",
+  "global_tables": [
+    "platform_provider_keys",
+    "tetral_schema_migrations",
+    "workspaces"
+  ],
+  "special_policies": [
+    {
+      "table": "api_keys",
+      "name": "auth_lookup",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.auth_lookup'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_git_tickets",
+      "name": "git_ticket_lookup",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.git_ticket_lookup'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "queue_jobs",
+      "name": "queue_maintenance",
+      "command": "ALL",
+      "using": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)",
+      "check": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)"
+    },
+    {
+      "table": "queue_partition_counters",
+      "name": "queue_maintenance",
+      "command": "ALL",
+      "using": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)",
+      "check": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)"
+    },
+    {
+      "table": "session_transient_attachments",
+      "name": "transient_attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_transient_attachments",
+      "name": "transient_attachment_gc_update",
+      "command": "UPDATE",
+      "using": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)",
+      "check": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)"
+    },
+    {
+      "table": "session_runtime_tool_results",
+      "name": "transient_attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    }
+  ]
+}

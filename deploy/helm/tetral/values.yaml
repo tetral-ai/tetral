@@ -81,7 +81,14 @@ edge:
 
 image:
   registry: ghcr.io/tetral-ai
+  # Empty means Chart.appVersion: 0.0.0-dev in a source checkout and the exact
+  # numbered version in a packaged release. Operators may still override it.
   tag: ""
+  digests:
+    tetral: ""
+    gateway: ""
+    agent-runtime: ""
+    sandbox: ""
 
 secrets:
   apiDatabase: api-database

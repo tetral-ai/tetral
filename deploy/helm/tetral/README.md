@@ -107,21 +107,28 @@ finishes bootstrap after API has created the schema.
    need no custom label; Kubernetes supplies their
    `kubernetes.io/metadata.name` labels.
 
-7. **Use restricted database roles.** The nine Go DB-connected containers
-   reject superusers and roles with row-security bypass privileges at startup.
-   The TypeScript `provider-gateway` and `mcp-connector` currently perform only
-   the schema check, so using a privileged DSN causes an asymmetric and unsafe
-   partial startup. Use non-superuser, non-bypass roles for every container.
-   The api role additionally needs DDL rights because api owns migrations.
+7. **Install the repository-owned database roles.** Use
+   `go run ./services/api/cmd/tetral-postgresql-roles` with an administrative connection in
+   `TETRAL_DATABASE_ADMIN_URL` and a JSON declaration on stdin containing the
+   operator-chosen role names and passwords for every workload key in
+   `database/roles.json`, plus `migration`. Run it before installing workloads.
+   The command idempotently constructs the current schema, revokes public access,
+   gives each serving workload only its declared tables and operations, and
+   assigns schema objects to the separate migration owner. Put the API serving
+   DSN in the `url` key of `api-database` and the schema-owner DSN in its
+   `migration-url` key. All serving processes reject superuser and row-security
+   bypass roles before readiness.
 
 8. **Seed the bootstrap workspace.** Auth resolves
    `bootstrapWorkspaceID` against the `workspaces` table during startup.
-   Set that value to the chosen ID, install the platform so API can migrate the
-   schema, allow Auth to crash-loop while the row is absent, then run the
+   Set that value to the chosen ID, install the platform after the database
+   contract is installed, allow Auth to crash-loop while the row is absent, then run the
    one-shot seed and let Auth self-heal. The default `existing-workspace-id` is
    a placeholder. Follow the complete
    [from-zero bootstrap sequence](../../../docs/bootstrap.md) for key
-   generation, the Secret inventory, and the seed command.
+   generation, the Secret inventory, the seed command, and the Daytona
+   sandbox-snapshot registration that must happen before the first tool
+   execution.
 
 ## Install
 
@@ -136,9 +143,13 @@ Published releases install from GHCR:
 
 ```bash
 helm install tetral oci://ghcr.io/tetral-ai/charts/tetral \
-  --version 0.1.0-alpha \
+  --version <version-without-leading-v> \
   -f values.yaml
 ```
+
+Choose the version from GitHub Releases. If no `v0.1.0-alpha.N` release is
+listed, no public Alpha is available. The release's Candidate Manifest names
+the exact four image digests; use those values rather than moving tags.
 
 Every object has an explicit namespace. `helm install -n another-namespace`
 does not relocate the platform.
@@ -151,9 +162,16 @@ is outside this chart.
 
 The chart parameterizes only axes already present in the canonical manifests:
 
-- `image.registry` and `image.tag` select all four image families:
-  `tetral`, `gateway`, `agent-runtime`, and the `sandbox` artifact reference.
-  An empty `image.tag` resolves to `.Chart.AppVersion`.
+- `image.registry` and the effective image tag select development images from a
+  source checkout. An empty `image.tag` uses the Chart `appVersion`; an explicit
+  value overrides it. `image.digests` selects the four release image families:
+  `tetral`, `gateway`, `agent-runtime`, and `sandbox`. A non-empty digest takes
+  precedence for workload images. Published release values supply all four
+  digests together. The API separately uses
+  `image.registry/sandbox:<effective image tag>` as the stable Daytona snapshot
+  lookup name. A packaged release therefore uses its numbered `appVersion`;
+  operators register that name from the matching immutable sandbox image digest
+  before rollout.
 - `secrets.*` selects the names of operator-created Secrets; no Secret content
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
@@ -239,7 +257,7 @@ The Sandbox over-limit reconciler, expired output-capture sweep, and
 resource-prefix garbage collector are deliberate poll-only maintenance loops;
 latency-relevant business Queue runners receive the PostgreSQL wake hint.
 
-The following remain deliberately fixed for `0.1.0-alpha`:
+The following remain deliberately fixed for the initial numbered Alpha line:
 
 - `tetral-system` and `tetral-agent-runtime`, including every service FQDN,
   NetworkPolicy namespace selector, RBAC subject, and service-account
@@ -257,9 +275,14 @@ Use plain `helm upgrade` as the supported upgrade mode:
 helm upgrade tetral ./deploy/helm/tetral -f values.yaml
 ```
 
+Before upgrading, register the new version's numbered sandbox snapshot name
+with Daytona from the matching immutable sandbox image digest (see the
+bootstrap sequence). A skipped registration does not fail the upgrade; it
+fails the first tool execution afterwards.
+
 Helm applies every object at once. All eleven DB-connected containers validate
-schema state at boot. Api alone runs forward migrations under a
-pinned-connection advisory lock. During an upgrade, new non-api pods enter
+schema and serving-role state at boot. API alone uses the dedicated migration
+owner for forward migrations under a pinned-connection advisory lock. During an upgrade, new non-api pods enter
 `CrashLoopBackOff` until api completes migration; operators observe restart
 counts, not merely unready pods. Existing ReplicaSet pods continue serving. At
 the manifest scale of one or two replicas, the default RollingUpdate 25%
@@ -301,10 +324,8 @@ objects are not byte-identical to the files.
 
 ## Registered follow-ups
 
-Four follow-ups are intentionally outside this chart:
+Three follow-ups are intentionally outside this chart:
 
 1. Parameterize the two fixed namespaces as one security-reviewed change.
 2. Define migration compatibility or a documented stop-the-world upgrade mode.
 3. Drop stale `kustomize` managed-by labels from the canonical manifests.
-4. Port the runtime-role privilege check to the two TypeScript gateway
-   containers.

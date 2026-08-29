@@ -16,7 +16,7 @@
 #   fuse_conf       /etc/fuse.conf contains user_allow_other
 #   capture_procfd  /proc/self/fd reopen self-test (kernel, not packaging)
 
-ARG SANDBOX_HELPER_BASE_IMAGE=golang:1.25.13-alpine
+ARG SANDBOX_HELPER_BASE_IMAGE=docker.io/library/golang:1.25.13-alpine@sha256:1e0126852075c9c60731c8ba49088448b91f63e2aed97ca9d1a9791622a05946
 ARG SANDBOX_RUNTIME_BASE_IMAGE=ghcr.io/tetral-ai/mirror/ubuntu:24.04@sha256:ee4d23cbccd3aa96de85ab491b0404aecdda1d458931e9ef1aaba733a1128ba9
 
 FROM ${SANDBOX_HELPER_BASE_IMAGE} AS helper
@@ -27,6 +27,21 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/sandbox ./internal/sandbox/helper/cmd/sandbox
+
+# Full repository verification targets this stage explicitly. The nonce is
+# runner-owned so Docker cannot satisfy a new evidence run from a cached test
+# layer; it does not affect the release image below.
+FROM helper AS helper-privilege-test
+ARG TETRAL_HELPER_PRIVILEGE_TEST_NONCE
+RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
+    && go test ./internal/sandbox/helper \
+      -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' \
+      -count=1 -v
+RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
+    && rm -rf /tmp/tetral-runtime \
+    && go test ./internal/sandbox/helper/internal/cli \
+      -run '^TestBuiltHelperDetachedExecReturnsPromptly$' \
+      -count=1 -v
 
 FROM ${SANDBOX_RUNTIME_BASE_IMAGE}
 
@@ -56,7 +71,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG RCLONE_RELEASE=1.71.1
 ARG RCLONE_ARCHIVE_SHA256=417e3da236f3a12d292da4e7287d67b1df558b8c2b280d092e563958ed724be7
 RUN curl -fsSL -o /tmp/rclone.zip \
-      "https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip" \
+      "https://github.com/rclone/rclone/releases/download/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip" \
  && printf '%s  /tmp/rclone.zip\n' "${RCLONE_ARCHIVE_SHA256}" | sha256sum -c - \
  && unzip -q -j /tmp/rclone.zip "rclone-v${RCLONE_RELEASE}-linux-amd64/rclone" -d /usr/bin \
  && chmod 0755 /usr/bin/rclone \

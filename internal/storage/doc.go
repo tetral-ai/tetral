@@ -5,8 +5,8 @@
 //
 // OWNS:
 //   - The durable table/index/policy DDL and its ordered application
-//     (InitializePostgreSQLSchema), plus the migration registry, per-version
-//     checksums, and the cluster-wide migration advisory lock (MigrateSchema,
+//     through the migration registry, per-version checksums, and the
+//     cluster-wide migration advisory lock (MigrateSchema,
 //     VerifySchema, PostgreSQLSchemaAdvisoryLockID).
 //   - PostgreSQL connection opening from the runtime DSN
 //     (OpenPostgreSQLDatabase, OpenPostgreSQLDatabaseFromEnv).
@@ -32,9 +32,8 @@
 //   - Durable rows are the source of truth. Runtime Pod hot state is
 //     residency and execution state only; it is recoverable from the durable
 //     state Bridge loads, so losing pod hot state loses no committed fact.
-//   - Every DDL statement is idempotent (IF NOT EXISTS, or DROP + CREATE for
-//     policies), so InitializePostgreSQLSchema is a no-op against an
-//     already-initialized database.
+//   - Every current-state DDL statement is idempotent (IF NOT EXISTS, or DROP
+//   - CREATE for policies), while MigrateSchema is the only public writer.
 //   - Before the first public release, the version-one baseline is the clean
 //     bootstrap schema and its checksum is regenerated when pre-release
 //     shapes are folded into their final definitions. After release, schema
@@ -43,7 +42,7 @@
 //     it stays portable across self-managed PostgreSQL and managed providers.
 //
 // UPDATE-WITH:
-//   - postgresql_schema.go (table/index/policy DDL and InitializePostgreSQLSchema)
+//   - postgresql_schema.go (table/index/policy DDL)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_database.go (connection open)
 //

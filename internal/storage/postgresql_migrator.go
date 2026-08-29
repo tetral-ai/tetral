@@ -43,6 +43,7 @@ const (
 	SchemaErrorGap           SchemaErrorKind = "schema_history_gap"
 	SchemaErrorDuplicate     SchemaErrorKind = "schema_history_duplicate"
 	SchemaErrorChecksumDrift SchemaErrorKind = "schema_checksum_drift"
+	SchemaErrorRLSDrift      SchemaErrorKind = "schema_rls_drift"
 	SchemaErrorLock          SchemaErrorKind = "schema_lock_failed"
 	SchemaErrorApply         SchemaErrorKind = "schema_apply_failed"
 	SchemaErrorCanceled      SchemaErrorKind = "schema_operation_canceled"
@@ -70,6 +71,8 @@ func (e *SchemaMigrationError) Error() string {
 		return "postgresql schema history is malformed"
 	case SchemaErrorChecksumDrift:
 		return "postgresql schema checksum does not match this binary"
+	case SchemaErrorRLSDrift:
+		return "postgresql workspace isolation contract does not match this binary"
 	case SchemaErrorLock:
 		return "postgresql schema migration lock failed"
 	case SchemaErrorApply:
@@ -215,6 +218,9 @@ func VerifySchema(ctx context.Context, db *sql.DB) error {
 	}
 	if len(history) < len(registry) {
 		return newSchemaMigrationError(SchemaErrorBehind, registry[len(history)].version, nil)
+	}
+	if err := verifyPostgreSQLRLSContract(ctx, tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return newSchemaMigrationError(SchemaErrorMalformed, 0, err)

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -234,7 +235,6 @@ func TestDiagnosticErrorTextExcludesDescriptorAcrossPhases(t *testing.T) {
 		PhaseParseConfig,
 		PhaseOpenConnection,
 		PhasePing,
-		PhaseInitializeSchema,
 		PhaseMigrateSchema,
 		PhaseVerifySchema,
 		PhaseVerifyRuntimeRole,
@@ -263,15 +263,8 @@ func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
 		t.Fatalf("close runtime db: %v", err)
 	}
 	client := newTestClient(runtimeDB)
-	err := client.InitializeSchema(context.Background())
-	diagnostic := assertDiagnostic(t, err, PhaseInitializeSchema, KindSchemaInitializationFailed)
-	var schemaErr *storage.PostgreSQLSchemaError
-	if !errors.As(diagnostic, &schemaErr) {
-		t.Fatalf("diagnostic must unwrap PostgreSQLSchemaError, got %T", diagnostic.Unwrap())
-	}
-
-	err = client.MigrateSchema(context.Background())
-	diagnostic = assertDiagnostic(t, err, PhaseMigrateSchema, KindSchemaMigrationFailed)
+	err := client.MigrateSchema(context.Background())
+	diagnostic := assertDiagnostic(t, err, PhaseMigrateSchema, KindSchemaMigrationFailed)
 	var migrationErr *storage.SchemaMigrationError
 	if !errors.As(diagnostic, &migrationErr) {
 		t.Fatalf("diagnostic must unwrap SchemaMigrationError, got %T", diagnostic.Unwrap())
@@ -755,7 +748,11 @@ func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("create cleanup probe: %v", err)
 	}
-	if _, err := admin.ExecContext(ctx, `GRANT INSERT, SELECT, REFERENCES ON cleanup_probe TO tetral_runtime_test`); err != nil {
+	var runtimeRole string
+	if err := runtimeDB.QueryRowContext(ctx, `SELECT current_user`).Scan(&runtimeRole); err != nil {
+		t.Fatalf("read clone runtime role: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `GRANT INSERT, SELECT, REFERENCES ON cleanup_probe TO `+pgx.Identifier{runtimeRole}.Sanitize()); err != nil {
 		t.Fatalf("grant cleanup probe: %v", err)
 	}
 	err = client.WithWorkspaceTxAndCleanup(ctx, "workspace_cleanup", "dbconnect.cleanup_commit_failure",

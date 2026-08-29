@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "producers": [
+    "repository",
+    "go-static",
+    "go-0",
+    "go-1",
+    "go-2",
+    "go-3",
+    "runtime",
+    "gateway",
+    "protocol",
+    "deployment",
+    "sandbox-image",
+    "security"
+  ]
+}

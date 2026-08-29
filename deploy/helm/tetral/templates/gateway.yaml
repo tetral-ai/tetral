@@ -44,7 +44,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: provider-gateway
-          image: {{ .Values.image.registry }}/gateway:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "gateway") }}
           imagePullPolicy: IfNotPresent
           command:
             - bun
@@ -121,7 +121,7 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
         - name: mcp-connector
-          image: {{ .Values.image.registry }}/gateway:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "gateway") }}
           imagePullPolicy: IfNotPresent
           command:
             - bun
@@ -200,7 +200,7 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
         - name: web-connector
-          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/web-connector

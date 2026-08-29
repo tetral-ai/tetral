@@ -1,10 +1,11 @@
 # Bootstrap Tetral from zero
 
 Tetral needs one deployment-owned workspace row before Auth can register the
-bootstrap API key. The API service owns migrations, so a fresh installation
-must start far enough for API to create the schema before the workspace can be
-seeded. Auth crash-loops until that seed exists and then recovers through its
-normal restart backoff.
+bootstrap API key. Before starting workloads, the repository-owned PostgreSQL
+installer constructs the current schema, creates the separate migration and
+serving roles, and applies their exact grants. The API then performs an
+idempotent migration check under the migration owner. Auth crash-loops until
+the workspace seed exists and then recovers through its normal restart backoff.
 
 ## 1. Choose the workspace ID
 
@@ -59,7 +60,7 @@ workloads.
 
 | Secret | Required keys |
 | --- | --- |
-| `api-database` | `url` |
+| `api-database` | `url`, `migration-url` |
 | `api-secrets` | `engine-vault-key` |
 | `auth-bootstrap` | `engine-api-key` |
 | `auth-database` | `url` |
@@ -122,31 +123,51 @@ The blob key casing is intentionally documented as it exists:
 `TETRAL_BLOB_*` keys for the same logical settings. Unifying this surface is a
 registered follow-up, not part of bootstrap.
 
-Use restricted database roles for every workload. The API role can run the
-seed because API owns the `workspaces` table it created by running migrations.
-Tetral does not define a production `GRANT` for another role and operators
-must not use the PostgreSQL superuser for bootstrap.
+Before installing the platform, run the role installer from the exact source or
+image revision being installed. Give it an administrative connection only for
+this one-shot operation, and pipe one protected JSON declaration on stdin. The
+declaration must contain exactly the workload keys in `database/roles.json`,
+plus `migration`; every value supplies an operator-chosen `name` and
+`password`. Do not put the JSON or administrative DSN in the repository,
+command arguments, shell history, or Kubernetes manifest.
+
+```bash
+export TETRAL_DATABASE_ADMIN_URL
+go run ./services/api/cmd/tetral-postgresql-roles \
+  < /secure/path/tetral-postgresql-roles.json
+```
+
+The idempotent command constructs Version 1, revokes public database/schema
+access, assigns catalog ownership to the migration role, and grants each
+serving role only its declared operations. Use the resulting role DSNs in the
+Secret inventory above; `api-database/url` is the API serving role and
+`api-database/migration-url` is the migration owner. Runtime workloads reject
+superuser or BYPASSRLS credentials before readiness. The administrative
+credential is not a serving credential and must not be placed in a workload
+Secret.
 
 ## 4. Install the platform
 
 Set Helm's `bootstrapWorkspaceID` to the chosen ID, or set the corresponding
-environment value in the raw manifests, and install Tetral. The API starts and
-runs migrations. Auth fails its workspace lookup and crash-loops at this point
-by design.
+environment value in the raw manifests, and install Tetral. The API verifies
+and idempotently migrates through the dedicated owner, then starts through its
+restricted serving role. Auth fails its workspace lookup and crash-loops at
+this point by design.
 
 See the [Helm chart instructions](../deploy/helm/tetral/README.md) for the
 remaining cluster prerequisites and install command.
 
 ## 5. Seed the workspace
 
-Use the same Tetral image version as the installation. Reference the API role's
+Use the same immutable Tetral image digest recorded by the selected GitHub
+Release. Reference the API role's
 DSN directly from `api-database/url` so it never becomes a literal command-line
 argument or Pod-spec value, and remove the one-shot pod when it exits:
 
 ```bash
 kubectl -n tetral-system run tetral-bootstrap \
   --rm -i --restart=Never \
-  --image=ghcr.io/tetral-ai/tetral:0.1.0-alpha \
+  --image=ghcr.io/tetral-ai/tetral@sha256:<tetral-image-digest> \
   --override-type=strategic \
   --overrides='{
     "apiVersion": "v1",
@@ -171,7 +192,58 @@ The command reports either `created` or `already present`; rerunning it is
 safe. Auth then finds the row, registers the bootstrap API key from
 `auth-bootstrap/engine-api-key`, and self-heals within its restart backoff.
 
-## 6. Add a model provider key
+## 6. Register the sandbox snapshot with Daytona
+
+Tool execution runs inside Daytona-managed sandboxes. The sandbox service
+hands Daytona the environment's artifact reference verbatim as the snapshot
+name (`internal/sandbox/driver/provider.go`). The release chart renders the
+stable, numbered lookup name from `image.registry`, `/sandbox:`, and the
+released platform version. A snapshot named
+`ghcr.io/tetral-ai/sandbox:<platform version>` must exist in the Daytona
+organization that owns `sandbox-daytona/DAYTONA_API_KEY` before the first
+tool runs. This lookup name is distinct from the immutable sandbox image
+digest from which Daytona builds the snapshot.
+
+Nothing earlier verifies this. An environment with no custom packages never
+touches Daytona at admission: it is marked ready with the configured default
+reference as-is (`internal/environment/postgresql_store.go`,
+`createEnvironmentArtifactAdmission`). A missing snapshot therefore fails
+neither installation, bootstrap, session creation, nor environment
+readiness — it surfaces only when the first tool call cannot create its
+sandbox. On a fresh install where sessions answer but every command
+execution fails, check this step first.
+
+Environments *with* custom packages are different and need no manual
+snapshot: the platform derives a deterministic snapshot per package set and
+creates it in Daytona automatically, building `FROM` the sandbox image — for
+those, Daytona must be able to pull the image itself (see the registry note
+below).
+
+Register the snapshot in the Daytona dashboard (Snapshots → Create), or
+through the API. Set the snapshot name to the stable numbered lookup name and
+set the image to the exact sandbox digest recorded by the selected release:
+
+```bash
+SNAPSHOT_NAME="ghcr.io/tetral-ai/sandbox:<platform version>"
+SOURCE_IMAGE="ghcr.io/tetral-ai/sandbox@sha256:<sandbox-image-digest>"
+curl -sS -X POST https://app.daytona.io/api/snapshots \
+  -H "Authorization: Bearer ${DAYTONA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"${SNAPSHOT_NAME}\", \"imageName\": \"${SOURCE_IMAGE}\"}"
+```
+
+Then poll `GET https://app.daytona.io/api/snapshots` until the entry whose
+`name` equals `SNAPSHOT_NAME` reports `state: "active"`; creation takes up to
+a few minutes. A snapshot that reaches an error state, or never appears,
+means Daytona could not pull the image — if the image is not publicly
+pullable, register the registry credential with Daytona first (one-time per
+organization, in the dashboard or via `POST /api/docker-registry`).
+
+Every platform version needs its own numbered snapshot name. Register that
+name from the matching release digest before the sandbox service rolls to the
+new version.
+
+## 7. Add a model provider key
 
 After Auth is healthy, add the first model credential with
 [`services/gateway/scripts/platform-key.ts`](../services/gateway/scripts/platform-key.ts).

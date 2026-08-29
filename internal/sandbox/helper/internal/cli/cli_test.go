@@ -83,13 +83,22 @@ func TestRunReadEmitsContractEnvelopeAndUnlinksPayload(t *testing.T) {
 }
 
 func TestHiddenSupervisorEntrypointsRejectDirectInvocation(t *testing.T) {
-	cwd := t.TempDir()
-	args := []string{"--task-id", "task_direct", "--cmd", "true", "--cwd", cwd, "--env-json", `[]`, "--lifetime-ms", "1000"}
+	if mode := os.Getenv("TETRAL_HELPER_DIRECT_SUPERVISOR_MODE"); mode != "" {
+		cwd := t.TempDir()
+		args := []string{"--task-id", "task_direct", "--cmd", "true", "--cwd", cwd, "--env-json", `[]`, "--lifetime-ms", "1000"}
+		var stdout bytes.Buffer
+		if code := Main(context.Background(), append([]string{mode}, args...), &stdout); code != 1 || stdout.Len() != 0 {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
 	for _, mode := range []string{"__supervise", "__supervise-bootstrap"} {
 		t.Run(mode, func(t *testing.T) {
-			var stdout bytes.Buffer
-			if code := Main(context.Background(), append([]string{mode}, args...), &stdout); code != 1 {
-				t.Fatalf("Main(%s) exit = %d stdout=%q; want unauthorized internal mode rejection", mode, code, stdout.String())
+			cmd := exec.Command(os.Args[0], "-test.run=TestHiddenSupervisorEntrypointsRejectDirectInvocation")
+			cmd.Env = append(os.Environ(), "TETRAL_HELPER_DIRECT_SUPERVISOR_MODE="+mode)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("Main(%s) subprocess failed: %v output=%q", mode, err, output)
 			}
 		})
 	}
@@ -183,16 +192,27 @@ func TestRunReadPrivilegeDropFailureExitsWithoutHelperFailureEnvelope(t *testing
 }
 
 func TestMainInvalidInvocationExitsNonzeroWithoutLegacyEnvelope(t *testing.T) {
-	for _, args := range [][]string{
+	cases := [][]string{
 		{"read"},
 		{"unknown", "--payload", "/tmp/payload.json"},
-	} {
-		var stdout bytes.Buffer
-		if code := Main(context.Background(), args, &stdout); code == 0 {
-			t.Fatalf("Main(%v) exit = 0; want helper failure nonzero", args)
+	}
+	if rawIndex := os.Getenv("TETRAL_HELPER_INVALID_INVOCATION_INDEX"); rawIndex != "" {
+		index, err := strconv.Atoi(rawIndex)
+		if err != nil || index < 0 || index >= len(cases) {
+			os.Exit(2)
 		}
-		if stdout.Len() != 0 {
-			t.Fatalf("Main(%v) stdout = %q; want no legacy envelope", args, stdout.String())
+		var stdout bytes.Buffer
+		if code := Main(context.Background(), cases[index], &stdout); code == 0 || stdout.Len() != 0 {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	for index, args := range cases {
+		cmd := exec.Command(os.Args[0], "-test.run=TestMainInvalidInvocationExitsNonzeroWithoutLegacyEnvelope")
+		cmd.Env = append(os.Environ(), "TETRAL_HELPER_INVALID_INVOCATION_INDEX="+strconv.Itoa(index))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("Main(%v) subprocess failed: %v output=%q", args, err, output)
 		}
 	}
 }
@@ -360,8 +380,27 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("detached helper authorization requires the production root helper identity")
 	}
+	runtimeRoot := filepath.Dir(payloadRoot)
+	if _, err := os.Lstat(runtimeRoot); !os.IsNotExist(err) {
+		t.Fatalf("root helper proof requires an unused runtime root, stat error = %v", err)
+	}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeRoot) })
+	const runtimeUID, runtimeGID = 65534, 65534
+	if err := os.Chown(runtimeRoot, runtimeUID, runtimeGID); err != nil {
+		t.Fatal(err)
+	}
 	bin := buildSandboxHelper(t)
-	workspace := t.TempDir()
+	workspace, err := os.MkdirTemp("/tmp", "tetral-cli-runtime-workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	if err := os.Chown(workspace, runtimeUID, runtimeGID); err != nil {
+		t.Fatal(err)
+	}
 	taskID := "task_cli_real_detach"
 	_ = os.RemoveAll(filepath.Join("/tmp/tetral-runtime/tasks", taskID))
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/tmp/tetral-runtime/tasks", taskID)) })
@@ -390,7 +429,7 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 		t.Fatalf("decode exec envelope: %v\n%s", err, string(output))
 	}
 	if envelope.Status != protocol.ToolStatusRunning {
-		t.Fatalf("exec envelope = %+v; want running", envelope)
+		t.Fatalf("exec status/error/result = %s/%+v/%s; want running", envelope.Status, envelope.Error, envelope.Result)
 	}
 	cancelPayload := writeCLIPayload(t, protocol.Payload{
 		SchemaVersion:  protocol.SchemaVersion,
@@ -1291,7 +1330,15 @@ func writeCLIPayload(t *testing.T, payload protocol.Payload) string {
 
 func buildSandboxHelper(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "sandbox")
+	directory, err := os.MkdirTemp("/tmp", "tetral-cli-helper-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(directory, "sandbox")
 	build := exec.Command("go", "build", "-o", bin, "../../cmd/sandbox")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build helper: %v\n%s", err, string(output))

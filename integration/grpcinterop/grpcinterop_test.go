@@ -70,7 +70,9 @@ func TestRuntimePodCarriesMaximumContextProviderRequestsToGateway(t *testing.T) 
 		t.Skip("bun is not installed")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// This proves large-payload transport identity under Race; it is not a
+	// latency benchmark and may share a small CI host with other Go packages.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	runtimeRoot := filepath.Join("..", "..", "services", "agent-runtime")
 	command := exec.CommandContext(ctx, "bun", "run", "packages/runtime-pod/test/harness/gateway-transport-harness.ts")

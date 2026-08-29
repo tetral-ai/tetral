@@ -17,6 +17,8 @@
  * details or connection material.
  */
 
+import postgresqlContractJSON from "../../../../../database/postgresql.json";
+
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
 	"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6";
@@ -31,7 +33,9 @@ export type SchemaVerificationErrorKind =
 	| "schema_history_malformed"
 	| "schema_history_gap"
 	| "schema_history_duplicate"
-	| "schema_checksum_drift";
+	| "schema_checksum_drift"
+	| "schema_rls_drift"
+	| "runtime_role_invalid";
 
 /** Defines the tagged-template query capability required to read migration history. */
 export type SchemaSQL = <T = unknown>(
@@ -57,6 +61,167 @@ interface RegistryPresenceRow {
 interface AppliedMigrationRow {
 	readonly version: number | bigint | string;
 	readonly checksum: string;
+}
+
+interface RuntimeRoleRow {
+	readonly is_superuser: boolean;
+	readonly bypasses_rls: boolean;
+}
+
+interface CatalogTableRow {
+	readonly table_name: string;
+	readonly has_workspace_id: boolean;
+	readonly rls_enabled: boolean;
+	readonly rls_forced: boolean;
+}
+
+interface CatalogPolicyRow {
+	readonly table_name: string;
+	readonly policy_name: string;
+	readonly permissive: boolean;
+	readonly public_only: boolean;
+	readonly command: string;
+	readonly using_expression: string;
+	readonly check_expression: string;
+}
+
+interface PostgreSQLContract {
+	readonly version: number;
+	readonly workspace_tables: readonly string[];
+	readonly append_only_workspace_table: string;
+	readonly global_tables: readonly string[];
+	readonly special_policies: readonly {
+		readonly table: string;
+		readonly name: string;
+		readonly command: string;
+		readonly using: string;
+		readonly check: string;
+	}[];
+}
+
+const postgresqlContract = postgresqlContractJSON as PostgreSQLContract;
+
+/** Verifies runtime-role safety, migration history, and the live RLS catalog. */
+export async function verifyPostgreSQLReadiness(sql: SchemaSQL): Promise<void> {
+	await verifyRuntimeRole(sql);
+	await verifyPostgreSQLSchema(sql);
+	await verifyPostgreSQLRLS(sql);
+}
+
+async function verifyRuntimeRole(sql: SchemaSQL): Promise<void> {
+	let rows: readonly RuntimeRoleRow[];
+	try {
+		rows = await sql<readonly RuntimeRoleRow[]>`
+      SELECT rolsuper AS is_superuser, rolbypassrls AS bypasses_rls
+        FROM pg_roles WHERE rolname = current_user
+    `;
+	} catch {
+		throw new SchemaVerificationError("runtime_role_invalid");
+	}
+	const row = rows[0];
+	if (rows.length !== 1 || row === undefined || row.is_superuser || row.bypasses_rls) {
+		throw new SchemaVerificationError("runtime_role_invalid");
+	}
+}
+
+async function verifyPostgreSQLRLS(sql: SchemaSQL): Promise<void> {
+	let tables: readonly CatalogTableRow[];
+	let policies: readonly CatalogPolicyRow[];
+	try {
+		tables = await sql<readonly CatalogTableRow[]>`
+      SELECT c.relname AS table_name,
+             EXISTS (
+               SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = c.oid AND a.attname = 'workspace_id' AND NOT a.attisdropped
+             ) AS has_workspace_id,
+             c.relrowsecurity AS rls_enabled,
+             c.relforcerowsecurity AS rls_forced
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = current_schema() AND c.relkind = 'r'
+       ORDER BY c.relname
+    `;
+		policies = await sql<readonly CatalogPolicyRow[]>`
+      SELECT c.relname AS table_name,
+             p.polname AS policy_name,
+             p.polpermissive AS permissive,
+             p.polroles = ARRAY[0::oid] AS public_only,
+             CASE p.polcmd WHEN '*' THEN 'ALL' WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' ELSE '?' END AS command,
+             COALESCE(pg_get_expr(p.polqual, p.polrelid), '') AS using_expression,
+             COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '') AS check_expression
+        FROM pg_policy p
+        JOIN pg_class c ON c.oid = p.polrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = current_schema()
+       ORDER BY c.relname, p.polname
+    `;
+	} catch {
+		throw new SchemaVerificationError("schema_rls_drift");
+	}
+	if (!catalogTablesMatch(tables) || !catalogPoliciesMatch(policies)) {
+		throw new SchemaVerificationError("schema_rls_drift");
+	}
+}
+
+function catalogTablesMatch(rows: readonly CatalogTableRow[]): boolean {
+	const expectedWorkspace = new Set([
+		...postgresqlContract.workspace_tables,
+		postgresqlContract.append_only_workspace_table,
+	]);
+	const expectedGlobal = new Set(postgresqlContract.global_tables);
+	const actualWorkspace = new Set<string>();
+	const actualGlobal = new Set<string>();
+	for (const row of rows) {
+		if (row.has_workspace_id) {
+			if (!row.rls_enabled || !row.rls_forced) return false;
+			actualWorkspace.add(row.table_name);
+		} else {
+			actualGlobal.add(row.table_name);
+		}
+	}
+	return equalSets(actualWorkspace, expectedWorkspace) && equalSets(actualGlobal, expectedGlobal);
+}
+
+function catalogPoliciesMatch(rows: readonly CatalogPolicyRow[]): boolean {
+	const expected = expectedPolicies();
+	if (rows.length !== expected.size) return false;
+	for (const row of rows) {
+		const policy = expected.get(`${row.table_name}\0${row.policy_name}`);
+		if (
+			policy === undefined ||
+			!row.permissive ||
+			!row.public_only ||
+			row.command !== policy.command ||
+			normalizeExpression(row.using_expression) !== normalizeExpression(policy.using) ||
+			normalizeExpression(row.check_expression) !== normalizeExpression(policy.check)
+		) return false;
+	}
+	return true;
+}
+
+function expectedPolicies(): Map<string, { command: string; using: string; check: string }> {
+	const result = new Map<string, { command: string; using: string; check: string }>();
+	const workspace = "(workspace_id = current_setting('tetral.workspace_id'::text, true))";
+	for (const table of postgresqlContract.workspace_tables) {
+		result.set(`${table}\0workspace_isolation`, { command: "ALL", using: workspace, check: workspace });
+	}
+	const appendOnly = postgresqlContract.append_only_workspace_table;
+	result.set(`${appendOnly}\0workspace_select`, { command: "SELECT", using: workspace, check: "" });
+	result.set(`${appendOnly}\0workspace_insert`, { command: "INSERT", using: "", check: workspace });
+	for (const policy of postgresqlContract.special_policies) {
+		result.set(`${policy.table}\0${policy.name}`, policy);
+	}
+	return result;
+}
+
+function equalSets(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+	if (left.size !== right.size) return false;
+	for (const value of left) if (!right.has(value)) return false;
+	return true;
+}
+
+function normalizeExpression(value: string): string {
+	return value.replaceAll(/\s+/g, "");
 }
 
 // verifyPostgreSQLSchema is intentionally SELECT-only and needs no migration
@@ -138,6 +303,10 @@ function publicMessage(kind: SchemaVerificationErrorKind): string {
 			return "postgresql schema is ahead of this binary";
 		case "schema_checksum_drift":
 			return "postgresql schema checksum does not match this binary";
+		case "schema_rls_drift":
+			return "postgresql workspace isolation contract does not match this binary";
+		case "runtime_role_invalid":
+			return "postgresql runtime role is not permitted";
 		default:
 			return "postgresql schema history is malformed";
 	}

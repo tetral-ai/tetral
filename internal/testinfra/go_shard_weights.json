@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "calibrated_at": "2026-08-28",
+  "packages": {
+    "github.com/tetral-ai/tetral/services/bridge": {
+      "default_ms": 350,
+      "tests_ms": {
+        "TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues": 20520,
+        "TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand": 6780,
+        "TestSubagentRetainedAssistantAndTerminalToolResultColdResume": 5660,
+        "TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody": 4690,
+        "TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition": 4590,
+        "TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority": 4030,
+        "TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas": 3410,
+        "TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors": 3210,
+        "TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation": 3140,
+        "TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs": 2980
+      }
+    },
+    "github.com/tetral-ai/tetral/internal/httpapi": {
+      "default_ms": 350,
+      "tests_ms": {
+        "TestFilePathIDValidationRejectsBadIDsBeforeStore": 6070,
+        "TestSessionRealDependenciesIntegrationRejectedCreateLeavesNoSessionOwnedRows": 5790,
+        "TestFileListResponseShapeAndQueryValidation": 5280,
+        "TestFileUploadRejectsMalformedPartsWithoutBlobWrites": 5070,
+        "TestSkillHandlerFileBudgetAndRouteCap": 3250,
+        "TestCreateAgentRejectsUnsupportedApprovalAndMultiagentTopology": 2950,
+        "TestSessionRealDependenciesProviderSelectorRejectsInvalidCredentialsFailClosed": 2860,
+        "TestFileUploadValidatesFilename": 2820,
+        "TestFileErrorsMapThroughCentralEnvelope": 2610,
+        "TestSkillHandlerMalformedMultipartAndRouteCapErrors": 2580
+      }
+    }
+  }
+}

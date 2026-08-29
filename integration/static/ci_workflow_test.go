@@ -44,7 +44,6 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 		t.Fatalf("read engine-ci workflow: %v", err)
 	}
 	text := string(body)
-	requiredGuard := "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
 	if !strings.Contains(text, "permissions:\n  contents: read") {
 		t.Fatal("engine-ci must run with read-only contents permission")
 	}
@@ -59,24 +58,19 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	// on a maintainer's machine and getting no checks at all.
 	engineCIJobs := []string{
 		"go-static:", "go-test:", "protocol:", "agent-runtime-ts:", "gateway-ts:",
-		"k8s-manifests:", "helm-chart:", "security:", "sandbox-local-image-smoke:", "external-smoke:",
+		"k8s-manifests:", "helm-chart:", "security:", "sandbox-local-image-smoke:",
 	}
 	for _, jobName := range engineCIJobs {
 		if !strings.Contains(workflowJobForStaticTest(t, text, jobName), "runs-on: ubuntu-latest") {
 			t.Fatalf("engine-ci job %q must run on a GitHub-hosted runner", strings.TrimSuffix(jobName, ":"))
 		}
 	}
-	// external-smoke reads every secret this workflow touches, so it gates on the
-	// fork guard.
-	if !strings.Contains(workflowJobForStaticTest(t, text, "external-smoke:"), requiredGuard) {
-		t.Fatal("engine-ci external-smoke job must reject fork pull_request execution")
-	}
 	// A hosted runner starts empty, so each Go toolchain keys its cache on the
 	// repository's module file.
-	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 8 {
-		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 8", got)
+	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 7 {
+		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 7", got)
 	}
-	if strings.Count(text, "persist-credentials: false") != 12 {
+	if strings.Count(text, "persist-credentials: false") != 11 {
 		t.Fatal("each engine-ci checkout must disable credential persistence")
 	}
 	for fragment, want := range map[string]int{
@@ -101,7 +95,6 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 		"k8s-manifests:",
 		"helm-chart:",
 		"security:",
-		"external-smoke:",
 	} {
 		if !strings.Contains(text, "\n  "+jobName) {
 			t.Fatalf("engine-ci must expose required gate job %q", strings.TrimSuffix(jobName, ":"))
@@ -179,11 +172,8 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 			t.Fatalf("engine-ci security job missing fragment:\n%s", fragment)
 		}
 	}
-	externalSmokeJob := workflowJobForStaticTest(t, text, "external-smoke:")
-	if !strings.Contains(externalSmokeJob, "github.event_name == 'workflow_dispatch'") ||
-		!strings.Contains(externalSmokeJob, "github.event_name == 'schedule'") ||
-		!strings.Contains(externalSmokeJob, "contains(github.event.pull_request.labels.*.name, 'external-smoke')") {
-		t.Fatal("engine-ci external-smoke job must be manual, scheduled, or label-triggered only")
+	if strings.Contains(text, "external-smoke") || strings.Contains(text, "${{ secrets.") {
+		t.Fatal("legacy verification must not register live external smoke or credentials")
 	}
 	for _, jobName := range []string{"go-static:", "go-test:", "protocol:", "agent-runtime-ts:", "gateway-ts:", "k8s-manifests:", "security:"} {
 		if strings.Contains(workflowJobForStaticTest(t, text, jobName), "${{ secrets.") {
@@ -249,7 +239,6 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		"k8s-manifests:",
 		"security:",
 		"sandbox-local-image-smoke:",
-		"external-smoke:",
 	}
 	for _, jobName := range requiredJobs {
 		t.Run("job_"+strings.TrimSuffix(jobName, ":"), func(t *testing.T) {
@@ -389,147 +378,6 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 	})
 }
 
-func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
-	repoRoot := finalArchitectureEngineRoot(t)
-	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "engine-release.yml")
-	content, err := os.ReadFile(workflowPath) //nolint:gosec // test-only static read of repo workflow
-	if err != nil {
-		t.Fatalf("read %s: %v", workflowPath, err)
-	}
-	text := string(content)
-	versionJob := workflowJobForStaticTest(t, text, "version:")
-	sandboxImageJob := workflowJobForStaticTest(t, text, "sandbox-image:")
-	imagesJob := workflowJobForStaticTest(t, text, "images:")
-	releaseSmokeJob := workflowJobForStaticTest(t, text, "daytona-release-smoke:")
-	chartJob := workflowJobForStaticTest(t, text, "chart:")
-
-	for _, token := range []string{
-		"outputs:",
-		"version: ${{ steps.resolve.outputs.version }}",
-		"SemVer 2",
-		"without build metadata",
-		"${#version} > 128",
-		"OCI image tags are limited to 128 characters",
-	} {
-		if !strings.Contains(versionJob, token) {
-			t.Errorf("release version job missing %q", token)
-		}
-	}
-	for _, token := range []string{
-		"needs: version",
-		"digest: ${{ steps.build.outputs.digest }}",
-		"file: Dockerfile.sandbox",
-		"push: true",
-		"tags: ghcr.io/${{ github.repository_owner }}/sandbox:${{ needs.version.outputs.version }}",
-	} {
-		if !strings.Contains(sandboxImageJob, token) {
-			t.Errorf("release Sandbox image job missing %q", token)
-		}
-	}
-	for _, token := range []string{
-		"needs: version",
-		"${{ needs.version.outputs.version }}",
-	} {
-		if !strings.Contains(imagesJob, token) {
-			t.Errorf("release image job missing %q", token)
-		}
-	}
-	if strings.Contains(imagesJob, "- image: sandbox") || strings.Contains(imagesJob, "Dockerfile.sandbox") {
-		t.Error("generic release image matrix duplicates the separately published Sandbox image")
-	}
-	for _, token := range []string{
-		"needs: sandbox-image",
-		"environment: release",
-		"permissions:\n      contents: read",
-		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox@${{ needs.sandbox-image.outputs.digest }}",
-		"DAYTONA_API_URL: ${{ secrets.DAYTONA_API_URL }}",
-		"DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}",
-		"-tags daytona_release_smoke",
-		"^TestDaytonaPublishedImageProductionAdapterSmoke$",
-	} {
-		if !strings.Contains(releaseSmokeJob, token) {
-			t.Errorf("Daytona release smoke job missing %q", token)
-		}
-	}
-	if strings.Contains(releaseSmokeJob, "packages: write") {
-		t.Error("Daytona release smoke job must not receive package write permission")
-	}
-	for _, secret := range []string{"${{ secrets.DAYTONA_API_URL }}", "${{ secrets.DAYTONA_API_KEY }}"} {
-		if count := strings.Count(text, secret); count != 1 {
-			t.Errorf("release workflow Daytona secret %q count = %d; want release smoke only", secret, count)
-		}
-	}
-	for _, token := range []string{
-		"needs: [version, images, daytona-release-smoke]",
-		"version: v4.2.0",
-		`helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"`,
-		"helm push",
-		"oci://ghcr.io/tetral-ai/charts",
-	} {
-		if !strings.Contains(chartJob, token) {
-			t.Errorf("release chart job missing %q", token)
-		}
-	}
-}
-
-func TestDaytonaPublishedImageSmokeIsReleaseOnlyAndUsesProductionAdapters(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	smokePath := filepath.Join(engineRoot, "services", "sandbox", "daytona_release_smoke_test.go")
-	smokeBody, err := os.ReadFile(smokePath) //nolint:gosec // Repository-local release-smoke source.
-	if err != nil {
-		t.Fatalf("read Daytona release smoke: %v", err)
-	}
-	smoke := string(smokeBody)
-	if !strings.HasPrefix(smoke, "//go:build daytona_release_smoke\n") {
-		t.Fatal("Daytona release smoke must be excluded from normal Go test selection")
-	}
-	for _, token := range []string{
-		"driver.NewDaytonaArtifactBuilderForClient(client.Snapshot, imageRef)",
-		"buildReleaseSmokeArtifact(ctx, builder, artifactRequest)",
-		"driver.NewDaytonaLifecycleProviderForSDKClient(client, cfg)",
-		"driver.NewDaytonaHelperExecutorForSDKClient(client, cfg.CommandTimeout)",
-		"lifecycle.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: setup})",
-		"lifecycle.InspectState(ctx, handle.SandboxID)",
-		"cleanup.cleanupSandbox(cleanupCtx, lifecycle, stableName, ownershipLabels, policy)",
-		"lifecycle.ResolveSandbox(ctx, stableName, labels)",
-		"snapshot.Name != expectedName",
-		"helper.CheckHealth(ctx, target)",
-		`ToolName: "Write"`,
-		`ToolName: "Read"`,
-		`ToolName: "exec_command"`,
-	} {
-		if !strings.Contains(smoke, token) {
-			t.Errorf("Daytona release smoke missing production-path proof %q", token)
-		}
-	}
-	for _, forbidden := range []string{
-		"t.Skip(",
-		"ProviderArtifactRef: imageRef",
-		"t.Fatalf(\"%v",
-		"t.Fatal(err)",
-		"ResultJSON)",
-	} {
-		if strings.Contains(smoke, forbidden) {
-			t.Errorf("Daytona release smoke contains unsafe or invalid pattern %q", forbidden)
-		}
-	}
-
-	ciBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")) //nolint:gosec // Repository-local workflow.
-	if err != nil {
-		t.Fatalf("read engine CI workflow: %v", err)
-	}
-	for _, forbidden := range []string{
-		"daytona-release-smoke",
-		"daytona_release_smoke",
-		"TestDaytonaPublishedImageProductionAdapterSmoke",
-		"TETRAL_DAYTONA_RELEASE_SMOKE_IMAGE",
-	} {
-		if strings.Contains(string(ciBody), forbidden) {
-			t.Errorf("engine-ci.yml must not register release-only Daytona token %q", forbidden)
-		}
-	}
-}
-
 func TestEngineCIWorkflowRunsLocalSandboxImageSmoke(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	workflowPath := filepath.Join(engineRoot, ".github", "workflows", "engine-ci.yml")
@@ -571,108 +419,6 @@ func TestSandboxSmokeUsesReleaseRecipe(t *testing.T) {
 	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
 		t.Fatal("release workflow retains an empty build-argument channel")
 	}
-}
-
-func TestBaseImageMirrorWorkflowOwnsManualGHCRCopies(t *testing.T) {
-	repoRoot := finalArchitectureEngineRoot(t)
-	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "mirror-base-images.yml")
-	body, err := os.ReadFile(workflowPath) //nolint:gosec // Repository-local workflow definition.
-	if err != nil {
-		t.Fatalf("read base-image mirror workflow: %v", err)
-	}
-	workflow := string(body)
-	const workflowPreamble = `name: mirror-base-images
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  packages: write
-
-`
-	if !strings.HasPrefix(workflow, workflowPreamble) {
-		t.Fatalf("base-image mirror workflow must be dispatch-only with workflow-level read/package-write permissions")
-	}
-	const loginBlock = `      - name: Log in to GitHub Container Registry
-        # docker/login-action@v4.5.1
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-`
-	if !strings.Contains(workflow, loginBlock) {
-		t.Fatal("base-image mirror workflow must authenticate its GHCR push with the workflow GITHUB_TOKEN")
-	}
-	const matrixEnvironment = `        env:
-          PRIMARY: ${{ matrix.primary }}
-          FALLBACK: ${{ matrix.fallback }}
-          TARGET: ${{ matrix.target }}
-`
-	if !strings.Contains(workflow, matrixEnvironment) {
-		t.Fatal("base-image mirror workflow must wire each matrix source tuple into the matching shell variables")
-	}
-	for _, matrixEntry := range []string{
-		`          - primary: public.ecr.aws/docker/library/golang:1.25.13
-            fallback: docker.io/library/golang:1.25.13
-            target: ghcr.io/tetral-ai/mirror/golang:1.25.13`,
-		`          - primary: public.ecr.aws/docker/library/ubuntu:24.04
-            fallback: docker.io/library/ubuntu:24.04
-            target: ghcr.io/tetral-ai/mirror/ubuntu:24.04`,
-		`          - primary: public.ecr.aws/docker/library/postgres:18-alpine
-            fallback: docker.io/library/postgres:18-alpine
-            target: ghcr.io/tetral-ai/mirror/postgres:18-alpine`,
-		`          - primary: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-            fallback: ""
-            target: ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z`,
-	} {
-		if !strings.Contains(workflow, matrixEntry) {
-			t.Fatalf("base-image mirror workflow has a missing or mismatched source tuple:\n%s", matrixEntry)
-		}
-	}
-	const fallbackFlow = `          if docker pull "$PRIMARY"; then
-            selected_source="$PRIMARY"
-          elif [ -n "$FALLBACK" ]; then
-            echo "primary mirror unavailable; falling back to Docker Hub"
-            docker pull "$FALLBACK"
-            selected_source="$FALLBACK"
-          else
-            echo "primary image unavailable and no fallback is configured" >&2
-            exit 1
-          fi
-`
-	if !strings.Contains(workflow, fallbackFlow) {
-		t.Fatal("base-image mirror workflow must use a configured fallback and reject a failed source when no fallback exists")
-	}
-	for _, digestProof := range []string{
-		`push_output="$(docker push "$TARGET" 2>&1)"`,
-		`digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' <<<"$push_output" | tail -n 1)"`,
-	} {
-		if !strings.Contains(workflow, digestProof) {
-			t.Fatalf("base-image mirror workflow must verify and report the pushed digest; missing %q", digestProof)
-		}
-	}
-	const emptyDigestFailure = `          if [ -z "$digest" ]; then
-            echo "mirror push did not report an image digest" >&2
-            exit 1
-          fi
-`
-	if !strings.Contains(workflow, emptyDigestFailure) {
-		t.Fatal("base-image mirror workflow must reject a push that does not report a digest")
-	}
-	const summaryBlock = "          {\n" +
-		"            echo \"### $TARGET\"\n" +
-		"            echo\n" +
-		"            echo '```'\n" +
-		"            echo \"$TARGET\"\n" +
-		"            echo \"$TARGET@$digest\"\n" +
-		"            echo '```'\n" +
-		"          } >> \"$GITHUB_STEP_SUMMARY\"\n"
-	if !strings.Contains(workflow, summaryBlock) {
-		t.Fatal("base-image mirror workflow must append the target and pushed digest to the job summary")
-	}
-	requireWorkflowActionsUseFullSHAs(t, "mirror-base-images.yml", workflow)
 }
 
 // govulncheckCommand is the exact, whole invocation the merge-gating

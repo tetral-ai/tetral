@@ -55,7 +55,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: auth
-          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/tetral-auth

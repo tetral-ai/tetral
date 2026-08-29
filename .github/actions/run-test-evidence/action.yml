@@ -1,0 +1,114 @@
+name: Run repository test evidence
+description: Sets up pinned tools, runs one repository-owned evidence group, and uploads its structured result.
+inputs:
+  group:
+    description: Evidence group from internal/testinfra/inventory.json, or all
+    required: true
+  producer:
+    description: Stable producer identity consumed by Merge Gate
+    required: true
+  artifact-prefix:
+    description: Workflow-specific structured evidence artifact prefix
+    required: false
+    default: evidence
+  shard-index:
+    description: Zero-based Go shard index
+    required: false
+    default: '0'
+  shard-count:
+    description: Number of deterministic Go shards
+    required: false
+    default: '1'
+  needs-bun:
+    description: Install the repository-pinned Bun toolchain
+    required: false
+    default: 'false'
+  needs-buf:
+    description: Install the protocol generator
+    required: false
+    default: 'false'
+  needs-helm:
+    description: Install Helm for deployment verification
+    required: false
+    default: 'false'
+  needs-lint:
+    description: Install golangci-lint without running it outside the evidence runner
+    required: false
+    default: 'false'
+  needs-go-test-host:
+    description: Prepare host capabilities required by the complete Go integration suite
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-version: '1.25.13'
+        cache-dependency-path: go.sum
+
+    - name: Set up Bun
+      if: inputs.needs-bun == 'true'
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      with:
+        bun-version-file: services/gateway/package.json
+
+    - name: Set up Helm
+      if: inputs.needs-helm == 'true'
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      with:
+        version: v4.2.0
+
+    - name: Install buf
+      if: inputs.needs-buf == 'true'
+      shell: bash
+      run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+
+    - name: Install golangci-lint
+      if: inputs.needs-lint == 'true'
+      uses: golangci/golangci-lint-action@63c23d5020da8f97005b6de340504130bdbe42c7
+      with:
+        version: v2.11.4
+        install-only: true
+
+    - name: Prepare Go integration host
+      if: inputs.needs-go-test-host == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v rg >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep
+        fi
+        rg --version
+        if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+        unshare -Ur -m true
+
+    - name: Run ${{ inputs.group }} evidence
+      shell: bash
+      env:
+        TETRAL_CI_PRODUCER: ${{ inputs.producer }}
+      run: |
+        set -euo pipefail
+        group_args=()
+        if [[ '${{ inputs.group }}' != 'all' ]]; then
+          group_args=(--groups '${{ inputs.group }}')
+        fi
+        go run ./internal/testinfra/cmd/tetral-test \
+          --profile full \
+          "${group_args[@]}" \
+          --shard-index '${{ inputs.shard-index }}' \
+          --shard-count '${{ inputs.shard-count }}' \
+          --output '.test-results/${{ inputs.producer }}'
+
+    - name: Upload structured evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ inputs.artifact-prefix }}-${{ inputs.producer }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .test-results/${{ inputs.producer }}
+        if-no-files-found: error
+        retention-days: 14

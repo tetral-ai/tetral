@@ -1,4 +1,4 @@
-.PHONY: build build-sandbox-helper install-sandbox-helper test lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream
+.PHONY: build build-sandbox-helper install-sandbox-helper test test-affected test-full lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream
 
 SANDBOX_HELPER_OUT ?= bin/sandbox
 SANDBOX_HELPER_INSTALL_PATH ?= /usr/local/bin/sandbox
@@ -13,7 +13,13 @@ install-sandbox-helper: build-sandbox-helper
 	install -D -m 0755 $(SANDBOX_HELPER_OUT) $(DESTDIR)$(SANDBOX_HELPER_INSTALL_PATH)
 
 test:
-	go test -race ./...
+	go run ./internal/testinfra/cmd/tetral-test --profile fast
+
+test-affected:
+	go run ./internal/testinfra/cmd/tetral-test --profile affected
+
+test-full:
+	go run ./internal/testinfra/cmd/tetral-test --profile full
 
 lint:
 	go vet ./...

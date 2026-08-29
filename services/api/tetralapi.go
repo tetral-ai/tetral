@@ -83,14 +83,22 @@ func (a *Application) Close() error {
 
 // StartupDatabase is the opened DB state used during production bootstrap.
 type StartupDatabase struct {
-	OpenResult dbconnect.OpenResult
-	Client     StartupReadinessClient
+	OpenResult      dbconnect.OpenResult
+	RuntimeClient   StartupRuntimeClient
+	MigrationClient StartupMigrationClient
 }
 
-// StartupReadinessClient validates database readiness before serving.
-type StartupReadinessClient interface {
+type StartupMigrationClient interface {
 	MigrateSchema(context.Context) error
+	Close() error
+}
+
+// StartupRuntimeClient validates the serving role and live schema before the
+// public API exposes SQL-backed collaborators.
+type StartupRuntimeClient interface {
+	VerifySchema(context.Context) error
 	VerifyRuntimeRole(context.Context) error
+	Close() error
 }
 
 // StartupOpenFunc opens the startup database state.
@@ -102,7 +110,12 @@ func OpenStartupDatabaseFromEnv(ctx context.Context) (StartupDatabase, error) {
 	if err != nil {
 		return StartupDatabase{}, err
 	}
-	return StartupDatabase{OpenResult: openResult, Client: openResult.Client}, nil
+	migration, err := dbconnect.OpenPlainDSN(ctx, "TETRAL_MIGRATION_DATABASE_URL", os.Getenv("TETRAL_MIGRATION_DATABASE_URL"))
+	if err != nil {
+		_ = openResult.Client.Close()
+		return StartupDatabase{}, err
+	}
+	return StartupDatabase{OpenResult: openResult, RuntimeClient: openResult.Client, MigrationClient: migration.Client}, nil
 }
 
 // BuildProductionApplication initializes DB readiness and builds the router.
@@ -150,22 +163,32 @@ func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupD
 	if err != nil {
 		return StartupDatabase{}, err
 	}
-	if database.Client == nil {
-		if database.OpenResult.Client != nil {
-			_ = database.OpenResult.Client.Close()
+	if database.RuntimeClient == nil {
+		if database.MigrationClient != nil {
+			_ = database.MigrationClient.Close()
 		}
 		return StartupDatabase{}, fmt.Errorf("runtime database client is required")
 	}
-	if err := database.Client.MigrateSchema(ctx); err != nil {
-		if database.OpenResult.Client != nil {
-			_ = database.OpenResult.Client.Close()
-		}
+	if database.MigrationClient == nil {
+		_ = database.RuntimeClient.Close()
+		return StartupDatabase{}, fmt.Errorf("migration database client is required")
+	}
+	if err := database.MigrationClient.MigrateSchema(ctx); err != nil {
+		_ = database.MigrationClient.Close()
+		_ = database.RuntimeClient.Close()
 		return StartupDatabase{}, fmt.Errorf("schema migration: %w", err)
 	}
-	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
-		if database.OpenResult.Client != nil {
-			_ = database.OpenResult.Client.Close()
-		}
+	if err := database.MigrationClient.Close(); err != nil {
+		_ = database.RuntimeClient.Close()
+		return StartupDatabase{}, fmt.Errorf("close migration database: %w", err)
+	}
+	database.MigrationClient = nil
+	if err := database.RuntimeClient.VerifySchema(ctx); err != nil {
+		_ = database.RuntimeClient.Close()
+		return StartupDatabase{}, fmt.Errorf("schema verification: %w", err)
+	}
+	if err := database.RuntimeClient.VerifyRuntimeRole(ctx); err != nil {
+		_ = database.RuntimeClient.Close()
 		return StartupDatabase{}, err
 	}
 	return database, nil

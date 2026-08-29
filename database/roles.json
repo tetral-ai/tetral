@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "migration_owner": "migration",
+  "workloads": {
+    "api": {
+      "tables": {
+        "workspaces": ["SELECT", "INSERT", "UPDATE"],
+        "sessions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_threads": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "environment_artifacts": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_resources": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_file_resources": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_memory_store_resources": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_github_repository_resources": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_resource_prefix_gc": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_events": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_event_stream_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_event_idempotency_keys": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_pending_tool_uses": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_runtime_status": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "request_usage_details": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_provider_auth": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "agents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "agent_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "environments": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "vaults": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "credentials": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "api_keys": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "skills": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "skill_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "file_objects": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "memory_stores": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "memories": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "memory_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "auth": {
+      "tables": {
+        "workspaces": ["SELECT"],
+        "api_keys": ["SELECT", "INSERT", "UPDATE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "queue": {
+      "tables": {
+        "workspaces": ["SELECT"],
+        "sessions": ["SELECT"],
+        "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "bridge": {
+      "sequences": ["session_runtime_binding_generation_seq"],
+      "tables": {
+        "workspaces": ["SELECT"],
+        "sessions": ["SELECT", "INSERT", "UPDATE"],
+        "session_threads": ["SELECT", "INSERT", "UPDATE"],
+        "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_resources": ["SELECT", "INSERT", "UPDATE"],
+        "session_memory_store_resources": ["SELECT", "INSERT", "UPDATE"],
+        "session_events": ["SELECT", "INSERT", "UPDATE"],
+        "session_event_stream_changes": ["SELECT", "INSERT"],
+        "session_messages": ["SELECT", "INSERT", "UPDATE"],
+        "session_mcp_manifests": ["SELECT", "INSERT", "UPDATE"],
+        "session_thread_context_prefixes": ["SELECT", "INSERT"],
+        "session_turn_retries": ["SELECT", "INSERT", "UPDATE"],
+        "session_pending_tool_uses": ["SELECT", "INSERT", "UPDATE"],
+        "session_transient_attachments": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_background_tasks": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_status": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_bridge_operations": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_output_captures": ["SELECT", "INSERT", "UPDATE"],
+        "sandbox_output_capture_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "request_usage_details": ["SELECT", "INSERT", "UPDATE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "agent_versions": ["SELECT"],
+        "environments": ["SELECT"],
+        "credentials": ["SELECT"],
+        "skills": ["SELECT"],
+        "file_objects": ["SELECT", "INSERT", "UPDATE"],
+        "files": ["SELECT", "INSERT", "UPDATE"],
+        "memory_stores": ["SELECT"],
+        "memories": ["SELECT", "INSERT", "UPDATE"],
+        "memory_versions": ["SELECT", "INSERT", "UPDATE"],
+        "session_file_attachment_consumptions": ["SELECT", "INSERT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "cleanup": {
+      "tables": {
+        "workspaces": ["SELECT"],
+        "session_runtime_status": ["SELECT", "UPDATE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "gateway": {
+      "tables": {
+        "sessions": ["SELECT"],
+        "session_provider_auth": ["SELECT", "INSERT", "UPDATE"],
+        "credentials": ["SELECT", "UPDATE"],
+        "platform_provider_keys": ["SELECT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "git_proxy": {
+      "tables": {
+        "sessions": ["SELECT"],
+        "session_resources": ["SELECT"],
+        "session_github_repository_resources": ["SELECT"],
+        "session_git_tickets": ["SELECT", "INSERT", "UPDATE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "sandbox": {
+      "tables": {
+        "workspaces": ["SELECT"],
+        "sessions": ["SELECT", "UPDATE"],
+        "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE"],
+        "environment_artifacts": ["SELECT", "INSERT", "UPDATE"],
+        "session_resources": ["SELECT", "UPDATE"],
+        "session_memory_store_resources": ["SELECT", "UPDATE"],
+        "session_resource_prefix_gc": ["SELECT", "INSERT", "UPDATE"],
+        "session_transient_attachments": ["SELECT", "UPDATE"],
+        "session_background_tasks": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_status": ["SELECT", "UPDATE"],
+        "session_runtime_bindings": ["SELECT", "UPDATE"],
+        "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE"],
+        "session_output_captures": ["SELECT", "INSERT", "UPDATE"],
+        "sandbox_output_capture_operations": ["SELECT", "INSERT", "UPDATE"],
+        "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "environments": ["SELECT"],
+        "credentials": ["SELECT", "UPDATE"],
+        "skills": ["SELECT"],
+        "files": ["SELECT"],
+        "memories": ["SELECT", "UPDATE"],
+        "memory_versions": ["SELECT", "INSERT", "UPDATE"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "event_stream": {
+      "tables": {
+        "sessions": ["SELECT"],
+        "session_threads": ["SELECT"],
+        "session_events": ["SELECT"],
+        "session_event_stream_changes": ["SELECT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    }
+  }
+}

@@ -16,6 +16,19 @@ do not paper over it. Reviewers spot-check the sheet against the diff; an
 unexplained load-bearing change is grounds for rejection without further
 review. Polish is the contributor's cost; clarity is everyone's gain.
 
+## Local verification
+
+Run `make test` while iterating; it needs no Docker, PostgreSQL, or MinIO. Run
+`make test-affected` before submitting a focused change. The runner prints the
+exact selection and starts only required disposable dependencies; uncertain
+ownership expands to the full profile. `make test-full` is the complete local
+pull-request gate and may take materially longer. Native `go test` and
+`bun test` commands remain available for a single owning package.
+
+See [docs/testing.md](docs/testing.md) for the CI ownership model, structured
+evidence, and the current shadow status. The legacy required checks remain
+authoritative until a separately reviewed ruleset cutover.
+
 ## During the work, not after
 
 Keep an implementation-notes file while you work. Whenever reality forces you
@@ -41,7 +54,8 @@ reads differently from one grown during the work, and reviewers can tell.
    (the touched service's README section) and either point at your doc delta
    or state in one line why no doc is affected.
 4. **Tests prove claims.** Every behavioral claim in your sheet names the test
-   that pins it. Run the focused suites; record the counts.
+   that pins it. Run the focused suites and `make test-affected`; record the
+   counts and any fail-closed expansion to Full.
 5. **Fill the answer sheet** below and paste it into the PR description.
 
 ## The answer sheet

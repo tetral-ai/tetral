@@ -22,7 +22,7 @@ spec:
       terminationGracePeriodSeconds: 15
       containers:
         - name: agent-runtime
-          image: ghcr.io/tetral-ai/agent-runtime:0.1.0-alpha
+          image: ghcr.io/tetral-ai/agent-runtime:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - bun

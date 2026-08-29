@@ -32,7 +32,7 @@ spec:
       terminationGracePeriodSeconds: 1800
       containers:
         - name: git-proxy
-          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          image: ghcr.io/tetral-ai/tetral:0.0.0-dev
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/git-proxy

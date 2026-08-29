@@ -18,7 +18,7 @@
     "agentRuntimePod": {
       "entrypoint": "packages/runtime-pod/src/command.ts",
       "buildArtifact": "dist/command.js",
-      "image": "ghcr.io/tetral-ai/agent-runtime:0.1.0-alpha",
+      "image": "ghcr.io/tetral-ai/agent-runtime:0.0.0-dev",
       "containerCommand": [
         "bun",
         "/app/dist/command.js"

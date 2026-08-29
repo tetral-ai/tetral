@@ -22,7 +22,7 @@ import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
 import { McpConnectorServiceShell } from "./service.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
-import { verifyPostgreSQLSchema } from "../../schema/src/verify.js";
+import { verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { McpClient, McpManifestChangeNotifier } from "./service.js";
 import type { SchemaSQL } from "../../schema/src/verify.js";
 import type { McpConnectorHttpServer } from "./http-server.js";
@@ -73,9 +73,9 @@ export async function runMcpConnectorCommand(options: {
   const sqlOptions = databasePoolOptions(config.config);
   const sql = options.sql ?? options.sqlFactory?.(sqlOptions) ?? new Bun.SQL(sqlOptions);
   try {
-    await (options.schemaVerifier ?? verifyPostgreSQLSchema)(sql);
+    await (options.schemaVerifier ?? verifyPostgreSQLReadiness)(sql);
   } catch (error) {
-    await sql.close?.({ timeout: 1 });
+    await closeSQLAfterStartupFailure(sql);
     throw error;
   }
   const client = options.client ?? new McpSDKClient({
@@ -152,6 +152,16 @@ export async function runMcpConnectorCommand(options: {
   };
   (options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
   await (options.waitForever ?? waitForever)();
+}
+
+async function closeSQLAfterStartupFailure(
+  sql: { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> },
+): Promise<void> {
+  try {
+    await sql.close?.({ timeout: 1 });
+  } catch {
+    // The verified public-safe startup error remains authoritative.
+  }
 }
 
 function databasePoolOptions(config: Extract<ReturnType<typeof loadMcpConnectorConfigFromProcessEnv>, { readonly ok: true }>["config"]): Bun.SQL.PostgresOrMySQLOptions {
