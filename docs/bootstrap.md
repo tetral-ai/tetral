@@ -196,12 +196,13 @@ safe. Auth then finds the row, registers the bootstrap API key from
 
 Tool execution runs inside Daytona-managed sandboxes. The sandbox service
 hands Daytona the environment's artifact reference verbatim as the snapshot
-name (`internal/sandbox/driver/provider.go`), so a snapshot named exactly
-like the sandbox image reference the chart renders — `image.registry` plus
-`/sandbox:` plus the released platform version, i.e.
+name (`internal/sandbox/driver/provider.go`). The release chart renders the
+stable, numbered lookup name from `image.registry`, `/sandbox:`, and the
+released platform version. A snapshot named
 `ghcr.io/tetral-ai/sandbox:<platform version>` — must exist in the Daytona
 organization that owns `sandbox-daytona/DAYTONA_API_KEY` before the first
-tool runs.
+tool runs. This lookup name is distinct from the immutable sandbox image
+digest from which Daytona builds the snapshot.
 
 Nothing earlier verifies this. An environment with no custom packages never
 touches Daytona at admission: it is marked ready with the configured default
@@ -219,27 +220,28 @@ those, Daytona must be able to pull the image itself (see the registry note
 below).
 
 Register the snapshot in the Daytona dashboard (Snapshots → Create), or
-through the API, giving the full image reference as both the name and the
-image:
+through the API. Set the snapshot name to the stable numbered lookup name and
+set the image to the exact sandbox digest recorded by the selected release:
 
 ```bash
-REF="ghcr.io/tetral-ai/sandbox:<platform version>"
+SNAPSHOT_NAME="ghcr.io/tetral-ai/sandbox:<platform version>"
+SOURCE_IMAGE="ghcr.io/tetral-ai/sandbox@sha256:<sandbox-image-digest>"
 curl -sS -X POST https://app.daytona.io/api/snapshots \
   -H "Authorization: Bearer ${DAYTONA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{\"name\": \"${REF}\", \"imageName\": \"${REF}\"}"
+  -d "{\"name\": \"${SNAPSHOT_NAME}\", \"imageName\": \"${SOURCE_IMAGE}\"}"
 ```
 
 Then poll `GET https://app.daytona.io/api/snapshots` until the entry whose
-`name` equals the reference reports `state: "active"`; creation takes up to
+`name` equals `SNAPSHOT_NAME` reports `state: "active"`; creation takes up to
 a few minutes. A snapshot that reaches an error state, or never appears,
 means Daytona could not pull the image — if the image is not publicly
 pullable, register the registry credential with Daytona first (one-time per
 organization, in the dashboard or via `POST /api/docker-registry`).
 
-Every platform version needs its own snapshot, because the reference embeds
-the version: registering the new reference is part of every upgrade, before
-the sandbox service rolls to the new tag.
+Every platform version needs its own numbered snapshot name. Register that
+name from the matching release digest before the sandbox service rolls to the
+new version.
 
 ## 7. Add a model provider key
 

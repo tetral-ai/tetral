@@ -164,9 +164,12 @@ The chart parameterizes only axes already present in the canonical manifests:
 
 - `image.registry` and `image.tag` select development images from a source
   checkout. `image.digests` selects the four release image families:
-  `tetral`, `gateway`, `agent-runtime`, and the `sandbox` artifact reference.
-  A non-empty digest takes precedence over the development tag. Published
-  release values supply all four digests together.
+  `tetral`, `gateway`, `agent-runtime`, and `sandbox`. A non-empty digest takes
+  precedence for workload images. Published release values supply all four
+  digests together. The API separately uses
+  `image.registry/sandbox:image.tag` as the stable Daytona snapshot lookup
+  name; operators register that name from the matching immutable sandbox
+  image digest before rollout.
 - `secrets.*` selects the names of operator-created Secrets; no Secret content
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
@@ -270,8 +273,8 @@ Use plain `helm upgrade` as the supported upgrade mode:
 helm upgrade tetral ./deploy/helm/tetral -f values.yaml
 ```
 
-Before upgrading, register the new version's sandbox snapshot with Daytona
-(the reference embeds the tag, so every version needs its own — see the
+Before upgrading, register the new version's numbered sandbox snapshot name
+with Daytona from the matching immutable sandbox image digest (see the
 bootstrap sequence). A skipped registration does not fail the upgrade; it
 fails the first tool execution afterwards.
 
