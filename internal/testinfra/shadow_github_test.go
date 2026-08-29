@@ -73,7 +73,16 @@ func shadowFixtureClient(t *testing.T, snapshot ShadowSnapshot) fixtureGHClient 
 	legacyRun := githubWorkflowRun{ID: snapshot.Legacy.RunID, Name: snapshot.Legacy.Name, Path: snapshot.Legacy.Path, HeadSHA: snapshot.EventHeadSHA, RunAttempt: snapshot.Legacy.RunAttempt, CheckSuiteID: snapshot.Legacy.CheckSuiteID, Status: "completed", Conclusion: "success", CreatedAt: snapshot.Legacy.CreatedAt, RunStartedAt: snapshot.Legacy.StartedAt, UpdatedAt: snapshot.Legacy.CompletedAt}
 	shadowRun := githubWorkflowRun{ID: snapshot.Shadow.RunID, Name: snapshot.Shadow.Name, Path: snapshot.Shadow.Path, HeadSHA: snapshot.EventHeadSHA, RunAttempt: snapshot.Shadow.RunAttempt, CheckSuiteID: snapshot.Shadow.CheckSuiteID, Status: "completed", Conclusion: "success", CreatedAt: snapshot.Shadow.CreatedAt, RunStartedAt: snapshot.Shadow.StartedAt, UpdatedAt: snapshot.Shadow.CompletedAt}
 	client := fixtureGHClient{json: map[string]any{}, bytes: map[string][]byte{}}
-	client.json["repos/tetral-ai/tetral/pulls/101"] = map[string]any{"head": map[string]string{"sha": snapshot.EventHeadSHA}, "base": map[string]string{"sha": snapshot.EventBaseSHA}}
+	client.json["repos/tetral-ai/tetral/pulls/101"] = map[string]any{
+		"head": map[string]any{"sha": snapshot.EventHeadSHA, "repo": map[string]string{"full_name": snapshot.HeadRepository}},
+		"base": map[string]string{"sha": snapshot.EventBaseSHA}, "author_association": snapshot.AuthorAssociation,
+		"changed_files": len(snapshot.ChangedPaths),
+	}
+	files := make([]map[string]string, 0, len(snapshot.ChangedPaths))
+	for _, path := range snapshot.ChangedPaths {
+		files = append(files, map[string]string{"filename": path})
+	}
+	client.json["repos/tetral-ai/tetral/pulls/101/files?per_page=100"] = files
 	client.json["repos/tetral-ai/tetral/actions/runs?event=pull_request&head_sha=head&per_page=100"] = map[string]any{"workflow_runs": []githubWorkflowRun{legacyRun, shadowRun}}
 	addWorkflowFixture(t, &client, snapshot.Repository, snapshot.Legacy, snapshot.LegacyMetadata, nil, 11)
 	addWorkflowFixture(t, &client, snapshot.Repository, snapshot.Shadow, nil, snapshot.ShadowResults, 12)

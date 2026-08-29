@@ -5,24 +5,35 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const githubActionsAppID int64 = 15368
 
 type ShadowSnapshot struct {
-	Repository     string                   `json:"repository"`
-	PullRequest    int                      `json:"pull_request"`
-	EventHeadSHA   string                   `json:"event_head_sha"`
-	EventBaseSHA   string                   `json:"event_base_sha"`
-	TestMergeSHA   string                   `json:"test_merge_sha"`
-	CollectedAt    time.Time                `json:"collected_at"`
-	Legacy         ShadowWorkflowExecution  `json:"legacy"`
-	Shadow         ShadowWorkflowExecution  `json:"shadow"`
-	LegacyMetadata []LegacyWorkflowMetadata `json:"legacy_metadata"`
-	ShadowResults  []Result                 `json:"shadow_results"`
+	Repository        string                   `json:"repository"`
+	PullRequest       int                      `json:"pull_request"`
+	HeadRepository    string                   `json:"head_repository"`
+	AuthorAssociation string                   `json:"author_association"`
+	ChangedPaths      []string                 `json:"changed_paths"`
+	ForkApproval      *ShadowForkApproval      `json:"fork_approval,omitempty"`
+	EventHeadSHA      string                   `json:"event_head_sha"`
+	EventBaseSHA      string                   `json:"event_base_sha"`
+	TestMergeSHA      string                   `json:"test_merge_sha"`
+	CollectedAt       time.Time                `json:"collected_at"`
+	Legacy            ShadowWorkflowExecution  `json:"legacy"`
+	Shadow            ShadowWorkflowExecution  `json:"shadow"`
+	LegacyMetadata    []LegacyWorkflowMetadata `json:"legacy_metadata"`
+	ShadowResults     []Result                 `json:"shadow_results"`
+}
+
+type ShadowForkApproval struct {
+	PendingObservedAt time.Time `json:"pending_observed_at"`
+	ApprovedAt        time.Time `json:"approved_at"`
 }
 
 type ShadowWorkflowExecution struct {
@@ -81,6 +92,10 @@ type LegacyWorkflowMetadata struct {
 type ShadowLedgerRow struct {
 	Repository          string                  `json:"repository"`
 	PullRequest         int                     `json:"pull_request"`
+	HeadRepository      string                  `json:"head_repository"`
+	AuthorAssociation   string                  `json:"author_association"`
+	ChangeClasses       []string                `json:"change_classes"`
+	ForkApproval        *ShadowForkApproval     `json:"fork_approval,omitempty"`
 	EventHeadSHA        string                  `json:"event_head_sha"`
 	EventBaseSHA        string                  `json:"event_base_sha"`
 	TestMergeSHA        string                  `json:"test_merge_sha"`
@@ -100,6 +115,7 @@ type ShadowLedgerRow struct {
 	ShadowConclusion    string                  `json:"shadow_conclusion"`
 	LegacyExecution     ShadowWorkflowExecution `json:"legacy_execution"`
 	ShadowExecution     ShadowWorkflowExecution `json:"shadow_execution"`
+	ShadowResults       []Result                `json:"shadow_results"`
 	SnapshotDigest      string                  `json:"snapshot_digest"`
 	CollectedAt         time.Time               `json:"collected_at"`
 }
@@ -143,8 +159,12 @@ var shadowProducerJobs = map[string]string{
 }
 
 func NormalizeShadowSnapshot(snapshot ShadowSnapshot) (ShadowLedgerRow, error) {
-	if snapshot.Repository == "" || snapshot.PullRequest <= 0 || snapshot.EventHeadSHA == "" || snapshot.EventBaseSHA == "" || snapshot.TestMergeSHA == "" {
+	if snapshot.Repository == "" || snapshot.PullRequest <= 0 || snapshot.HeadRepository == "" || snapshot.AuthorAssociation == "" ||
+		len(snapshot.ChangedPaths) == 0 || snapshot.EventHeadSHA == "" || snapshot.EventBaseSHA == "" || snapshot.TestMergeSHA == "" {
 		return ShadowLedgerRow{}, fmt.Errorf("shadow snapshot has an incomplete PR revision tuple")
+	}
+	if snapshot.HeadRepository != snapshot.Repository && !validForkApproval(snapshot.ForkApproval) {
+		return ShadowLedgerRow{}, fmt.Errorf("external fork snapshot lacks pending and approval evidence")
 	}
 	if snapshot.Legacy.Name != "engine-ci" || snapshot.Legacy.Path != ".github/workflows/engine-ci.yml" ||
 		snapshot.Shadow.Name != "Pull Request Verification" || snapshot.Shadow.Path != ".github/workflows/pull-request-verification.yml" {
@@ -173,26 +193,56 @@ func NormalizeShadowSnapshot(snapshot ShadowSnapshot) (ShadowLedgerRow, error) {
 	if err != nil {
 		return ShadowLedgerRow{}, err
 	}
+	legacyDuration, legacyQueue, legacyMinutes := shadowExecutionMetrics(snapshot.Legacy, mapValues(legacyShadowProducers))
+	shadowJobs := mapValues(shadowProducerJobs)
+	shadowJobs = append(shadowJobs, "Merge Gate")
+	shadowDuration, shadowQueue, shadowMinutes := shadowExecutionMetrics(snapshot.Shadow, shadowJobs)
 	return ShadowLedgerRow{
 		Repository: snapshot.Repository, PullRequest: snapshot.PullRequest,
+		HeadRepository: snapshot.HeadRepository, AuthorAssociation: snapshot.AuthorAssociation,
+		ChangeClasses: classifyShadowChanges(snapshot.ChangedPaths), ForkApproval: snapshot.ForkApproval,
 		EventHeadSHA: snapshot.EventHeadSHA, EventBaseSHA: snapshot.EventBaseSHA,
 		TestMergeSHA: snapshot.TestMergeSHA, RequiredCheckSHA: requiredCheckSHA,
 		WorkflowSourceSHA: snapshot.Shadow.WorkflowSourceSHA,
 		LegacyRunID:       snapshot.Legacy.RunID, LegacyRunAttempt: snapshot.Legacy.RunAttempt,
 		ShadowRunID: snapshot.Shadow.RunID, ShadowRunAttempt: snapshot.Shadow.RunAttempt,
-		LegacyDuration:      snapshot.Legacy.CompletedAt.Sub(snapshot.Legacy.StartedAt),
-		ShadowDuration:      snapshot.Shadow.CompletedAt.Sub(snapshot.Shadow.StartedAt),
-		LegacyQueueTime:     snapshot.Legacy.StartedAt.Sub(snapshot.Legacy.CreatedAt),
-		ShadowQueueTime:     snapshot.Shadow.StartedAt.Sub(snapshot.Shadow.CreatedAt),
-		LegacyRunnerMinutes: runnerMinutes(snapshot.Legacy.Jobs),
-		ShadowRunnerMinutes: runnerMinutes(snapshot.Shadow.Jobs),
-		LegacyConclusion:    aggregateConclusion(snapshot.Legacy.Jobs),
-		ShadowConclusion:    aggregateConclusion(snapshot.Shadow.Jobs),
-		LegacyExecution:     snapshot.Legacy,
-		ShadowExecution:     snapshot.Shadow,
-		SnapshotDigest:      snapshotDigest,
-		CollectedAt:         snapshot.CollectedAt,
+		LegacyDuration: legacyDuration, ShadowDuration: shadowDuration,
+		LegacyQueueTime: legacyQueue, ShadowQueueTime: shadowQueue,
+		LegacyRunnerMinutes: legacyMinutes, ShadowRunnerMinutes: shadowMinutes,
+		LegacyConclusion: aggregateConclusion(snapshot.Legacy.Jobs),
+		ShadowConclusion: aggregateConclusion(snapshot.Shadow.Jobs),
+		LegacyExecution:  snapshot.Legacy,
+		ShadowExecution:  snapshot.Shadow,
+		ShadowResults:    snapshot.ShadowResults,
+		SnapshotDigest:   snapshotDigest,
+		CollectedAt:      snapshot.CollectedAt,
 	}, nil
+}
+
+func classifyShadowChanges(paths []string) []string {
+	classes := map[string]bool{}
+	for _, path := range paths {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		if strings.HasPrefix(path, "services/agent-runtime/") || strings.HasPrefix(path, "services/gateway/") {
+			classes["runtime-or-gateway"] = true
+		}
+		if strings.Contains(path, "/proto/") || strings.Contains(path, "/gen/") || strings.HasSuffix(path, ".proto") {
+			classes["protocol-generated"] = true
+		}
+		if strings.HasPrefix(path, ".github/") || strings.HasPrefix(path, "internal/testinfra/") || path == "Makefile" {
+			classes["ci-test-infrastructure"] = true
+		}
+		if strings.HasSuffix(path, ".go") && (strings.HasPrefix(path, "services/bridge/") || strings.HasPrefix(path, "internal/storage/") ||
+			strings.HasPrefix(path, "internal/queue/") || strings.HasPrefix(path, "internal/sessionevent/") || strings.HasPrefix(path, "internal/files/")) {
+			classes["database-heavy-go"] = true
+		}
+	}
+	result := make([]string, 0, len(classes))
+	for class := range classes {
+		result = append(result, class)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func shadowSnapshotDigest(snapshot ShadowSnapshot) (string, error) {
@@ -335,12 +385,34 @@ func checkNameSet(checks []ShadowCheck) map[string]bool {
 	return result
 }
 
-func runnerMinutes(jobs []ShadowJob) float64 {
+func shadowExecutionMetrics(execution ShadowWorkflowExecution, includedNames []string) (time.Duration, time.Duration, float64) {
+	included := map[string]bool{}
+	for _, name := range includedNames {
+		included[name] = true
+	}
+	var earliest, latest time.Time
 	var total time.Duration
-	for _, job := range jobs {
+	for _, job := range execution.Jobs {
+		if !included[job.Name] {
+			continue
+		}
+		if earliest.IsZero() || job.StartedAt.Before(earliest) {
+			earliest = job.StartedAt
+		}
+		if latest.IsZero() || job.CompletedAt.After(latest) {
+			latest = job.CompletedAt
+		}
 		total += job.CompletedAt.Sub(job.StartedAt)
 	}
-	return total.Minutes()
+	return latest.Sub(earliest), earliest.Sub(execution.CreatedAt), total.Minutes()
+}
+
+func mapValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
 }
 
 func aggregateConclusion(jobs []ShadowJob) string {

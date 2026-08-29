@@ -50,14 +50,32 @@ func CollectLiveShadowSnapshot(ctx context.Context, repository string, pullReque
 func collectShadowSnapshot(ctx context.Context, client ghShadowClient, repository string, pullRequest int) (ShadowSnapshot, error) {
 	var pull struct {
 		Head struct {
-			SHA string `json:"sha"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
 		} `json:"head"`
 		Base struct {
 			SHA string `json:"sha"`
 		} `json:"base"`
+		AuthorAssociation string `json:"author_association"`
+		ChangedFiles      int    `json:"changed_files"`
 	}
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/pulls/%d", repository, pullRequest), &pull); err != nil {
 		return ShadowSnapshot{}, err
+	}
+	var files []struct {
+		Filename string `json:"filename"`
+	}
+	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/pulls/%d/files?per_page=100", repository, pullRequest), &files); err != nil {
+		return ShadowSnapshot{}, err
+	}
+	if pull.ChangedFiles != len(files) {
+		return ShadowSnapshot{}, fmt.Errorf("pull request changed-file capture is incomplete: got %d of %d", len(files), pull.ChangedFiles)
+	}
+	changedPaths := make([]string, 0, len(files))
+	for _, file := range files {
+		changedPaths = append(changedPaths, file.Filename)
 	}
 	var runList struct {
 		Runs []githubWorkflowRun `json:"workflow_runs"`
@@ -103,7 +121,9 @@ func collectShadowSnapshot(ctx context.Context, client ghShadowClient, repositor
 		return ShadowSnapshot{}, err
 	}
 	snapshot := ShadowSnapshot{
-		Repository: repository, PullRequest: pullRequest, EventHeadSHA: pull.Head.SHA, EventBaseSHA: pull.Base.SHA,
+		Repository: repository, PullRequest: pullRequest, HeadRepository: pull.Head.Repo.FullName,
+		AuthorAssociation: pull.AuthorAssociation, ChangedPaths: changedPaths,
+		EventHeadSHA: pull.Head.SHA, EventBaseSHA: pull.Base.SHA,
 		TestMergeSHA: shadowResults[0].Execution.TestMergeSHA, CollectedAt: time.Now().UTC(),
 		Legacy: legacyExecution, Shadow: shadowExecution, LegacyMetadata: legacyMetadata, ShadowResults: shadowResults,
 	}

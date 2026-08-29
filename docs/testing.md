@@ -76,6 +76,29 @@ It joins GitHub API facts, legacy metadata sidecars, and new result artifacts.
 Mismatched carriers, workflow sources, Apps, runs, attempts, rerun ancestry,
 jobs, checks, or durations are rejected instead of compared.
 
+After collection, evaluate the complete ledger with the fixed paired-row
+estimator. The pull request that introduced shadow collection is excluded:
+
+```bash
+go run ./internal/testinfra/cmd/tetral-shadow-evaluate \
+  --input shadow-ledger.json \
+  --exclude-pull-request <shadow-workflow-pr> \
+  --output shadow-acceptance.json
+```
+
+The evaluator fails closed until it has ten distinct, first-attempt,
+all-successful old/new integration tuples with the required change classes, a
+real external-fork approval observation, acceptable wall and runner cost, and
+balanced Go shards. Reruns and incomplete rows remain in the reliability and
+cost record but cannot improve the acceptance medians. For an external fork,
+the collector additionally requires the operator-observed pending and approval
+times through `--fork-pending-observed-at` and `--fork-approved-at`; a
+same-repository or organization-member fixture is not equivalent evidence.
+
+The shadow gate is currently pending. Until its report is green and a separate
+repository-policy change is explicitly authorized, the legacy workflow and
+required checks remain authoritative.
+
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
 classify apparatus failures separately from product failures, and use the
 printed focused reproduction command for diagnosis.

@@ -44,7 +44,8 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 	t.Helper()
 	started := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	snapshot := ShadowSnapshot{
-		Repository: "tetral-ai/tetral", PullRequest: 101,
+		Repository: "tetral-ai/tetral", PullRequest: 101, HeadRepository: "tetral-ai/tetral", AuthorAssociation: "OWNER",
+		ChangedPaths: []string{"internal/testinfra/shadow.go"},
 		EventHeadSHA: "head", EventBaseSHA: "base", TestMergeSHA: "merge", CollectedAt: started.Add(20 * time.Minute),
 		Legacy: ShadowWorkflowExecution{Name: "engine-ci", Path: ".github/workflows/engine-ci.yml", RunID: 1001, RunAttempt: 1, CheckSuiteID: 2001, CheckHeadSHA: "merge", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "legacy-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(15 * time.Minute)},
 		Shadow: ShadowWorkflowExecution{Name: "Pull Request Verification", Path: ".github/workflows/pull-request-verification.yml", RunID: 1002, RunAttempt: 1, CheckSuiteID: 2002, CheckHeadSHA: "merge", SourceAppID: githubActionsAppID, WorkflowSourceSHA: "source", WorkflowBlobSHA: "shadow-blob", CreatedAt: started.Add(-time.Minute), StartedAt: started, CompletedAt: started.Add(8 * time.Minute)},
@@ -76,6 +77,7 @@ func validShadowSnapshot(t *testing.T) ShadowSnapshot {
 		snapshot.ShadowResults = append(snapshot.ShadowResults, Result{
 			Plan: Plan{Revision: Revision{Head: "merge"}}, Status: "pass",
 			Execution: ExecutionEnvelope{Repository: snapshot.Repository, EventHeadSHA: "head", EventBaseSHA: "base", TestMergeSHA: "merge", RequiredCheckSHA: "merge", WorkflowSourceSHA: "source", Workflow: "Pull Request Verification", RunID: "1002", RunAttempt: strconv.Itoa(snapshot.Shadow.RunAttempt), Job: PRProducerJobs()[producer], Producer: producer},
+			StartedAt: started, FinishedAt: started.Add(time.Minute), Steps: []StepResult{{Group: producer, Command: []string{"test"}, Status: "pass", Elapsed: time.Minute}},
 		})
 		jobID++
 	}
