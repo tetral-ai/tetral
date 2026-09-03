@@ -41,6 +41,10 @@ jobs:
         with:
           go-version: '1.25.13'
           cache-dependency-path: go.sum
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: services/gateway/package.json
       - name: Run bounded repeated concurrency evidence
         env:
           TETRAL_CI_PRODUCER: scheduled-concurrency

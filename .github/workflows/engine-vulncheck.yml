@@ -59,7 +59,7 @@ jobs:
       - name: Slice coverage guard
         run: |
           set -euo pipefail
-          uncovered=$(go list ./... | grep -vE '^github.com/tetral-ai/tetral/(deploy|integration|internal|services/(agent-runtime|api|auth|bridge|cleanup|event-stream|gateway|git-proxy|queue|web-connector|sandbox))(/|$)' || true)
+          uncovered=$(go list ./... | grep -vE '^github.com/tetral-ai/tetral/(database|deploy|integration|internal|services/(agent-runtime|api|auth|bridge|cleanup|event-stream|gateway|git-proxy|queue|web-connector|sandbox))(/|$)' || true)
           if [ -n "${uncovered}" ]; then
             echo "package trees missing from the vulncheck slice list:"
             echo "${uncovered}"
@@ -70,6 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           slices=(
+            ./database/...
             ./deploy/...
             ./integration/...
             ./internal/...
