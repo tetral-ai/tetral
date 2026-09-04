@@ -32,8 +32,24 @@ The readable CI topology is:
   on the exact merged commit. Ordinary Go, Runtime, and Gateway coverage is a
   report-only artifact here, not a PR Race burden.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
-  plus compatibility and repository-health evidence. A later pass is recorded
-  but never erases the first failure.
+  each week, plus daily compatibility, repository-health, and online dependency
+  audits. A later pass is recorded but never erases the first failure.
+
+Online Bun dependency audits are deliberately separated from deterministic
+security checks. Pull requests run them when a `package.json`, `bun.lock`, or
+the audit runner changes. The main-branch workflow does not repeat the same
+remote query after merge; the daily scheduled workflow catches advisories
+published after the dependency graph was accepted. Secret, redaction, import,
+and boundary checks remain part of normal repository evidence at every layer.
+
+To force the online audit locally, run:
+
+```sh
+go run ./internal/testinfra/cmd/tetral-test \
+  --profile full \
+  --groups security \
+  --dependency-audit always
+```
 
 The main-branch ruleset requires the **Merge Gate** produced by Pull Request
 Verification. Individual producer jobs are evidence inputs; none can bypass or

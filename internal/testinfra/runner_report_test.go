@@ -16,6 +16,7 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 		Selection{Group: "coverage"},
 		t.TempDir(),
 		t.TempDir(),
+		DependencyAuditChanged,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -32,6 +33,53 @@ func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	}
 	if !slices.Equal(commands[2].Arguments[:2], []string{"go", "test"}) {
 		t.Fatalf("third coverage command = %v; want Go tests after dependency setup", commands[2].Arguments)
+	}
+}
+
+func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       DependencyAuditMode
+		paths      []string
+		wantAudits int
+	}{
+		{name: "changed unrelated", mode: DependencyAuditChanged, paths: []string{"services/bridge/runtime_delivery.go"}},
+		{name: "changed package manifest", mode: DependencyAuditChanged, paths: []string{"services/gateway/package.json"}, wantAudits: 2},
+		{name: "changed lockfile", mode: DependencyAuditChanged, paths: []string{"services/agent-runtime/bun.lock"}, wantAudits: 2},
+		{name: "changed audit runner", mode: DependencyAuditChanged, paths: []string{"scripts/run-bun-audit.sh"}, wantAudits: 2},
+		{name: "always", mode: DependencyAuditAlways, wantAudits: 2},
+		{name: "never", mode: DependencyAuditNever, paths: []string{"services/gateway/package.json"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := Plan{Revision: Revision{ChangedPaths: test.paths}}
+			commands, err := commandsForSelection(plan, Selection{Group: "security"}, t.TempDir(), t.TempDir(), test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			audits := 0
+			staticChecks := 0
+			for _, command := range commands {
+				if len(command.Arguments) > 0 && command.Arguments[0] == "./scripts/run-bun-audit.sh" {
+					audits++
+				}
+				if slices.Equal(command.Arguments[:min(3, len(command.Arguments))], []string{"go", "test", "./integration/static"}) {
+					staticChecks++
+				}
+			}
+			if audits != test.wantAudits {
+				t.Fatalf("online audits = %d; want %d", audits, test.wantAudits)
+			}
+			if staticChecks != 1 {
+				t.Fatalf("static security checks = %d; want 1", staticChecks)
+			}
+		})
+	}
+}
+
+func TestDependencyAuditModeRejectsUnknownPolicy(t *testing.T) {
+	if _, err := ParseDependencyAuditMode("sometimes"); err == nil {
+		t.Fatal("unknown dependency audit policy was accepted")
 	}
 }
 

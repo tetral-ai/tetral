@@ -73,6 +73,9 @@ func VerifyPullRequestWorkflow(root string) error {
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
 	}
+	if !jobEvidenceInputEquals(mappingValue(jobs, "dependency-security"), "dependency-audit", string(DependencyAuditChanged)) {
+		return fmt.Errorf("pull request dependency security does not audit changed dependency graphs")
+	}
 	gate := mappingValue(jobs, "merge-gate")
 	if scalar(mappingValue(gate, "if")) != "always()" {
 		return fmt.Errorf("merge Gate is not unconditional")
@@ -126,6 +129,9 @@ func VerifyMainBranchWorkflow(root string) error {
 	if !jobEvidenceInputEquals(integrated, "needs-go-test-host", "true") {
 		return fmt.Errorf("main integrated correctness does not prepare its Go integration host")
 	}
+	if !jobEvidenceInputEquals(integrated, "dependency-audit", string(DependencyAuditNever)) {
+		return fmt.Errorf("main integrated correctness repeats the online dependency audit")
+	}
 	coverage := mappingValue(jobs, "coverage")
 	if !jobRunContainsAll(coverage,
 		"apparmor_restrict_unprivileged_userns=0",
@@ -141,10 +147,22 @@ func VerifyScheduledWorkflow(root string) error {
 	if err != nil {
 		return err
 	}
-	jobs := mappingValue(document.Content[0], "jobs")
+	workflow := document.Content[0]
+	schedules := mappingValue(mappingValue(workflow, "on"), "schedule")
+	var crons []string
+	for _, schedule := range sequenceNodes(schedules) {
+		crons = append(crons, scalar(mappingValue(schedule, "cron")))
+	}
+	if !sameStrings(crons, []string{"41 6 * * *", "17 7 * * 1"}) {
+		return fmt.Errorf("scheduled verification must declare one daily health run and one weekly concurrency run")
+	}
+	jobs := mappingValue(workflow, "jobs")
 	job := mappingValue(jobs, "concurrency-history")
 	if job == nil {
 		return fmt.Errorf("scheduled concurrency history job is missing")
+	}
+	if scalar(mappingValue(job, "if")) != "github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1'" {
+		return fmt.Errorf("scheduled concurrency history is not limited to manual and weekly runs")
 	}
 	setupIndex := -1
 	runIndex := -1
@@ -159,6 +177,13 @@ func VerifyScheduledWorkflow(root string) error {
 	}
 	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
 		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
+	}
+	health := mappingValue(jobs, "compatibility-health")
+	if health == nil || scalar(mappingValue(health, "if")) != "github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'" {
+		return fmt.Errorf("scheduled compatibility health is not limited to manual and daily runs")
+	}
+	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditAlways)) {
+		return fmt.Errorf("scheduled compatibility health does not always run the online dependency audit")
 	}
 	return nil
 }

@@ -53,6 +53,79 @@ func TestScheduledWorkflowRejectsMissingBunSetup(t *testing.T) {
 	}
 }
 
+func TestWorkflowsRejectWrongDependencyAuditCadence(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow string
+		old      string
+		new      string
+		verify   func(string) error
+	}{
+		{
+			name:     "pull request skips changed audit",
+			workflow: "pull-request-verification.yml",
+			old:      "          dependency-audit: changed\n",
+			new:      "          dependency-audit: never\n",
+			verify:   VerifyPullRequestWorkflow,
+		},
+		{
+			name:     "main repeats online audit",
+			workflow: "main-branch-verification.yml",
+			old:      "          dependency-audit: never\n",
+			new:      "          dependency-audit: always\n",
+			verify:   VerifyMainBranchWorkflow,
+		},
+		{
+			name:     "scheduled audit becomes changed-only",
+			workflow: "scheduled-verification.yml",
+			old:      "          dependency-audit: always\n",
+			new:      "          dependency-audit: changed\n",
+			verify:   VerifyScheduledWorkflow,
+		},
+	}
+	root := testRepositoryRoot(t)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := copyWorkflowFixture(t, root, test.workflow)
+			path := filepath.Join(fixture, ".github", "workflows", test.workflow)
+			body, err := os.ReadFile(path) //nolint:gosec // fixture path is rooted in t.TempDir.
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutated := strings.Replace(string(body), test.old, test.new, 1)
+			if mutated == string(body) {
+				t.Fatal("workflow fixture did not contain the expected audit policy")
+			}
+			if err := os.WriteFile(path, []byte(mutated), 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+				t.Fatal(err)
+			}
+			if err := test.verify(fixture); err == nil {
+				t.Fatal("wrong dependency audit cadence passed")
+			}
+		})
+	}
+}
+
+func TestScheduledWorkflowRejectsMissingDailyAudit(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := copyWorkflowFixture(t, root, "scheduled-verification.yml")
+	path := filepath.Join(fixture, ".github", "workflows", "scheduled-verification.yml")
+	body, err := os.ReadFile(path) //nolint:gosec // fixture path is rooted in t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := strings.Replace(string(body), "    - cron: '41 6 * * *'\n", "", 1)
+	if mutated == string(body) {
+		t.Fatal("scheduled workflow fixture did not contain the daily audit")
+	}
+	if err := os.WriteFile(path, []byte(mutated), 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyScheduledWorkflow(fixture); err == nil {
+		t.Fatal("scheduled workflow without daily dependency audit passed")
+	}
+}
+
 func TestPullRequestWorkflowRejectsMismatchedRaceShardCount(t *testing.T) {
 	root := testRepositoryRoot(t)
 	fixture := copyPullRequestWorkflowFixture(t, root)
@@ -226,8 +299,13 @@ func TestPullRequestWorkflowRejectsMergeRevisionAsRequiredCheckCarrier(t *testin
 
 func copyPullRequestWorkflowFixture(t *testing.T, root string) string {
 	t.Helper()
+	return copyWorkflowFixture(t, root, "pull-request-verification.yml")
+}
+
+func copyWorkflowFixture(t *testing.T, root, name string) string {
+	t.Helper()
 	fixture := t.TempDir()
-	source := filepath.Join(root, ".github", "workflows", "pull-request-verification.yml")
+	source := filepath.Join(root, ".github", "workflows", name)
 	body, err := os.ReadFile(source) //nolint:gosec // source is a repository-owned workflow fixture.
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +316,7 @@ func copyPullRequestWorkflowFixture(t *testing.T, root string) string {
 	}
 	// destination is rooted in t.TempDir and the filename is fixed.
 	//nolint:gosec
-	if err := os.WriteFile(filepath.Join(destination, "pull-request-verification.yml"), body, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(destination, name), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return fixture

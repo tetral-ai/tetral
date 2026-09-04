@@ -28,6 +28,9 @@ pull-request gate and may take materially longer. Native `go test` and
 See [docs/testing.md](docs/testing.md) for the CI ownership model and
 structured evidence. Pull requests merge only after the repository-owned
 `Merge Gate` reconciles every required producer for the tested revision.
+Online dependency audits run for dependency-changing pull requests and every
+day on the default branch; deterministic security checks remain in the normal
+local and CI evidence.
 
 ## During the work, not after
 
