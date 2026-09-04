@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	frozenForkSDKCommit     = "83ad546898bf9ac0369a4d214463c63fd4502586"
+	frozenForkSDKCommit     = "def73de473079295dcd408a65dee45b42686fcf6"
 	supersededForkSDKCommit = "a8f5b9262e0d42fb571cb2ea8f902124bbb4f01d"
 )
 
@@ -163,9 +163,9 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	securityJob := workflowJobForStaticTest(t, text, "security:")
 	for _, fragment := range []string{
 		"name: Agent Runtime dependency audit",
-		"working-directory: services/agent-runtime\n        run: bun audit",
+		"run: ./scripts/run-bun-audit.sh services/agent-runtime",
 		"name: Gateway Service dependency audit",
-		"working-directory: services/gateway\n        run: bun audit",
+		"run: ./scripts/run-bun-audit.sh services/gateway",
 		"name: Secret and redaction static guards",
 	} {
 		if !strings.Contains(securityJob, fragment) {

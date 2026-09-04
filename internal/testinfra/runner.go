@@ -294,9 +294,9 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 	case "security":
 		return []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
-			{Arguments: []string{"bun", "audit"}, WorkingDir: "services/agent-runtime"},
+			{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime"}},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-			{Arguments: []string{"bun", "audit"}, WorkingDir: "services/gateway"},
+			{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
 			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}},
 		}, nil
 	case "sandbox-image":
