@@ -18,12 +18,13 @@ fi
 attempt=1
 max_attempts=3
 retry_delay_seconds="${TETRAL_BUN_AUDIT_RETRY_DELAY_SECONDS:-5}"
+attempt_timeout_seconds="${TETRAL_BUN_AUDIT_TIMEOUT_SECONDS:-60}"
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
 
 while (( attempt <= max_attempts )); do
   set +e
-  (cd "$package_dir" && timeout 5m bun audit) >"$output" 2>&1
+  (cd "$package_dir" && timeout --kill-after=5s "${attempt_timeout_seconds}s" bun audit) >"$output" 2>&1
   status=$?
   set -e
 

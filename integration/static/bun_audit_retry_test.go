@@ -21,6 +21,7 @@ func TestBunAuditRetriesOnlyTransportFailures(t *testing.T) {
 		{name: "transient then clean", scenario: "transient_then_clean", wantSuccess: true, wantRuns: "2"},
 		{name: "vulnerability remains red", scenario: "vulnerability", wantSuccess: false, wantRuns: "1"},
 		{name: "persistent outage remains red", scenario: "persistent_transient", wantSuccess: false, wantRuns: "3"},
+		{name: "hung transport remains bounded", scenario: "hung_transport", wantSuccess: false, wantRuns: "3"},
 	}
 
 	for _, test := range tests {
@@ -52,6 +53,9 @@ case "$TETRAL_FAKE_BUN_SCENARIO" in
     echo 'ConnectionClosed: audit request failed' >&2
     exit 1
     ;;
+  hung_transport)
+    sleep 30
+    ;;
   *)
     exit 2
     ;;
@@ -65,6 +69,7 @@ esac
 			command.Env = append(os.Environ(),
 				"PATH="+binDir+":"+os.Getenv("PATH"),
 				"TETRAL_BUN_AUDIT_RETRY_DELAY_SECONDS=0",
+				"TETRAL_BUN_AUDIT_TIMEOUT_SECONDS=1",
 				"TETRAL_FAKE_BUN_COUNTER="+counter,
 				"TETRAL_FAKE_BUN_SCENARIO="+test.scenario,
 			)
