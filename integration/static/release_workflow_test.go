@@ -211,15 +211,6 @@ func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.
 	}
 }
 
-func jobUsesLocalAction(job releaseWorkflowJob, action string) bool {
-	for _, step := range job.Steps {
-		if step["uses"] == action {
-			return true
-		}
-	}
-	return false
-}
-
 func marshalWorkflowJob(t *testing.T, job releaseWorkflowJob) string {
 	t.Helper()
 	body, err := json.Marshal(job)
