@@ -18,7 +18,10 @@ import (
 
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
@@ -92,7 +95,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `BEGIN; SELECT set_config('tetral.queue_maintenance','true',true); SELECT 1 FROM queue_jobs LIMIT 1; COMMIT`)
 
 		seedRLSRows(t, admin)
-		assertRepresentativeWorkloadOperations(t, databaseName, declarations)
+		assertRepresentativeWorkloadOperations(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -230,7 +233,7 @@ func assertExactWorkloadPrivileges(t *testing.T, admin *sql.DB, contract databas
 	}
 }
 
-func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, declarations database.RoleDeclarations) {
+func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
 	t.Helper()
 	operations := map[string][]string{
 		"auth": {`UPDATE api_keys SET name=name WHERE false`},
@@ -295,7 +298,66 @@ func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, d
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertAPIEnvironmentBuildAdmission(t, databaseName, admin, declarations.Roles["api"])
+	assertBridgeRuntimeRecoveryAdmission(t, databaseName, admin, declarations.Roles["bridge"])
 	assertSameWorkspaceCrossSessionAccess(t, databaseName, declarations)
+}
+
+func assertAPIEnvironmentBuildAdmission(t *testing.T, databaseName string, admin *sql.DB, credential database.RoleCredential) {
+	t.Helper()
+	api := openManagedRoleSQL(t, databaseName, credential)
+	defer func() { _ = api.Close() }()
+	store := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(api))
+	created, err := store.Create(context.Background(), workspace.ID("ws_contract_a"), environment.CreateEnvironmentRequest{
+		Name: "role-contract-packages",
+		Config: environment.EnvironmentConfig{
+			Packages: environment.PackageMap{"pip": {"pandas==2.2.0"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("API role package environment creation failed: %v", err)
+	}
+	var artifacts, jobs, counters int
+	if err := admin.QueryRow(`SELECT count(*) FROM environment_artifacts WHERE workspace_id='ws_contract_a' AND environment_id=$1 AND status='pending'`, created.ID).Scan(&artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='ws_contract_a' AND kind='environment_build'`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_partition_counters WHERE workspace_id='ws_contract_a'`).Scan(&counters); err != nil {
+		t.Fatal(err)
+	}
+	if artifacts != 1 || jobs != 1 || counters != 1 {
+		t.Fatalf("API role package environment admission = artifacts:%d jobs:%d counters:%d; want 1/1/1", artifacts, jobs, counters)
+	}
+}
+
+func assertBridgeRuntimeRecoveryAdmission(t *testing.T, databaseName string, admin *sql.DB, credential database.RoleCredential) {
+	t.Helper()
+	bridge := openManagedRoleSQL(t, databaseName, credential)
+	defer func() { _ = bridge.Close() }()
+	client := dbconnect.NewClientForTesting(bridge)
+	ws := workspace.ID("ws_contract_a")
+	request, err := queue.NewRuntimeRecoveryEnqueueRequest(ws, "ses_seed_a_0", "sth_contract", "evt_contract_recovery", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.WithWorkspaceTx(context.Background(), string(ws), "role_contract.bridge_recovery", func(tx *dbconnect.Tx) error {
+		_, enqueueErr := queue.EnqueueTx(context.Background(), tx, request)
+		return enqueueErr
+	}); err != nil {
+		t.Fatalf("Bridge role Runtime recovery admission failed: %v", err)
+	}
+	var jobs, counters int
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id=$1 AND kind=$2 AND dedupe_key=$3`, string(ws), request.Kind, request.DedupeKey).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_partition_counters WHERE workspace_id=$1 AND partition_key=$2`, string(ws), request.PartitionKey).Scan(&counters); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 || counters != 1 {
+		t.Fatalf("Bridge role Runtime recovery admission = jobs:%d counters:%d; want 1/1", jobs, counters)
+	}
 }
 
 func assertSameWorkspaceCrossSessionAccess(t *testing.T, databaseName string, declarations database.RoleDeclarations) {
