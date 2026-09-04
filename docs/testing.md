@@ -37,10 +37,11 @@ The readable CI topology is:
 
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or
-the audit runner changes. The main-branch workflow does not repeat the same
-remote query after merge; the daily scheduled workflow catches advisories
-published after the dependency graph was accepted. Secret, redaction, import,
-and boundary checks remain part of normal repository evidence at every layer.
+the audit execution plumbing changes. The main-branch workflow does not repeat
+the same remote query after merge; the daily scheduled workflow catches
+advisories published after the dependency graph was accepted. Secret,
+redaction, import, and boundary checks remain part of normal repository
+evidence at every layer, including the dependency setup they require.
 
 To force the online audit locally, run:
 

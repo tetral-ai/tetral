@@ -321,10 +321,11 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
 		}, nil
 	case "security":
-		commands := []commandSpec{}
+		commands := []commandSpec{
+			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
+		}
 		if runDependencyAudit(plan, dependencyAuditMode) {
 			commands = append(commands,
-				commandSpec{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
 				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime"}},
 				commandSpec{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
 				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
@@ -356,9 +357,18 @@ func runDependencyAudit(plan Plan, mode DependencyAuditMode) bool {
 	case DependencyAuditNever:
 		return false
 	}
+	auditOwnerPaths := map[string]bool{
+		".github/actions/run-test-evidence/action.yml":    true,
+		".github/workflows/main-branch-verification.yml":  true,
+		".github/workflows/pull-request-verification.yml": true,
+		".github/workflows/scheduled-verification.yml":    true,
+		"internal/testinfra/cmd/tetral-test/main.go":      true,
+		"internal/testinfra/runner.go":                    true,
+		"scripts/run-bun-audit.sh":                        true,
+	}
 	for _, path := range plan.Revision.ChangedPaths {
 		base := filepath.Base(path)
-		if base == "package.json" || base == "bun.lock" || path == "scripts/run-bun-audit.sh" {
+		if base == "package.json" || base == "bun.lock" || auditOwnerPaths[path] {
 			return true
 		}
 	}

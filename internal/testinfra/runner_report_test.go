@@ -47,6 +47,7 @@ func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 		{name: "changed package manifest", mode: DependencyAuditChanged, paths: []string{"services/gateway/package.json"}, wantAudits: 2},
 		{name: "changed lockfile", mode: DependencyAuditChanged, paths: []string{"services/agent-runtime/bun.lock"}, wantAudits: 2},
 		{name: "changed audit runner", mode: DependencyAuditChanged, paths: []string{"scripts/run-bun-audit.sh"}, wantAudits: 2},
+		{name: "changed audit plumbing", mode: DependencyAuditChanged, paths: []string{"internal/testinfra/runner.go"}, wantAudits: 2},
 		{name: "always", mode: DependencyAuditAlways, wantAudits: 2},
 		{name: "never", mode: DependencyAuditNever, paths: []string{"services/gateway/package.json"}},
 	}
@@ -59,9 +60,19 @@ func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 			}
 			audits := 0
 			staticChecks := 0
+			runtimeInstalls := 0
+			gatewayInstalls := 0
 			for _, command := range commands {
 				if len(command.Arguments) > 0 && command.Arguments[0] == "./scripts/run-bun-audit.sh" {
 					audits++
+				}
+				if slices.Equal(command.Arguments, []string{"bun", "install", "--frozen-lockfile"}) {
+					switch command.WorkingDir {
+					case "services/agent-runtime":
+						runtimeInstalls++
+					case "services/gateway":
+						gatewayInstalls++
+					}
 				}
 				if slices.Equal(command.Arguments[:min(3, len(command.Arguments))], []string{"go", "test", "./integration/static"}) {
 					staticChecks++
@@ -69,6 +80,12 @@ func TestSecuritySelectionAppliesDependencyAuditPolicy(t *testing.T) {
 			}
 			if audits != test.wantAudits {
 				t.Fatalf("online audits = %d; want %d", audits, test.wantAudits)
+			}
+			if runtimeInstalls != 1 {
+				t.Fatalf("Runtime installs = %d; want 1 for deterministic boundary checks", runtimeInstalls)
+			}
+			if gatewayInstalls != test.wantAudits/2 {
+				t.Fatalf("Gateway installs = %d; want %d", gatewayInstalls, test.wantAudits/2)
 			}
 			if staticChecks != 1 {
 				t.Fatalf("static security checks = %d; want 1", staticChecks)
