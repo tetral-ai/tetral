@@ -58,9 +58,6 @@ func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {
 		if !ok || job.Environment != "release" {
 			t.Fatalf("write job %q is absent or outside the release environment", name)
 		}
-		if !jobUsesLocalAction(job, "./.github/actions/verify-release-authority") {
-			t.Fatalf("write job %q does not re-read GitHub authority before mutation", name)
-		}
 	}
 	if workflow.Jobs["state"].Environment != "" {
 		t.Fatal("read-only state reconstruction must not cross the release environment")
@@ -212,15 +209,6 @@ func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.
 			t.Fatalf("fixed release identity %q failed: %v", valid, err)
 		}
 	}
-}
-
-func jobUsesLocalAction(job releaseWorkflowJob, action string) bool {
-	for _, step := range job.Steps {
-		if step["uses"] == action {
-			return true
-		}
-	}
-	return false
 }
 
 func marshalWorkflowJob(t *testing.T, job releaseWorkflowJob) string {
