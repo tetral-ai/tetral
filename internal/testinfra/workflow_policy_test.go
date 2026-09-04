@@ -18,8 +18,41 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 	if err := VerifyMainBranchWorkflow(root); err != nil {
 		t.Fatal(err)
 	}
+	if err := VerifyScheduledWorkflow(root); err != nil {
+		t.Fatal(err)
+	}
 	if err := VerifyLegacyShadowSidecar(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScheduledWorkflowRejectsMissingBunSetup(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := t.TempDir()
+	source := filepath.Join(root, ".github", "workflows", "scheduled-verification.yml")
+	body, err := os.ReadFile(source) //nolint:gosec // source is a repository-owned workflow fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	const setup = `      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: services/gateway/package.json
+`
+	mutated := strings.Replace(string(body), setup, "", 1)
+	if mutated == string(body) {
+		t.Fatal("scheduled workflow fixture did not contain the pinned Bun setup")
+	}
+	destination := filepath.Join(fixture, ".github", "workflows")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(destination, "scheduled-verification.yml")
+	if err := os.WriteFile(path, []byte(mutated), 0o600); err != nil { //nolint:gosec // fixture path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyScheduledWorkflow(fixture); err == nil {
+		t.Fatal("scheduled concurrency history without Bun setup passed")
 	}
 }
 

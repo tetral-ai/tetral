@@ -36,8 +36,8 @@ func TestRunGRPCWorkloadMetricsIncludeDatabaseStats(t *testing.T) {
 			return grpcWorkloadAuthenticator{}, nil
 		},
 		RunInternalGRPC: func(ctx context.Context, cfg Config) error {
-			cfg.OnServing()
 			cfg.Metrics.ObserveGRPCRequest("/tetral.test.v1.Service/Call", "OK", time.Second)
+			cfg.OnServing()
 			<-ctx.Done()
 			return nil
 		},

@@ -499,6 +499,7 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 		t.Error("the symbol-level scan step must run under set -euo pipefail so a failing slice fails the job")
 	}
 	expectedSlices := []string{
+		"./database/...",
 		"./deploy/...",
 		"./integration/...",
 		"./internal/...",

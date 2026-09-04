@@ -21,6 +21,8 @@ var pullRequestJobs = map[string]string{
 	"merge-gate":             "Merge Gate",
 }
 
+const pinnedSetupBunAction = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+
 func VerifyPullRequestWorkflow(root string) error {
 	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
 	if err != nil {
@@ -117,6 +119,33 @@ func VerifyMainBranchWorkflow(root string) error {
 		"unshare -Ur -m true",
 	) {
 		return fmt.Errorf("main coverage does not prepare its Go integration host")
+	}
+	return nil
+}
+
+func VerifyScheduledWorkflow(root string) error {
+	document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "scheduled-verification.yml"))
+	if err != nil {
+		return err
+	}
+	jobs := mappingValue(document.Content[0], "jobs")
+	job := mappingValue(jobs, "concurrency-history")
+	if job == nil {
+		return fmt.Errorf("scheduled concurrency history job is missing")
+	}
+	setupIndex := -1
+	runIndex := -1
+	for index, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if scalar(mappingValue(step, "uses")) == pinnedSetupBunAction &&
+			scalar(mappingValue(mappingValue(step, "with"), "bun-version-file")) == "services/gateway/package.json" {
+			setupIndex = index
+		}
+		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-scheduled") {
+			runIndex = index
+		}
+	}
+	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
+		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
 	}
 	return nil
 }
