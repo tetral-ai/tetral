@@ -122,15 +122,73 @@ func VerifyMainBranchWorkflow(root string) error {
 		return err
 	}
 	jobs := mappingValue(document.Content[0], "jobs")
-	integrated := mappingValue(jobs, "integrated-correctness")
-	if integrated == nil || !jobEvidenceInputEquals(integrated, "group", "all") {
-		return fmt.Errorf("main integrated correctness does not run the full evidence group")
+	if mappingValue(jobs, "integrated-correctness") != nil {
+		return fmt.Errorf("main verification retains the serial integrated evidence job")
 	}
-	if !jobEvidenceInputEquals(integrated, "needs-go-test-host", "true") {
-		return fmt.Errorf("main integrated correctness does not prepare its Go integration host")
+	verification := mappingValue(jobs, "verification")
+	if verification == nil || scalar(mappingValue(verification, "name")) != "${{ matrix.name }}" {
+		return fmt.Errorf("main verification matrix is missing")
 	}
-	if !jobEvidenceInputEquals(integrated, "dependency-audit", string(DependencyAuditNever)) {
-		return fmt.Errorf("main integrated correctness repeats the online dependency audit")
+	if scalar(mappingValue(mappingValue(verification, "strategy"), "fail-fast")) != "false" {
+		return fmt.Errorf("main verification matrix is not fail-independent")
+	}
+	include := mappingValue(mappingValue(mappingValue(verification, "strategy"), "matrix"), "include")
+	type matrixEntry struct {
+		name, producer, bun, buf, helm, lint string
+	}
+	wantGroups := map[string]matrixEntry{
+		"repository":    {name: "Repository Integrity", producer: "repository", bun: "false", buf: "false", helm: "false", lint: "false"},
+		"go-static":     {name: "Go Static Analysis", producer: "go-static", bun: "false", buf: "false", helm: "false", lint: "true"},
+		"runtime":       {name: "Agent Runtime", producer: "runtime", bun: "true", buf: "false", helm: "false", lint: "false"},
+		"gateway":       {name: "Provider Gateway", producer: "gateway", bun: "true", buf: "false", helm: "false", lint: "false"},
+		"protocol":      {name: "Protocol and SDK Compatibility", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
+		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "false", buf: "false", helm: "true", lint: "false"},
+		"sandbox-image": {name: "Sandbox Image", producer: "sandbox-image", bun: "false", buf: "false", helm: "false", lint: "false"},
+		"security":      {name: "Dependency Security", producer: "security", bun: "true", buf: "false", helm: "false", lint: "false"},
+	}
+	gotGroups := map[string]matrixEntry{}
+	for _, entry := range sequenceNodes(include) {
+		group := scalar(mappingValue(entry, "group"))
+		got := matrixEntry{
+			name: scalar(mappingValue(entry, "name")), producer: scalar(mappingValue(entry, "producer")),
+			bun: scalar(mappingValue(entry, "needs_bun")), buf: scalar(mappingValue(entry, "needs_buf")),
+			helm: scalar(mappingValue(entry, "needs_helm")), lint: scalar(mappingValue(entry, "needs_lint")),
+		}
+		if group == "" || got.producer == "" || gotGroups[group].producer != "" {
+			return fmt.Errorf("main verification matrix contains an invalid or duplicate evidence group %q", group)
+		}
+		gotGroups[group] = got
+	}
+	if len(gotGroups) != len(wantGroups) {
+		return fmt.Errorf("main verification matrix has %d evidence groups; want %d", len(gotGroups), len(wantGroups))
+	}
+	for group, want := range wantGroups {
+		if got := gotGroups[group]; got != want {
+			return fmt.Errorf("main verification group %q = %+v; want %+v", group, got, want)
+		}
+	}
+	if !jobEvidenceInputEquals(verification, "group", "${{ matrix.group }}") ||
+		!jobEvidenceInputEquals(verification, "producer", "${{ matrix.producer }}") ||
+		!jobEvidenceInputEquals(verification, "needs-bun", "${{ matrix.needs_bun }}") ||
+		!jobEvidenceInputEquals(verification, "needs-buf", "${{ matrix.needs_buf }}") ||
+		!jobEvidenceInputEquals(verification, "needs-helm", "${{ matrix.needs_helm }}") ||
+		!jobEvidenceInputEquals(verification, "needs-lint", "${{ matrix.needs_lint }}") ||
+		!jobEvidenceInputEquals(verification, "dependency-audit", string(DependencyAuditNever)) {
+		return fmt.Errorf("main verification matrix does not preserve evidence identity or offline audit policy")
+	}
+	race := mappingValue(jobs, "go-race")
+	shards := sequenceScalars(mappingValue(mappingValue(mappingValue(race, "strategy"), "matrix"), "shard"))
+	if !sameStrings(shards, []string{"0", "1", "2", "3"}) ||
+		!jobEvidenceInputEquals(race, "producer", "go-${{ matrix.shard }}") ||
+		!jobEvidenceInputEquals(race, "shard-count", "4") ||
+		!goRacePreparesIntegrationHost(race) {
+		return fmt.Errorf("main Go Race does not own four complete integration-ready shards")
+	}
+	if !jobEvidenceInputEquals(race, "dependency-audit", string(DependencyAuditNever)) {
+		return fmt.Errorf("main Go Race repeats the online dependency audit")
+	}
+	if !jobChecksOutFullHistory(verification) || !jobChecksOutFullHistory(race) {
+		return fmt.Errorf("main parallel verification does not check out complete repository history")
 	}
 	coverage := mappingValue(jobs, "coverage")
 	if !jobRunContainsAll(coverage,
