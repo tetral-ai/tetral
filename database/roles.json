@@ -23,6 +23,7 @@
         "session_runtime_status": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "request_usage_details": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_provider_auth": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "agents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "agent_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
