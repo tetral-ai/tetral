@@ -107,7 +107,7 @@ func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, 
 	if err != nil && !os.IsNotExist(err) {
 		return report, err
 	}
-	live, liveErr := readWorkflowHealth(ctx, commandGHClient{}, repository, runID, runAttempt)
+	live, liveErr := readWorkflowHealth(ctx, commandGitHubClient{}, repository, runID, runAttempt)
 	if liveErr != nil {
 		report.ApparatusNotes = append(report.ApparatusNotes, liveErr.Error())
 	} else {
@@ -120,7 +120,7 @@ func BuildCIHealthReport(ctx context.Context, artifactsRoot, repository string, 
 	return report, nil
 }
 
-func collectCompletedJobHealth(report *CIHealthReport, jobs []ShadowJob) {
+func collectCompletedJobHealth(report *CIHealthReport, jobs []workflowJob) {
 	for _, job := range jobs {
 		if job.Status != "completed" || job.Conclusion == "" || job.StartedAt.IsZero() || job.CompletedAt.Before(job.StartedAt) {
 			continue
@@ -137,16 +137,16 @@ func collectCompletedJobHealth(report *CIHealthReport, jobs []ShadowJob) {
 type workflowHealth struct {
 	CreatedAt time.Time
 	StartedAt time.Time
-	Jobs      []ShadowJob
+	Jobs      []workflowJob
 }
 
-func readWorkflowHealth(ctx context.Context, client ghShadowClient, repository string, runID int64, runAttempt int) (workflowHealth, error) {
+func readWorkflowHealth(ctx context.Context, client githubAPIClient, repository string, runID int64, runAttempt int) (workflowHealth, error) {
 	var run githubWorkflowRun
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", repository, runID, runAttempt), &run); err != nil {
 		return workflowHealth{}, err
 	}
 	var jobs struct {
-		Jobs []ShadowJob `json:"jobs"`
+		Jobs []workflowJob `json:"jobs"`
 	}
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repository, runID, runAttempt), &jobs); err != nil {
 		return workflowHealth{}, err

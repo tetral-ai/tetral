@@ -21,9 +21,6 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 	if err := VerifyScheduledWorkflow(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyLegacyShadowSidecar(root); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestScheduledWorkflowRejectsMissingBunSetup(t *testing.T) {

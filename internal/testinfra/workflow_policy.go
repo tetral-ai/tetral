@@ -189,27 +189,6 @@ func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
 	return false
 }
 
-func VerifyLegacyShadowSidecar(root string) error {
-	document, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "legacy-shadow-sidecar", "action.yml"))
-	if err != nil {
-		return err
-	}
-	action := document.Content[0]
-	steps := sequenceNodes(mappingValue(mappingValue(action, "runs"), "steps"))
-	if len(steps) != 2 {
-		return fmt.Errorf("legacy shadow sidecar must contain exactly record and upload steps")
-	}
-	for _, step := range steps {
-		if scalar(mappingValue(step, "continue-on-error")) != "true" {
-			return fmt.Errorf("legacy shadow sidecar can influence the authoritative verdict")
-		}
-	}
-	if scalar(mappingValue(steps[1], "if")) != "always()" {
-		return fmt.Errorf("legacy shadow upload is not attempted after metadata failure")
-	}
-	return nil
-}
-
 func readOnlyPermissions(permissions *workflowYAMLNode, names []string) bool {
 	if permissions == nil || permissions.Kind != workflowYAMLMapping || len(permissions.Content) != len(names)*2 {
 		return false

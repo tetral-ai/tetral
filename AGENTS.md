@@ -45,9 +45,8 @@ TypeScript (Bun; run inside `services/agent-runtime` or
 `services/gateway` package dirs): `bun install --frozen-lockfile`,
 `bun run typecheck`, `bun run test`, `bun run build`.
 
-The legacy `.github/workflows/engine-ci.yml` remains the authoritative CI
-workflow until the repository completes its measured workflow cutover.
-Repository-wide
+Pull requests are gated by `.github/workflows/pull-request-verification.yml`;
+its `Merge Gate` job is the repository's required check. Repository-wide
 architecture guards live in `integration/static`; when a check fails, the
 failing test is the rule's authoritative text — read it.
 
