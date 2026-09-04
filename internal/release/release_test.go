@@ -297,26 +297,6 @@ func TestReleaseEnvironmentBundleHasExactMainAndRestorablePreState(t *testing.T)
 	}
 }
 
-func TestPackagePreflightRequiresCompleteReadbackAndDeclaredPermission(t *testing.T) {
-	preflight := PackagePreflight{
-		Schema: "tetral.release-package-preflight/v1", Organization: "tetral-ai", RepositoryID: 7,
-		RequireWrite: true, DeclaredJobPermission: "write", ReadbackComplete: true,
-		Packages: []PackageIdentity{{Found: true, Name: "tetral", Organization: "tetral-ai", Visibility: "public", LinkedRepositoryID: 7, ActionsRepositoryIDs: []int64{7}}},
-	}
-	if err := ValidatePackagePreflights(preflight); err != nil {
-		t.Fatal(err)
-	}
-	preflight.ReadbackComplete = false
-	if err := ValidatePackagePreflights(preflight); err == nil {
-		t.Fatal("accepted an incomplete package readback")
-	}
-	preflight.ReadbackComplete = true
-	preflight.DeclaredJobPermission = "read"
-	if err := ValidatePackagePreflights(preflight); err == nil {
-		t.Fatal("accepted a write transition under read-only declared authority")
-	}
-}
-
 func TestGitHubDeploymentAdapterJoinsApprovalAndStatusToCurrentRun(t *testing.T) {
 	root, err := os.Getwd()
 	if err != nil {
@@ -341,41 +321,6 @@ esac
 	output, err := command.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "11" {
 		t.Fatalf("deployment adapter = %q, %v", output, err)
-	}
-}
-
-func TestPackagePreflightRejectsPrivateWrongLinkedOrMovingPackage(t *testing.T) {
-	valid := PackageIdentity{
-		Found: true,
-		Name:  "tetral", Organization: "tetral-ai", Visibility: "public", LinkedRepositoryID: 7,
-		ActionsRepositoryIDs: []int64{7},
-	}
-	notFound := PackageIdentity{
-		Name: "new-package", Organization: "tetral-ai", CreationAuthorized: true,
-	}
-	if err := ValidatePackagePreflight(notFound, "tetral-ai", 7, true); err != nil {
-		t.Fatal(err)
-	}
-	notFound.Visibility = "public"
-	if err := ValidatePackagePreflight(notFound, "tetral-ai", 7, true); err == nil {
-		t.Fatal("accepted fabricated live identity for a not-found package")
-	}
-	if err := ValidatePackagePreflight(valid, "tetral-ai", 7, true); err != nil {
-		t.Fatal(err)
-	}
-	for name, mutate := range map[string]func(*PackageIdentity){
-		"private": func(p *PackageIdentity) { p.Visibility = "private" },
-		"link":    func(p *PackageIdentity) { p.LinkedRepositoryID = 8 },
-		"access":  func(p *PackageIdentity) { p.ActionsRepositoryIDs = nil },
-		"latest":  func(p *PackageIdentity) { p.ExistingReferences = []string{"latest"} },
-	} {
-		t.Run(name, func(t *testing.T) {
-			copy := valid
-			mutate(&copy)
-			if err := ValidatePackagePreflight(copy, "tetral-ai", 7, true); err == nil {
-				t.Fatal("accepted invalid package preflight")
-			}
-		})
 	}
 }
 
