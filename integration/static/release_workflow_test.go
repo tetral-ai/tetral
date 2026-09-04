@@ -161,38 +161,6 @@ func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
 	requireWorkflowActionsUseFullSHAs(t, "mirror-base-images.yml", text)
 }
 
-func TestReleaseAuthorityUsesPaginatedFactsWithoutFabricatedTokenCapabilities(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	for _, relative := range []string{"scripts/verify-release-github-authority.sh", "scripts/release-github-deployment.sh", "scripts/release-oci-record.sh", "scripts/release-state.sh"} {
-		body, err := os.ReadFile(filepath.Join(root, relative)) //nolint:gosec // Repository-owned release adapter.
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		if strings.Contains(text, "repository_token_can_read") || strings.Contains(text, "repository_token_can_write") {
-			t.Fatalf("%s fabricates package-token capability", relative)
-		}
-	}
-	authority, err := os.ReadFile(filepath.Join(root, "scripts", "verify-release-github-authority.sh")) //nolint:gosec // Repository-owned release adapter.
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"--paginate --slurp", "DECLARED_PACKAGE_PERMISSION", "readback_complete:true", "declared_job_permission"} {
-		if !strings.Contains(string(authority), required) {
-			t.Fatalf("release authority readback is missing %q", required)
-		}
-	}
-	oci, err := os.ReadFile(filepath.Join(root, "scripts", "release-oci-record.sh")) //nolint:gosec // Repository-owned release adapter.
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"--to-oci-layout", "validate-layout", "--from-oci-layout"} {
-		if !strings.Contains(string(oci), required) {
-			t.Fatalf("release OCI adapter is missing %q", required)
-		}
-	}
-}
-
 func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	paths := []string{

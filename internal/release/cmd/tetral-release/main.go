@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan|package-preflight>")
+		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan>")
 	}
 	var err error
 	switch os.Args[1] {
@@ -39,8 +39,6 @@ func main() {
 		err = verifyBases(os.Args[2:])
 	case "environment-plan":
 		err = environmentPlan(os.Args[2:])
-	case "package-preflight":
-		err = packagePreflight(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown release command %q", os.Args[1])
 	}
@@ -291,22 +289,6 @@ func environmentPlan(arguments []string) error {
 		return fmt.Errorf("output path is required")
 	}
 	return os.WriteFile(*output, append(body, '\n'), 0o600)
-}
-
-func packagePreflight(arguments []string) error {
-	flags := flag.NewFlagSet("package-preflight", flag.ContinueOnError)
-	input := flags.String("input", "", "normalized package inventory")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	var preflight releasecontract.PackagePreflight
-	if err := readJSON(*input, &preflight); err != nil {
-		return err
-	}
-	if err := releasecontract.ValidatePackagePreflights(preflight); err != nil {
-		return err
-	}
-	return writeJSON(os.Stdout, preflight)
 }
 
 func factsFlags(name string, arguments []string) (releasecontract.Facts, time.Time, error) {
