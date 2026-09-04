@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 var pullRequestJobs = map[string]string{
@@ -105,7 +103,7 @@ func VerifyPullRequestWorkflow(root string) error {
 	return nil
 }
 
-func mergeGateDownloadsAllRunAttempts(job *yaml.Node) bool {
+func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if !strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/download-artifact@") {
 			continue
