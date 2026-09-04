@@ -86,6 +86,7 @@
         "sandbox_output_capture_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "request_usage_details": ["SELECT", "INSERT", "UPDATE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "agent_versions": ["SELECT"],
         "environments": ["SELECT"],

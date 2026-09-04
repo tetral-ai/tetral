@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -298,6 +299,7 @@ func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, a
 		t.Fatal(err)
 	}
 	assertAPIEnvironmentBuildAdmission(t, databaseName, admin, declarations.Roles["api"])
+	assertBridgeRuntimeRecoveryAdmission(t, databaseName, admin, declarations.Roles["bridge"])
 	assertSameWorkspaceCrossSessionAccess(t, databaseName, declarations)
 }
 
@@ -327,6 +329,34 @@ func assertAPIEnvironmentBuildAdmission(t *testing.T, databaseName string, admin
 	}
 	if artifacts != 1 || jobs != 1 || counters != 1 {
 		t.Fatalf("API role package environment admission = artifacts:%d jobs:%d counters:%d; want 1/1/1", artifacts, jobs, counters)
+	}
+}
+
+func assertBridgeRuntimeRecoveryAdmission(t *testing.T, databaseName string, admin *sql.DB, credential database.RoleCredential) {
+	t.Helper()
+	bridge := openManagedRoleSQL(t, databaseName, credential)
+	defer func() { _ = bridge.Close() }()
+	client := dbconnect.NewClientForTesting(bridge)
+	ws := workspace.ID("ws_contract_a")
+	request, err := queue.NewRuntimeRecoveryEnqueueRequest(ws, "ses_seed_a_0", "sth_contract", "evt_contract_recovery", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.WithWorkspaceTx(context.Background(), string(ws), "role_contract.bridge_recovery", func(tx *dbconnect.Tx) error {
+		_, enqueueErr := queue.EnqueueTx(context.Background(), tx, request)
+		return enqueueErr
+	}); err != nil {
+		t.Fatalf("Bridge role Runtime recovery admission failed: %v", err)
+	}
+	var jobs, counters int
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id=$1 AND kind=$2 AND dedupe_key=$3`, string(ws), request.Kind, request.DedupeKey).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_partition_counters WHERE workspace_id=$1 AND partition_key=$2`, string(ws), request.PartitionKey).Scan(&counters); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 || counters != 1 {
+		t.Fatalf("Bridge role Runtime recovery admission = jobs:%d counters:%d; want 1/1", jobs, counters)
 	}
 }
 
