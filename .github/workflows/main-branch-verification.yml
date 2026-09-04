@@ -25,26 +25,112 @@ env:
   TETRAL_CI_JOB: ${{ github.job }}
 
 jobs:
-  integrated-correctness:
-    name: Integrated Correctness and Full Race
+  verification:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Repository Integrity
+            group: repository
+            producer: repository
+            needs_bun: 'false'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'false'
+          - name: Go Static Analysis
+            group: go-static
+            producer: go-static
+            needs_bun: 'false'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'true'
+          - name: Agent Runtime
+            group: runtime
+            producer: runtime
+            needs_bun: 'true'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'false'
+          - name: Provider Gateway
+            group: gateway
+            producer: gateway
+            needs_bun: 'true'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'false'
+          - name: Protocol and SDK Compatibility
+            group: protocol
+            producer: protocol
+            needs_bun: 'true'
+            needs_buf: 'true'
+            needs_helm: 'false'
+            needs_lint: 'false'
+          - name: Deployment Definitions
+            group: deployment
+            producer: deployment
+            needs_bun: 'false'
+            needs_buf: 'false'
+            needs_helm: 'true'
+            needs_lint: 'false'
+          - name: Sandbox Image
+            group: sandbox-image
+            producer: sandbox-image
+            needs_bun: 'false'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'false'
+          - name: Dependency Security
+            group: security
+            producer: security
+            needs_bun: 'true'
+            needs_buf: 'false'
+            needs_helm: 'false'
+            needs_lint: 'false'
     steps:
       - name: Check out the exact merged revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify the merged repository
+      - name: Verify ${{ matrix.name }}
         uses: ./.github/actions/run-test-evidence
         with:
-          group: all
-          producer: integrated
+          group: ${{ matrix.group }}
+          producer: ${{ matrix.producer }}
           artifact-prefix: main-evidence
+          needs-bun: ${{ matrix.needs_bun }}
+          needs-buf: ${{ matrix.needs_buf }}
+          needs-helm: ${{ matrix.needs_helm }}
+          needs-lint: ${{ matrix.needs_lint }}
+          dependency-audit: never
+
+  go-race:
+    name: Go Race (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Check out the exact merged revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify all Go packages under Race
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: go
+          producer: go-${{ matrix.shard }}
+          artifact-prefix: main-evidence
+          shard-index: ${{ matrix.shard }}
+          shard-count: '4'
           needs-bun: 'true'
           needs-buf: 'true'
-          needs-helm: 'true'
-          needs-lint: 'true'
           needs-go-test-host: 'true'
           dependency-audit: never
 

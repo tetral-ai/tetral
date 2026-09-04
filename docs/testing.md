@@ -28,9 +28,11 @@ The readable CI topology is:
   have separate owners. **Merge Gate** reconciles exactly one result from every
   required producer for the same PR event, tested integration commit, workflow
   source, run, and attempt.
-- **Main Branch Verification**: integrated correctness and unsharded full Race
-  on the exact merged commit. Ordinary Go, Runtime, and Gateway coverage is a
-  report-only artifact here, not a PR Race burden.
+- **Main Branch Verification**: the same evidence owners run independently on
+  the exact merged commit. Four jobs shard Go Race; repository, static,
+  Runtime, Gateway, protocol, deployment, image, and security evidence run in
+  parallel. Ordinary Go, Runtime, and Gateway coverage is a separate
+  report-only artifact.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
   each week, plus daily compatibility, repository-health, and online dependency
   audits. A later pass is recorded but never erases the first failure.
