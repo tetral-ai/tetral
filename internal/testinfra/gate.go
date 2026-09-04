@@ -31,9 +31,9 @@ type GateVerdict struct {
 	Failures  []string `json:"failures,omitempty"`
 }
 
-// VerifyMergeGate accepts only one passing result from every expected producer
-// for the exact current execution envelope. It never retries or reinterprets a
-// failed producer.
+// VerifyMergeGate accepts the latest result from every expected producer for
+// the exact current execution envelope. GitHub preserves successful jobs when
+// only failed jobs are rerun, so a complete verdict may span run attempts.
 func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, error) {
 	if err := validateGateExpectation(expectation); err != nil {
 		return GateVerdict{Status: "fail", Failures: []string{err.Error()}}, err
@@ -45,7 +45,13 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		}
 		wanted[producer] = true
 	}
-	results := map[string]Result{}
+	currentAttempt, _ := strconv.ParseUint(expectation.RunAttempt, 10, 32)
+	type attemptedResult struct {
+		attempt uint64
+		result  Result
+	}
+	results := map[string]attemptedResult{}
+	seenAttempts := map[string]map[uint64]bool{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -67,10 +73,23 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		if !wanted[producer] {
 			return fmt.Errorf("unexpected result producer %q", producer)
 		}
-		if _, exists := results[producer]; exists {
-			return fmt.Errorf("duplicate result producer %q", producer)
+		attempt, parseErr := strconv.ParseUint(result.Execution.RunAttempt, 10, 32)
+		if parseErr != nil || attempt == 0 || attempt > currentAttempt {
+			return fmt.Errorf("result producer %q has invalid run attempt", producer)
 		}
-		results[producer] = result
+		if reason := gateResultIdentityFailure(result, expectation); reason != "" {
+			return fmt.Errorf("result producer %q has %s", producer, reason)
+		}
+		if seenAttempts[producer] == nil {
+			seenAttempts[producer] = map[uint64]bool{}
+		}
+		if seenAttempts[producer][attempt] {
+			return fmt.Errorf("duplicate result producer %q for run attempt %d", producer, attempt)
+		}
+		seenAttempts[producer][attempt] = true
+		if existing, exists := results[producer]; !exists || attempt > existing.attempt {
+			results[producer] = attemptedResult{attempt: attempt, result: result}
+		}
 		return nil
 	})
 	if err != nil {
@@ -78,13 +97,13 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 	}
 	verdict := GateVerdict{Status: "pass"}
 	for _, producer := range expectation.Producers {
-		result, exists := results[producer]
+		attempted, exists := results[producer]
 		if !exists {
 			verdict.Failures = append(verdict.Failures, "missing result: "+producer)
 			continue
 		}
 		verdict.Producers = append(verdict.Producers, producer)
-		if reason := gateResultFailure(result, expectation); reason != "" {
+		if reason := gateResultFailure(attempted.result, expectation); reason != "" {
 			verdict.Failures = append(verdict.Failures, producer+": "+reason)
 		}
 	}
@@ -131,6 +150,10 @@ func gateResultFailure(result Result, want GateExpectation) string {
 	if result.Plan.Revision.WorktreeDirty {
 		return "tested worktree was dirty"
 	}
+	return gateResultIdentityFailure(result, want)
+}
+
+func gateResultIdentityFailure(result Result, want GateExpectation) string {
 	pairs := [][3]string{
 		{"repository", result.Execution.Repository, want.Repository},
 		{"event_head_sha", result.Execution.EventHeadSHA, want.EventHeadSHA},
@@ -140,7 +163,6 @@ func gateResultFailure(result Result, want GateExpectation) string {
 		{"workflow_source_sha", result.Execution.WorkflowSourceSHA, want.WorkflowSourceSHA},
 		{"workflow", result.Execution.Workflow, want.Workflow},
 		{"run_id", result.Execution.RunID, want.RunID},
-		{"run_attempt", result.Execution.RunAttempt, want.RunAttempt},
 		{"plan_head", result.Plan.Revision.Head, want.TestMergeSHA},
 	}
 	for _, pair := range pairs {

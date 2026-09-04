@@ -70,6 +70,28 @@ func TestPullRequestWorkflowRejectsMismatchedRaceShardCount(t *testing.T) {
 	}
 }
 
+func TestPullRequestWorkflowRejectsCurrentAttemptOnlyEvidence(t *testing.T) {
+	root := testRepositoryRoot(t)
+	fixture := copyPullRequestWorkflowFixture(t, root)
+	path := filepath.Join(fixture, ".github", "workflows", "pull-request-verification.yml")
+	body, err := os.ReadFile(path) //nolint:gosec // path is rooted in t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(
+		string(body),
+		"pr-evidence-*-${{ github.run_id }}-*",
+		"pr-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}",
+		1,
+	))
+	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // path is rooted in t.TempDir.
+		t.Fatal(err)
+	}
+	if err := VerifyPullRequestWorkflow(fixture); err == nil {
+		t.Fatal("current-attempt-only Merge Gate evidence passed")
+	}
+}
+
 func TestMainWorkflowRejectsUnpreparedGoIntegrationHost(t *testing.T) {
 	root := testRepositoryRoot(t)
 	fixture := t.TempDir()

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 var pullRequestJobs = map[string]string{
@@ -77,6 +79,9 @@ func VerifyPullRequestWorkflow(root string) error {
 	if scalar(mappingValue(gate, "if")) != "always()" {
 		return fmt.Errorf("merge Gate is not unconditional")
 	}
+	if !mergeGateDownloadsAllRunAttempts(gate) {
+		return fmt.Errorf("merge Gate does not reconcile evidence across rerun attempts")
+	}
 	expectedNeeds := []string{"repository-integrity", "go-static-analysis", "go-race", "agent-runtime", "provider-gateway", "protocol-sdk", "deployment-definitions", "sandbox-image", "dependency-security"}
 	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), expectedNeeds) {
 		return fmt.Errorf("merge Gate dependency set is incomplete")
@@ -98,6 +103,16 @@ func VerifyPullRequestWorkflow(root string) error {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
 	}
 	return nil
+}
+
+func mergeGateDownloadsAllRunAttempts(job *yaml.Node) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if !strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/download-artifact@") {
+			continue
+		}
+		return scalar(mappingValue(mappingValue(step, "with"), "pattern")) == "pr-evidence-*-${{ github.run_id }}-*"
+	}
+	return false
 }
 
 func VerifyMainBranchWorkflow(root string) error {
