@@ -20,6 +20,7 @@ func main() {
 	planOnly := flag.Bool("plan-only", false, "print the selection plan without executing it")
 	output := flag.String("output", "", "result artifact directory")
 	workers := flag.Int("workers", 0, "maximum local package workers")
+	dependencyAudit := flag.String("dependency-audit", "changed", "online dependency audit policy: changed, always, or never")
 	groups := flag.String("groups", "", "comma-separated evidence groups to execute from the selected profile")
 	shardIndex := flag.Int("shard-index", 0, "zero-based Go package shard index")
 	shardCount := flag.Int("shard-count", 1, "number of deterministic Go package shards")
@@ -40,14 +41,19 @@ func main() {
 		}
 	}
 	printPlan(plan, *base)
+	dependencyAuditMode, err := testinfra.ParseDependencyAuditMode(*dependencyAudit)
+	if err != nil {
+		fatal(err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	result, err := testinfra.Execute(ctx, plan, testinfra.RunOptions{
-		Root:       root,
-		OutputDir:  *output,
-		PlanOnly:   *planOnly,
-		MaxWorkers: *workers,
+		Root:                root,
+		OutputDir:           *output,
+		PlanOnly:            *planOnly,
+		MaxWorkers:          *workers,
+		DependencyAuditMode: dependencyAuditMode,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "verification %s: %v\n", result.Status, err)

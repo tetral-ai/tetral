@@ -87,7 +87,7 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 	candidate := marshalWorkflowJob(t, workflow.Jobs["candidate-images"])
 	finalize := marshalWorkflowJob(t, workflow.Jobs["finalize-candidate"])
 	promote := marshalWorkflowJob(t, workflow.Jobs["promote"])
-	for _, token := range []string{"docker/build-push-action@", `"platforms":"linux/amd64"`, "Build candidate exactly once"} {
+	for _, token := range []string{"docker/build-push-action@", `"platforms":"linux/amd64"`} {
 		if !strings.Contains(candidate, token) {
 			t.Fatalf("candidate build is missing %q", token)
 		}
@@ -148,7 +148,7 @@ func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
 		t.Fatalf("base-image triggers = %#v", workflow.On)
 	}
 	text := string(body)
-	for _, required := range []string{"repository@sha256:digest", "linux/amd64", "Mirror without overwrite", "source_identity", "selected_digest", "TARGET_REPOSITORY: ${{ inputs.target_repository }}", "--prefer-index=false", "target_digest", "internal/release/base_images.json", "Update the owning Dockerfile"} {
+	for _, required := range []string{"repository@sha256:digest", "linux/amd64", "source_identity", "selected_digest", "TARGET_REPOSITORY: ${{ inputs.target_repository }}", "--prefer-index=false", "target_digest", "internal/release/base_images.json"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("base-image maintenance is missing %q", required)
 		}

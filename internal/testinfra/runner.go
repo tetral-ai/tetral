@@ -22,14 +22,43 @@ import (
 )
 
 type RunOptions struct {
-	Root       string
-	OutputDir  string
-	PlanOnly   bool
-	MaxWorkers int
+	Root                string
+	OutputDir           string
+	PlanOnly            bool
+	MaxWorkers          int
+	DependencyAuditMode DependencyAuditMode
+}
+
+type DependencyAuditMode string
+
+const (
+	DependencyAuditChanged DependencyAuditMode = "changed"
+	DependencyAuditAlways  DependencyAuditMode = "always"
+	DependencyAuditNever   DependencyAuditMode = "never"
+)
+
+func ParseDependencyAuditMode(value string) (DependencyAuditMode, error) {
+	mode := DependencyAuditMode(value)
+	if mode == "" {
+		mode = DependencyAuditChanged
+	}
+	switch mode {
+	case DependencyAuditChanged, DependencyAuditAlways, DependencyAuditNever:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown dependency audit mode %q", value)
+	}
 }
 
 func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error) {
 	result := Result{Plan: plan, Execution: executionEnvelopeFromEnvironment(), StartedAt: time.Now().UTC(), Status: "pass"}
+	dependencyAuditMode, err := ParseDependencyAuditMode(string(options.DependencyAuditMode))
+	if err != nil {
+		result.Status = "apparatus-failed"
+		result.FinishedAt = time.Now().UTC()
+		return result, err
+	}
+	options.DependencyAuditMode = dependencyAuditMode
 	if options.PlanOnly {
 		result.FinishedAt = time.Now().UTC()
 		return result, nil
@@ -116,7 +145,7 @@ func executionEnvelopeFromEnvironment() ExecutionEnvelope {
 }
 
 func executeSelection(ctx context.Context, plan Plan, selection Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
-	commands, err := commandsForSelection(plan, selection, options.Root, options.OutputDir)
+	commands, err := commandsForSelection(plan, selection, options.Root, options.OutputDir, options.DependencyAuditMode)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +233,7 @@ type commandSpec struct {
 
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
 
-func commandsForSelection(plan Plan, selection Selection, root, outputDir string) ([]commandSpec, error) {
+func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
 	case "repository":
 		return []commandSpec{{Arguments: []string{"go", "run", "./internal/testinfra/cmd/tetral-format-check"}}}, nil
@@ -292,13 +321,17 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
 		}, nil
 	case "security":
-		return []commandSpec{
+		commands := []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
-			{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime"}},
-			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-			{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
-			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}},
-		}, nil
+		}
+		if runDependencyAudit(plan, dependencyAuditMode) {
+			commands = append(commands,
+				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/agent-runtime"}},
+				commandSpec{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
+				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
+			)
+		}
+		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
 	case "sandbox-image":
 		return []commandSpec{
 			{Arguments: []string{"./scripts/run-helper-privilege-container.sh"}},
@@ -315,6 +348,31 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 	default:
 		return nil, fmt.Errorf("unknown evidence group %q", selection.Group)
 	}
+}
+
+func runDependencyAudit(plan Plan, mode DependencyAuditMode) bool {
+	switch mode {
+	case DependencyAuditAlways:
+		return true
+	case DependencyAuditNever:
+		return false
+	}
+	auditOwnerPaths := map[string]bool{
+		".github/actions/run-test-evidence/action.yml":    true,
+		".github/workflows/main-branch-verification.yml":  true,
+		".github/workflows/pull-request-verification.yml": true,
+		".github/workflows/scheduled-verification.yml":    true,
+		"internal/testinfra/cmd/tetral-test/main.go":      true,
+		"internal/testinfra/runner.go":                    true,
+		"scripts/run-bun-audit.sh":                        true,
+	}
+	for _, path := range plan.Revision.ChangedPaths {
+		base := filepath.Base(path)
+		if base == "package.json" || base == "bun.lock" || auditOwnerPaths[path] {
+			return true
+		}
+	}
+	return false
 }
 
 func runStep(ctx context.Context, root, group string, spec commandSpec, dependencies *dependencyManager, outputDir string) (StepResult, error) {

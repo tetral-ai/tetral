@@ -2,6 +2,7 @@ name: Scheduled Verification
 
 on:
   schedule:
+    - cron: '41 6 * * *'
     - cron: '17 7 * * 1'
   workflow_dispatch:
 
@@ -28,6 +29,7 @@ env:
 jobs:
   concurrency-history:
     name: Repeated Concurrency Owners
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -60,6 +62,7 @@ jobs:
 
   compatibility-health:
     name: Compatibility and Repository Health
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -76,6 +79,7 @@ jobs:
           artifact-prefix: scheduled-evidence
           needs-bun: 'true'
           needs-buf: 'true'
+          dependency-audit: always
 
   ci-health:
     name: CI Health and Calibration

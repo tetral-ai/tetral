@@ -195,6 +195,7 @@ jobs:
           producer: security
           artifact-prefix: pr-evidence
           needs-bun: 'true'
+          dependency-audit: changed
 
   merge-gate:
     name: Merge Gate

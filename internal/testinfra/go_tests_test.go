@@ -128,7 +128,7 @@ func TestAffectedFullFallbackRunsCompleteRuntimeEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := Plan{Profile: ProfileAffected, Revision: Revision{FullFallbackCause: "test fallback"}}
-	commands, err := commandsForSelection(plan, Selection{Group: "runtime", Tests: selected}, root, t.TempDir())
+	commands, err := commandsForSelection(plan, Selection{Group: "runtime", Tests: selected}, root, t.TempDir(), DependencyAuditChanged)
 	if err != nil {
 		t.Fatal(err)
 	}

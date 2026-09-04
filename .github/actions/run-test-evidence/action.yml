@@ -39,6 +39,10 @@ inputs:
     description: Prepare host capabilities required by the complete Go integration suite
     required: false
     default: 'false'
+  dependency-audit:
+    description: 'Online dependency audit policy: changed, always, or never'
+    required: false
+    default: changed
 runs:
   using: composite
   steps:
@@ -99,6 +103,7 @@ runs:
         fi
         go run ./internal/testinfra/cmd/tetral-test \
           --profile full \
+          --dependency-audit '${{ inputs.dependency-audit }}' \
           "${group_args[@]}" \
           --shard-index '${{ inputs.shard-index }}' \
           --shard-count '${{ inputs.shard-count }}' \
