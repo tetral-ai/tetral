@@ -77,6 +77,9 @@ func VerifyPullRequestWorkflow(root string) error {
 	if scalar(mappingValue(gate, "if")) != "always()" {
 		return fmt.Errorf("merge Gate is not unconditional")
 	}
+	if !mergeGateDownloadsAllRunAttempts(gate) {
+		return fmt.Errorf("merge Gate does not reconcile evidence across rerun attempts")
+	}
 	expectedNeeds := []string{"repository-integrity", "go-static-analysis", "go-race", "agent-runtime", "provider-gateway", "protocol-sdk", "deployment-definitions", "sandbox-image", "dependency-security"}
 	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), expectedNeeds) {
 		return fmt.Errorf("merge Gate dependency set is incomplete")
@@ -98,6 +101,16 @@ func VerifyPullRequestWorkflow(root string) error {
 		return fmt.Errorf("workflow producers do not match the PR producer inventory")
 	}
 	return nil
+}
+
+func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if !strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/download-artifact@") {
+			continue
+		}
+		return scalar(mappingValue(mappingValue(step, "with"), "pattern")) == "pr-evidence-*-${{ github.run_id }}-*"
+	}
+	return false
 }
 
 func VerifyMainBranchWorkflow(root string) error {
@@ -187,27 +200,6 @@ func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {
 		return scalar(mappingValue(mappingValue(step, "with"), name)) == value
 	}
 	return false
-}
-
-func VerifyLegacyShadowSidecar(root string) error {
-	document, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "legacy-shadow-sidecar", "action.yml"))
-	if err != nil {
-		return err
-	}
-	action := document.Content[0]
-	steps := sequenceNodes(mappingValue(mappingValue(action, "runs"), "steps"))
-	if len(steps) != 2 {
-		return fmt.Errorf("legacy shadow sidecar must contain exactly record and upload steps")
-	}
-	for _, step := range steps {
-		if scalar(mappingValue(step, "continue-on-error")) != "true" {
-			return fmt.Errorf("legacy shadow sidecar can influence the authoritative verdict")
-		}
-	}
-	if scalar(mappingValue(steps[1], "if")) != "always()" {
-		return fmt.Errorf("legacy shadow upload is not attempted after metadata failure")
-	}
-	return nil
 }
 
 func readOnlyPermissions(permissions *workflowYAMLNode, names []string) bool {

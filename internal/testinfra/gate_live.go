@@ -18,7 +18,7 @@ type GateLiveFacts struct {
 	CheckSuiteID   int64
 	CheckHeadSHA   string
 	SourceAppID    int64
-	GateChecks     []ShadowCheck
+	GateChecks     []workflowCheck
 }
 
 func VerifyUpstreamNeeds(body string, expectedJobs []string) error {
@@ -48,10 +48,10 @@ func PRUpstreamJobs() []string {
 }
 
 func ReadLiveGateFacts(ctx context.Context, repository string, pullRequest int, runID int64, runAttempt int) (GateLiveFacts, error) {
-	return readLiveGateFacts(ctx, commandGHClient{}, repository, pullRequest, runID, runAttempt)
+	return readLiveGateFacts(ctx, commandGitHubClient{}, repository, pullRequest, runID, runAttempt)
 }
 
-func readLiveGateFacts(ctx context.Context, client ghShadowClient, repository string, pullRequest int, runID int64, runAttempt int) (GateLiveFacts, error) {
+func readLiveGateFacts(ctx context.Context, client githubAPIClient, repository string, pullRequest int, runID int64, runAttempt int) (GateLiveFacts, error) {
 	var pull struct {
 		Head struct {
 			SHA string `json:"sha"`
@@ -91,10 +91,10 @@ func readLiveGateFacts(ctx context.Context, client ghShadowClient, repository st
 	if err := client.JSON(ctx, fmt.Sprintf("repos/%s/check-suites/%d/check-runs?per_page=100", repository, run.CheckSuiteID), &list); err != nil {
 		return GateLiveFacts{}, err
 	}
-	var gateChecks []ShadowCheck
+	var gateChecks []workflowCheck
 	for _, check := range list.CheckRuns {
 		if check.Name == "Merge Gate" {
-			gateChecks = append(gateChecks, ShadowCheck{ID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA, AppID: check.App.ID, Status: check.Status, Conclusion: check.Conclusion})
+			gateChecks = append(gateChecks, workflowCheck{ID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA, AppID: check.App.ID, Status: check.Status, Conclusion: check.Conclusion})
 		}
 	}
 	return GateLiveFacts{

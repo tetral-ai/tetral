@@ -28,7 +28,7 @@ func TestVerifyLiveGateFactsRejectsSupersededAndWrongCheck(t *testing.T) {
 		CurrentHeadSHA: want.EventHeadSHA, CurrentBaseSHA: want.EventBaseSHA,
 		RunID: 123, RunAttempt: 1, RunName: want.Workflow, RunPath: ".github/workflows/pull-request-verification.yml",
 		RunHeadSHA: want.EventHeadSHA, CheckSuiteID: 7, CheckHeadSHA: want.RequiredCheckSHA, SourceAppID: githubActionsAppID,
-		GateChecks: []ShadowCheck{{ID: 8, Name: "Merge Gate", HeadSHA: want.RequiredCheckSHA, AppID: githubActionsAppID, Status: "in_progress"}},
+		GateChecks: []workflowCheck{{ID: 8, Name: "Merge Gate", HeadSHA: want.RequiredCheckSHA, AppID: githubActionsAppID, Status: "in_progress"}},
 	}
 	if err := VerifyLiveGateFacts(want, facts); err != nil {
 		t.Fatal(err)

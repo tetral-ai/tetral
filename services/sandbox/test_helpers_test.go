@@ -172,6 +172,7 @@ func leaseSandboxMaterializationJobForTest(t *testing.T, runtimeDB *sql.DB, admi
 	t.Helper()
 	if job == nil {
 		t.Fatal("sandbox materialization job is required")
+		return nil
 	}
 	payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{
 		WorkspaceID: job.WorkspaceID,

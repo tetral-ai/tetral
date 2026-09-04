@@ -27,7 +27,7 @@ func TestCollectGoTestDurationsCountsCompletedTopLevelTests(t *testing.T) {
 func TestCollectCompletedJobHealthIgnoresCurrentAndMalformedJobs(t *testing.T) {
 	started := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	report := CIHealthReport{JobConclusions: map[string]int{}, GoShardMinutes: map[string]float64{}}
-	collectCompletedJobHealth(&report, []ShadowJob{
+	collectCompletedJobHealth(&report, []workflowJob{
 		{Name: "Go Race (shard 0)", Status: "completed", Conclusion: "success", StartedAt: started, CompletedAt: started.Add(2 * time.Minute)},
 		{Name: "CI Health and Calibration", Status: "in_progress", StartedAt: started},
 		{Name: "broken", Status: "completed", Conclusion: "failure", StartedAt: started},

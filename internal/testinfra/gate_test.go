@@ -20,6 +20,27 @@ func TestVerifyMergeGateAcceptsOnlyCompleteExactExecution(t *testing.T) {
 	}
 }
 
+func TestVerifyMergeGateAcceptsLatestEvidenceAcrossRerunAttempts(t *testing.T) {
+	want := gateFixtureExpectation()
+	want.RunAttempt = "2"
+	root := t.TempDir()
+
+	carried := gateFixtureResult(want, "repository")
+	carried.Execution.RunAttempt = "1"
+	writeGateFixture(t, root, carried)
+
+	failed := gateFixtureResult(want, "go-0")
+	failed.Execution.RunAttempt = "1"
+	failed.Status = "fail"
+	writeGateFixture(t, root, failed)
+	writeGateFixture(t, root, gateFixtureResult(want, "go-0"))
+
+	verdict, err := VerifyMergeGate(root, want)
+	if err != nil || verdict.Status != "pass" || len(verdict.Producers) != len(want.Producers) {
+		t.Fatalf("verdict = %#v error = %v", verdict, err)
+	}
+}
+
 func TestVerifyMergeGateRejectsEveryNonAcceptedResultClass(t *testing.T) {
 	tests := []struct {
 		name   string
