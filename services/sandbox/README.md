@@ -195,6 +195,9 @@ the already-admitted origin is recognized during recovery or
 rematerialization — the checkout installs a declared `git_identity` as
 repository-local `user.name`/`user.email`, so disposable Sandbox recreation
 reasserts it and one Session can mount repositories with different identities.
+The driver rejects malformed identity snapshots before running a command,
+including values Git would trim or remove from commit headers; admitted values
+are installed unchanged as the default author and committer identity.
 A mount without a declared identity keeps the session-scoped platform identity
 from the Sandbox-global Git configuration, which per-repository configuration
 never rewrites.

@@ -70,7 +70,8 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 		`SELECT sr.resource_id, sr.type, sr.detached_at, sr.delete_requested_at,
 		        sfr.source_file_id, source_file.object_id, sfr.file_id, sfr.mount_path,
 		        smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref
+		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref,
+		        sgr.git_identity_name, sgr.git_identity_email
 		   FROM session_resources sr
 		   LEFT JOIN session_file_resources sfr
 		     ON sfr.workspace_id = sr.workspace_id

@@ -26,6 +26,8 @@ func TestValidateGitIdentityAdmitsOrdinaryAndUnicodeIdentities(t *testing.T) {
 		{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
 		{Name: "山田 太郎", Email: "taro@example.co.jp"},
 		{Name: "bot", Email: "a@b"},
+		{Name: ".山田 O'Brien.", Email: "a.b+bot@example.test."},
+		{Name: "A, B: C; D\"E\\F", Email: "o'brien@example.test"},
 	} {
 		got, err := validateGitIdentity(identity)
 		if err != nil {
@@ -38,6 +40,75 @@ func TestValidateGitIdentityAdmitsOrdinaryAndUnicodeIdentities(t *testing.T) {
 	absent, err := validateGitIdentity(nil)
 	if err != nil || absent != nil {
 		t.Fatalf("validateGitIdentity(nil) = %+v, %v; want nil identity", absent, err)
+	}
+}
+
+func TestValidateGitIdentityRejectsGitSanitization(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		value string
+	}{
+		{"name", "<>"},
+		{"name", "Alice <Automation>"},
+		{"email", "<bot@example.test>"},
+		{"email", "bo<t@example.test"},
+		{"email", "bot@example.test>"},
+	} {
+		t.Run(tc.field+"/"+tc.value, func(t *testing.T) {
+			identity := &GitIdentity{Name: "Bot", Email: "bot@example.test"}
+			if tc.field == "name" {
+				identity.Name = tc.value
+			} else {
+				identity.Email = tc.value
+			}
+			if _, err := validateGitIdentity(identity); err == nil {
+				t.Fatalf("accepted Git-sanitized %s %q", tc.field, tc.value)
+			}
+		})
+	}
+
+	for _, punctuation := range []string{",", ":", ";", "\"", "\\", "'"} {
+		for _, field := range []string{"name", "email"} {
+			for _, leading := range []bool{true, false} {
+				identity := &GitIdentity{Name: "Bot", Email: "bot@example.test"}
+				value := &identity.Name
+				if field == "email" {
+					value = &identity.Email
+				}
+				if leading {
+					*value = punctuation + *value
+				} else {
+					*value += punctuation
+				}
+				if _, err := validateGitIdentity(identity); err == nil {
+					t.Errorf("accepted Git-trimmed %s %q", field, *value)
+				}
+			}
+		}
+	}
+}
+
+func TestValidateGitIdentityByteLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity *GitIdentity
+		valid    bool
+	}{
+		{"name at limit", &GitIdentity{Name: strings.Repeat("n", 256), Email: "bot@example.test"}, true},
+		{"name over limit", &GitIdentity{Name: strings.Repeat("n", 257), Email: "bot@example.test"}, false},
+		{"unicode name at byte limit", &GitIdentity{Name: strings.Repeat("界", 85) + "n", Email: "bot@example.test"}, true},
+		{"unicode name over byte limit", &GitIdentity{Name: strings.Repeat("界", 85) + "nn", Email: "bot@example.test"}, false},
+		{"email at limit", &GitIdentity{Name: "Bot", Email: strings.Repeat("e", 252) + "@b"}, true},
+		{"email over limit", &GitIdentity{Name: "Bot", Email: strings.Repeat("e", 253) + "@b"}, false},
+		{"invalid UTF-8 name", &GitIdentity{Name: "Bot\xff", Email: "bot@example.test"}, false},
+		{"invalid UTF-8 email", &GitIdentity{Name: "Bot", Email: "bot\xff@example.test"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateGitIdentity(tc.identity)
+			if (err == nil) != tc.valid {
+				t.Fatalf("validateGitIdentity error = %v; valid = %t", err, tc.valid)
+			}
+		})
 	}
 }
 

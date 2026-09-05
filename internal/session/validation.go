@@ -238,9 +238,9 @@ func safeGitHubPathComponent(value string) bool {
 // Both fields are required when the object is present: git uses the pair as
 // the default author and committer, and a half-declared identity would fall
 // back to the global session identity for one half only. Values must be
-// valid UTF-8, bounded, and free of control, format, and whitespace characters
-// that Git cannot represent faithfully in a commit header or that smuggle
-// additional headers; the email must carry exactly one non-anchored '@'.
+// valid UTF-8 and bounded, with no controls, format characters, or delimiters.
+// Reject values Git's ident.c would sanitize instead of silently changing the
+// declared identity; the email must carry exactly one non-anchored '@'.
 func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
 	if identity == nil {
 		return nil, nil
@@ -258,7 +258,7 @@ func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
 			return nil, &ValidationError{Message: "git_identity.name is invalid"}
 		}
 	}
-	if strings.TrimSpace(name) != name {
+	if strings.TrimSpace(name) != name || gitIdentityNeedsSanitization(name) {
 		return nil, &ValidationError{Message: "git_identity.name is invalid"}
 	}
 	for _, r := range email {
@@ -266,10 +266,19 @@ func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
 			return nil, &ValidationError{Message: "git_identity.email is invalid"}
 		}
 	}
-	if strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
+	if gitIdentityNeedsSanitization(email) || strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
 		return nil, &ValidationError{Message: "git_identity.email is invalid"}
 	}
 	return &GitIdentity{Name: name, Email: email}, nil
+}
+
+// Git's ident.c removes angle brackets anywhere and trims these ASCII bytes
+// from both ends (crud / strbuf_addstr_without_crud). Internal punctuation,
+// periods, and non-ASCII names remain representable and must not be stripped.
+// UPDATE-WITH: sandbox/driver/github_repository.go (durable snapshot guard).
+func gitIdentityNeedsSanitization(value string) bool {
+	const trimmed = " \t\n\r\v\f,:;<>\"\\'"
+	return strings.ContainsAny(value, "<>") || strings.Trim(value, trimmed) != value
 }
 
 func validateCheckout(checkout *GitHubCheckout) (*GitHubCheckout, error) {

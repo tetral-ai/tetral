@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
@@ -1485,8 +1487,11 @@ func TestSessionGitHubRepositoryResourceGitIdentityShape(t *testing.T) {
 		{resourceID: "res_github_identity_empty_email", name: "Example Automation", email: ""},
 	} {
 		insertResource(row.resourceID)
-		if err := insertGitHub(row.resourceID, row.name, row.email); err == nil {
-			t.Fatalf("insert half-declared or empty git identity %s succeeded; want shape constraint failure", row.resourceID)
+		err := insertGitHub(row.resourceID, row.name, row.email)
+		var constraintError *pgconn.PgError
+		if !errors.As(err, &constraintError) || constraintError.Code != "23514" ||
+			constraintError.ConstraintName != "session_github_repository_git_identity_shape" {
+			t.Fatalf("insert invalid git identity %s: %v; want git identity shape CHECK violation (23514)", row.resourceID, err)
 		}
 	}
 }

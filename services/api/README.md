@@ -280,9 +280,15 @@ A `github_repository` resource admits `url`, `authorization_token`, optional
 `mount_path`, optional `checkout`, and optional `git_identity`
 (`{name, email}`, both required when the object is present). `git_identity`
 declares the default Git author and committer for that mounted repository only:
-admission rejects empty, unbounded, or Git-invalid values before any Session or
-Sandbox exists; the value is persisted with the resource, returned unredacted
-from Session and resource reads, and cannot be changed afterward. It grants no
+admission requires nonempty UTF-8 values, at most 256 bytes for `name` and 254
+bytes for `email`. It rejects controls, format characters, angle brackets,
+leading/trailing name whitespace, all email whitespace, and leading/trailing
+`,`, `:`, `;`, double quotes, single quotes, or backslashes that Git would trim.
+Email requires exactly one `@` with nonempty parts on both sides. Unicode names,
+internal punctuation, and periods are preserved; values are never silently
+sanitized. Invalid values fail before any Session or Sandbox exists. The
+identity is persisted with the resource, returned unredacted from Session and
+resource reads, and cannot be changed afterward. It grants no
 repository access — `authorization_token` remains the sole clone/push
 credential. An omitted `git_identity` keeps the session-scoped platform
 identity (`Tetral Agent <session+<session_id>@agents.tetral.ai>`).

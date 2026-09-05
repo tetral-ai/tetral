@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
@@ -210,6 +211,17 @@ func validateGitHubRepositoryIdentity(name, email string) (bool, error) {
 	}
 	if name == "" || email == "" {
 		return false, errors.New("github_repository git identity requires both name and email")
+	}
+	// UPDATE-WITH: session/validation.go (admission bounds and Git ident rules).
+	const trimmed = " \t\n\r\v\f,:;<>\"\\'"
+	if len(name) > 256 || !utf8.ValidString(name) || strings.TrimSpace(name) != name ||
+		strings.ContainsAny(name, "<>") || strings.Trim(name, trimmed) != name {
+		return false, errors.New("github_repository git identity name is invalid")
+	}
+	if len(email) > 254 || !utf8.ValidString(email) || strings.ContainsAny(email, "<>") ||
+		strings.Trim(email, trimmed) != email || strings.Count(email, "@") != 1 ||
+		strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
+		return false, errors.New("github_repository git identity email is invalid")
 	}
 	for _, r := range name {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
