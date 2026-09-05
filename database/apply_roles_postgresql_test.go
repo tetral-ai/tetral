@@ -50,8 +50,26 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("apply role contract attempt %d: %v", attempt+1, err)
 			}
+			if attempt == 0 {
+				defer restoreCloneRoleBoundary(t, admin, cloneOwner, cloneRuntimeRole, declarations)
+				assertExactWorkloadPrivileges(t, admin, roleContract, declarations)
+				for _, statement := range []string{
+					"REVOKE UPDATE ON environments FROM " + pgx.Identifier{declarations.Roles["sandbox"].Name}.Sanitize(),
+					"GRANT SELECT ON queue_jobs TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+					"GRANT UPDATE ON SEQUENCE session_runtime_binding_generation_seq TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+				} {
+					if _, err := admin.Exec(statement); err != nil {
+						t.Fatal(err)
+					}
+				}
+				drift := workloadPrivilegeMismatches(t, admin, roleContract, declarations)
+				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE"} {
+					if !contains(drift, want) {
+						t.Fatalf("catalog checker missed injected drift %s: %v", want, drift)
+					}
+				}
+			}
 		}
-		defer restoreCloneRoleBoundary(t, admin, cloneOwner, cloneRuntimeRole, declarations)
 
 		for workload, declaration := range declarations.Roles {
 			connection := openManagedRole(t, databaseName, declaration)
@@ -79,15 +97,6 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		}
 		assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles["gateway"])
 
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["auth"], "workspaces")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["queue"], "queue_jobs")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["bridge"], "session_events")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["cleanup"], "session_runtime_status")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["gateway"], "session_provider_auth")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["git_proxy"], "session_git_tickets")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["sandbox"], "session_sandbox_bindings")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["event_stream"], "session_event_stream_changes")
-
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `SELECT 1 FROM queue_jobs LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["gateway"], `SELECT 1 FROM session_events LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["queue"], `TRUNCATE queue_jobs`)
@@ -95,7 +104,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `BEGIN; SELECT set_config('tetral.queue_maintenance','true',true); SELECT 1 FROM queue_jobs LIMIT 1; COMMIT`)
 
 		seedRLSRows(t, admin)
-		assertRepresentativeWorkloadOperations(t, databaseName, admin, declarations)
+		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -215,63 +224,69 @@ func runGatewayCommandRoleFixture(t *testing.T, dsn, expected string) {
 
 func assertExactWorkloadPrivileges(t *testing.T, admin *sql.DB, contract database.RoleContract, declarations database.RoleDeclarations) {
 	t.Helper()
-	const privileges = "SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER"
-	for workload, role := range contract.Workloads {
-		credential := declarations.Roles[workload]
-		for table, expected := range role.Tables {
-			for _, privilege := range strings.Split(privileges, ",") {
-				var granted bool
-				if err := admin.QueryRow(`SELECT has_table_privilege($1, $2, $3)`, credential.Name, "public."+table, privilege).Scan(&granted); err != nil {
-					t.Fatal(err)
-				}
-				want := contains(expected, privilege)
-				if granted != want {
-					t.Fatalf("workload %s privilege %s on %s = %v; want %v", workload, privilege, table, granted, want)
-				}
-			}
-		}
+	if mismatches := workloadPrivilegeMismatches(t, admin, contract, declarations); len(mismatches) != 0 {
+		t.Fatalf("workload privilege drift: %v", mismatches)
 	}
 }
 
-func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+// Inspect every live public relation, including tables absent from a workload's
+// declaration. Iterating only declared tables cannot detect accidental grants.
+func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.RoleContract, declarations database.RoleDeclarations) []string {
 	t.Helper()
-	operations := map[string][]string{
-		"auth": {`UPDATE api_keys SET name=name WHERE false`},
-		"bridge": {
-			`UPDATE session_events SET updated_at=updated_at WHERE false`,
-			`DELETE FROM session_runtime_tool_results WHERE workspace_id='ws_contract_a' AND session_id='ses_contract' AND tool_kind IN ('sandbox_tool','sandbox_background')`,
-			`DELETE FROM session_background_tasks WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_output_capture_blobs WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_output_capture_operations WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_lifecycle_operations WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-		},
-		"cleanup":      {`UPDATE session_runtime_status SET updated_at=updated_at WHERE false`},
-		"event_stream": {`SELECT count(*) FROM session_event_stream_changes`},
-		"gateway":      {`UPDATE session_provider_auth SET updated_at=updated_at WHERE false`},
-		"git_proxy":    {`UPDATE session_git_tickets SET status=status WHERE false`},
-		"queue":        {`UPDATE queue_jobs SET updated_at=updated_at WHERE false`},
-		"sandbox": {
-			`UPDATE session_sandbox_bindings SET updated_at=updated_at WHERE false`,
-			`DELETE FROM sandbox_output_capture_blobs WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-		},
-	}
-	for workload, statements := range operations {
-		connection := openManagedRole(t, databaseName, declarations.Roles[workload])
-		tx, err := connection.Begin(context.Background())
+	var mismatches []string
+	for workload, role := range contract.Workloads {
+		credential := declarations.Roles[workload]
+		rows, err := admin.Query(`SELECT c.relname, p.privilege, has_table_privilege($1, c.oid, p.privilege)
+   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+   CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) AS p(privilege)
+   WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f')`, credential.Name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(context.Background(), `SELECT set_config('tetral.workspace_id','ws_contract_a',true)`); err != nil {
-			t.Fatal(err)
-		}
-		for _, statement := range statements {
-			if _, err := tx.Exec(context.Background(), statement); err != nil {
-				t.Fatalf("representative %s operation failed: %v", workload, err)
+		for rows.Next() {
+			var table, privilege string
+			var granted bool
+			if err := rows.Scan(&table, &privilege, &granted); err != nil {
+				t.Fatal(err)
+			}
+			if granted != contains(role.Tables[table], privilege) {
+				mismatches = append(mismatches, fmt.Sprintf("%s %s %s", workload, table, privilege))
 			}
 		}
-		_ = tx.Rollback(context.Background())
-		_ = connection.Close(context.Background())
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		_ = rows.Close()
+		rows, err = admin.Query(`SELECT seq.relname, COALESCE(tbl.relname,''), p.privilege, has_sequence_privilege($1,seq.oid,p.privilege)
+   FROM pg_class seq JOIN pg_namespace n ON n.oid=seq.relnamespace
+   LEFT JOIN pg_depend dep ON dep.classid='pg_class'::regclass AND dep.objid=seq.oid AND dep.deptype IN ('a','i')
+   LEFT JOIN pg_class tbl ON tbl.oid=dep.refobjid
+   CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) AS p(privilege)
+   WHERE n.nspname='public' AND seq.relkind='S'`, credential.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var sequence, table, privilege string
+			var granted bool
+			if err := rows.Scan(&sequence, &table, &privilege, &granted); err != nil {
+				t.Fatal(err)
+			}
+			want := privilege == "USAGE" && (contains(role.Sequences, sequence) || contains(role.Tables[table], "INSERT"))
+			if granted != want {
+				mismatches = append(mismatches, fmt.Sprintf("%s %s %s", workload, sequence, privilege))
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		_ = rows.Close()
 	}
+	return mismatches
+}
+
+func assertAPIAndBridgeDurableOperations(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
 
 	api := openManagedRole(t, databaseName, declarations.Roles["api"])
 	defer func() { _ = api.Close(context.Background()) }()
@@ -449,15 +464,6 @@ func managedRoleURL(t *testing.T, databaseName string, credential database.RoleC
 	parsed.User = url.UserPassword(credential.Name, credential.Password)
 	parsed.Path = "/" + databaseName
 	return parsed.String()
-}
-
-func assertWorkloadCanQuery(t *testing.T, databaseName string, credential database.RoleCredential, table string) {
-	t.Helper()
-	connection := openManagedRole(t, databaseName, credential)
-	defer func() { _ = connection.Close(context.Background()) }()
-	if _, err := connection.Exec(context.Background(), "SELECT 1 FROM "+pgx.Identifier{table}.Sanitize()+" LIMIT 0"); err != nil {
-		t.Fatalf("allowed table %s failed: %v", table, err)
-	}
 }
 
 func assertWorkloadDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {

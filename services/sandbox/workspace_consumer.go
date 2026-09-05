@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -132,6 +134,16 @@ func runWorkspaceConsumerLoop(
 		hadWork, err := RunWorkspaceConsumerCycle(ctx, lister, consume)
 		delay := backoff.Next(hadWork)
 		if logger != nil {
+			if err != nil && ctx.Err() == nil {
+				logger.Warn("sandbox.queue.consume.failed",
+					slog.String("operation", "sandbox.queue.consume"),
+					slog.String("event.kind", "queue_consume_failed"),
+					slog.String("component", "sandbox"),
+					slog.String("error.class", workspaceConsumerErrorClass(err)),
+					slog.Bool("retryable", true),
+					slog.Int64("retry.delay.ms", delay.Milliseconds()),
+				)
+			}
 			logger.Debug("sandbox.queue.wait",
 				slog.String("operation", "sandbox.queue.wait"),
 				slog.String("event.kind", "queue_wait"),
@@ -147,8 +159,21 @@ func runWorkspaceConsumerLoop(
 			}
 			return waitErr
 		}
-		if err != nil {
-			continue
-		}
 	}
+}
+
+// Never log the error text or database diagnostics: they may contain SQL,
+// connection identities, provider payloads or credentials.
+func workspaceConsumerErrorClass(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if pgErr.Code == "42501" {
+			return "database_permission_denied"
+		}
+		return "database_error"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	return "consumer_error"
 }

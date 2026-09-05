@@ -88,6 +88,7 @@ var (
 )
 
 type cloneHandle struct {
+	controlConfig *pgx.ConnConfig
 	database      string
 	runtimeRole   string
 	runtimeConfig *pgx.ConnConfig
@@ -389,6 +390,7 @@ func provisionDatabase(ctx context.Context, initialize bool) (*provisionedDataba
 	}
 
 	handle := &cloneHandle{
+		controlConfig: controlConfig,
 		database:      databaseName,
 		runtimeRole:   roleName,
 		runtimeConfig: runtimeConfig,
@@ -587,6 +589,7 @@ func ensureRegistry(ctx context.Context, db *sql.DB) error {
 	statements := []string{
 		"CREATE TABLE IF NOT EXISTS " + runRegistryTable + " (run_id text PRIMARY KEY, owner_pid integer NOT NULL, heartbeat_at timestamptz NOT NULL, expires_at timestamptz NOT NULL)",
 		"CREATE TABLE IF NOT EXISTS " + cloneRegistryTable + " (database_name text PRIMARY KEY, run_id text NOT NULL, baseline_digest text NOT NULL, role_name text NOT NULL, phase text NOT NULL DEFAULT 'reserved', database_owner text NOT NULL, database_comment text NOT NULL, role_comment text NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp())",
+		"ALTER TABLE " + cloneRegistryTable + " ADD COLUMN IF NOT EXISTS workload_roles jsonb NOT NULL DEFAULT '[]'",
 		"ALTER TABLE " + cloneRegistryTable + " ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT 'reserved'",
 		"ALTER TABLE " + cloneRegistryTable + " ADD COLUMN IF NOT EXISTS database_owner text NOT NULL DEFAULT ''",
 		"ALTER TABLE " + cloneRegistryTable + " ADD COLUMN IF NOT EXISTS database_comment text NOT NULL DEFAULT ''",
@@ -982,7 +985,16 @@ func cleanupRegisteredClone(ctx context.Context, db cleanupExecutor, registratio
 	if err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1), EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$2)", databaseName, roleName).Scan(&databaseExists, &roleExists); err != nil {
 		return &DatabaseCleanupError{Database: databaseName, Stage: "inspect_resources"}
 	}
+	workloadRoles, err := registeredWorkloadRoles(ctx, db, registration)
+	if err != nil {
+		return &DatabaseCleanupError{Database: databaseName, Stage: "verify_workload_roles"}
+	}
 	var statements []struct{ stage, sql string }
+	for _, role := range workloadRoles {
+		if role.exists {
+			statements = append(statements, struct{ stage, sql string }{"revoke_workload_login", "ALTER ROLE " + pgx.Identifier{role.Name}.Sanitize() + " NOLOGIN"})
+		}
+	}
 	if roleExists {
 		statements = append(statements, struct{ stage, sql string }{"revoke_login", "ALTER ROLE " + roleName + " NOLOGIN"})
 	}
@@ -998,6 +1010,9 @@ func cleanupRegisteredClone(ctx context.Context, db cleanupExecutor, registratio
 	}
 	if roleExists {
 		statements = append(statements, struct{ stage, sql string }{"drop_role", "DROP ROLE " + roleName})
+	}
+	for _, role := range workloadRoles {
+		statements = append(statements, struct{ stage, sql string }{"drop_workload_role", "DROP ROLE IF EXISTS " + pgx.Identifier{role.Name}.Sanitize()})
 	}
 	var cleanupErr error
 	for _, item := range statements {
@@ -1035,6 +1050,14 @@ func cloneCleanupAuthorized(ctx context.Context, db cleanupExecutor, registratio
 		return false, err
 	}
 
+	workloadRoles, err := registeredWorkloadRoles(ctx, db, registration)
+	if err != nil {
+		return false, err
+	}
+	allowedRoles := []string{registration.role}
+	for _, role := range workloadRoles {
+		allowedRoles = append(allowedRoles, role.Name)
+	}
 	originalPhase := strings.TrimPrefix(registration.phase, cloneCleanupPrefix)
 	cleanupStarted := originalPhase != registration.phase
 	if originalPhase != clonePhaseReserved && originalPhase != clonePhaseRole && originalPhase != clonePhaseDatabase && originalPhase != clonePhaseReady {
@@ -1050,7 +1073,7 @@ func cloneCleanupAuthorized(ctx context.Context, db cleanupExecutor, registratio
 		                       AND NOT EXISTS (
 		                         SELECT 1 FROM aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
 		                          WHERE a.privilege_type='CONNECT'
-		                            AND a.grantee NOT IN (d.datdba, (SELECT oid FROM pg_roles WHERE rolname=$4))
+		                            AND a.grantee <> d.datdba AND a.grantee NOT IN (SELECT oid FROM pg_roles WHERE rolname=ANY($5))
 		                       )
 		                  FROM pg_database d WHERE d.datname=$1), false),
 			       COALESCE((SELECT shobj_description(d.oid, 'pg_database') IS NULL
@@ -1067,7 +1090,7 @@ func cloneCleanupAuthorized(ctx context.Context, db cleanupExecutor, registratio
 			                       AND NOT EXISTS (
 			                         SELECT 1 FROM aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
 			                          WHERE a.privilege_type='CONNECT'
-			                            AND a.grantee NOT IN (d.datdba, (SELECT oid FROM pg_roles WHERE rolname=$4))
+			                            AND a.grantee <> d.datdba AND a.grantee NOT IN (SELECT oid FROM pg_roles WHERE rolname=ANY($5))
 			                       )
 			                  FROM pg_database d WHERE d.datname=$1), false),
 			       COALESCE((SELECT shobj_description(d.oid, 'pg_database') IS NULL
@@ -1077,7 +1100,7 @@ func cloneCleanupAuthorized(ctx context.Context, db cleanupExecutor, registratio
 			                          WHERE a.grantee NOT IN (d.datdba, 0, (SELECT oid FROM pg_roles WHERE rolname=$4))
 			                       )
 			                  FROM pg_database d WHERE d.datname=$1), false)`,
-		registration.database, registration.databaseNote, registration.databaseOwner, registration.role,
+		registration.database, registration.databaseNote, registration.databaseOwner, registration.role, allowedRoles,
 	).Scan(&databaseExists, &databaseSealed, &databaseUnsealed, &databaseCleanupOwned, &databaseRoleCleanupOwned)
 	if err != nil {
 		return false, err

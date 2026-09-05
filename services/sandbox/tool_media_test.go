@@ -13,11 +13,14 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 func TestPostgreSQLSandboxMediaMaterializerStagesBlobBeforePublishingReference(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
 	blobStore := blob.NewFakeBlobStore()
@@ -25,6 +28,13 @@ func TestPostgreSQLSandboxMediaMaterializerStagesBlobBeforePublishingReference(t
 	now := time.Date(2026, 7, 31, 16, 0, 0, 0, time.UTC)
 	raw := `{"status":"success","result":{"mime":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("image-bytes")) + `"}}`
 
+	workload.RequirePrivilege(t, "session_transient_attachments", "INSERT", func() error {
+		_, err := materializer.MaterializeResult(ctx, SandboxExecutionRef{
+			WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+			SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+		}, "view_image", `{"path":"/workspace/plot.png"}`, raw, now)
+		return err
+	})
 	result, err := materializer.MaterializeResult(ctx, SandboxExecutionRef{
 		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
 		SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",

@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -63,7 +64,9 @@ func TestPostgreSQLSandboxExecutionSettlementRollsBackAfterQueueAuthorityExpires
 }
 
 func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedSandboxExecutionStoreRows(t, adminDB, "evt_execution_c", "evt_execution_d")
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
@@ -74,6 +77,13 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_b"),
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_c"),
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_d"),
+	}
+	workload.RequirePrivilege(t, "environments", "UPDATE", func() error {
+		return coordinator.WaitForActivation(ctx, works[0], ExecutionNeedsCreation)
+	})
+	var rolledBack int
+	if err := adminDB.QueryRow(`SELECT count(*) FROM session_sandbox_bindings`).Scan(&rolledBack); err != nil || rolledBack != 0 {
+		t.Fatalf("failed activation left bindings: %d, %v", rolledBack, err)
 	}
 	start := make(chan struct{})
 	errs := make(chan error, len(works))

@@ -56,7 +56,9 @@ func TestPostgreSQLSessionRuntimeMutationUsesOnePoolConnection(t *testing.T) {
 }
 
 func TestPostgreSQLSessionStoreDeleteRecordsSandboxReleaseBeforeCommit(t *testing.T) {
-	runtime, admin := newControlPlaneSessionStoreTestDB(t)
+	_, admin := newControlPlaneSessionStoreTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, admin, "api")
+	runtime := workload.DB
 	ctx := context.Background()
 	store := newControlPlaneSessionStore(t, runtime)
 	seedSessionStoreReferences(t, admin, workspace.DefaultID, "agent_delete_release", 1, "env_delete_release")
@@ -84,6 +86,23 @@ func TestPostgreSQLSessionStoreDeleteRecordsSandboxReleaseBeforeCommit(t *testin
 		t.Fatalf("seed background task: %v", err)
 	}
 
+	for _, grant := range []struct{ table, privilege string }{
+		{"session_runtime_tool_results", "SELECT"}, {"session_runtime_tool_results", "INSERT"}, {"session_runtime_tool_results", "UPDATE"},
+		{"session_background_tasks", "SELECT"}, {"session_background_tasks", "UPDATE"},
+	} {
+		workload.RequirePrivilege(t, grant.table, grant.privilege, func() error {
+			return store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error { return tx.DeleteSession(ctx, sessionID) })
+		})
+		if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM sessions WHERE id=$1 AND lifecycle_state='active'`, sessionID); got != 1 {
+			t.Fatal("failed delete changed lifecycle")
+		}
+		if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_sandbox_bindings WHERE session_id=$1 AND release_requested_at IS NOT NULL`, sessionID); got != 0 {
+			t.Fatal("failed delete retained release fence")
+		}
+		if got := sessionStoreRowCount(t, admin, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1`, sessionID); got != 0 {
+			t.Fatal("failed delete retained cancellation receipt")
+		}
+	}
 	if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
 		return tx.DeleteSession(ctx, sessionID)
 	}); err != nil {
@@ -95,6 +114,11 @@ func TestPostgreSQLSessionStoreDeleteRecordsSandboxReleaseBeforeCommit(t *testin
 		query string
 		want  int
 	}{
+		{
+			name:  "deleted session",
+			query: `SELECT count(*) FROM sessions WHERE workspace_id='default' AND id='sesn_delete_release' AND lifecycle_state='deleted'`,
+			want:  1,
+		},
 		{
 			name: "release fence",
 			query: `SELECT count(*) FROM session_sandbox_bindings

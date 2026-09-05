@@ -1,14 +1,20 @@
 package tetralsandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -224,17 +230,19 @@ func TestRunWorkspaceConsumerLoopBacksOffAcrossConsecutiveEmptyPolls(t *testing.
 func TestRunWorkspaceConsumerLoopResetsBackoffAfterActiveFailedPoll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
 	polls := 0
 	var delays []time.Duration
 	err := runWorkspaceConsumerLoop(ctx, sandboxStaticWorkspaceLister{"ws_alpha"}, time.Second, func(context.Context, workspace.ID) (bool, error) {
 		polls++
 		if polls == 3 {
-			return true, errors.New("leased work failed")
+			return true, fmt.Errorf("unsafe-token: %w", &pgconn.PgError{Code: "42501", Message: "unsafe-query", Detail: "unsafe-password"})
 		}
 		return false, nil
-	}, nil, nil, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
+	}, nil, logger, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
 		delays = append(delays, delay)
-		if len(delays) == 3 {
+		if len(delays) == 4 {
 			cancel()
 			return context.Canceled
 		}
@@ -243,8 +251,44 @@ func TestRunWorkspaceConsumerLoopResetsBackoffAfterActiveFailedPoll(t *testing.T
 	if err != context.Canceled {
 		t.Fatalf("runWorkspaceConsumerLoop = %v; want context.Canceled", err)
 	}
-	if want := []time.Duration{time.Second, 2 * time.Second, time.Second}; !reflect.DeepEqual(delays, want) {
+	if want := []time.Duration{time.Second, 2 * time.Second, time.Second, time.Second}; !reflect.DeepEqual(delays, want) {
 		t.Fatalf("poll delays = %v; want active failure to reset backoff to %v", delays, want)
+	}
+	logText := output.String()
+	if strings.Count(logText, "\n") != 1 || !strings.Contains(logText, `"event.kind":"queue_consume_failed"`) ||
+		!strings.Contains(logText, `"operation":"sandbox.queue.consume"`) || !strings.Contains(logText, `"error.class":"database_permission_denied"`) ||
+		!strings.Contains(logText, `"retry.delay.ms":1000`) || strings.Contains(logText, "unsafe-") {
+		t.Fatalf("consumer failure log = %q", logText)
+	}
+}
+
+func TestRunWorkspaceConsumerLoopBoundsIdleFailureLogsAndSuppressesShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	var delays []time.Duration
+	polls := 0
+	err := runWorkspaceConsumerLoop(ctx, sandboxStaticWorkspaceLister{"ws_alpha"}, time.Second, func(context.Context, workspace.ID) (bool, error) {
+		polls++
+		if polls == 8 {
+			cancel()
+			return false, ctx.Err()
+		}
+		return false, errors.New("private-provider-payload")
+	}, nil, logger, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
+		delays = append(delays, delay)
+		return ctx.Err()
+	})
+	if err != context.Canceled {
+		t.Fatalf("loop shutdown: %v", err)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+	if !reflect.DeepEqual(delays, want) {
+		t.Fatalf("failed-poll backoff = %v; want %v", delays, want)
+	}
+	if logText := output.String(); strings.Count(logText, "\n") != 7 || strings.Count(logText, `"error.class":"consumer_error"`) != 7 || strings.Contains(logText, "private-provider-payload") {
+		t.Fatalf("failure/shutdown diagnostics: %q", logText)
 	}
 }
 

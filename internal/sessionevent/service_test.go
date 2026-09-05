@@ -1812,7 +1812,8 @@ func newSessionEventStoreTestDB(t *testing.T) (runtime, admin *sql.DB) {
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
 	}
-	return storagetest.NewPostgreSQLDBWithAdmin(t)
+	_, admin = storagetest.NewPostgreSQLDBWithAdmin(t)
+	return storagetest.OpenWorkloadDB(t, admin, "api").DB, admin
 }
 
 func newSessionEventServiceForTest(db *sql.DB, options ...Option) *Service {

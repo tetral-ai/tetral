@@ -17,20 +17,42 @@ import (
 )
 
 func TestGitHubRepositoryConvergerPostgreSQLPhaseOrderRequiresLiveBeforeClone(t *testing.T) {
-	ctx := context.Background()
-	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_phase")
-	events := []string{}
-	rotator := &eventingGitTicketRotator{delegate: store, events: &events}
-	materializer := &persistedGitConfigMaterializer{admin: admin, events: &events}
-	service := newGitHubRepositoryConverger(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{1}, gitticket.TokenBytes)))
-
-	if err := service.materialize(ctx, workspace.DefaultID, "sesn_git_phase", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err != nil {
-		t.Fatalf("MaterializeGitHubRepositories: %v", err)
+	for _, privilege := range []string{"SELECT", "INSERT", "UPDATE"} {
+		t.Run(privilege, func(t *testing.T) {
+			ctx := context.Background()
+			_, admin := newGitHubPreparationTicketStore(t, "sesn_git_phase")
+			workload := storagetest.OpenWorkloadDB(t, admin, "sandbox")
+			store := gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(workload.DB))
+			events := []string{}
+			rotator := &eventingGitTicketRotator{delegate: store, events: &events}
+			materializer := &persistedGitConfigMaterializer{admin: admin, events: &events}
+			service := newGitHubRepositoryConverger(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{1}, 2*gitticket.TokenBytes)))
+			run := func() error {
+				return service.materialize(ctx, workspace.DefaultID, "sesn_git_phase", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources())
+			}
+			workload.RequirePrivilege(t, "session_git_tickets", privilege, run)
+			if materializer.cloneInvocations != 0 {
+				t.Fatal("permission failure reached clone")
+			}
+			want := "pending -> config install -> activate -> clone"
+			if privilege == "UPDATE" {
+				assertGitTicketCounts(t, admin, "sesn_git_phase", 1, 0, 0)
+				// Recovery must find and activate the installed pending ticket, without minting.
+				service.Random = errorReader{}
+				want = "activate -> clone"
+			} else {
+				assertGitTicketCounts(t, admin, "sesn_git_phase", 0, 0, 0)
+			}
+			events = nil
+			if err := run(); err != nil {
+				t.Fatalf("MaterializeGitHubRepositories: %v", err)
+			}
+			if got := strings.Join(events, " -> "); got != want {
+				t.Fatalf("phase order = %s; want %s", got, want)
+			}
+			assertGitTicketCounts(t, admin, "sesn_git_phase", 0, 1, 0)
+		})
 	}
-	if got := strings.Join(events, " -> "); got != "pending -> config install -> activate -> clone" {
-		t.Fatalf("phase order = %s; want pending -> config install -> activate -> clone", got)
-	}
-	assertGitTicketCounts(t, admin, "sesn_git_phase", 0, 1, 0)
 }
 
 func TestGitHubRepositoryConvergerExistingCheckoutSkipsCloneAfterActivation(t *testing.T) {
