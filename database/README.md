@@ -36,6 +36,11 @@ installer authority comments in the control registry before installation. Normal
 cleanup and expired-run recovery verify that identity, reclaim the private
 database, and remove all registered roles; a changed role identity fails closed.
 
+The supported database and test baseline is PostgreSQL 18, including when a
+focused test receives an administrative `TETRAL_TEST_DATABASE_URL`. That override
+selects the server, not an older-version compatibility profile. The catalog
+privilege check includes `MAINTAIN`, which is unavailable before PostgreSQL 17.
+
 ## Serving privilege validation
 
 Review privileges at the production caller, including shared stores and helpers.
@@ -53,10 +58,12 @@ These owner tests pin the serving paths repaired after role restriction:
 | sandbox | Lifecycle resource snapshot | `session_file_resources`, `session_github_repository_resources`, `agent_versions`, `skill_versions SELECT`; `services/sandbox/lifecycle_store_test.go` uses the real resource reader through activation and materialization |
 | sandbox | Git repository preparation and recovery | `session_git_tickets SELECT/INSERT/UPDATE`; `internal/sandbox/github_preparation_postgresql_test.go` proves live ticket before clone and pending-ticket recovery |
 | sandbox | Media publication | `session_transient_attachments INSERT`; `services/sandbox/tool_media_test.go` checks staged Blob bytes and recovery |
+| sandbox | Background task/command settlement and child-close fence | `session_threads SELECT/UPDATE`, `session_events SELECT/UPDATE`, `session_bridge_operations SELECT`; `services/sandbox/background_command_store_test.go` uses the Sandbox role for all store cases; `background_settlement_role_test.go` checks committed control without a close receipt, atomic parking and replay |
 | bridge | Durable Memory mutation | `memory_stores UPDATE`; `services/bridge/bridge_api_tools_test.go` checks committed content and idempotent replay |
 | bridge | Compaction Request End | `session_thread_context_prefixes UPDATE`; `services/bridge/runtime_compaction_role_test.go` checks main-thread checkpoint, child-prefix consumption, rollback and replay |
 | bridge | Runtime context skill index | `skill_versions SELECT`; `services/bridge/bridge_api_context_test.go` checks configured version metadata |
 | api | Session deletion through shared Sandbox release | `session_runtime_tool_results SELECT/INSERT/UPDATE`, `session_background_tasks SELECT/UPDATE`; `internal/session/postgresql_store_controlplane_test.go` checks atomic release and background cancellation custody |
+| api | Child tool-confirmation admission during close | `session_bridge_operations SELECT`; `internal/sessionevent/closing_role_test.go` checks missing-grant failure, intended conflict with no receipt, and admission/replay after the source Tool Result is terminal; the event-store suite uses the API role |
 
 The installer test independently inspects all live public tables and sequences,
 including undeclared ones, and verifies that reapplication repairs missing grants
@@ -64,8 +71,16 @@ and removes overgrants. This establishes the upper permission bound; owner tests
 establish that intended operations remain possible. Declaration equality or
 empty-table SQL alone cannot establish the latter.
 
+Owner suites must cover the states that change their SQL dependencies, including
+shared helpers: open, closed, and committed-control-without-receipt are distinct
+background settlement paths. Single-grant revocations prove sensitivity only for
+the paths executed. A green grant-equality check cannot establish that the grant
+manifest itself is complete. Broad test roles remain useful for shared-store
+behavior and RLS tests, but do not establish serving authorization.
+
 Authorization changes must also inspect other callers: API control-plane stores,
-Bridge Runtime APIs and cleanup, Sandbox lifecycle/execution/projection, Queue
+Bridge Runtime APIs and cleanup, Sandbox lifecycle/execution/projection and
+background command settlement, API event admission's child-close fence, Queue
 lease and maintenance, Auth key management, Cleanup admission, Gateway credential
 resolution, Git Proxy ticket/credential reads, and Event Stream's dedicated
 read-only store. Agent Runtime has no database role and persists through Bridge.

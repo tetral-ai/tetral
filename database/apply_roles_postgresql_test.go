@@ -97,13 +97,6 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		}
 		assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles["gateway"])
 
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["auth"], "workspaces")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["queue"], "queue_jobs")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["cleanup"], "session_runtime_status")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["gateway"], "session_provider_auth")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["git_proxy"], "session_git_tickets")
-		assertWorkloadCanQuery(t, databaseName, declarations.Roles["event_stream"], "session_event_stream_changes")
-
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `SELECT 1 FROM queue_jobs LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["gateway"], `SELECT 1 FROM session_events LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["queue"], `TRUNCATE queue_jobs`)
@@ -111,7 +104,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `BEGIN; SELECT set_config('tetral.queue_maintenance','true',true); SELECT 1 FROM queue_jobs LIMIT 1; COMMIT`)
 
 		seedRLSRows(t, admin)
-		assertRepresentativeWorkloadOperations(t, databaseName, admin, declarations)
+		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -292,43 +285,8 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 	return mismatches
 }
 
-func assertRepresentativeWorkloadOperations(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+func assertAPIAndBridgeDurableOperations(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
 	t.Helper()
-	operations := map[string][]string{
-		"auth": {`UPDATE api_keys SET name=name WHERE false`},
-		"bridge": {
-			`DELETE FROM session_runtime_tool_results WHERE workspace_id='ws_contract_a' AND session_id='ses_contract' AND tool_kind IN ('sandbox_tool','sandbox_background')`,
-			`DELETE FROM session_background_tasks WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_output_capture_blobs WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_output_capture_operations WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-			`DELETE FROM sandbox_lifecycle_operations WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-		},
-		"cleanup":      {`UPDATE session_runtime_status SET updated_at=updated_at WHERE false`},
-		"event_stream": {`SELECT count(*) FROM session_event_stream_changes`},
-		"gateway":      {`UPDATE session_provider_auth SET updated_at=updated_at WHERE false`},
-		"git_proxy":    {`UPDATE session_git_tickets SET status=status WHERE false`},
-		"queue":        {`UPDATE queue_jobs SET updated_at=updated_at WHERE false`},
-		"sandbox": {
-			`DELETE FROM sandbox_output_capture_blobs WHERE workspace_id='ws_contract_a' AND session_id='ses_contract'`,
-		},
-	}
-	for workload, statements := range operations {
-		connection := openManagedRole(t, databaseName, declarations.Roles[workload])
-		tx, err := connection.Begin(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tx.Exec(context.Background(), `SELECT set_config('tetral.workspace_id','ws_contract_a',true)`); err != nil {
-			t.Fatal(err)
-		}
-		for _, statement := range statements {
-			if _, err := tx.Exec(context.Background(), statement); err != nil {
-				t.Fatalf("representative %s operation failed: %v", workload, err)
-			}
-		}
-		_ = tx.Rollback(context.Background())
-		_ = connection.Close(context.Background())
-	}
 
 	api := openManagedRole(t, databaseName, declarations.Roles["api"])
 	defer func() { _ = api.Close(context.Background()) }()
@@ -506,15 +464,6 @@ func managedRoleURL(t *testing.T, databaseName string, credential database.RoleC
 	parsed.User = url.UserPassword(credential.Name, credential.Password)
 	parsed.Path = "/" + databaseName
 	return parsed.String()
-}
-
-func assertWorkloadCanQuery(t *testing.T, databaseName string, credential database.RoleCredential, table string) {
-	t.Helper()
-	connection := openManagedRole(t, databaseName, credential)
-	defer func() { _ = connection.Close(context.Background()) }()
-	if _, err := connection.Exec(context.Background(), "SELECT 1 FROM "+pgx.Identifier{table}.Sanitize()+" LIMIT 0"); err != nil {
-		t.Fatalf("allowed table %s failed: %v", table, err)
-	}
 }
 
 func assertWorkloadDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {

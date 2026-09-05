@@ -40,6 +40,7 @@
         "memory_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE"],
         "session_background_tasks": ["SELECT", "UPDATE"],
+        "session_bridge_operations": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
@@ -135,6 +136,9 @@
       "tables": {
         "workspaces": ["SELECT"],
         "sessions": ["SELECT", "UPDATE"],
+        "session_threads": ["SELECT", "UPDATE"],
+        "session_events": ["SELECT", "UPDATE"],
+        "session_bridge_operations": ["SELECT"],
         "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE"],
         "environment_artifacts": ["SELECT", "INSERT", "UPDATE"],
