@@ -9,11 +9,11 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 
+	"github.com/tetral-ai/tetral/internal/gitidentity"
 	"github.com/tetral-ai/tetral/internal/gitticket"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
@@ -200,11 +200,8 @@ func githubRepositoryCloneCommand(repo sandbox.GitHubRepositoryMount) (string, e
 	return strings.Join(lines, "\n"), nil
 }
 
-// validateGitHubRepositoryIdentity is the driver's fail-closed guard on the
-// declared commit identity: both values arrive together or not at all, and
-// neither may carry characters Git cannot represent faithfully in a commit
-// header. Admission validation owns the full contract; this guard keeps a
-// corrupted durable snapshot from reaching the shell.
+// validateGitHubRepositoryIdentity checks durable input with the same contract
+// used at admission. An absent pair retains the global session identity.
 func validateGitHubRepositoryIdentity(name, email string) (bool, error) {
 	if name == "" && email == "" {
 		return false, nil
@@ -212,26 +209,12 @@ func validateGitHubRepositoryIdentity(name, email string) (bool, error) {
 	if name == "" || email == "" {
 		return false, errors.New("github_repository git identity requires both name and email")
 	}
-	// UPDATE-WITH: session/validation.go (admission bounds and Git ident rules).
-	const trimmed = " \t\n\r\v\f,:;<>\"\\'"
-	if len(name) > 256 || !utf8.ValidString(name) || strings.TrimSpace(name) != name ||
-		strings.ContainsAny(name, "<>") || strings.Trim(name, trimmed) != name {
-		return false, errors.New("github_repository git identity name is invalid")
-	}
-	if len(email) > 254 || !utf8.ValidString(email) || strings.ContainsAny(email, "<>") ||
-		strings.Trim(email, trimmed) != email || strings.Count(email, "@") != 1 ||
-		strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
-		return false, errors.New("github_repository git identity email is invalid")
-	}
-	for _, r := range name {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return false, errors.New("github_repository git identity name is invalid")
+	if err := gitidentity.Validate(name, email); err != nil {
+		field := "email"
+		if err == gitidentity.ErrInvalidName {
+			field = "name"
 		}
-	}
-	for _, r := range email {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
-			return false, errors.New("github_repository git identity email is invalid")
-		}
+		return false, errors.New("github_repository git identity " + field + " is invalid")
 	}
 	return true, nil
 }

@@ -313,6 +313,14 @@ execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
 
+`TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources` starts with
+persisted resources and drives activation and materialization through real
+Queue RPCs, PostgreSQL stores and `RunOnce`. It checks declared and omitted
+identities at the provider adapter boundary; provider responses are fixtures,
+so this does not prove remote Git execution. Driver tests separately execute
+clone/configuration commands and inspect actual local Git commits. Admission
+and driver snapshot checks use the shared `internal/gitidentity` rules.
+
 Repository CI builds the unmodified Sandbox Dockerfile and exercises the local
 image and Helper without Daytona credentials. Published-image Daytona behavior
 belongs to the separately operated release rehearsal, which records the exact

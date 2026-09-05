@@ -21,120 +21,40 @@ func TestValidateResourceRequestTypeClosureRejectsGitHubTokenOnOtherResourceType
 	}
 }
 
-func TestValidateGitIdentityAdmitsOrdinaryAndUnicodeIdentities(t *testing.T) {
-	for _, identity := range []*GitIdentity{
-		{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
-		{Name: "山田 太郎", Email: "taro@example.co.jp"},
-		{Name: "bot", Email: "a@b"},
-		{Name: ".山田 O'Brien.", Email: "a.b+bot@example.test."},
-		{Name: "A, B: C; D\"E\\F", Email: "o'brien@example.test"},
-	} {
-		got, err := validateGitIdentity(identity)
-		if err != nil {
-			t.Fatalf("validateGitIdentity(%+v): %v", identity, err)
-		}
-		if got.Name != identity.Name || got.Email != identity.Email {
-			t.Fatalf("validateGitIdentity = %+v; want %+v", got, identity)
-		}
-	}
+func TestValidateGitIdentityPreservesAbsenceAndCopiesValues(t *testing.T) {
 	absent, err := validateGitIdentity(nil)
 	if err != nil || absent != nil {
 		t.Fatalf("validateGitIdentity(nil) = %+v, %v; want nil identity", absent, err)
 	}
-}
-
-func TestValidateGitIdentityRejectsGitSanitization(t *testing.T) {
-	for _, tc := range []struct {
-		field string
-		value string
-	}{
-		{"name", "<>"},
-		{"name", "Alice <Automation>"},
-		{"email", "<bot@example.test>"},
-		{"email", "bo<t@example.test"},
-		{"email", "bot@example.test>"},
-	} {
-		t.Run(tc.field+"/"+tc.value, func(t *testing.T) {
-			identity := &GitIdentity{Name: "Bot", Email: "bot@example.test"}
-			if tc.field == "name" {
-				identity.Name = tc.value
-			} else {
-				identity.Email = tc.value
-			}
-			if _, err := validateGitIdentity(identity); err == nil {
-				t.Fatalf("accepted Git-sanitized %s %q", tc.field, tc.value)
-			}
-		})
-	}
-
-	for _, punctuation := range []string{",", ":", ";", "\"", "\\", "'"} {
-		for _, field := range []string{"name", "email"} {
-			for _, leading := range []bool{true, false} {
-				identity := &GitIdentity{Name: "Bot", Email: "bot@example.test"}
-				value := &identity.Name
-				if field == "email" {
-					value = &identity.Email
-				}
-				if leading {
-					*value = punctuation + *value
-				} else {
-					*value += punctuation
-				}
-				if _, err := validateGitIdentity(identity); err == nil {
-					t.Errorf("accepted Git-trimmed %s %q", field, *value)
-				}
-			}
-		}
+	identity := &GitIdentity{Name: "山田 O'Brien", Email: "bot@example.test"}
+	original := *identity
+	got, err := validateGitIdentity(identity)
+	if err != nil || got == nil || *got != original || got == identity || *identity != original {
+		t.Fatalf("validateGitIdentity = %+v, %v; want unchanged values in a separate object", got, err)
 	}
 }
 
-func TestValidateGitIdentityByteLimits(t *testing.T) {
+func TestValidateGitIdentityReportsInvalidField(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		identity *GitIdentity
-		valid    bool
-	}{
-		{"name at limit", &GitIdentity{Name: strings.Repeat("n", 256), Email: "bot@example.test"}, true},
-		{"name over limit", &GitIdentity{Name: strings.Repeat("n", 257), Email: "bot@example.test"}, false},
-		{"unicode name at byte limit", &GitIdentity{Name: strings.Repeat("界", 85) + "n", Email: "bot@example.test"}, true},
-		{"unicode name over byte limit", &GitIdentity{Name: strings.Repeat("界", 85) + "nn", Email: "bot@example.test"}, false},
-		{"email at limit", &GitIdentity{Name: "Bot", Email: strings.Repeat("e", 252) + "@b"}, true},
-		{"email over limit", &GitIdentity{Name: "Bot", Email: strings.Repeat("e", 253) + "@b"}, false},
-		{"invalid UTF-8 name", &GitIdentity{Name: "Bot\xff", Email: "bot@example.test"}, false},
-		{"invalid UTF-8 email", &GitIdentity{Name: "Bot", Email: "bot\xff@example.test"}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := validateGitIdentity(tc.identity)
-			if (err == nil) != tc.valid {
-				t.Fatalf("validateGitIdentity error = %v; valid = %t", err, tc.valid)
-			}
-		})
-	}
-}
-
-func TestValidateGitIdentityRejectsGitUnsafeValues(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		identity *GitIdentity
+		identity GitIdentity
 		want     string
 	}{
-		{name: "empty name", identity: &GitIdentity{Email: "bot@example.test"}, want: "git_identity.name is invalid"},
-		{name: "empty email", identity: &GitIdentity{Name: "Bot"}, want: "git_identity.email is invalid"},
-		{name: "newline in name", identity: &GitIdentity{Name: "Bot\nCo-Authored-By: x", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
-		{name: "format character in name", identity: &GitIdentity{Name: "Bot\u200b", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
-		{name: "surrounding space in name", identity: &GitIdentity{Name: "Bot ", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
-		{name: "newline in email", identity: &GitIdentity{Name: "Bot", Email: "bot\n@example.test"}, want: "git_identity.email is invalid"},
-		{name: "space in email", identity: &GitIdentity{Name: "Bot", Email: "b ot@example.test"}, want: "git_identity.email is invalid"},
-		{name: "missing at", identity: &GitIdentity{Name: "Bot", Email: "bot.example.test"}, want: "git_identity.email is invalid"},
-		{name: "double at", identity: &GitIdentity{Name: "Bot", Email: "a@b@example.test"}, want: "git_identity.email is invalid"},
-		{name: "empty local part", identity: &GitIdentity{Name: "Bot", Email: "@example.test"}, want: "git_identity.email is invalid"},
-		{name: "empty domain", identity: &GitIdentity{Name: "Bot", Email: "bot@"}, want: "git_identity.email is invalid"},
+		{"empty object", GitIdentity{}, "git_identity.name is invalid"},
+		{"missing name", GitIdentity{Email: "bot@example.test"}, "git_identity.name is invalid"},
+		{"missing email", GitIdentity{Name: "Bot"}, "git_identity.email is invalid"},
+		{"invalid name", GitIdentity{Name: "<>", Email: "bot@example.test"}, "git_identity.name is invalid"},
+		{"invalid email", GitIdentity{Name: "Bot", Email: "bo<t@example.test"}, "git_identity.email is invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := validateGitIdentity(tc.identity)
+			original := tc.identity
+			got, err := validateGitIdentity(&tc.identity)
 			var validation *ValidationError
-			if !errors.As(err, &validation) || validation.Message != tc.want {
-				t.Fatalf("validateGitIdentity err = %T %v; want %q", err, err, tc.want)
+			if got != nil || !errors.As(err, &validation) || validation.Message != tc.want {
+				t.Fatalf("validateGitIdentity = %+v, %T %v; want nil, %q", got, err, err, tc.want)
+			}
+			if tc.identity != original {
+				t.Fatal("validation changed the input identity")
 			}
 		})
 	}

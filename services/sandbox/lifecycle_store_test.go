@@ -39,22 +39,6 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 		'https://github.com/tetral-ai/deleted', '/workspace/deleted', 'encrypted-token')`); err != nil {
 		t.Fatalf("seed deleted repository resource detail: %v", err)
 	}
-	// Exercise the production resource reader and its durable snapshot with both
-	// a declared identity and the existing omitted-identity resource above.
-	if _, err := adminDB.Exec(`INSERT INTO session_resources (
-		workspace_id, session_id, resource_id, type, created_at, updated_at
-	) VALUES ('ws_execution_store', 'sesn_execution_store', 'sesrsc_identity_repo',
-		'github_repository', $1, $1)`, now); err != nil {
-		t.Fatalf("seed identity repository resource: %v", err)
-	}
-	if _, err := adminDB.Exec(`INSERT INTO session_github_repository_resources (
-		workspace_id, session_id, resource_id, url, mount_path,
-		git_identity_name, git_identity_email, authorization_token_encrypted
-	) VALUES ('ws_execution_store', 'sesn_execution_store', 'sesrsc_identity_repo',
-		'https://github.com/tetral-ai/identity', '/workspace/identity',
-		'Example Automation', 'automation@example.test', 'encrypted-token')`); err != nil {
-		t.Fatalf("seed identity repository detail: %v", err)
-	}
 	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
 	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
 		t.Fatalf("WaitForActivation: %v", err)
@@ -105,17 +89,6 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 	}
 	if current != SandboxLifecycleApplied || materialization.Handle.SandboxID != "provider_execution_store" {
 		t.Fatalf("materialization = %+v current=%s", materialization, current)
-	}
-	repositories := materialization.Setup.Resources.GitHubRepositories
-	if len(repositories) != 1 || repositories[0].ResourceID != "sesrsc_identity_repo" ||
-		repositories[0].GitIdentityName != "Example Automation" ||
-		repositories[0].GitIdentityEmail != "automation@example.test" {
-		t.Fatalf("materialization repository snapshot = %+v; want declared identity", repositories)
-	}
-	deletedRepositories := materialization.Setup.Resources.DeletedGitHubRepositories
-	if len(deletedRepositories) != 1 || deletedRepositories[0].ResourceID != "sesrsc_deleted_repo" ||
-		deletedRepositories[0].GitIdentityName != "" || deletedRepositories[0].GitIdentityEmail != "" {
-		t.Fatalf("deleted repository snapshot = %+v; want omitted identity", deletedRepositories)
 	}
 	if skills := materialization.Setup.Resources.Skills; len(skills) != 1 || skills[0].SkillVersionID != "sv_role" || skills[0].BlobKey != "role.zip" {
 		t.Fatalf("materialization skill snapshot = %+v; want configured version and blob", skills)

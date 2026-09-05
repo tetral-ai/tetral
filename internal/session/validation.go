@@ -7,6 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/gitidentity"
 	"github.com/tetral-ai/tetral/internal/pathvalidation"
 )
 
@@ -26,11 +27,6 @@ const (
 	maxMemoryResources    = 8
 	maxMemoryInstructions = 4096
 	maxGitBranchNameBytes = 255
-	// maxGitIdentityNameBytes and maxGitIdentityEmailBytes bound the declared
-	// commit identity; the email bound mirrors the RFC 5321 path limit.
-	// UPDATE-WITH: service.go (prepareCreateResources identity admission).
-	maxGitIdentityNameBytes  = 256
-	maxGitIdentityEmailBytes = 254
 )
 
 var (
@@ -234,51 +230,20 @@ func safeGitHubPathComponent(value string) bool {
 	return true
 }
 
-// validateGitIdentity admits one declared repository-local commit identity.
-// Both fields are required when the object is present: git uses the pair as
-// the default author and committer, and a half-declared identity would fall
-// back to the global session identity for one half only. Values must be
-// valid UTF-8 and bounded, with no controls, format characters, or delimiters.
-// Reject values Git's ident.c would sanitize instead of silently changing the
-// declared identity; the email must carry exactly one non-anchored '@'.
+// validateGitIdentity preserves absence and copies an admitted repository identity.
+// Admission and durable snapshot validation share the gitidentity contract.
 func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
 	if identity == nil {
 		return nil, nil
 	}
-	name := identity.Name
-	email := identity.Email
-	if name == "" || !utf8.ValidString(name) || len(name) > maxGitIdentityNameBytes {
-		return nil, &ValidationError{Message: "git_identity.name is invalid"}
-	}
-	if email == "" || !utf8.ValidString(email) || len(email) > maxGitIdentityEmailBytes {
-		return nil, &ValidationError{Message: "git_identity.email is invalid"}
-	}
-	for _, r := range name {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return nil, &ValidationError{Message: "git_identity.name is invalid"}
+	if err := gitidentity.Validate(identity.Name, identity.Email); err != nil {
+		field := "email"
+		if err == gitidentity.ErrInvalidName {
+			field = "name"
 		}
+		return nil, &ValidationError{Message: "git_identity." + field + " is invalid"}
 	}
-	if strings.TrimSpace(name) != name || gitIdentityNeedsSanitization(name) {
-		return nil, &ValidationError{Message: "git_identity.name is invalid"}
-	}
-	for _, r := range email {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
-			return nil, &ValidationError{Message: "git_identity.email is invalid"}
-		}
-	}
-	if gitIdentityNeedsSanitization(email) || strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
-		return nil, &ValidationError{Message: "git_identity.email is invalid"}
-	}
-	return &GitIdentity{Name: name, Email: email}, nil
-}
-
-// Git's ident.c removes angle brackets anywhere and trims these ASCII bytes
-// from both ends (crud / strbuf_addstr_without_crud). Internal punctuation,
-// periods, and non-ASCII names remain representable and must not be stripped.
-// UPDATE-WITH: sandbox/driver/github_repository.go (durable snapshot guard).
-func gitIdentityNeedsSanitization(value string) bool {
-	const trimmed = " \t\n\r\v\f,:;<>\"\\'"
-	return strings.ContainsAny(value, "<>") || strings.Trim(value, trimmed) != value
+	return &GitIdentity{Name: identity.Name, Email: identity.Email}, nil
 }
 
 func validateCheckout(checkout *GitHubCheckout) (*GitHubCheckout, error) {
