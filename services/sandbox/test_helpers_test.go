@@ -318,7 +318,7 @@ func waitForSandboxLockWait(t *testing.T, db *sql.DB, queryFragment string) {
 		var waiting bool
 		if err := db.QueryRow(`SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
-			WHERE wait_event_type='Lock' AND query LIKE $1
+			WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1
 		)`, "%"+queryFragment+"%").Scan(&waiting); err != nil {
 			t.Fatalf("inspect %s lock wait: %v", queryFragment, err)
 		}

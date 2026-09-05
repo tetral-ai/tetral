@@ -84,6 +84,11 @@ Activation is single-flight per logical Sandbox. Concurrent executions attach
 to the same unfinished operation. Completion records the provider handle and
 re-enqueues refs-only execution jobs; each released execution inspects the
 provider again before authorization.
+Sandbox activation and lifecycle transactions lock the Environment row while
+selecting or validating its generation. The Sandbox database role therefore
+needs `environments UPDATE` for `SELECT ... FOR UPDATE`, even though API remains
+the owner of Environment configuration changes. Granting the row-lock capability
+does not change that business ownership.
 If a lifecycle notification is redelivered after a release fence but no
 provider submission was recorded, the worker abandons that operation without a
 provider call. Once a submission boundary exists, recovery continues by
@@ -142,6 +147,14 @@ Memory projection stays bound to the exact attached writable store named by
 its durable job. Detaching that store terminalizes the projection even when a
 different writable store is attached later; projection work never crosses
 store identity.
+
+Background settlement checks the shared child-close fence before publishing a
+task notification. `session_threads` and `session_events` require `SELECT` and
+`UPDATE` because the fence takes `FOR SHARE` locks; Sandbox does not become an
+author of their business columns. A committed close input with no terminal source
+Tool Result also requires reading `session_bridge_operations` for the close
+receipt. A closing or closed target receives a parked notification without a
+runnable notification job; task result and notification commit atomically.
 
 ## Provider Adapter
 
@@ -263,6 +276,13 @@ normalized error code, and Queue attempt N/M of each current attempt.
 Materialization arm operations identify helper health,
 base directories, credential mint, file staging, mount/bind verification,
 skills, memory projection, and repository checkout separately.
+
+Failed workspace consumer cycles emit one `sandbox.queue.consume.failed` warning
+per cycle, including failures before a job is leased. It records the operation,
+Sandbox component, a fixed error class (`database_permission_denied` for SQLSTATE
+`42501`), and the next retry delay. It omits raw error text and database
+diagnostics. Existing polling backoff and wake behavior govern retries; normal
+shutdown cancellation emits no failure warning.
 
 Provider failures retain only a safe status code and a bounded message that
 passes the provider-message validator. Credentials, headers, request bodies,

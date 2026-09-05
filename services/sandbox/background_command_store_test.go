@@ -12,11 +12,14 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 func TestPostgreSQLBackgroundTaskReconcileAdvancesOneGeneration(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -80,7 +83,9 @@ func TestPostgreSQLBackgroundTaskReconcileAdvancesOneGeneration(t *testing.T) {
 }
 
 func TestPostgreSQLBackgroundReconcileExhaustionIgnoresPoisonPayload(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
@@ -106,7 +111,9 @@ func TestPostgreSQLBackgroundReconcileExhaustionIgnoresPoisonPayload(t *testing.
 }
 
 func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -149,6 +156,15 @@ func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t 
 	if taskStatus != "running" || inboxCount != 0 {
 		t.Fatalf("task/inbox after stale settlement = %s/%d; want running/0", taskStatus, inboxCount)
 	}
+	for _, grant := range []struct{ table, privilege string }{
+		{"session_threads", "SELECT"}, {"session_threads", "UPDATE"},
+		{"session_events", "SELECT"}, {"session_events", "UPDATE"},
+	} {
+		workload.RequirePrivilege(t, grant.table, grant.privilege, func() error {
+			return store.SettleTask(secondCtx, work, result, time.Now().UTC())
+		})
+		assertBackgroundTaskSettlementRolledBack(t, adminDB)
+	}
 	if err := store.SettleTask(secondCtx, work, result, time.Now().UTC()); err != nil {
 		t.Fatalf("successor SettleTask: %v", err)
 	}
@@ -186,7 +202,9 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 			name = "rollback"
 		}
 		t.Run(name, func(t *testing.T) {
-			runtimeDB, adminDB := newSandboxServiceTestDB(t)
+			_, adminDB := newSandboxServiceTestDB(t)
+			workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+			runtimeDB := workload.DB
 			seedSandboxExecutionStoreFixture(t, adminDB)
 			seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 			if _, err := adminDB.Exec(`INSERT INTO session_runtime_bindings (
@@ -273,7 +291,9 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 }
 
 func TestPostgreSQLBackgroundCommandDuplicatePollPreservesConsumedReceipt(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	const terminalResult = `{"status":"completed","result":{"stdout":"done"}}`
@@ -335,7 +355,9 @@ func TestPostgreSQLBackgroundCommandDuplicatePollPreservesConsumedReceipt(t *tes
 }
 
 func TestPostgreSQLBackgroundSettlementLocksLifecycleBeforeTask(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
@@ -386,7 +408,9 @@ func TestPostgreSQLBackgroundSettlementLocksLifecycleBeforeTask(t *testing.T) {
 }
 
 func TestPostgreSQLBackgroundSettlementLocksTaskBeforeRuntimeQueue(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
@@ -420,7 +444,7 @@ func TestPostgreSQLBackgroundSettlementLocksTaskBeforeRuntimeQueue(t *testing.T)
 			ResultJSON: `{"status":"completed","result":{"stdout":"done"}}`, TerminalStatus: "completed",
 		}, now)
 	}()
-	time.Sleep(200 * time.Millisecond)
+	waitForSandboxLockWait(t, adminDB, "session_background_tasks")
 	lockCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var sequence int64
@@ -442,7 +466,9 @@ func TestPostgreSQLBackgroundSettlementLocksTaskBeforeRuntimeQueue(t *testing.T)
 }
 
 func TestPostgreSQLBackgroundCommandSettlementLocksReceiptBeforeLifecycle(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)

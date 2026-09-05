@@ -409,6 +409,13 @@ never added through `POST /resources`) are covered above.
 
 ### Admission fence + same-transaction enqueue (owner: this service)
 
+Event admission also reads the shared child-close fence. A tool confirmation
+targets its pending Tool Use's thread, so a child confirmation can reach the
+committed-close branch even though ordinary user messages target Main. The API
+role needs `session_bridge_operations SELECT` to inspect the close receipt;
+Bridge remains its writer. Without a receipt or terminal source Tool Result,
+the close fence rejects admission without persisting an event or Queue job.
+
 - **Contract.** Work leaves this service only as durable facts. The recurring
   pattern is one PostgreSQL transaction containing both the business rows and the
   `queue_jobs` rows: an admitted `user.message` writes its events and the
