@@ -96,12 +96,15 @@ func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 			githubMountPath    sql.NullString
 			checkoutType       sql.NullString
 			checkoutRef        sql.NullString
+			gitIdentityName    sql.NullString
+			gitIdentityEmail   sql.NullString
 		)
 		if err := rows.Scan(
 			&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
 			&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
 			&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
 			&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
+			&gitIdentityName, &gitIdentityEmail,
 		); err != nil {
 			return ResourceSetup{}, err
 		}
@@ -137,11 +140,13 @@ func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 			}
 		case "github_repository":
 			mount := GitHubRepositoryMount{
-				ResourceID:   resourceID,
-				URL:          nullableStringValue(githubURL),
-				MountPath:    nullableStringValue(githubMountPath),
-				CheckoutType: nullableStringValue(checkoutType),
-				CheckoutRef:  nullableStringValue(checkoutRef),
+				ResourceID:       resourceID,
+				URL:              nullableStringValue(githubURL),
+				MountPath:        nullableStringValue(githubMountPath),
+				CheckoutType:     nullableStringValue(checkoutType),
+				CheckoutRef:      nullableStringValue(checkoutRef),
+				GitIdentityName:  nullableStringValue(gitIdentityName),
+				GitIdentityEmail: nullableStringValue(gitIdentityEmail),
 			}
 			if deleteRequestedAt.Valid && !detachedAt.Valid {
 				setup.DeletedGitHubRepositories = append(setup.DeletedGitHubRepositories, mount)

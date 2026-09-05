@@ -73,12 +73,22 @@ type ResourceRequest struct {
 	GitHubURL          string
 	AuthorizationToken string
 	Checkout           *GitHubCheckout
+	GitIdentity        *GitIdentity
 }
 
 type GitHubCheckout struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
 	SHA  string `json:"sha,omitempty"`
+}
+
+// GitIdentity is the repository-local Git commit identity declared on one
+// github_repository resource. It is configuration, not authentication
+// material: it supplies the default author and committer for ordinary
+// git commit operations inside that mount and is returned unredacted.
+type GitIdentity struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 type UpdateRequest struct {
@@ -230,20 +240,21 @@ type ThreadAgentModelConfig struct {
 }
 
 type ResourceResponse struct {
-	ID            string    `json:"id"`
-	Type          string    `json:"type"`
-	FileID        string    `json:"file_id,omitempty"`
-	MemoryStoreID string    `json:"memory_store_id,omitempty"`
-	Access        string    `json:"access,omitempty"`
-	Instructions  string    `json:"instructions,omitempty"`
-	Name          string    `json:"name,omitempty"`
-	Description   string    `json:"description,omitempty"`
-	URL           string    `json:"url,omitempty"`
-	MountPath     string    `json:"mount_path"`
-	CheckoutType  string    `json:"-"`
-	CheckoutRef   string    `json:"-"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            string       `json:"id"`
+	Type          string       `json:"type"`
+	FileID        string       `json:"file_id,omitempty"`
+	MemoryStoreID string       `json:"memory_store_id,omitempty"`
+	Access        string       `json:"access,omitempty"`
+	Instructions  string       `json:"instructions,omitempty"`
+	Name          string       `json:"name,omitempty"`
+	Description   string       `json:"description,omitempty"`
+	URL           string       `json:"url,omitempty"`
+	MountPath     string       `json:"mount_path"`
+	CheckoutType  string       `json:"-"`
+	CheckoutRef   string       `json:"-"`
+	GitIdentity   *GitIdentity `json:"-"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 func (value ResourceResponse) MarshalJSON() ([]byte, error) {
@@ -259,6 +270,7 @@ func (value ResourceResponse) MarshalJSON() ([]byte, error) {
 		URL           string          `json:"url,omitempty"`
 		MountPath     string          `json:"mount_path"`
 		Checkout      *GitHubCheckout `json:"checkout,omitempty"`
+		GitIdentity   *GitIdentity    `json:"git_identity,omitempty"`
 		CreatedAt     time.Time       `json:"created_at"`
 		UpdatedAt     time.Time       `json:"updated_at"`
 	}
@@ -277,6 +289,7 @@ func (value ResourceResponse) MarshalJSON() ([]byte, error) {
 		MemoryStoreID: value.MemoryStoreID, Access: value.Access,
 		Instructions: value.Instructions, Name: value.Name,
 		Description: value.Description, URL: value.URL, MountPath: value.MountPath,
-		Checkout: checkout, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		Checkout: checkout, GitIdentity: value.GitIdentity,
+		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	})
 }

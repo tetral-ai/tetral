@@ -45,6 +45,11 @@ type sessionGitHubRepositoryMount struct {
 	MountPath    string
 	CheckoutType string
 	CheckoutRef  string
+	// GitIdentityName/GitIdentityEmail carry the declared repository-local
+	// commit identity; both empty means the resource keeps the session-scoped
+	// platform fallback.
+	GitIdentityName  string
+	GitIdentityEmail string
 }
 
 type sessionSkillMount struct {
@@ -96,11 +101,13 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 		var sourceFileID, objectID, sessionFileID, fileMountPath sql.NullString
 		var memoryStoreID, memoryAccess, memoryInstructions, memoryName, memoryDescription, memoryMountPath sql.NullString
 		var githubURL, githubMountPath, checkoutType, checkoutRef sql.NullString
+		var gitIdentityName, gitIdentityEmail sql.NullString
 		if err := rows.Scan(
 			&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
 			&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
 			&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
 			&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
+			&gitIdentityName, &gitIdentityEmail,
 		); err != nil {
 			return snapshot, err
 		}
@@ -135,6 +142,7 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 			mount := sessionGitHubRepositoryMount{
 				ResourceID: resourceID, URL: githubURL.String, MountPath: githubMountPath.String,
 				CheckoutType: checkoutType.String, CheckoutRef: checkoutRef.String,
+				GitIdentityName: gitIdentityName.String, GitIdentityEmail: gitIdentityEmail.String,
 			}
 			if deleteRequestedAt.Valid {
 				snapshot.DeletedGitHubRepositories = append(snapshot.DeletedGitHubRepositories, mount)

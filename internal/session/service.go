@@ -852,6 +852,10 @@ func (s *Service) prepareCreateResources(ctx context.Context, ws workspace.ID, r
 			if err != nil {
 				return nil, err
 			}
+			gitIdentity, err := validateGitIdentity(request.GitIdentity)
+			if err != nil {
+				return nil, err
+			}
 			checkoutType := ""
 			checkoutRef := ""
 			if checkout != nil {
@@ -879,6 +883,7 @@ func (s *Service) prepareCreateResources(ctx context.Context, ws workspace.ID, r
 					MountPath:                   mount,
 					CheckoutType:                checkoutType,
 					CheckoutRef:                 checkoutRef,
+					GitIdentity:                 gitIdentity,
 					AuthorizationTokenEncrypted: encryptedToken,
 				},
 			}})
@@ -1131,6 +1136,10 @@ func resourceResponse(resource *Resource) *ResourceResponse {
 		if resource.GitHubRepository.CheckoutType != "" {
 			response.CheckoutType = resource.GitHubRepository.CheckoutType
 			response.CheckoutRef = resource.GitHubRepository.CheckoutRef
+		}
+		if resource.GitHubRepository.GitIdentity != nil {
+			identity := *resource.GitHubRepository.GitIdentity
+			response.GitIdentity = &identity
 		}
 	}
 	return response
