@@ -26,6 +26,11 @@ const (
 	maxMemoryResources    = 8
 	maxMemoryInstructions = 4096
 	maxGitBranchNameBytes = 255
+	// maxGitIdentityNameBytes and maxGitIdentityEmailBytes bound the declared
+	// commit identity; the email bound mirrors the RFC 5321 path limit.
+	// UPDATE-WITH: service.go (prepareCreateResources identity admission).
+	maxGitIdentityNameBytes  = 256
+	maxGitIdentityEmailBytes = 254
 )
 
 var (
@@ -66,11 +71,11 @@ func validateMetadataPatch(current map[string]string, patch map[string]*string) 
 func validateResourceRequestTypeClosure(request ResourceRequest) error {
 	switch request.Type {
 	case string(ResourceTypeFile):
-		if request.MemoryStoreID != "" || request.Access != "" || request.Instructions != "" || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil {
+		if request.MemoryStoreID != "" || request.Access != "" || request.Instructions != "" || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil || request.GitIdentity != nil {
 			return resourceFieldNotAllowedForTypeError(request.Type)
 		}
 	case string(ResourceTypeMemoryStore):
-		if request.FileID != "" || request.MountPath != nil || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil {
+		if request.FileID != "" || request.MountPath != nil || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil || request.GitIdentity != nil {
 			return resourceFieldNotAllowedForTypeError(request.Type)
 		}
 	case string(ResourceTypeGitHubRepository):
@@ -227,6 +232,44 @@ func safeGitHubPathComponent(value string) bool {
 		}
 	}
 	return true
+}
+
+// validateGitIdentity admits one declared repository-local commit identity.
+// Both fields are required when the object is present: git uses the pair as
+// the default author and committer, and a half-declared identity would fall
+// back to the global session identity for one half only. Values must be
+// valid UTF-8, bounded, and free of control, format, and whitespace characters
+// that Git cannot represent faithfully in a commit header or that smuggle
+// additional headers; the email must carry exactly one non-anchored '@'.
+func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
+	if identity == nil {
+		return nil, nil
+	}
+	name := identity.Name
+	email := identity.Email
+	if name == "" || !utf8.ValidString(name) || len(name) > maxGitIdentityNameBytes {
+		return nil, &ValidationError{Message: "git_identity.name is invalid"}
+	}
+	if email == "" || !utf8.ValidString(email) || len(email) > maxGitIdentityEmailBytes {
+		return nil, &ValidationError{Message: "git_identity.email is invalid"}
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return nil, &ValidationError{Message: "git_identity.name is invalid"}
+		}
+	}
+	if strings.TrimSpace(name) != name {
+		return nil, &ValidationError{Message: "git_identity.name is invalid"}
+	}
+	for _, r := range email {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+			return nil, &ValidationError{Message: "git_identity.email is invalid"}
+		}
+	}
+	if strings.Count(email, "@") != 1 || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
+		return nil, &ValidationError{Message: "git_identity.email is invalid"}
+	}
+	return &GitIdentity{Name: name, Email: email}, nil
 }
 
 func validateCheckout(checkout *GitHubCheckout) (*GitHubCheckout, error) {

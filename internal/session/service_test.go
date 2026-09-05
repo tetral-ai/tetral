@@ -104,6 +104,159 @@ func TestCreatePersistsDurableResourcesAndNeverReturnsGitHubToken(t *testing.T) 
 	}
 }
 
+func TestCreateAdmitsConfiguredGitIdentityWithoutEchoingToken(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	const authorizationToken = "github_resource_token_identity"
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+	response, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+		Agent:         AgentReference{ID: "agent_test", Version: intPtr(2)},
+		EnvironmentID: "env_test",
+		Resources: []ResourceRequest{{
+			Type:               string(ResourceTypeGitHubRepository),
+			GitHubURL:          "https://github.com/tetral-ai/tetral.git",
+			AuthorizationToken: authorizationToken,
+			GitIdentity:        &GitIdentity{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(response.Resources) != 1 || response.Resources[0].GitIdentity == nil {
+		t.Fatalf("resources = %+v; want one github resource with git_identity", response.Resources)
+	}
+	if response.Resources[0].GitIdentity.Name != "Example Automation" ||
+		response.Resources[0].GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("response git_identity = %+v; want declared identity", response.Resources[0].GitIdentity)
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"git_identity":{"name":"Example Automation","email":"example-automation@users.noreply.github.com"}`) {
+		t.Fatalf("response missing unredacted git_identity: %s", encoded)
+	}
+	if strings.Contains(string(encoded), authorizationToken) || strings.Contains(string(encoded), "encrypted:") {
+		t.Fatalf("response leaked credential material: %s", encoded)
+	}
+
+	stored := store.sessions["sesn_test"]
+	if stored.Resources[0].GitHubRepository.GitIdentity == nil ||
+		stored.Resources[0].GitHubRepository.GitIdentity.Name != "Example Automation" ||
+		stored.Resources[0].GitHubRepository.GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("stored git identity = %+v; want declared identity", stored.Resources[0].GitHubRepository.GitIdentity)
+	}
+}
+
+func TestCreateRejectsInvalidGitIdentityBeforePersistingSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity *GitIdentity
+		want     string
+	}{
+		{name: "empty name", identity: &GitIdentity{Name: "", Email: "bot@users.noreply.github.com"}, want: "git_identity.name is invalid"},
+		{name: "empty email", identity: &GitIdentity{Name: "Bot", Email: ""}, want: "git_identity.email is invalid"},
+		{name: "unbounded name", identity: &GitIdentity{Name: strings.Repeat("n", maxGitIdentityNameBytes+1), Email: "bot@users.noreply.github.com"}, want: "git_identity.name is invalid"},
+		{name: "unbounded email", identity: &GitIdentity{Name: "Bot", Email: strings.Repeat("e", maxGitIdentityEmailBytes)}, want: "git_identity.email is invalid"},
+		{name: "control character in name", identity: &GitIdentity{Name: "Bot\nCo-Authored-By: other", Email: "bot@users.noreply.github.com"}, want: "git_identity.name is invalid"},
+		{name: "control character in email", identity: &GitIdentity{Name: "Bot", Email: "bot\r@users.noreply.github.com"}, want: "git_identity.email is invalid"},
+		{name: "email without at", identity: &GitIdentity{Name: "Bot", Email: "bot.example.test"}, want: "git_identity.email is invalid"},
+		{name: "email with two at", identity: &GitIdentity{Name: "Bot", Email: "bot@@users.noreply.github.com"}, want: "git_identity.email is invalid"},
+		{name: "email with empty domain", identity: &GitIdentity{Name: "Bot", Email: "bot@"}, want: "git_identity.email is invalid"},
+		{name: "email with whitespace", identity: &GitIdentity{Name: "Bot", Email: "bot @users.noreply.github.com"}, want: "git_identity.email is invalid"},
+		{name: "padded name", identity: &GitIdentity{Name: " Bot", Email: "bot@users.noreply.github.com"}, want: "git_identity.name is invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+			store := newRecordingSessionStore()
+			service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+			_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+				Agent:         AgentReference{ID: "agent_test"},
+				EnvironmentID: "env_test",
+				Resources: []ResourceRequest{{
+					Type:               string(ResourceTypeGitHubRepository),
+					GitHubURL:          "https://github.com/tetral-ai/tetral",
+					AuthorizationToken: "github_resource_token",
+					GitIdentity:        tc.identity,
+				}},
+			})
+			var validation *ValidationError
+			if !errors.As(err, &validation) || validation.Message != tc.want {
+				t.Fatalf("Create err = %T %v; want %q", err, err, tc.want)
+			}
+			if len(store.sessions) != 0 {
+				t.Fatalf("session persisted for invalid git_identity: %v", store.sessions)
+			}
+		})
+	}
+}
+
+func TestCreateRejectsGitIdentityOnNonGitHubResource(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+		Agent:         AgentReference{ID: "agent_test"},
+		EnvironmentID: "env_test",
+		Resources: []ResourceRequest{{
+			Type:        string(ResourceTypeMemoryStore),
+			GitIdentity: &GitIdentity{Name: "Bot", Email: "bot@users.noreply.github.com"},
+		}},
+	})
+	var validation *ValidationError
+	if !errors.As(err, &validation) || validation.Message != "resource field is not allowed for type" {
+		t.Fatalf("Create err = %T %v; want type closure rejection", err, err)
+	}
+}
+
+func TestUpdateGitHubResourceTokenPreservesDeclaredGitIdentity(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+	session := testStoredSession(fixed)
+	session.Status = StatusIdle
+	session.Resources = []*Resource{{
+		ID:          "sesrsc_github",
+		SessionID:   session.ID,
+		WorkspaceID: workspace.DefaultID,
+		Type:        ResourceTypeGitHubRepository,
+		GitHubRepository: &GitHubRepositoryResource{
+			URL:                         "https://github.com/tetral-ai/tetral",
+			MountPath:                   "/workspace/tetral",
+			GitIdentity:                 &GitIdentity{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
+			AuthorizationTokenEncrypted: []byte("encrypted:old"),
+		},
+	}}
+	store.sessions[session.ID] = session
+
+	response, err := service.UpdateResource(
+		context.Background(),
+		workspace.DefaultID,
+		session.ID,
+		"sesrsc_github",
+		"github_resource_token_rotated",
+	)
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if response.GitIdentity == nil ||
+		response.GitIdentity.Name != "Example Automation" ||
+		response.GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("rotation response git_identity = %+v; want preserved declared identity", response.GitIdentity)
+	}
+	stored := store.sessions[session.ID].Resources[0].GitHubRepository
+	if stored.GitIdentity == nil || stored.GitIdentity.Name != "Example Automation" {
+		t.Fatalf("stored git identity after rotation = %+v; want preserved", stored.GitIdentity)
+	}
+	if got := string(stored.AuthorizationTokenEncrypted); got != "encrypted:github_resource_token_rotated" {
+		t.Fatalf("stored token = %q; want rotated token", got)
+	}
+}
+
 func TestCreateRejectsGitHubResourceWithoutAuthorizationToken(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()

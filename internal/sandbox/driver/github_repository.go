@@ -151,6 +151,10 @@ func githubRepositoryCloneCommand(repo sandbox.GitHubRepositoryMount) (string, e
 	if mountPath == "/workspace" || !strings.HasPrefix(mountPath, "/workspace/") {
 		return "", errors.New("github_repository mount_path must be under /workspace")
 	}
+	hasIdentity, err := validateGitHubRepositoryIdentity(repo.GitIdentityName, repo.GitIdentityEmail)
+	if err != nil {
+		return "", err
+	}
 	lines := []string{
 		"set -eu",
 		"export GIT_TERMINAL_PROMPT=0",
@@ -158,7 +162,7 @@ func githubRepositoryCloneCommand(repo sandbox.GitHubRepositoryMount) (string, e
 		"target=" + shellQuote(mountPath),
 		"same_origin=0",
 		"if git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then origin=$(git -C \"$target\" config --get remote.origin.url 2>/dev/null || true); origin=${origin%.git}; if [ \"$origin\" = \"$repo_url\" ]; then same_origin=1; fi; fi",
-		"if [ \"$same_origin\" = 1 ]; then exit 0; fi",
+		"if [ \"$same_origin\" != 1 ]; then",
 		"if [ -e \"$target\" ]; then echo 'github_repository target exists but is not the admitted origin' >&2; exit 65; fi",
 		"mkdir -p " + shellQuote(path.Dir(mountPath)),
 	}
@@ -181,7 +185,43 @@ func githubRepositoryCloneCommand(repo sandbox.GitHubRepositoryMount) (string, e
 	default:
 		return "", errors.New("github_repository checkout_type is invalid")
 	}
+	lines = append(lines, "fi")
+	if hasIdentity {
+		// Repository-local identity: applies after a fresh clone and after the
+		// already-admitted origin is recognized, so recovery and
+		// rematerialization reassert it. The global session identity installed
+		// by the configuration phase stays the fallback for every other mount.
+		lines = append(lines,
+			"git -C \"$target\" config user.name "+shellQuote(repo.GitIdentityName),
+			"git -C \"$target\" config user.email "+shellQuote(repo.GitIdentityEmail),
+		)
+	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// validateGitHubRepositoryIdentity is the driver's fail-closed guard on the
+// declared commit identity: both values arrive together or not at all, and
+// neither may carry characters Git cannot represent faithfully in a commit
+// header. Admission validation owns the full contract; this guard keeps a
+// corrupted durable snapshot from reaching the shell.
+func validateGitHubRepositoryIdentity(name, email string) (bool, error) {
+	if name == "" && email == "" {
+		return false, nil
+	}
+	if name == "" || email == "" {
+		return false, errors.New("github_repository git identity requires both name and email")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false, errors.New("github_repository git identity name is invalid")
+		}
+	}
+	for _, r := range email {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+			return false, errors.New("github_repository git identity email is invalid")
+		}
+	}
+	return true, nil
 }
 
 func (e *DaytonaHelperExecutor) executeGitHubCommand(ctx context.Context, sandboxHandle daytonaSandboxHandle, command string) (string, error) {

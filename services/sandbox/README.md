@@ -189,6 +189,16 @@ repositories, memory stores, skills, credentials, and helper health are
 converged in the same materialization operation. There is no alternate mount
 path or provider fallback.
 
+GitHub repository checkout carries the mount's declared commit identity from
+the durable materialization snapshot. After a fresh clone — and again whenever
+the already-admitted origin is recognized during recovery or
+rematerialization — the checkout installs a declared `git_identity` as
+repository-local `user.name`/`user.email`, so disposable Sandbox recreation
+reasserts it and one Session can mount repositories with different identities.
+A mount without a declared identity keeps the session-scoped platform identity
+from the Sandbox-global Git configuration, which per-repository configuration
+never rewrites.
+
 ## Release
 
 Release is a durable lifecycle operation. Its only producers are Session

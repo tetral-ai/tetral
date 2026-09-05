@@ -21,6 +21,54 @@ func TestValidateResourceRequestTypeClosureRejectsGitHubTokenOnOtherResourceType
 	}
 }
 
+func TestValidateGitIdentityAdmitsOrdinaryAndUnicodeIdentities(t *testing.T) {
+	for _, identity := range []*GitIdentity{
+		{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
+		{Name: "山田 太郎", Email: "taro@example.co.jp"},
+		{Name: "bot", Email: "a@b"},
+	} {
+		got, err := validateGitIdentity(identity)
+		if err != nil {
+			t.Fatalf("validateGitIdentity(%+v): %v", identity, err)
+		}
+		if got.Name != identity.Name || got.Email != identity.Email {
+			t.Fatalf("validateGitIdentity = %+v; want %+v", got, identity)
+		}
+	}
+	absent, err := validateGitIdentity(nil)
+	if err != nil || absent != nil {
+		t.Fatalf("validateGitIdentity(nil) = %+v, %v; want nil identity", absent, err)
+	}
+}
+
+func TestValidateGitIdentityRejectsGitUnsafeValues(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity *GitIdentity
+		want     string
+	}{
+		{name: "empty name", identity: &GitIdentity{Email: "bot@example.test"}, want: "git_identity.name is invalid"},
+		{name: "empty email", identity: &GitIdentity{Name: "Bot"}, want: "git_identity.email is invalid"},
+		{name: "newline in name", identity: &GitIdentity{Name: "Bot\nCo-Authored-By: x", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
+		{name: "format character in name", identity: &GitIdentity{Name: "Bot\u200b", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
+		{name: "surrounding space in name", identity: &GitIdentity{Name: "Bot ", Email: "bot@example.test"}, want: "git_identity.name is invalid"},
+		{name: "newline in email", identity: &GitIdentity{Name: "Bot", Email: "bot\n@example.test"}, want: "git_identity.email is invalid"},
+		{name: "space in email", identity: &GitIdentity{Name: "Bot", Email: "b ot@example.test"}, want: "git_identity.email is invalid"},
+		{name: "missing at", identity: &GitIdentity{Name: "Bot", Email: "bot.example.test"}, want: "git_identity.email is invalid"},
+		{name: "double at", identity: &GitIdentity{Name: "Bot", Email: "a@b@example.test"}, want: "git_identity.email is invalid"},
+		{name: "empty local part", identity: &GitIdentity{Name: "Bot", Email: "@example.test"}, want: "git_identity.email is invalid"},
+		{name: "empty domain", identity: &GitIdentity{Name: "Bot", Email: "bot@"}, want: "git_identity.email is invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateGitIdentity(tc.identity)
+			var validation *ValidationError
+			if !errors.As(err, &validation) || validation.Message != tc.want {
+				t.Fatalf("validateGitIdentity err = %T %v; want %q", err, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateCheckoutAcceptsDocumentedCommitSHAAndCanonicalizes(t *testing.T) {
 	rawSHA := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 
