@@ -1030,7 +1030,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 }
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	workload := storagetest.OpenWorkloadDB(t, admin, "bridge")
+	runtime := workload.DB
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory", "thr_bridge_memory")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory", "bind_bridge_memory", 1, "pod_uid_memory")
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory", "memstore_bridge_memory")
@@ -1041,6 +1043,13 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 		t, admin, scope, "evt_tool_memory_create",
 		`{"action":"create","path":"notes/todo.md","content":"one"}`,
 	)
+	workload.RequirePrivilege(t, "memory_stores", "UPDATE", func() error {
+		_, err := store.RunMemory(context.Background(), create)
+		return err
+	})
+	if count := countMemoryVersions(t, admin, "memstore_bridge_memory"); count != 0 {
+		t.Fatalf("failed memory mutation left %d versions", count)
+	}
 	response, err := store.RunMemory(context.Background(), create)
 	if err != nil {
 		t.Fatalf("RunMemory create: %v", err)

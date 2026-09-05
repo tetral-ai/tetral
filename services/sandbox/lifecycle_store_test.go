@@ -13,12 +13,15 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testing.T) {
-	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	_, adminDB := newSandboxServiceTestDB(t)
+	workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
+	runtimeDB := workload.DB
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
@@ -44,22 +47,32 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 	activationJob := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_activation_operation_id")
 	lifecycle := NewPostgreSQLSandboxLifecycleStore(
 		dbconnect.NewClientForTesting(runtimeDB),
-		&fixedSandboxResourceSource{resources: sandbox.ResourceSetup{
-			ResourceCredExpiresAt: ptrTime(now.Add(2 * time.Hour)),
-			ResourceRootsJSON:     `[{"path":"/mnt/session/uploads/a","mode":"read"}]`,
-			DeletedGitHubRepositories: []sandbox.GitHubRepositoryMount{{
-				ResourceID: "sesrsc_deleted_repo", URL: "https://github.com/tetral-ai/deleted",
-				MountPath: "/workspace/deleted",
-			}},
-		}},
+		sandbox.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)),
 		30*time.Minute,
 	)
+	workload.RequirePrivilege(t, "environments", "UPDATE", func() error {
+		_, _, err := lifecycle.ClaimActivation(ctx, activationJob, now)
+		return err
+	})
 	activation, current, err := lifecycle.ClaimActivation(ctx, activationJob, now)
 	if err != nil {
 		t.Fatalf("ClaimActivation: %v", err)
 	}
 	if current != SandboxLifecycleApplied || activation.Kind != ActivationCreate {
 		t.Fatalf("activation = %+v current=%s; want current create", activation, current)
+	}
+	if _, err := adminDB.Exec(`UPDATE agent_versions SET config_json=(config_json::jsonb || '{"skills":[{"skill_id":"skill_role","version":"1"}]}'::jsonb)::text;
+ INSERT INTO skills(workspace_id,skill_id,latest_version,created_at,updated_at) VALUES ('ws_execution_store','skill_role','1',now(),now());
+ INSERT INTO skill_versions(workspace_id,skill_id,skill_version_id,version,name,description,directory,blob_key,size_bytes,sha256,created_at) VALUES ('ws_execution_store','skill_role','sv_role','1','role skill','role description','role','role.zip',1,'hash',now())`); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"session_file_resources", "session_github_repository_resources", "agent_versions", "skill_versions"} {
+		workload.RequirePrivilege(t, table, "SELECT", func() error {
+			_, err := lifecycle.CompleteActivation(ctx, activation, sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_execution_store"}, now.Add(time.Second))
+			return err
+		})
+		assertSandboxExecutionState(t, adminDB, "evt_execution_a", "waiting_activation", 1)
+		assertQueueJobCount(t, adminDB, "ws_execution_store", "sandbox_materialize", 0)
 	}
 	if _, err := lifecycle.CompleteActivation(ctx, activation, sandbox.ProviderHandle{
 		Provider: "daytona", SandboxID: "provider_execution_store",
@@ -76,6 +89,9 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 	}
 	if current != SandboxLifecycleApplied || materialization.Handle.SandboxID != "provider_execution_store" {
 		t.Fatalf("materialization = %+v current=%s", materialization, current)
+	}
+	if skills := materialization.Setup.Resources.Skills; len(skills) != 1 || skills[0].SkillVersionID != "sv_role" || skills[0].BlobKey != "role.zip" {
+		t.Fatalf("materialization skill snapshot = %+v; want configured version and blob", skills)
 	}
 	if err := lifecycle.CompleteMaterialization(ctx, materialization, MaterializationResult{
 		MaterializedEnvironmentGeneration: materialization.TargetEnvironmentGeneration,

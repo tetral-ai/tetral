@@ -264,6 +264,13 @@ Materialization arm operations identify helper health,
 base directories, credential mint, file staging, mount/bind verification,
 skills, memory projection, and repository checkout separately.
 
+Failed workspace consumer cycles emit one `sandbox.queue.consume.failed` warning
+per cycle, including failures before a job is leased. It records the operation,
+Sandbox component, a fixed error class (`database_permission_denied` for SQLSTATE
+`42501`), and the next retry delay. It omits raw error text and database
+diagnostics. Existing polling backoff and wake behavior govern retries; normal
+shutdown cancellation emits no failure warning.
+
 Provider failures retain only a safe status code and a bounded message that
 passes the provider-message validator. Credentials, headers, request bodies,
 tool JSON, commands, mount URLs, tokens, and raw stacks are omitted. Startup

@@ -43,7 +43,9 @@ func TestLoadContextRejectionEmitsBoundedBridgePhaseReason(t *testing.T) {
 }
 
 func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
-	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	workload := storagetest.OpenWorkloadDB(t, admin, "bridge")
+	runtimeDB := workload.DB
 	const (
 		sessionID = "sesn_narrow_context"
 		threadID  = "sthr_narrow_context"
@@ -61,6 +63,15 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("narrow-context-test-signing-key")
+	if _, err := admin.Exec(`UPDATE agent_versions SET config_json=(config_json::jsonb || '{"skills":[{"skill_id":"skill_context","version":"1"}]}'::jsonb)::text;
+ INSERT INTO skills(workspace_id,skill_id,latest_version,created_at,updated_at) VALUES ('default','skill_context','1',now(),now());
+ INSERT INTO skill_versions(workspace_id,skill_id,skill_version_id,version,name,description,directory,blob_key,size_bytes,sha256,created_at) VALUES ('default','skill_context','sv_context','1','context skill','context description','context','context.zip',1,'hash',now())`); err != nil {
+		t.Fatal(err)
+	}
+	workload.RequirePrivilege(t, "skill_versions", "SELECT", func() error {
+		_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
+		return err
+	})
 	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 	if err != nil {
 		t.Fatalf("LoadContext: %v", err)
@@ -68,6 +79,9 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	var payload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode context: %v", err)
+	}
+	if !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), `"skill_version_id":"sv_context"`) || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context skill") || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context description") {
+		t.Fatalf("skill index = %s; want configured version metadata", payload.RuntimeConfig.SkillsIndex)
 	}
 	if len(payload.ContextEntries) != 1 || payload.ContextEntries[0].MessageSequence != 1 || payload.ContextEntries[0].ContextKind != "user" || len(payload.ContextEntries[0].Parts) != 1 {
 		t.Fatalf("context entries = %#v", payload.ContextEntries)

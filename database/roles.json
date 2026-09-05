@@ -38,6 +38,8 @@
         "memory_stores": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "memories": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "memory_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE"],
+        "session_background_tasks": ["SELECT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
@@ -72,7 +74,7 @@
         "session_event_stream_changes": ["SELECT", "INSERT"],
         "session_messages": ["SELECT", "INSERT", "UPDATE"],
         "session_mcp_manifests": ["SELECT", "INSERT", "UPDATE"],
-        "session_thread_context_prefixes": ["SELECT", "INSERT"],
+        "session_thread_context_prefixes": ["SELECT", "INSERT", "UPDATE"],
         "session_turn_retries": ["SELECT", "INSERT", "UPDATE"],
         "session_pending_tool_uses": ["SELECT", "INSERT", "UPDATE"],
         "session_transient_attachments": ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -94,10 +96,11 @@
         "skills": ["SELECT"],
         "file_objects": ["SELECT", "INSERT", "UPDATE"],
         "files": ["SELECT", "INSERT", "UPDATE"],
-        "memory_stores": ["SELECT"],
+        "memory_stores": ["SELECT", "UPDATE"],
         "memories": ["SELECT", "INSERT", "UPDATE"],
         "memory_versions": ["SELECT", "INSERT", "UPDATE"],
         "session_file_attachment_consumptions": ["SELECT", "INSERT"],
+        "skill_versions": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
@@ -138,7 +141,7 @@
         "session_resources": ["SELECT", "UPDATE"],
         "session_memory_store_resources": ["SELECT", "UPDATE"],
         "session_resource_prefix_gc": ["SELECT", "INSERT", "UPDATE"],
-        "session_transient_attachments": ["SELECT", "UPDATE"],
+        "session_transient_attachments": ["SELECT", "INSERT", "UPDATE"],
         "session_background_tasks": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_status": ["SELECT", "UPDATE"],
@@ -149,12 +152,17 @@
         "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-        "environments": ["SELECT"],
+        "environments": ["SELECT", "UPDATE"],
         "credentials": ["SELECT", "UPDATE"],
         "skills": ["SELECT"],
         "files": ["SELECT"],
         "memories": ["SELECT", "UPDATE"],
         "memory_versions": ["SELECT", "INSERT", "UPDATE"],
+        "session_file_resources": ["SELECT"],
+        "session_github_repository_resources": ["SELECT"],
+        "agent_versions": ["SELECT"],
+        "skill_versions": ["SELECT"],
+        "session_git_tickets": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
