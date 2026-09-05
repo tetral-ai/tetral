@@ -211,7 +211,7 @@ func validateGitHubRepositoryIdentity(name, email string) (bool, error) {
 	}
 	if err := gitidentity.Validate(name, email); err != nil {
 		field := "email"
-		if err == gitidentity.ErrInvalidName {
+		if errors.Is(err, gitidentity.ErrInvalidName) {
 			field = "name"
 		}
 		return false, errors.New("github_repository git identity " + field + " is invalid")

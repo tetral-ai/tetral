@@ -1,6 +1,7 @@
 package gitidentity
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,12 +19,13 @@ func TestValidate(t *testing.T) {
 		{"minimal email", "Bot", "a@b", nil},
 		{"periods preserved", ".山田 O'Brien.", "a.b+bot@example.test.", nil},
 		{"internal punctuation", "A, B: C; D\"E\\F", "o'brien@example.test", nil},
-		{"name at limit", strings.Repeat("n", 256), "bot@example.test", nil},
-		{"name over limit", strings.Repeat("n", 257), "bot@example.test", ErrInvalidName},
+		{"name at limit", strings.Repeat("n", MaxNameBytes), "bot@example.test", nil},
+		{"name over limit", strings.Repeat("n", MaxNameBytes+1), "bot@example.test", ErrInvalidName},
+		// Fixed Unicode fixtures independently pin the documented 256/254-byte contract.
 		{"unicode name at byte limit", strings.Repeat("界", 85) + "n", "bot@example.test", nil},
 		{"unicode name over byte limit", strings.Repeat("界", 85) + "nn", "bot@example.test", ErrInvalidName},
-		{"email at limit", "Bot", strings.Repeat("e", 252) + "@b", nil},
-		{"email over limit", "Bot", strings.Repeat("e", 253) + "@b", ErrInvalidEmail},
+		{"email at limit", "Bot", strings.Repeat("e", MaxEmailBytes-2) + "@b", nil},
+		{"email over limit", "Bot", strings.Repeat("e", MaxEmailBytes-1) + "@b", ErrInvalidEmail},
 		{"unicode email at byte limit", "Bot", strings.Repeat("界", 84) + "@b", nil},
 		{"unicode email over byte limit", "Bot", strings.Repeat("界", 84) + "n@b", ErrInvalidEmail},
 		{"empty name", "", "bot@example.test", ErrInvalidName},
@@ -49,7 +51,7 @@ func TestValidate(t *testing.T) {
 		{"trailing angle bracket in email", "Bot", "bot@example.test>", ErrInvalidEmail},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
-			if err := Validate(tc.name, tc.email); err != tc.want {
+			if err := Validate(tc.name, tc.email); !errors.Is(err, tc.want) {
 				t.Fatalf("Validate = %v; want %v", err, tc.want)
 			}
 		})
@@ -71,7 +73,7 @@ func TestValidateRejectsGitTrimmedPunctuation(t *testing.T) {
 					} else {
 						*value += punctuation
 					}
-					if err := Validate(name, email); err != want {
+					if err := Validate(name, email); !errors.Is(err, want) {
 						t.Fatalf("Validate = %v; want %v", err, want)
 					}
 				})

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"net/url"
 	"regexp"
 	"strings"
@@ -238,7 +239,7 @@ func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
 	}
 	if err := gitidentity.Validate(identity.Name, identity.Email); err != nil {
 		field := "email"
-		if err == gitidentity.ErrInvalidName {
+		if errors.Is(err, gitidentity.ErrInvalidName) {
 			field = "name"
 		}
 		return nil, &ValidationError{Message: "git_identity." + field + " is invalid"}

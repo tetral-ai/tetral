@@ -9,6 +9,13 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	// MaxNameBytes is the maximum UTF-8 byte length of a declared Git name.
+	MaxNameBytes = 256
+	// MaxEmailBytes is the maximum UTF-8 byte length of a declared Git email.
+	MaxEmailBytes = 254
+)
+
 var (
 	ErrInvalidName  = errors.New("git identity name is invalid")
 	ErrInvalidEmail = errors.New("git identity email is invalid")
@@ -18,10 +25,10 @@ var (
 // its values. Callers handle optional identities before calling Validate.
 // Errors identify the field without echoing untrusted input.
 func Validate(name, email string) error {
-	if name == "" || !utf8.ValidString(name) || len(name) > 256 {
+	if name == "" || !utf8.ValidString(name) || len(name) > MaxNameBytes {
 		return ErrInvalidName
 	}
-	if email == "" || !utf8.ValidString(email) || len(email) > 254 {
+	if email == "" || !utf8.ValidString(email) || len(email) > MaxEmailBytes {
 		return ErrInvalidEmail
 	}
 	for _, r := range name {
