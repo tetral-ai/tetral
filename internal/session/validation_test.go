@@ -21,6 +21,45 @@ func TestValidateResourceRequestTypeClosureRejectsGitHubTokenOnOtherResourceType
 	}
 }
 
+func TestValidateGitIdentityPreservesAbsenceAndCopiesValues(t *testing.T) {
+	absent, err := validateGitIdentity(nil)
+	if err != nil || absent != nil {
+		t.Fatalf("validateGitIdentity(nil) = %+v, %v; want nil identity", absent, err)
+	}
+	identity := &GitIdentity{Name: "山田 O'Brien", Email: "bot@example.test"}
+	original := *identity
+	got, err := validateGitIdentity(identity)
+	if err != nil || got == nil || *got != original || got == identity || *identity != original {
+		t.Fatalf("validateGitIdentity = %+v, %v; want unchanged values in a separate object", got, err)
+	}
+}
+
+func TestValidateGitIdentityReportsInvalidField(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity GitIdentity
+		want     string
+	}{
+		{"empty object", GitIdentity{}, "git_identity.name is invalid"},
+		{"missing name", GitIdentity{Email: "bot@example.test"}, "git_identity.name is invalid"},
+		{"missing email", GitIdentity{Name: "Bot"}, "git_identity.email is invalid"},
+		{"invalid name", GitIdentity{Name: "<>", Email: "bot@example.test"}, "git_identity.name is invalid"},
+		{"invalid email", GitIdentity{Name: "Bot", Email: "bo<t@example.test"}, "git_identity.email is invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.identity
+			got, err := validateGitIdentity(&tc.identity)
+			var validation *ValidationError
+			if got != nil || !errors.As(err, &validation) || validation.Message != tc.want {
+				t.Fatalf("validateGitIdentity = %+v, %T %v; want nil, %q", got, err, err, tc.want)
+			}
+			if tc.identity != original {
+				t.Fatal("validation changed the input identity")
+			}
+		})
+	}
+}
+
 func TestValidateCheckoutAcceptsDocumentedCommitSHAAndCanonicalizes(t *testing.T) {
 	rawSHA := "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 

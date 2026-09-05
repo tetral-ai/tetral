@@ -81,6 +81,12 @@ type GitHubRepositoryMount struct {
 	MountPath    string
 	CheckoutType string
 	CheckoutRef  string
+	// GitIdentityName/GitIdentityEmail declare the repository-local commit
+	// identity installed after clone or same-origin recognition. Both empty
+	// keeps the session-scoped platform fallback installed by the global
+	// configuration phase.
+	GitIdentityName  string
+	GitIdentityEmail string
 }
 
 type SkillMount struct {

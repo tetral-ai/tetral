@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
@@ -1427,6 +1429,69 @@ func TestSessionGitHubRepositoryResourceCheckoutShape(t *testing.T) {
 		insertResource(row.resourceID)
 		if err := insertGitHub(row.resourceID, "/workspace/tetral", row.checkoutType, row.checkoutRef); err == nil {
 			t.Fatalf("insert invalid github checkout %s succeeded; want checkout shape constraint failure", row.resourceID)
+		}
+	}
+}
+
+func TestSessionGitHubRepositoryResourceGitIdentityShape(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_github_identity", "sesn_github_identity")
+	insertResource := func(resourceID string) {
+		t.Helper()
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_resources (
+				workspace_id, session_id, resource_id, type, created_at, updated_at
+			) VALUES (
+				'workspace_github_identity', 'sesn_github_identity', $1, 'github_repository',
+				'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+			)`,
+			resourceID,
+		); err != nil {
+			t.Fatalf("seed github session resource %s: %v", resourceID, err)
+		}
+	}
+	insertGitHub := func(resourceID string, identityName any, identityEmail any) error {
+		t.Helper()
+		_, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_github_repository_resources (
+				workspace_id, session_id, resource_id, url, mount_path,
+				git_identity_name, git_identity_email, authorization_token_encrypted
+			) VALUES (
+				'workspace_github_identity', 'sesn_github_identity', $1,
+				'https://github.com/tetral-ai/tetral.git', '/workspace/tetral', $2, $3, decode('00', 'hex')
+			)`,
+			resourceID,
+			identityName,
+			identityEmail,
+		)
+		return err
+	}
+
+	insertResource("res_github_identity_absent")
+	if err := insertGitHub("res_github_identity_absent", nil, nil); err != nil {
+		t.Fatalf("insert github resource without identity: %v", err)
+	}
+	insertResource("res_github_identity_declared")
+	if err := insertGitHub("res_github_identity_declared", "Example Automation", "example-automation@users.noreply.github.com"); err != nil {
+		t.Fatalf("insert github resource with declared identity: %v", err)
+	}
+
+	for _, row := range []struct {
+		resourceID string
+		name       any
+		email      any
+	}{
+		{resourceID: "res_github_identity_name_only", name: "Example Automation", email: nil},
+		{resourceID: "res_github_identity_email_only", name: nil, email: "example-automation@users.noreply.github.com"},
+		{resourceID: "res_github_identity_empty_name", name: "", email: "example-automation@users.noreply.github.com"},
+		{resourceID: "res_github_identity_empty_email", name: "Example Automation", email: ""},
+	} {
+		insertResource(row.resourceID)
+		err := insertGitHub(row.resourceID, row.name, row.email)
+		var constraintError *pgconn.PgError
+		if !errors.As(err, &constraintError) || constraintError.Code != "23514" ||
+			constraintError.ConstraintName != "session_github_repository_git_identity_shape" {
+			t.Fatalf("insert invalid git identity %s: %v; want git identity shape CHECK violation (23514)", row.resourceID, err)
 		}
 	}
 }

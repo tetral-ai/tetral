@@ -1802,15 +1802,21 @@ func (t *postgresqlTransaction) CreateResource(ctx context.Context, resource *Re
 		if resource.GitHubRepository == nil {
 			return &ValidationError{Message: "github_repository resource detail is required"}
 		}
+		var gitIdentityName, gitIdentityEmail any
+		if resource.GitHubRepository.GitIdentity != nil {
+			gitIdentityName = resource.GitHubRepository.GitIdentity.Name
+			gitIdentityEmail = resource.GitHubRepository.GitIdentity.Email
+		}
 		_, err := t.tx.Exec(ctx,
 			`INSERT INTO session_github_repository_resources (
 				workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-				authorization_token_encrypted
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+				git_identity_name, git_identity_email, authorization_token_encrypted
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			string(t.workspaceID), resource.SessionID, resource.ID,
 			resource.GitHubRepository.URL, resource.GitHubRepository.MountPath,
 			nullableEmptyString(resource.GitHubRepository.CheckoutType),
 			nullableEmptyString(resource.GitHubRepository.CheckoutRef),
+			gitIdentityName, gitIdentityEmail,
 			resource.GitHubRepository.AuthorizationTokenEncrypted,
 		)
 		return mapPostgreSQLSessionError(err)
@@ -2276,7 +2282,7 @@ const resourceSelectSQL = `SELECT
 	sr.session_id, sr.resource_id, sr.type, sr.created_at, sr.updated_at, sr.detached_at, sr.delete_requested_at, sr.storage_sequence,
 	sfr.source_file_id, sfr.file_id, sfr.mount_path,
 	smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-	sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref
+	sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref, sgr.git_identity_name, sgr.git_identity_email
 	FROM session_resources sr
 	LEFT JOIN session_file_resources sfr
 	  ON sfr.workspace_id = sr.workspace_id AND sfr.session_id = sr.session_id AND sfr.resource_id = sr.resource_id
@@ -2630,33 +2636,35 @@ func scanResourceRow(row RowScanner, ws workspace.ID) (*Resource, error) {
 
 func scanResource(scanner interface{ Scan(dest ...any) error }, ws workspace.ID) (*Resource, error) {
 	var (
-		sessionID    string
-		resourceID   string
-		typeValue    string
-		createdAt    time.Time
-		updatedAt    time.Time
-		detachedAt   sql.NullTime
-		deleteAt     sql.NullTime
-		sequence     int64
-		sourceFileID nullableString
-		fileID       nullableString
-		fileMount    nullableString
-		memoryID     nullableString
-		access       nullableString
-		instructions nullableString
-		memoryName   nullableString
-		description  nullableString
-		memoryMount  nullableString
-		githubURL    nullableString
-		githubMount  nullableString
-		checkoutType nullableString
-		checkoutRef  nullableString
+		sessionID     string
+		resourceID    string
+		typeValue     string
+		createdAt     time.Time
+		updatedAt     time.Time
+		detachedAt    sql.NullTime
+		deleteAt      sql.NullTime
+		sequence      int64
+		sourceFileID  nullableString
+		fileID        nullableString
+		fileMount     nullableString
+		memoryID      nullableString
+		access        nullableString
+		instructions  nullableString
+		memoryName    nullableString
+		description   nullableString
+		memoryMount   nullableString
+		githubURL     nullableString
+		githubMount   nullableString
+		checkoutType  nullableString
+		checkoutRef   nullableString
+		identityName  nullableString
+		identityEmail nullableString
 	)
 	err := scanner.Scan(
 		&sessionID, &resourceID, &typeValue, &createdAt, &updatedAt, &detachedAt, &deleteAt, &sequence,
 		&sourceFileID, &fileID, &fileMount,
 		&memoryID, &access, &instructions, &memoryName, &description, &memoryMount,
-		&githubURL, &githubMount, &checkoutType, &checkoutRef,
+		&githubURL, &githubMount, &checkoutType, &checkoutRef, &identityName, &identityEmail,
 	)
 	if dbconnect.IsNoRows(err) {
 		return nil, &NotFoundError{Message: "session resource not found"}
@@ -2705,11 +2713,19 @@ func scanResource(scanner interface{ Scan(dest ...any) error }, ws workspace.ID)
 			MountPath:    githubMount.String,
 			CheckoutType: checkoutType.String,
 			CheckoutRef:  checkoutRef.String,
+			GitIdentity:  scanGitIdentity(identityName, identityEmail),
 		}
 	default:
 		return nil, &ValidationError{Message: "invalid session resource type"}
 	}
 	return resource, nil
+}
+
+func scanGitIdentity(name, email nullableString) *GitIdentity {
+	if !name.Valid || !email.Valid || name.String == "" || email.String == "" {
+		return nil
+	}
+	return &GitIdentity{Name: name.String, Email: email.String}
 }
 
 type nullableString struct {

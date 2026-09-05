@@ -50,7 +50,8 @@ func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 		`SELECT sr.resource_id, sr.type, sr.detached_at, sr.delete_requested_at,
 		        sfr.source_file_id, source_file.object_id, sfr.file_id, sfr.mount_path,
 		        smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref
+		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref,
+		        sgr.git_identity_name, sgr.git_identity_email
 		   FROM session_resources sr
 		   LEFT JOIN session_file_resources sfr
 		     ON sfr.workspace_id = sr.workspace_id
@@ -96,12 +97,15 @@ func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 			githubMountPath    sql.NullString
 			checkoutType       sql.NullString
 			checkoutRef        sql.NullString
+			gitIdentityName    sql.NullString
+			gitIdentityEmail   sql.NullString
 		)
 		if err := rows.Scan(
 			&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
 			&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
 			&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
 			&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
+			&gitIdentityName, &gitIdentityEmail,
 		); err != nil {
 			return ResourceSetup{}, err
 		}
@@ -137,11 +141,13 @@ func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 			}
 		case "github_repository":
 			mount := GitHubRepositoryMount{
-				ResourceID:   resourceID,
-				URL:          nullableStringValue(githubURL),
-				MountPath:    nullableStringValue(githubMountPath),
-				CheckoutType: nullableStringValue(checkoutType),
-				CheckoutRef:  nullableStringValue(checkoutRef),
+				ResourceID:       resourceID,
+				URL:              nullableStringValue(githubURL),
+				MountPath:        nullableStringValue(githubMountPath),
+				CheckoutType:     nullableStringValue(checkoutType),
+				CheckoutRef:      nullableStringValue(checkoutRef),
+				GitIdentityName:  nullableStringValue(gitIdentityName),
+				GitIdentityEmail: nullableStringValue(gitIdentityEmail),
 			}
 			if deleteRequestedAt.Valid && !detachedAt.Valid {
 				setup.DeletedGitHubRepositories = append(setup.DeletedGitHubRepositories, mount)

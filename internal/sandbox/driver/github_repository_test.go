@@ -164,7 +164,6 @@ func TestDaytonaGitHubConfigurationAndCloneAreSeparatePhases(t *testing.T) {
 		`target=`,
 		`/workspace/tetral`,
 		"git -C \"$target\" config --get remote.origin.url",
-		"if [ \"$same_origin\" = 1 ]; then exit 0; fi",
 		"git clone --branch",
 		"main",
 		"--single-branch \"$repo_url\" \"$target\"",
@@ -460,6 +459,190 @@ func TestDaytonaGitHubMaterializationCapturesFirstFailingRepositoryIdentity(t *t
 	}
 }
 
+func TestGitHubRepositoryCloneCommandKeepsIdentitiesRepositoryLocalAcrossMounts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required for clone fixture")
+	}
+	for _, tc := range []struct {
+		name        string
+		globalName  string
+		globalEmail string
+	}{
+		{name: "without global identity"},
+		{name: "with session fallback", globalName: "Tetral Agent", globalEmail: "session+sesn_multi@agents.tetral.ai"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			sourceRoot := t.TempDir()
+			for _, repo := range []string{"alpha", "beta"} {
+				source := filepath.Join(sourceRoot, "tetral-ai", repo)
+				runGit(t, home, "init", source)
+				runGit(t, home, "-C", source, "config", "user.name", "Source Fixture")
+				runGit(t, home, "-C", source, "config", "user.email", "source@example.test")
+				runGit(t, home, "-C", source, "commit", "--allow-empty", "-m", "seed")
+			}
+			// Route admitted GitHub URLs to local sources for real offline clones.
+			runGit(t, home, "config", "--global", "url.file://"+sourceRoot+"/.insteadOf", "https://github.com/")
+			if tc.globalName != "" {
+				runGit(t, home, "config", "--global", "user.name", tc.globalName)
+				runGit(t, home, "config", "--global", "user.email", tc.globalEmail)
+			}
+
+			workspace := t.TempDir()
+			targets := map[string]string{"alpha": filepath.Join(workspace, "alpha"), "beta": filepath.Join(workspace, "beta")}
+			identities := map[string][2]string{
+				"alpha": {"Alpha Automation", "alpha@users.noreply.github.com"},
+				"beta":  {"Beta Automation", "beta@users.noreply.github.com"},
+			}
+			for _, repo := range []string{"alpha", "beta"} {
+				command := retargetCloneCommand(t, sandbox.GitHubRepositoryMount{
+					ResourceID:       "sesrsc_" + repo,
+					URL:              "https://github.com/tetral-ai/" + repo,
+					MountPath:        "/workspace/" + repo,
+					GitIdentityName:  identities[repo][0],
+					GitIdentityEmail: identities[repo][1],
+				}, targets[repo])
+				runShellWithHome(t, home, command)
+			}
+			for _, repo := range []string{"alpha", "beta"} {
+				if got := strings.TrimSpace(runGit(t, home, "-C", targets[repo], "config", "--local", "--get", "user.name")); got != identities[repo][0] {
+					t.Fatalf("%s local user.name = %q; want %q", repo, got, identities[repo][0])
+				}
+				if got := strings.TrimSpace(runGit(t, home, "-C", targets[repo], "config", "--local", "--get", "user.email")); got != identities[repo][1] {
+					t.Fatalf("%s local user.email = %q; want %q", repo, got, identities[repo][1])
+				}
+				assertGitCommitIdentity(t, home, targets[repo], identities[repo][0], identities[repo][1])
+			}
+			// Repository identities must neither set nor overwrite global defaults.
+			for key, want := range map[string]string{"user.name": tc.globalName, "user.email": tc.globalEmail} {
+				if want != "" {
+					assertGitConfigValue(t, home, key, want)
+					continue
+				}
+				cmd := exec.Command("git", "config", "--global", "--get", key)
+				cmd.Env = gitFixtureEnvironment(home)
+				output, err := cmd.CombinedOutput()
+				if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || len(output) != 0 {
+					t.Fatalf("global %s = %q, err = %v; want unset", key, output, err)
+				}
+			}
+		})
+	}
+}
+
+func TestGitHubRepositoryCloneCommandReappliesIdentityForAdmittedOrigin(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required for clone fixture")
+	}
+	home := t.TempDir()
+	target := filepath.Join(t.TempDir(), "workspace", "tetral")
+	runGit(t, home, "init", target)
+	runGit(t, home, "-C", target, "remote", "add", "origin", "https://github.com/tetral-ai/tetral.git")
+	runGit(t, home, "-C", target, "config", "user.name", "Old Identity")
+	runGit(t, home, "-C", target, "config", "user.email", "old@example.test")
+
+	command := retargetCloneCommand(t, sandbox.GitHubRepositoryMount{
+		ResourceID:       "sesrsc_recovered",
+		URL:              "https://github.com/tetral-ai/tetral",
+		MountPath:        "/workspace/tetral",
+		GitIdentityName:  "Recovered Automation",
+		GitIdentityEmail: "recovered@users.noreply.github.com",
+	}, target)
+	runShellWithHome(t, home, command)
+
+	if got := strings.TrimSpace(runGit(t, home, "-C", target, "config", "--local", "--get", "user.name")); got != "Recovered Automation" {
+		t.Fatalf("local user.name = %q; want identity reapplied without a fresh clone", got)
+	}
+	if got := strings.TrimSpace(runGit(t, home, "-C", target, "config", "--local", "--get", "user.email")); got != "recovered@users.noreply.github.com" {
+		t.Fatalf("local user.email = %q; want identity reapplied without a fresh clone", got)
+	}
+	assertGitCommitIdentity(t, home, target, "Recovered Automation", "recovered@users.noreply.github.com")
+}
+
+func TestGitHubRepositoryCloneCommandUsesSessionIdentityWhenUnconfigured(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required for clone fixture")
+	}
+	home := t.TempDir()
+	configuration, err := githubRepositoryConfigCommand("git-proxy.example.test", "fixture-ticket", "sesn_fallback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShellWithHome(t, home, configuration)
+	sourceRoot := t.TempDir()
+	runGit(t, home, "init", filepath.Join(sourceRoot, "tetral-ai", "tetral"))
+	// Replace the proxy route with a local source for the offline clone.
+	runGit(t, home, "config", "--global", "--unset-all", "url.https://git-proxy.example.test/github.com/.insteadOf")
+	runGit(t, home, "config", "--global", "url.file://"+sourceRoot+"/.insteadOf", "https://github.com/")
+	target := filepath.Join(t.TempDir(), "workspace", "tetral")
+	command := retargetCloneCommand(t, sandbox.GitHubRepositoryMount{URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral"}, target)
+	runShellWithHome(t, home, command)
+	assertGitCommitIdentity(t, home, target, "Tetral Agent", "session+sesn_fallback@agents.tetral.ai")
+	// Same-origin recovery also preserves the fallback.
+	runShellWithHome(t, home, command)
+	assertGitCommitIdentity(t, home, target, "Tetral Agent", "session+sesn_fallback@agents.tetral.ai")
+}
+
+func TestGitHubRepositoryCloneCommandRejectsInvalidIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mount sandbox.GitHubRepositoryMount
+	}{
+		{name: "name only", mount: sandbox.GitHubRepositoryMount{GitIdentityName: "Only Name"}},
+		{name: "email only", mount: sandbox.GitHubRepositoryMount{GitIdentityEmail: "only@example.test"}},
+		{name: "angle bracket name", mount: sandbox.GitHubRepositoryMount{GitIdentityName: "<>", GitIdentityEmail: "bot@example.test"}},
+		{name: "angle bracket email", mount: sandbox.GitHubRepositoryMount{GitIdentityName: "Bot", GitIdentityEmail: "bo<t@example.test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.mount.URL = "https://github.com/tetral-ai/tetral"
+			tc.mount.MountPath = "/workspace/tetral"
+			if _, err := githubRepositoryCloneCommand(tc.mount); err == nil {
+				t.Fatal("githubRepositoryCloneCommand accepted an invalid git identity")
+			}
+		})
+	}
+}
+
+// These cases distinguish Git's header rules from an ASCII-only or
+// punctuation-free policy, and exercise shell quoting with real commits.
+func TestGitHubRepositoryCloneCommandPreservesRepresentableIdentities(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary is required for clone fixture")
+	}
+	for _, identity := range [][2]string{
+		{".山田 O'Brien.", "a.b+bot@example.test."},
+		{"A, B: C; D\"E\\F", "o'brien@example.test"},
+		{"Bot $(false) `false`", "bot@example.test"},
+		{strings.Repeat("界", 85) + "n", strings.Repeat("e", 252) + "@b"},
+	} {
+		t.Run(identity[0], func(t *testing.T) {
+			home := t.TempDir()
+			target := filepath.Join(t.TempDir(), "workspace", "tetral")
+			runGit(t, home, "init", target)
+			runGit(t, home, "-C", target, "remote", "add", "origin", "https://github.com/tetral-ai/tetral")
+			command := retargetCloneCommand(t, sandbox.GitHubRepositoryMount{
+				URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral",
+				GitIdentityName: identity[0], GitIdentityEmail: identity[1],
+			}, target)
+			runShellWithHome(t, home, command)
+			assertGitCommitIdentity(t, home, target, identity[0], identity[1])
+		})
+	}
+}
+
+// retargetCloneCommand builds the clone command for one mount and rewrites its
+// fixed /workspace target at the local fixture path, mirroring the admitted
+// mount the Sandbox would hold.
+func retargetCloneCommand(t *testing.T, mount sandbox.GitHubRepositoryMount, target string) string {
+	t.Helper()
+	command, err := githubRepositoryCloneCommand(mount)
+	if err != nil {
+		t.Fatalf("githubRepositoryCloneCommand: %v", err)
+	}
+	command = strings.Replace(command, "target="+shellQuote(mount.MountPath), "target="+shellQuote(target), 1)
+	return strings.Replace(command, "mkdir -p "+shellQuote("/workspace"), "mkdir -p "+shellQuote(filepath.Dir(target)), 1)
+}
+
 func runShellWithHome(t *testing.T, home string, script string) {
 	t.Helper()
 	_ = runShellWithHomeOutput(t, home, script)
@@ -468,7 +651,7 @@ func runShellWithHome(t *testing.T, home string, script string) {
 func runShellWithHomeOutput(t *testing.T, home string, script string) string {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", script)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = gitFixtureEnvironment(home)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("script failed: %v\n%s\nscript:\n%s", err, string(output), script)
@@ -492,10 +675,33 @@ func runGitConfig(t *testing.T, home string, args ...string) string {
 func runGit(t *testing.T, home string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = gitFixtureEnvironment(home)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
 	}
 	return string(output)
+}
+
+// Ignore host Git overrides: these fixtures exercise repository and global
+// configuration, including actual author and committer selection.
+func gitFixtureEnvironment(home string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GIT_") || strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "XDG_CONFIG_HOME=") || strings.HasPrefix(entry, "EMAIL=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_NOSYSTEM=1")
+}
+
+func assertGitCommitIdentity(t *testing.T, home, target, name, email string) {
+	t.Helper()
+	runGit(t, home, "-C", target, "commit", "--allow-empty", "-m", "identity probe")
+	got := strings.TrimSuffix(runGit(t, home, "-C", target, "log", "-1", "--format=%an <%ae>|%cn <%ce>"), "\n")
+	want := name + " <" + email + ">|" + name + " <" + email + ">"
+	if got != want {
+		t.Fatalf("commit identity = %q; want %q", got, want)
+	}
 }

@@ -72,6 +72,7 @@ type resourceHTTPRequest struct {
 	URL                strictSessionJSONString `json:"url"`
 	AuthorizationToken strictSessionJSONString `json:"authorization_token"`
 	Checkout           *session.GitHubCheckout `json:"checkout"`
+	GitIdentity        *session.GitIdentity    `json:"git_identity"`
 }
 
 func (r *resourceHTTPRequest) UnmarshalJSON(raw []byte) error {
@@ -137,12 +138,19 @@ func (r *resourceHTTPRequest) UnmarshalJSON(raw []byte) error {
 		}
 		r.Checkout = checkout
 	}
+	if rawGitIdentity, ok := fields["git_identity"]; ok {
+		identity, err := decodeSessionGitIdentity(rawGitIdentity)
+		if err != nil {
+			return err
+		}
+		r.GitIdentity = identity
+	}
 	return nil
 }
 
 func knownSessionResourceHTTPField(field string) bool {
 	switch field {
-	case "type", "file_id", "mount_path", "memory_store_id", "access", "instructions", "url", "authorization_token", "checkout":
+	case "type", "file_id", "mount_path", "memory_store_id", "access", "instructions", "url", "authorization_token", "checkout", "git_identity":
 		return true
 	default:
 		return false
@@ -183,7 +191,7 @@ func sessionHTTPResourceFieldAllowed(resourceType string, field string) bool {
 		}
 	case string(session.ResourceTypeGitHubRepository):
 		switch field {
-		case "type", "url", "authorization_token", "mount_path", "checkout":
+		case "type", "url", "authorization_token", "mount_path", "checkout", "git_identity":
 			return true
 		}
 	default:
@@ -246,6 +254,44 @@ func decodeSessionGitHubCheckout(raw json.RawMessage) (*session.GitHubCheckout, 
 	default:
 		return nil, errors.New("checkout.type is unsupported")
 	}
+}
+
+// decodeSessionGitIdentity decodes the optional github_repository commit
+// identity. Both fields are required when the object is present; the decoded
+// value is validated by Session admission, which owns the full contract.
+func decodeSessionGitIdentity(raw json.RawMessage) (*session.GitIdentity, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, errors.New("git_identity must be an object")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, errors.New("git_identity must be an object")
+	}
+	for field := range fields {
+		if field != "name" && field != "email" {
+			return nil, errors.New("unknown git_identity field")
+		}
+	}
+	decodeRequired := func(field string) (string, error) {
+		valueRaw, present := fields[field]
+		if !present || bytes.Equal(bytes.TrimSpace(valueRaw), []byte("null")) {
+			return "", errors.New("git_identity." + field + " is required")
+		}
+		var value string
+		if err := json.Unmarshal(valueRaw, &value); err != nil || value == "" {
+			return "", errors.New("git_identity." + field + " must be a non-empty string")
+		}
+		return value, nil
+	}
+	name, err := decodeRequired("name")
+	if err != nil {
+		return nil, err
+	}
+	email, err := decodeRequired("email")
+	if err != nil {
+		return nil, err
+	}
+	return &session.GitIdentity{Name: name, Email: email}, nil
 }
 
 type strictSessionJSONString string
@@ -727,7 +773,16 @@ func (r resourceHTTPRequest) toServiceRequest() session.ResourceRequest {
 		GitHubURL:          string(r.URL),
 		AuthorizationToken: string(r.AuthorizationToken),
 		Checkout:           cloneSessionGitHubCheckout(r.Checkout),
+		GitIdentity:        cloneSessionGitIdentity(r.GitIdentity),
 	}
+}
+
+func cloneSessionGitIdentity(identity *session.GitIdentity) *session.GitIdentity {
+	if identity == nil {
+		return nil
+	}
+	copyValue := *identity
+	return &copyValue
 }
 
 func cloneSessionGitHubCheckout(checkout *session.GitHubCheckout) *session.GitHubCheckout {

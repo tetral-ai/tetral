@@ -218,6 +218,7 @@ type GitHubRepositoryResource struct {
 	MountPath                   string
 	CheckoutType                string
 	CheckoutRef                 string
+	GitIdentity                 *GitIdentity
 	AuthorizationTokenEncrypted []byte `json:"-"`
 }
 

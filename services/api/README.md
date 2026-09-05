@@ -131,7 +131,8 @@ delete is likewise refused while the runtime status is `running` or
 | `vault_ids` | create-time-only; must be supplied explicitly (empty list allowed); any update payload carrying it is `400 "field is immutable"` |
 | `providers` (credential selector) | create-time-only; any update payload carrying it — an entry, `{}`, anything — is `400`; only an omitted field passes. Fixes the session's model-supply route for life; changing it means a new session. Credential *repair* (rotating the same `credential_id` through the Vault update path) is unaffected. Omitted or `{}` means platform-hosted provider access (no credential row). |
 | `title`, `metadata`, runtime-visible `agent.tools` / `agent.mcp_servers` | mutable only when the session locks `idle` |
-| `github_repository` `authorization_token` | rotatable in any run state — a pure metadata write, encrypted at rest, never echoed |
+| `github_repository` `authorization_token` | rotatable in any run state — a pure metadata write, encrypted at rest, never echoed; rotation never touches `git_identity` |
+| `github_repository` `git_identity` | create-time-only per resource, immutable for the Session, returned unredacted; it is commit authorship configuration, not authentication material |
 
 When `providers` names a credential at create, admission validates all six of:
 (1) exactly one provider entry is present; (2) the provider key equals the Agent
@@ -274,6 +275,25 @@ metadata lives in Postgres. Types are `file`, `github_repository`, and
 silently defaulted and never added through `POST /resources`. A declared `file`
 resource materializes read-only at its resolved `mount_path`, or at the default
 `/mnt/session/uploads/<session_file_id>`.
+
+A `github_repository` resource admits `url`, `authorization_token`, optional
+`mount_path`, optional `checkout`, and optional `git_identity`
+(`{name, email}`, both required when the object is present). `git_identity`
+declares the default Git author and committer for that mounted repository only:
+admission requires nonempty UTF-8 values, at most 256 bytes for `name` and 254
+bytes for `email` (defined by `gitidentity.MaxNameBytes` and
+`gitidentity.MaxEmailBytes` in [the shared validator](../../internal/gitidentity/validation.go)).
+It rejects controls, format characters, angle brackets,
+leading/trailing name whitespace, all email whitespace, and leading/trailing
+`,`, `:`, `;`, double quotes, single quotes, or backslashes that Git would trim.
+Email requires exactly one `@` with nonempty parts on both sides. Unicode names,
+internal punctuation, and periods are preserved; values are never silently
+sanitized. Invalid values fail before any Session or Sandbox exists. The
+identity is persisted with the resource, returned unredacted from Session and
+resource reads, and cannot be changed afterward. It grants no
+repository access — `authorization_token` remains the sole clone/push
+credential. An omitted `git_identity` keeps the session-scoped platform
+identity (`Tetral Agent <session+<session_id>@agents.tetral.ai>`).
 
 ### Vault / Credential / Memory store / Environment archive
 

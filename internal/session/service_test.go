@@ -104,6 +104,115 @@ func TestCreatePersistsDurableResourcesAndNeverReturnsGitHubToken(t *testing.T) 
 	}
 }
 
+func TestCreateAdmitsConfiguredGitIdentityWithoutEchoingToken(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	const authorizationToken = "github_resource_token_identity"
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+	response, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+		Agent:         AgentReference{ID: "agent_test", Version: intPtr(2)},
+		EnvironmentID: "env_test",
+		Resources: []ResourceRequest{{
+			Type:               string(ResourceTypeGitHubRepository),
+			GitHubURL:          "https://github.com/tetral-ai/tetral.git",
+			AuthorizationToken: authorizationToken,
+			GitIdentity:        &GitIdentity{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(response.Resources) != 1 || response.Resources[0].GitIdentity == nil {
+		t.Fatalf("resources = %+v; want one github resource with git_identity", response.Resources)
+	}
+	if response.Resources[0].GitIdentity.Name != "Example Automation" ||
+		response.Resources[0].GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("response git_identity = %+v; want declared identity", response.Resources[0].GitIdentity)
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response: %v", err)
+	}
+	var wire struct {
+		Resources []struct {
+			GitIdentity *GitIdentity `json:"git_identity"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(wire.Resources) != 1 || wire.Resources[0].GitIdentity == nil ||
+		*wire.Resources[0].GitIdentity != *response.Resources[0].GitIdentity {
+		t.Fatalf("response missing unredacted git_identity: %s", encoded)
+	}
+	if strings.Contains(string(encoded), authorizationToken) || strings.Contains(string(encoded), "encrypted:") {
+		t.Fatalf("response leaked credential material: %s", encoded)
+	}
+
+	stored := store.sessions["sesn_test"]
+	if stored.Resources[0].GitHubRepository.GitIdentity == nil ||
+		stored.Resources[0].GitHubRepository.GitIdentity.Name != "Example Automation" ||
+		stored.Resources[0].GitHubRepository.GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("stored git identity = %+v; want declared identity", stored.Resources[0].GitHubRepository.GitIdentity)
+	}
+}
+
+func TestCreateRejectsInvalidGitIdentityBeforePersistingSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity *GitIdentity
+		want     string
+	}{
+		{name: "empty name", identity: &GitIdentity{Name: "", Email: "bot@users.noreply.github.com"}, want: "git_identity.name is invalid"},
+		{name: "empty email", identity: &GitIdentity{Name: "Bot", Email: ""}, want: "git_identity.email is invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+			store := newRecordingSessionStore()
+			service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+			_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+				Agent:         AgentReference{ID: "agent_test"},
+				EnvironmentID: "env_test",
+				Resources: []ResourceRequest{{
+					Type:               string(ResourceTypeGitHubRepository),
+					GitHubURL:          "https://github.com/tetral-ai/tetral",
+					AuthorizationToken: "github_resource_token",
+					GitIdentity:        tc.identity,
+				}},
+			})
+			var validation *ValidationError
+			if !errors.As(err, &validation) || validation.Message != tc.want {
+				t.Fatalf("Create err = %T %v; want %q", err, err, tc.want)
+			}
+			if len(store.sessions) != 0 {
+				t.Fatalf("session persisted for invalid git_identity: %v", store.sessions)
+			}
+		})
+	}
+}
+
+func TestCreateRejectsGitIdentityOnNonGitHubResource(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+
+	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+		Agent:         AgentReference{ID: "agent_test"},
+		EnvironmentID: "env_test",
+		Resources: []ResourceRequest{{
+			Type:        string(ResourceTypeMemoryStore),
+			GitIdentity: &GitIdentity{Name: "Bot", Email: "bot@users.noreply.github.com"},
+		}},
+	})
+	var validation *ValidationError
+	if !errors.As(err, &validation) || validation.Message != "resource field is not allowed for type" {
+		t.Fatalf("Create err = %T %v; want type closure rejection", err, err)
+	}
+}
+
 func TestCreateRejectsGitHubResourceWithoutAuthorizationToken(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
@@ -141,6 +250,7 @@ func TestUpdateGitHubResourceTokenRequiresIdleSessionAndNeverReturnsToken(t *tes
 			URL:                         "https://github.com/tetral-ai/tetral",
 			MountPath:                   "/workspace/tetral",
 			AuthorizationTokenEncrypted: []byte("encrypted:old"),
+			GitIdentity:                 &GitIdentity{Name: "Example Automation", Email: "example-automation@users.noreply.github.com"},
 		},
 	}}
 	store.sessions[session.ID] = session
@@ -157,6 +267,11 @@ func TestUpdateGitHubResourceTokenRequiresIdleSessionAndNeverReturnsToken(t *tes
 	}
 	if got := string(store.sessions[session.ID].Resources[0].GitHubRepository.AuthorizationTokenEncrypted); got != "encrypted:github_resource_token_rotated" {
 		t.Fatalf("stored encrypted github token = %q; want rotated token", got)
+	}
+	if response.GitIdentity == nil ||
+		response.GitIdentity.Name != "Example Automation" ||
+		response.GitIdentity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("rotation response git_identity = %+v; want declared identity", response.GitIdentity)
 	}
 	encoded, err := json.Marshal(response)
 	if err != nil {

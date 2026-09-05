@@ -1242,12 +1242,18 @@ const (
 		mount_path TEXT,
 		checkout_type TEXT,
 		checkout_ref TEXT,
+		git_identity_name TEXT,
+		git_identity_email TEXT,
 		authorization_token_encrypted BYTEA NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, resource_id),
 		FOREIGN KEY (workspace_id, session_id, resource_id) REFERENCES session_resources(workspace_id, session_id, resource_id) ON DELETE CASCADE,
 		CONSTRAINT session_github_repository_checkout_shape CHECK (
 			(checkout_type IS NULL AND checkout_ref IS NULL)
 			OR (checkout_type IS NOT NULL AND checkout_type IN ('branch', 'commit') AND checkout_ref IS NOT NULL AND checkout_ref <> '')
+		),
+		CONSTRAINT session_github_repository_git_identity_shape CHECK (
+			(git_identity_name IS NULL AND git_identity_email IS NULL)
+			OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> '')
 		),
 		CONSTRAINT session_github_repository_authorization_token_required CHECK (
 			authorization_token_encrypted IS NOT NULL

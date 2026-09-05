@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,7 +29,10 @@ const (
 	stageABaselineTree   = "767408b04eab8e7a11f09814ad2a164a0de2dd47"
 )
 
-func TestVersionOneCatalogMatchesExactStageABaseline(t *testing.T) {
+// Keep the historical catalog as an independent oracle, extended only by the
+// explicit Git identity delta below. All other schema and helper facts must
+// remain identical, including constraints, dependencies, RLS and privileges.
+func TestVersionOneCatalogMatchesStageABaselineWithGitIdentity(t *testing.T) {
 	controlDSN := os.Getenv(storagetest.EnvTestDatabaseURL)
 	if controlDSN == "" {
 		t.Skip("TETRAL_TEST_DATABASE_URL is required for Version 1 catalog equivalence")
@@ -102,8 +108,10 @@ func TestVersionOneCatalogMatchesExactStageABaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	baselineSnapshot = canonicalCatalogSnapshot(t, baselineSnapshot, true)
+	currentSnapshot = canonicalCatalogSnapshot(t, currentSnapshot, false)
 	if string(baselineSnapshot) != string(currentSnapshot) {
-		t.Fatal("fresh Version 1 PostgreSQL catalog differs from the exact Stage A baseline")
+		t.Fatalf("fresh Version 1 catalog differs from Stage A plus Git identity: %s", firstSnapshotDifference(baselineSnapshot, currentSnapshot))
 	}
 
 	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -115,9 +123,80 @@ func TestVersionOneCatalogMatchesExactStageABaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	baselineHelperSnapshot = canonicalCatalogSnapshot(t, baselineHelperSnapshot, true)
+	currentHelperSnapshot = canonicalCatalogSnapshot(t, currentHelperSnapshot, false)
 	if string(baselineHelperSnapshot) != string(currentHelperSnapshot) {
-		t.Fatalf("storage-test seed, runtime-role, or object privileges differ from the exact Stage A baseline: %s", firstSnapshotDifference(baselineHelperSnapshot, currentHelperSnapshot))
+		t.Fatalf("storage-test catalog, seed, runtime-role, or privileges differ from Stage A plus Git identity: %s", firstSnapshotDifference(baselineHelperSnapshot, currentHelperSnapshot))
 	}
+}
+
+func canonicalCatalogSnapshot(t *testing.T, body []byte, stageA bool) []byte {
+	t.Helper()
+	var decoded any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if stageA {
+		catalog := decoded
+		if helper, ok := decoded.(map[string]any); ok {
+			catalog = helper["catalog"]
+		}
+		// ALTER TABLE appends the expected columns at positions 9 and 10;
+		// the new bootstrap places them before the old token column at 8.
+		// Account only for this declared insertion, preserving every other
+		// column's ordinal and every column's type/default/nullability.
+		moved := 0
+		for _, section := range catalog.([]any) {
+			query := section.(map[string]any)
+			if query["name"] != "columns" {
+				continue
+			}
+			rows := query["rows"].([]any)
+			var identityRows []any
+			var identityIndexes []int
+			for index, item := range rows {
+				row := item.([]any)
+				if row[0] != "session_github_repository_resources" {
+					continue
+				}
+				var before, after string
+				switch row[2] {
+				case "authorization_token_encrypted":
+					before, after = "8", "10"
+				case "git_identity_name":
+					before, after = "9", "8"
+				case "git_identity_email":
+					before, after = "10", "9"
+				default:
+					continue
+				}
+				if row[1] != before {
+					t.Fatalf("Stage A column %s ordinal = %v; want %s", row[2], row[1], before)
+				}
+				row[1] = after
+				moved++
+				identityRows = append(identityRows, row)
+				identityIndexes = append(identityIndexes, index)
+			}
+			sort.Slice(identityRows, func(i, j int) bool {
+				left, right := identityRows[i].([]any), identityRows[j].([]any)
+				leftOrdinal, _ := strconv.Atoi(left[1].(string))
+				rightOrdinal, _ := strconv.Atoi(right[1].(string))
+				return leftOrdinal < rightOrdinal
+			})
+			for index, position := range identityIndexes {
+				rows[position] = identityRows[index]
+			}
+		}
+		if moved != 3 {
+			t.Fatalf("Stage A Git identity column insertion changed %d ordinals; want 3", moved)
+		}
+	}
+	canonical, err := json.MarshalIndent(decoded, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func firstSnapshotDifference(before, after []byte) string {
@@ -182,13 +261,29 @@ func TestWriteStageABaselineCatalog(t *testing.T) {
   if err != nil { t.Fatal(err) }
   defer db.Close()
   if err := storage.MigrateSchema(context.Background(), db); err != nil { t.Fatal(err) }
+  applyExpectedGitIdentityDelta(t, db)
   snapshot, err := catalogtest.Snapshot(context.Background(), db)
   if err != nil { t.Fatal(err) }
   if err := os.WriteFile(os.Getenv("TETRAL_STAGE_A_CATALOG_OUTPUT"), snapshot, 0600); err != nil { t.Fatal(err) }
   runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
+  applyExpectedGitIdentityDelta(t, adminDB)
   helperSnapshot, err := catalogtest.HelperSnapshot(context.Background(), runtimeDB, adminDB)
   if err != nil { t.Fatal(err) }
   if err := os.WriteFile(os.Getenv("TETRAL_STAGE_A_HELPER_OUTPUT"), helperSnapshot, 0600); err != nil { t.Fatal(err) }
+}
+
+// This fixture states the intended delta independently of the current DDL.
+// Do not derive it from storage's current schema or migration constants.
+func applyExpectedGitIdentityDelta(t *testing.T, db *sql.DB) {
+  t.Helper()
+  statements := []string{
+    "ALTER TABLE session_github_repository_resources ADD COLUMN git_identity_name TEXT, ADD COLUMN git_identity_email TEXT",
+    "ALTER TABLE session_github_repository_resources ADD CONSTRAINT session_github_repository_git_identity_shape CHECK ((git_identity_name IS NULL AND git_identity_email IS NULL) OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> ''))",
+    "UPDATE tetral_schema_migrations SET checksum = '6f1ec030d986cec0ae83cc9a5abc818045b5d3a388a9434483d05a5bcdd9fc44' WHERE version = 1 AND checksum = 'd42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6'",
+  }
+  for _, statement := range statements {
+    if _, err := db.ExecContext(context.Background(), statement); err != nil { t.Fatal(err) }
+  }
 }
 `
 	if err := os.WriteFile(filepath.Join(root, "internal", "storage", "stage_a_catalog_test.go"), []byte(source), 0o600); err != nil {
@@ -212,13 +307,33 @@ func freshCatalogDatabase(ctx context.Context, t *testing.T, controlDSN string) 
 		_ = control.Close()
 		t.Fatal(err)
 	}
-	databaseConfig := config.Copy()
-	databaseConfig.Database = name
-	dsn := databaseConfig.ConnString()
+	// ConnConfig.ConnString returns its original input; changing Database on
+	// the parsed config does not change the DSN passed to the baseline process.
+	dsn := controlDSN + " dbname=" + name
+	if strings.HasPrefix(controlDSN, "postgres://") || strings.HasPrefix(controlDSN, "postgresql://") {
+		databaseURL, err := url.Parse(controlDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		databaseURL.Path = "/" + name
+		databaseURL.RawPath = ""
+		query := databaseURL.Query()
+		query.Set("dbname", name)
+		databaseURL.RawQuery = query.Encode()
+		dsn = databaseURL.String()
+	}
 	cleanup := func() {
 		_, _ = control.ExecContext(context.Background(), `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1`, name)
 		_, _ = control.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize())
 		_ = control.Close()
+	}
+	probe := openCatalogDatabase(t, dsn)
+	var actualDatabase string
+	err = probe.QueryRowContext(ctx, "SELECT current_database()").Scan(&actualDatabase)
+	_ = probe.Close()
+	if err != nil || actualDatabase != name {
+		cleanup()
+		t.Fatalf("catalog DSN selected database %q; want %q (query error: %v)", actualDatabase, name, err)
 	}
 	return dsn, cleanup
 }

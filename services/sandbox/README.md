@@ -189,6 +189,19 @@ repositories, memory stores, skills, credentials, and helper health are
 converged in the same materialization operation. There is no alternate mount
 path or provider fallback.
 
+GitHub repository checkout carries the mount's declared commit identity from
+the durable materialization snapshot. After a fresh clone — and again whenever
+the already-admitted origin is recognized during recovery or
+rematerialization — the checkout installs a declared `git_identity` as
+repository-local `user.name`/`user.email`, so disposable Sandbox recreation
+reasserts it and one Session can mount repositories with different identities.
+The driver rejects malformed identity snapshots before running a command,
+including values Git would trim or remove from commit headers; admitted values
+are installed unchanged as the default author and committer identity.
+A mount without a declared identity keeps the session-scoped platform identity
+from the Sandbox-global Git configuration, which per-repository configuration
+never rewrites.
+
 ## Release
 
 Release is a durable lifecycle operation. Its only producers are Session
@@ -299,6 +312,14 @@ Focused tests live in `services/sandbox`, `internal/sandbox`, and
 execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
+
+`TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources` starts with
+persisted resources and drives activation and materialization through real
+Queue RPCs, PostgreSQL stores and `RunOnce`. It checks declared and omitted
+identities at the provider adapter boundary; provider responses are fixtures,
+so this does not prove remote Git execution. Driver tests separately execute
+clone/configuration commands and inspect actual local Git commits. Admission
+and driver snapshot checks use the shared `internal/gitidentity` rules.
 
 Repository CI builds the unmodified Sandbox Dockerfile and exercises the local
 image and Helper without Daytona credentials. Published-image Daytona behavior

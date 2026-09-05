@@ -45,6 +45,11 @@ type sessionGitHubRepositoryMount struct {
 	MountPath    string
 	CheckoutType string
 	CheckoutRef  string
+	// GitIdentityName/GitIdentityEmail carry the declared repository-local
+	// commit identity; both empty means the resource keeps the session-scoped
+	// platform fallback.
+	GitIdentityName  string
+	GitIdentityEmail string
 }
 
 type sessionSkillMount struct {
@@ -65,7 +70,8 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 		`SELECT sr.resource_id, sr.type, sr.detached_at, sr.delete_requested_at,
 		        sfr.source_file_id, source_file.object_id, sfr.file_id, sfr.mount_path,
 		        smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref
+		        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref,
+		        sgr.git_identity_name, sgr.git_identity_email
 		   FROM session_resources sr
 		   LEFT JOIN session_file_resources sfr
 		     ON sfr.workspace_id = sr.workspace_id
@@ -96,11 +102,13 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 		var sourceFileID, objectID, sessionFileID, fileMountPath sql.NullString
 		var memoryStoreID, memoryAccess, memoryInstructions, memoryName, memoryDescription, memoryMountPath sql.NullString
 		var githubURL, githubMountPath, checkoutType, checkoutRef sql.NullString
+		var gitIdentityName, gitIdentityEmail sql.NullString
 		if err := rows.Scan(
 			&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
 			&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
 			&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
 			&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
+			&gitIdentityName, &gitIdentityEmail,
 		); err != nil {
 			return snapshot, err
 		}
@@ -135,6 +143,7 @@ func (t *postgresqlTransaction) loadResourceMaterializationSnapshot(ctx context.
 			mount := sessionGitHubRepositoryMount{
 				ResourceID: resourceID, URL: githubURL.String, MountPath: githubMountPath.String,
 				CheckoutType: checkoutType.String, CheckoutRef: checkoutRef.String,
+				GitIdentityName: gitIdentityName.String, GitIdentityEmail: gitIdentityEmail.String,
 			}
 			if deleteRequestedAt.Valid {
 				snapshot.DeletedGitHubRepositories = append(snapshot.DeletedGitHubRepositories, mount)

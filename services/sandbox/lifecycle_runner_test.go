@@ -1235,15 +1235,16 @@ func (s *recordingSandboxLifecycleStore) FinalizeInvalidLifecycle(_ context.Cont
 }
 
 type recordingLifecycleAdapter struct {
-	resolution         ProviderOutcome[ActivationResolution]
-	activation         ProviderOutcome[sandbox.ProviderHandle]
-	inspection         ProviderOutcome[ExecutionReadiness]
-	inspectionSequence []ProviderOutcome[ExecutionReadiness]
-	releasePresence    ProviderOutcome[bool]
-	releasePresenceSet bool
-	materialization    ProviderOutcome[MaterializationResult]
-	releaseSequence    []ProviderOutcome[ReleaseResult]
-	calls              []string
+	resolution              ProviderOutcome[ActivationResolution]
+	activation              ProviderOutcome[sandbox.ProviderHandle]
+	inspection              ProviderOutcome[ExecutionReadiness]
+	inspectionSequence      []ProviderOutcome[ExecutionReadiness]
+	releasePresence         ProviderOutcome[bool]
+	releasePresenceSet      bool
+	materialization         ProviderOutcome[MaterializationResult]
+	materializationRequests []MaterializationRequest
+	releaseSequence         []ProviderOutcome[ReleaseResult]
+	calls                   []string
 }
 
 func (a *recordingLifecycleAdapter) ResolveActivation(context.Context, ActivationResolutionRequest) ProviderOutcome[ActivationResolution] {
@@ -1270,7 +1271,8 @@ func (a *recordingLifecycleAdapter) InspectForRelease(context.Context, string) P
 	}
 	return a.releasePresence
 }
-func (a *recordingLifecycleAdapter) MaterializeResources(context.Context, MaterializationRequest) ProviderOutcome[MaterializationResult] {
+func (a *recordingLifecycleAdapter) MaterializeResources(_ context.Context, request MaterializationRequest) ProviderOutcome[MaterializationResult] {
+	a.materializationRequests = append(a.materializationRequests, request)
 	a.calls = append(a.calls, "materialize")
 	return a.materialization
 }

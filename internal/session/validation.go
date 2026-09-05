@@ -1,12 +1,14 @@
 package session
 
 import (
+	"errors"
 	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/gitidentity"
 	"github.com/tetral-ai/tetral/internal/pathvalidation"
 )
 
@@ -66,11 +68,11 @@ func validateMetadataPatch(current map[string]string, patch map[string]*string) 
 func validateResourceRequestTypeClosure(request ResourceRequest) error {
 	switch request.Type {
 	case string(ResourceTypeFile):
-		if request.MemoryStoreID != "" || request.Access != "" || request.Instructions != "" || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil {
+		if request.MemoryStoreID != "" || request.Access != "" || request.Instructions != "" || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil || request.GitIdentity != nil {
 			return resourceFieldNotAllowedForTypeError(request.Type)
 		}
 	case string(ResourceTypeMemoryStore):
-		if request.FileID != "" || request.MountPath != nil || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil {
+		if request.FileID != "" || request.MountPath != nil || request.GitHubURL != "" || request.AuthorizationToken != "" || request.Checkout != nil || request.GitIdentity != nil {
 			return resourceFieldNotAllowedForTypeError(request.Type)
 		}
 	case string(ResourceTypeGitHubRepository):
@@ -227,6 +229,22 @@ func safeGitHubPathComponent(value string) bool {
 		}
 	}
 	return true
+}
+
+// validateGitIdentity preserves absence and copies an admitted repository identity.
+// Admission and durable snapshot validation share the gitidentity contract.
+func validateGitIdentity(identity *GitIdentity) (*GitIdentity, error) {
+	if identity == nil {
+		return nil, nil
+	}
+	if err := gitidentity.Validate(identity.Name, identity.Email); err != nil {
+		field := "email"
+		if errors.Is(err, gitidentity.ErrInvalidName) {
+			field = "name"
+		}
+		return nil, &ValidationError{Message: "git_identity." + field + " is invalid"}
+	}
+	return &GitIdentity{Name: identity.Name, Email: identity.Email}, nil
 }
 
 func validateCheckout(checkout *GitHubCheckout) (*GitHubCheckout, error) {

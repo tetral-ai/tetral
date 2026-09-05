@@ -803,6 +803,81 @@ func TestCreateSessionAcceptsRequiredWriteOnlyGitHubResourceAuthorizationToken(t
 	}
 }
 
+func TestCreateSessionAcceptsGitHubResourceGitIdentity(t *testing.T) {
+	service := &recordingCreateSessionService{}
+	router := newSessionHTTPTestRouterWithCreateService(service)
+	body := `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","authorization_token":"redacted_legacy_resource_token","git_identity":{"name":"Example Automation","email":"example-automation@users.noreply.github.com"}}]}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions?beta=true", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	setAuthHeader(request)
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
+	}
+	if service.calls != 1 || len(service.request.Resources) != 1 {
+		t.Fatalf("Create request = %#v; want one resource", service.request)
+	}
+	identity := service.request.Resources[0].GitIdentity
+	if identity == nil || identity.Name != "Example Automation" || identity.Email != "example-automation@users.noreply.github.com" {
+		t.Fatalf("git_identity = %+v; want declared identity", identity)
+	}
+}
+
+func TestCreateSessionRejectsMalformedGitIdentityBeforeService(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "null identity",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","git_identity":null}]}`,
+		},
+		{
+			name: "identity missing email",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","git_identity":{"name":"Example Automation"}}]}`,
+		},
+		{
+			name: "identity missing name",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","git_identity":{"email":"example-automation@users.noreply.github.com"}}]}`,
+		},
+		{
+			name: "identity unknown field",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","git_identity":{"name":"Example Automation","email":"example-automation@users.noreply.github.com","username":"other"}}]}`,
+		},
+		{
+			name: "identity empty email",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","git_identity":{"name":"Example Automation","email":""}}]}`,
+		},
+		{
+			name: "file resource rejects git_identity field",
+			body: `{"agent":"agent_test","environment_id":"env_test","vault_ids":[],"resources":[{"type":"file","file_id":"file_source","git_identity":{"name":"Example Automation","email":"example-automation@users.noreply.github.com"}}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &recordingCreateSessionService{}
+			router := newSessionHTTPTestRouterWithCreateService(service)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/sessions?beta=true", strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			setAuthHeader(request)
+
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
+			}
+			assertErrorType(t, recorder, "invalid_request_error")
+			if service.calls != 0 {
+				t.Fatalf("Create calls = %d; want 0", service.calls)
+			}
+		})
+	}
+}
+
 func TestCreateSessionRejectsResourceFieldsOutsideSelectedTypeBeforeService(t *testing.T) {
 	tests := []struct {
 		name      string
