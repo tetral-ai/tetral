@@ -1,6 +1,7 @@
 package testinfra
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,10 +216,46 @@ func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
 	}
 }
 
-func TestCrossLanguageIntegrationDeclaresPinnedSDKDependency(t *testing.T) {
-	dependencies := dependenciesForCapabilities([]Exclusion{{Capability: "cross-language-integration"}})
-	if !slices.Equal(dependencies, []string{"sdk"}) {
-		t.Fatalf("cross-language dependencies = %v; want [sdk]", dependencies)
+func TestFullPlanRunsLocalSDKIntegrationAndExcludesLiveSandbox(t *testing.T) {
+	plan, err := BuildPlan(repositoryRootForTest(t), ProfileFull, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const launcher = "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology"
+	selected := false
+	for _, selection := range plan.Selections {
+		if !slices.Contains(selection.Packages, "github.com/tetral-ai/tetral/integration") {
+			continue
+		}
+		selected = slices.Contains(selection.Tests, launcher)
+		for _, dependency := range []string{"sdk", "postgresql"} {
+			if !slices.Contains(selection.Dependencies, dependency) {
+				t.Errorf("SDK integration dependencies = %v; missing %s", selection.Dependencies, dependency)
+			}
+		}
+	}
+	if !selected {
+		t.Error("Full plan omitted the local SDK integration launcher")
+	}
+	var liveSandbox []string
+	for _, exclusion := range plan.Excluded {
+		if exclusion.Runnable == launcher {
+			t.Errorf("local SDK integration was excluded: %+v", exclusion)
+		}
+		if exclusion.Package == "github.com/tetral-ai/tetral/services/sandbox" && exclusion.Capability == "live-external-service" {
+			if exclusion.Disposition != "not-applicable" {
+				t.Errorf("live Sandbox disposition = %s; want not-applicable", exclusion.Disposition)
+			}
+			liveSandbox = append(liveSandbox, exclusion.Runnable)
+		}
+	}
+	wantLiveSandbox := []string{
+		"TestLiveResourceProjectionFUSEBindSmoke",
+		"TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWritable",
+		"TestLiveResourceProjectionTempCredentialPrefixIsolation",
+	}
+	if !slices.Equal(liveSandbox, wantLiveSandbox) {
+		t.Errorf("live Sandbox exclusions = %v; want %v", liveSandbox, wantLiveSandbox)
 	}
 }
 
@@ -314,5 +351,47 @@ func repositoryRootForTest(t *testing.T) string {
 			t.Fatal("repository root not found")
 		}
 		root = parent
+	}
+}
+
+func TestGoClassificationRetainsDependenciesWithoutTreatingChildEnvironmentAsLive(t *testing.T) {
+	sdkEnv := strings.Join([]string{"TETRAL", "ENGINE", "SDK", "ROOT"}, "_")
+	liveEnv := strings.Join([]string{"FIXTURE", "LIVE"}, "_")
+	for _, tc := range []struct {
+		name string
+		body string
+		live bool
+	}{
+		{"child assignment after dependencies", `sdk(); database(); _ = "FIXTURE_LIVE=1"`, false},
+		{"child assignment before dependencies", `_ = "FIXTURE_LIVE=1"; database(); sdk()`, false},
+		{"live read before dependencies", fmt.Sprintf(`_ = os.Getenv(%q); sdk(); database()`, liveEnv), true},
+		{"live read after dependencies", fmt.Sprintf(`database(); sdk(); _, _ = os.LookupEnv(%q)`, liveEnv), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := fmt.Sprintf(`package fixture
+import "os"
+import "github.com/tetral-ai/tetral/internal/storage/storagetest"
+func sdk() { _ = os.Getenv(%q) }
+func database() { storagetest.NewPostgreSQLDB(nil) }
+func TestFixture() { %s }
+`, sdkEnv, tc.body)
+			if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, exclusions, err := noInfrastructureTests(listedPackage{Dir: root, TestGoFiles: []string{"fixture_test.go"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(exclusions) != 1 {
+				t.Fatalf("classified tests = %v; want one infrastructure test", exclusions)
+			}
+			if got := exclusions[0].Capability == "live-external-service"; got != tc.live {
+				t.Errorf("live classification = %v; want %v", got, tc.live)
+			}
+			if got := dependenciesForCapabilities(exclusions); !slices.Equal(got, []string{"postgresql", "sdk"}) {
+				t.Errorf("dependencies = %v; want [postgresql sdk]", got)
+			}
+		})
 	}
 }

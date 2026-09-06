@@ -33,6 +33,7 @@ type testFunction struct {
 	calls          []string
 	infrastructure bool
 	capability     string
+	capabilities   map[string]bool
 	reason         string
 }
 
@@ -135,11 +136,14 @@ func goPackageDependencies(pkg listedPackage) ([]string, error) {
 func dependenciesForCapabilities(exclusions []Exclusion) []string {
 	set := map[string]bool{}
 	for _, exclusion := range exclusions {
-		switch exclusion.Capability {
-		case "postgresql", "minio", "docker", "bun-workspaces":
-			set[exclusion.Capability] = true
-		case "external-sdk-checkout", "cross-language-integration":
-			set["sdk"] = true
+		capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
+		for _, capability := range capabilities {
+			switch capability {
+			case "postgresql", "minio", "docker", "bun-workspaces":
+				set[capability] = true
+			case "external-sdk-checkout", "cross-language-integration":
+				set["sdk"] = true
+			}
 		}
 	}
 	dependencies := make([]string, 0, len(set))
@@ -241,9 +245,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 				if identifier, ok := node.(*ast.Ident); ok {
 					item.calls = append(item.calls, identifier.Name)
 					if identifier.Name == "EnvTestDatabaseURL" {
-						item.infrastructure = true
-						item.capability = "postgresql"
-						item.reason = "uses the PostgreSQL test database contract"
+						item.requireCapability("postgresql", "uses the PostgreSQL test database contract")
 					}
 				}
 				literal, ok := node.(*ast.BasicLit)
@@ -258,9 +260,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 				if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if identifier, ok := selector.X.(*ast.Ident); ok {
 						if capability := infrastructureImports[identifier.Name]; capability != "" {
-							item.infrastructure = true
-							item.capability = capability
-							item.reason = "calls the repository PostgreSQL test helper"
+							item.requireCapability(capability, "calls the repository PostgreSQL test helper")
 						}
 						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext") {
 							argument := 0
@@ -271,9 +271,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 								if literal, ok := call.Args[argument].(*ast.BasicLit); ok && literal.Kind == token.STRING {
 									value, _ := strconv.Unquote(literal.Value)
 									if value == "bun" {
-										item.infrastructure = true
-										item.capability = "bun-workspaces"
-										item.reason = "executes a repository Bun composition fixture"
+										item.requireCapability("bun-workspaces", "executes a repository Bun composition fixture")
 									}
 								}
 							}
@@ -285,6 +283,9 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 							if literal, ok := argument.(*ast.BasicLit); ok && literal.Kind == token.STRING {
 								value, _ := strconv.Unquote(literal.Value)
 								markExternalCapability(item, value)
+								if strings.Contains(value, "_LIVE") {
+									item.requireCapability("live-external-service", "reads a live external service environment contract")
+								}
 							}
 						}
 					case "Skip", "Skipf", "SkipNow":
@@ -302,19 +303,16 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 	for changed {
 		changed = false
 		for _, function := range functions {
-			if function.infrastructure {
-				continue
-			}
 			for _, call := range function.calls {
 				if call == "startDependenciesWith" || call == "markExternalCapability" {
 					continue
 				}
 				if called := functions[call]; called != nil && called.infrastructure {
-					function.infrastructure = true
-					function.capability = called.capability
-					function.reason = "calls " + called.name + ", which " + defaultReason(called.reason)
-					changed = true
-					break
+					for capability := range called.capabilities {
+						if function.requireCapability(capability, "calls "+called.name+", which requires "+capability) {
+							changed = true
+						}
+					}
 				}
 			}
 		}
@@ -326,7 +324,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 			continue
 		}
 		if function.infrastructure {
-			excluded = append(excluded, Exclusion{Runnable: name, Capability: defaultCapability(function.capability), Disposition: "not-applicable", Reason: defaultReason(function.reason)})
+			excluded = append(excluded, Exclusion{Runnable: name, Capability: defaultCapability(function.capability), Capabilities: function.sortedCapabilities(), Disposition: "not-applicable", Reason: defaultReason(function.reason)})
 		} else {
 			tests = append(tests, name)
 		}
@@ -334,6 +332,42 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 	sort.Strings(tests)
 	sort.Slice(excluded, func(a, b int) bool { return excluded[a].Runnable < excluded[b].Runnable })
 	return tests, excluded, nil
+}
+
+// Capabilities accumulate: needing PostgreSQL must not erase an SDK dependency,
+// and adding a local dependency must not make a real external service runnable.
+func (function *testFunction) requireCapability(capability, reason string) bool {
+	if function.capabilities == nil {
+		function.capabilities = map[string]bool{}
+	}
+	if function.capabilities[capability] {
+		return false
+	}
+	function.capabilities[capability] = true
+	function.infrastructure = true
+	// Keep one deterministic disposition for each runnable. External and root
+	// requirements govern exclusion; all capabilities still contribute dependencies.
+	primary := function.sortedCapabilities()[0]
+	switch {
+	case function.capabilities["live-external-service"]:
+		primary = "live-external-service"
+	case function.capabilities["root-linux"]:
+		primary = "root-linux"
+	}
+	if primary == capability {
+		function.capability = primary
+		function.reason = reason
+	}
+	return true
+}
+
+func (function *testFunction) sortedCapabilities() []string {
+	capabilities := make([]string, 0, len(function.capabilities))
+	for capability := range function.capabilities {
+		capabilities = append(capabilities, capability)
+	}
+	sort.Strings(capabilities)
+	return capabilities
 }
 
 func markExternalCapability(function *testFunction, value string) {
@@ -349,15 +383,13 @@ func markExternalCapability(function *testFunction, value string) {
 		capability = "external-sdk-checkout"
 	case strings.Contains(value, "TETRAL_RUN_GO_BUN_GRPC_INTEROP"):
 		capability = "cross-language-integration"
-	case strings.Contains(strings.ToLower(value), "live daytona"), strings.Contains(strings.ToLower(value), "live r2"), strings.Contains(value, "_LIVE"):
+	case strings.Contains(strings.ToLower(value), "live daytona"), strings.Contains(strings.ToLower(value), "live r2"):
 		capability = "live-external-service"
 	case strings.Contains(strings.ToLower(value), "root ci lane"), strings.Contains(strings.ToLower(value), "production root helper"):
 		capability = "root-linux"
 	}
 	if capability != "" {
-		function.infrastructure = true
-		function.capability = capability
-		function.reason = "requires " + capability
+		function.requireCapability(capability, "requires "+capability)
 	}
 }
 
