@@ -2801,8 +2801,9 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		t.Fatalf("receipt-pending facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
 			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
 	}
-	// Probe before the persisted retry deadline, even if full jitter made it
-	// expire before this test reached Lease. The follower must already be time-eligible.
+	// Probe before the persisted retry deadline, even if the randomized delay
+	// already elapsed before this test reached Lease.
+	// The follower must already be time-eligible.
 	probeAt := interruptAvailableAt.Add(-time.Microsecond)
 	if followerAvailableAt.After(probeAt) {
 		t.Fatal("follower is not yet time-eligible for the barrier probe")
