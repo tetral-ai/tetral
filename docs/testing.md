@@ -14,6 +14,14 @@ passing test.
 - `make test-full` runs the complete local evidence set. It includes Race and
   can take materially longer.
 
+The local SDK integration topology is part of Full Go evidence: it starts real
+Engine API services against disposable PostgreSQL and runs the pinned SDK's
+integration suite. Its selected dependencies include both `sdk` and `postgresql`.
+The child-process `TETRAL_COMPAT_LIVE=1` flag enables that suite against the local
+topology; it does not declare an external service requirement. The Go planner
+accumulates dependencies and recognizes generic `_LIVE` contracts at environment
+reads, rather than treating child-process assignments or diagnostics as opt-ins.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.

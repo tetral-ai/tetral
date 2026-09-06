@@ -29,12 +29,13 @@ type Plan struct {
 }
 
 type Exclusion struct {
-	Group       string `json:"group"`
-	Package     string `json:"package,omitempty"`
-	Runnable    string `json:"runnable,omitempty"`
-	Capability  string `json:"capability"`
-	Disposition string `json:"disposition"`
-	Reason      string `json:"reason"`
+	Group        string   `json:"group"`
+	Package      string   `json:"package,omitempty"`
+	Runnable     string   `json:"runnable,omitempty"`
+	Capability   string   `json:"capability"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Disposition  string   `json:"disposition"`
+	Reason       string   `json:"reason"`
 }
 
 type Selection struct {
