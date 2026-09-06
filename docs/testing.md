@@ -30,6 +30,13 @@ This proves API authentication and database write/read behavior; it does not
 start a Sandbox or execute Git. Dependency setup failures and unexpected skips
 fail verification.
 
+When reusing a clean SDK checkout at the pinned commit, the runner installs
+dependencies in that directory. This applies to `TETRAL_ENGINE_SDK_ROOT` and
+an automatically discovered sibling `tetral-sdk-typescript` checkout. The
+installation can update ignored files such as `node_modules` even while Git
+reports a clean working tree. These installed files remain after verification;
+the runner removes only temporary checkouts it created itself.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.
