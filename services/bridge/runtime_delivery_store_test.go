@@ -2785,12 +2785,15 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		t.Fatalf("run hot-accepted interrupt without receipt: %v", err)
 	}
 	var interruptQueueStatus, followerQueueStatus, interruptInboxStatus string
+	var interruptAvailableAt, followerAvailableAt time.Time
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
 		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$2),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3)`,
+		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$3),
+		(SELECT available_at FROM queue_jobs WHERE workspace_id='default' AND id=$1),
+		(SELECT available_at FROM queue_jobs WHERE workspace_id='default' AND id=$2)`,
 		interruptJob.JobID, messageJob.JobID, interruptJob.RuntimeInputID,
-	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus); err != nil {
+	).Scan(&interruptQueueStatus, &followerQueueStatus, &interruptInboxStatus, &interruptAvailableAt, &followerAvailableAt); err != nil {
 		t.Fatalf("read receipt-pending barrier: %v", err)
 	}
 	if interruptQueueStatus != queue.StatusPending || followerQueueStatus != queue.StatusPending ||
@@ -2798,9 +2801,16 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		t.Fatalf("receipt-pending facts = Queue %s follower %s Inbox %s interrupt calls/requests %d/%d",
 			interruptQueueStatus, followerQueueStatus, interruptInboxStatus, sender.interruptCalls, len(sender.requests))
 	}
+	// Probe before the persisted retry deadline, even if the randomized delay
+	// already elapsed before this test reached Lease.
+	// The follower must already be time-eligible.
+	probeAt := interruptAvailableAt.Add(-time.Microsecond)
+	if followerAvailableAt.After(probeAt) {
+		t.Fatal("follower is not yet time-eligible for the barrier probe")
+	}
 	blockedFollowers, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-pending-follower-proof",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: probeAt,
 	})
 	if err != nil || len(blockedFollowers) != 0 {
 		t.Fatalf("follower leases before interrupt receipt = %#v/%v; want none", blockedFollowers, err)
@@ -2813,6 +2823,9 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "receipt-response-lost",
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
+	if receiptLease.ID != interruptJob.JobID || receiptLease.AttemptCount != 2 {
+		t.Fatalf("receipt lease = %s attempt %d; want interrupt %s attempt 2", receiptLease.ID, receiptLease.AttemptCount, interruptJob.JobID)
+	}
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(receiptLease),
 	})
