@@ -18,7 +18,17 @@ var inventoryJSON []byte
 type Inventory struct {
 	Version           int      `json:"version"`
 	Groups            []Group  `json:"groups"`
+	GoTests           []GoTest `json:"go_tests"`
 	FullFallbackPaths []string `json:"full_fallback_paths"`
+}
+
+// GoTest declares the complete dependency contract for a Go test whose
+// composition spans repositories. Its requirements replace source inference.
+// Full and affected package selections run it; Fast compiles it without running.
+type GoTest struct {
+	Package      string   `json:"package"`
+	Name         string   `json:"name"`
+	Dependencies []string `json:"dependencies"`
 }
 
 type Group struct {
@@ -44,6 +54,21 @@ func LoadInventory() (Inventory, error) {
 			return Inventory{}, fmt.Errorf("invalid evidence group %q", group.ID)
 		}
 		seen[group.ID] = true
+	}
+	seenTests := map[string]bool{}
+	for _, test := range inventory.GoTests {
+		key := test.Package + "\x00" + test.Name
+		if test.Package == "" || !isGoRunnable(test.Name) || len(test.Dependencies) == 0 || seenTests[key] {
+			return Inventory{}, fmt.Errorf("invalid Go test declaration %q in %q", test.Name, test.Package)
+		}
+		seenTests[key] = true
+		for _, dependency := range test.Dependencies {
+			switch dependency {
+			case "postgresql", "minio", "docker", "bun-workspaces", "sdk":
+			default:
+				return Inventory{}, fmt.Errorf("go test %q declares unknown dependency %q", test.Name, dependency)
+			}
+		}
 	}
 	return inventory, nil
 }

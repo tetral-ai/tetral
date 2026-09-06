@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "go_tests": [
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology",
+      "dependencies": ["postgresql", "sdk"]
+    }
+  ],
   "groups": [
     {
       "id": "repository",

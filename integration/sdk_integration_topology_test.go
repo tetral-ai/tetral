@@ -31,7 +31,6 @@ import (
 const (
 	sdkIntegrationVaultKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	sdkIntegrationTimeout  = 3 * time.Minute
-	sdkIntegrationYarn     = "yarn@1.22.22"
 )
 
 type sdkIntegrationEnv map[string]string
@@ -392,26 +391,15 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	standardAPIKey := mintSDKIntegrationAPIKey(t, edgeServer.URL, bootstrapKey)
 	ctx, cancel := context.WithTimeout(context.Background(), sdkIntegrationTimeout)
 	defer cancel()
+	reportPath := filepath.Join(t.TempDir(), "sdk-jest-results.json")
 	jestPath := filepath.Join(sdkRoot, "node_modules", "jest", "bin", "jest.js")
-	//nolint:gosec // G703: path is built from TETRAL_ENGINE_SDK_ROOT, a developer-supplied local checkout.
+	//nolint:gosec // The SDK root comes from the runner's pinned dependency checkout.
 	if _, err := os.Stat(jestPath); err != nil {
-		install := exec.CommandContext(
-			ctx,
-			bunPath,
-			"x",
-			sdkIntegrationYarn,
-			"install",
-			"--frozen-lockfile",
-			"--ignore-scripts",
-			"--non-interactive",
-		) //nolint:gosec // repository-pinned SDK root, package-manager version, and fixed arguments.
-		install.Dir = sdkRoot
-		installOutput, installErr := install.CombinedOutput()
-		if installErr != nil {
-			t.Fatalf("install fork SDK integration dependencies: %v\n%s", installErr, installOutput)
-		}
+		t.Fatalf("SDK Jest dependency is not prepared: %v", err)
 	}
-	command := exec.CommandContext(ctx, bunPath, "x", "jest", "tests/integration/tetral.integration.test.ts", "--runInBand") //nolint:gosec // repository-pinned SDK root and fixed arguments.
+	//nolint:gosec // The runner prepares the pinned SDK checkout; all arguments are fixed test inputs.
+	command := exec.CommandContext(ctx, bunPath, "x", "--no-install", "jest",
+		"tests/integration/tetral.integration.test.ts", "--runInBand", "--json", "--outputFile", reportPath)
 	command.Dir = sdkRoot
 	command.Env = append(filteredSDKIntegrationEnvironment(os.Environ()),
 		"TETRAL_COMPAT_LIVE=1",
@@ -426,9 +414,15 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fork SDK integration suite failed: %v\n%s", err, safeOutput)
 	}
-	if strings.Contains(strings.ToLower(safeOutput), " skip") {
-		t.Fatalf("fork SDK integration suite skipped cases despite TETRAL_COMPAT_LIVE=1:\n%s", safeOutput)
+	report, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read SDK Jest results: %v", err)
 	}
+	passed, err := validateSDKIntegrationReport(report)
+	if err != nil {
+		t.Fatalf("SDK integration results: %v\n%s", err, safeOutput)
+	}
+	t.Logf("SDK integration: %d tests passed against the local Engine", passed)
 }
 
 func mintSDKIntegrationAPIKey(t *testing.T, baseURL string, bootstrapKey string) string {

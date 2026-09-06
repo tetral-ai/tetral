@@ -189,6 +189,11 @@ func installBunWorkspaces(ctx context.Context, root string) (string, error) {
 }
 
 func (m *dependencyManager) startSDK(ctx context.Context) error {
+	for _, executable := range []string{"bun", "node"} {
+		if _, err := exec.LookPath(executable); err != nil {
+			return fmt.Errorf("SDK tests require %s: %w", executable, err)
+		}
+	}
 	candidates := []string{strings.TrimSpace(os.Getenv("TETRAL_ENGINE_SDK_ROOT"))}
 	if m.root != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(m.root), "tetral-sdk-typescript"))
@@ -198,6 +203,9 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 			continue
 		}
 		if err := verifySDKCheckout(ctx, candidate); err == nil {
+			if err := installSDKDependencies(ctx, candidate); err != nil {
+				return err
+			}
 			m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_ENGINE_SDK_ROOT"),
 				"TETRAL_ENGINE_SDK_ROOT="+candidate,
 				"TETRAL_RUN_GO_BUN_GRPC_INTEROP=1",
@@ -238,13 +246,8 @@ func (m *dependencyManager) startSDK(ctx context.Context) error {
 }
 
 func installSDKDependencies(ctx context.Context, directory string) error {
-	if err := runQuietInDir(ctx, directory, "bun", "install", "--no-save", "--ignore-scripts"); err != nil {
+	if err := runQuietInDir(ctx, directory, "bun", "x", "yarn@1.22.22", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive"); err != nil {
 		return fmt.Errorf("install pinned SDK dependencies: %w", err)
-	}
-	for _, name := range []string{"bun.lock", "bun.lockb"} {
-		if err := os.Remove(filepath.Join(directory, name)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove generated SDK lockfile: %w", err)
-		}
 	}
 	return nil
 }

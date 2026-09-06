@@ -225,6 +225,12 @@ func reconcilePlan(root string, inventory Inventory, plan Plan) error {
 			}
 		}
 	}
+	for _, test := range inventory.GoTests {
+		key := test.Package + "\x00" + test.Name
+		if !seenRunnables[key] && !excluded[key] {
+			return fmt.Errorf("plan omitted declared Go test %q in %q", test.Name, test.Package)
+		}
+	}
 	return nil
 }
 

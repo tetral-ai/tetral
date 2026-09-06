@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -92,8 +93,6 @@ func fullGoSelections(root, reason string) ([]Selection, []Exclusion, error) {
 		excluded := map[string]bool{}
 		for _, item := range classified {
 			switch item.Capability {
-			case "live-external-service":
-				item.Disposition = "not-applicable"
 			case "root-linux":
 				item.Disposition = "delegated"
 				item.Reason = "executed by the sandbox-image root proof"
@@ -139,7 +138,7 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 		capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
 		for _, capability := range capabilities {
 			switch capability {
-			case "postgresql", "minio", "docker", "bun-workspaces":
+			case "postgresql", "minio", "docker", "bun-workspaces", "sdk":
 				set[capability] = true
 			case "external-sdk-checkout", "cross-language-integration":
 				set["sdk"] = true
@@ -202,6 +201,20 @@ func allGoRunnables(pkg listedPackage) ([]string, error) {
 }
 
 func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
+	inventory, err := LoadInventory()
+	if err != nil {
+		return nil, nil, err
+	}
+	return classifyGoTests(pkg, inventory.GoTests)
+}
+
+func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusion, error) {
+	declared := map[string][]string{}
+	for _, contract := range contracts {
+		if contract.Package == pkg.ImportPath {
+			declared[contract.Name] = contract.Dependencies
+		}
+	}
 	files := append(append(append([]string{}, pkg.GoFiles...), pkg.TestGoFiles...), pkg.XTestGoFiles...)
 	functions := map[string]*testFunction{}
 	for _, name := range files {
@@ -241,6 +254,14 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 				continue
 			}
 			item := &testFunction{name: function.Name.Name}
+			if dependencies, ok := declared[item.name]; ok && function.Recv == nil {
+				for _, dependency := range dependencies {
+					item.requireCapability(dependency, "declared in the Go test inventory")
+				}
+				functions[item.name] = item
+				delete(declared, item.name)
+				continue
+			}
 			ast.Inspect(function.Body, func(node ast.Node) bool {
 				if identifier, ok := node.(*ast.Ident); ok {
 					item.calls = append(item.calls, identifier.Name)
@@ -251,7 +272,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 				literal, ok := node.(*ast.BasicLit)
 				if ok && literal.Kind == token.STRING {
 					value, _ := strconv.Unquote(literal.Value)
-					markExternalCapability(item, value)
+					markInfrastructureCapability(item, value)
 				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -277,34 +298,21 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 							}
 						}
 					}
-					switch selector.Sel.Name {
-					case "Getenv", "LookupEnv":
-						for _, argument := range call.Args {
-							if literal, ok := argument.(*ast.BasicLit); ok && literal.Kind == token.STRING {
-								value, _ := strconv.Unquote(literal.Value)
-								markExternalCapability(item, value)
-								if strings.Contains(value, "_LIVE") {
-									item.requireCapability("live-external-service", "reads a live external service environment contract")
-								}
-							}
-						}
-					case "Skip", "Skipf", "SkipNow":
-						// A conditional native skip is not itself an exclusion. Fast
-						// rejects it unless the same function declares a known external
-						// capability through its durable environment contract.
-					}
 				}
 				return true
 			})
 			functions[item.name] = item
 		}
 	}
+	for name := range declared {
+		return nil, nil, fmt.Errorf("declared Go test %q is absent from package %q", name, pkg.ImportPath)
+	}
 	changed := true
 	for changed {
 		changed = false
 		for _, function := range functions {
 			for _, call := range function.calls {
-				if call == "startDependenciesWith" || call == "markExternalCapability" {
+				if call == "startDependenciesWith" || call == "markInfrastructureCapability" {
 					continue
 				}
 				if called := functions[call]; called != nil && called.infrastructure {
@@ -334,8 +342,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 	return tests, excluded, nil
 }
 
-// Capabilities accumulate: needing PostgreSQL must not erase an SDK dependency,
-// and adding a local dependency must not make a real external service runnable.
+// Capabilities accumulate so one required dependency cannot erase another.
 func (function *testFunction) requireCapability(capability, reason string) bool {
 	if function.capabilities == nil {
 		function.capabilities = map[string]bool{}
@@ -345,13 +352,9 @@ func (function *testFunction) requireCapability(capability, reason string) bool 
 	}
 	function.capabilities[capability] = true
 	function.infrastructure = true
-	// Keep one deterministic disposition for each runnable. External and root
-	// requirements govern exclusion; all capabilities still contribute dependencies.
+	// Root requirements govern delegation; all capabilities contribute dependencies.
 	primary := function.sortedCapabilities()[0]
-	switch {
-	case function.capabilities["live-external-service"]:
-		primary = "live-external-service"
-	case function.capabilities["root-linux"]:
+	if function.capabilities["root-linux"] {
 		primary = "root-linux"
 	}
 	if primary == capability {
@@ -370,7 +373,7 @@ func (function *testFunction) sortedCapabilities() []string {
 	return capabilities
 }
 
-func markExternalCapability(function *testFunction, value string) {
+func markInfrastructureCapability(function *testFunction, value string) {
 	capability := ""
 	switch {
 	case strings.Contains(value, "TETRAL_TEST_DATABASE_URL"):
@@ -383,8 +386,6 @@ func markExternalCapability(function *testFunction, value string) {
 		capability = "external-sdk-checkout"
 	case strings.Contains(value, "TETRAL_RUN_GO_BUN_GRPC_INTEROP"):
 		capability = "cross-language-integration"
-	case strings.Contains(strings.ToLower(value), "live daytona"), strings.Contains(strings.ToLower(value), "live r2"):
-		capability = "live-external-service"
 	case strings.Contains(strings.ToLower(value), "root ci lane"), strings.Contains(strings.ToLower(value), "production root helper"):
 		capability = "root-linux"
 	}
