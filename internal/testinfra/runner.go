@@ -777,11 +777,7 @@ func gatewayTestFiles(root string, profile Profile) ([]string, []Exclusion, erro
 		}
 		capability := ""
 		reason := ""
-		switch {
-		case strings.Contains(file, "/test/live/"):
-			capability = "live-external-service"
-			reason = "requires an operator-authorized live external service"
-		case profile == ProfileFast && strings.Contains(string(body), "TETRAL_TEST_DATABASE_URL"):
+		if profile == ProfileFast && strings.Contains(string(body), "TETRAL_TEST_DATABASE_URL") {
 			capability = "postgresql"
 			reason = "requires the PostgreSQL test database contract"
 		}

@@ -1,7 +1,6 @@
 package testinfra
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,46 +215,58 @@ func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
 	}
 }
 
-func TestFullPlanRunsLocalSDKIntegrationAndExcludesLiveSandbox(t *testing.T) {
-	plan, err := BuildPlan(repositoryRootForTest(t), ProfileFull, "")
+func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
+	root := repositoryRootForTest(t)
+	full, err := BuildPlan(root, ProfileFull, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const launcher = "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology"
-	selected := false
-	for _, selection := range plan.Selections {
-		if !slices.Contains(selection.Packages, "github.com/tetral-ai/tetral/integration") {
-			continue
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contract := range inventory.GoTests {
+		affected, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: []string{contract.Package}}})
+		if err != nil {
+			t.Fatal(err)
 		}
-		selected = slices.Contains(selection.Tests, launcher)
-		for _, dependency := range []string{"sdk", "postgresql"} {
-			if !slices.Contains(selection.Dependencies, dependency) {
-				t.Errorf("SDK integration dependencies = %v; missing %s", selection.Dependencies, dependency)
+		for _, selections := range [][]Selection{full.Selections, affected} {
+			found := false
+			for _, selection := range selections {
+				if !slices.Contains(selection.Packages, contract.Package) || !slices.Contains(selection.Tests, contract.Name) {
+					continue
+				}
+				found = true
+				for _, dependency := range contract.Dependencies {
+					if !slices.Contains(selection.Dependencies, dependency) {
+						t.Errorf("selected %s without declared dependency %s", contract.Name, dependency)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("profile did not select declared test %s", contract.Name)
 			}
 		}
 	}
-	if !selected {
-		t.Error("Full plan omitted the local SDK integration launcher")
+}
+
+func TestDeclaredGoDependenciesDoNotRequireSourceHints(t *testing.T) {
+	root := t.TempDir()
+	// This test has no environment reads or infrastructure helper calls.
+	if err := os.WriteFile(filepath.Join(root, "composition_test.go"), []byte("package fixture\nfunc TestComposition() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	var liveSandbox []string
-	for _, exclusion := range plan.Excluded {
-		if exclusion.Runnable == launcher {
-			t.Errorf("local SDK integration was excluded: %+v", exclusion)
-		}
-		if exclusion.Package == "github.com/tetral-ai/tetral/services/sandbox" && exclusion.Capability == "live-external-service" {
-			if exclusion.Disposition != "not-applicable" {
-				t.Errorf("live Sandbox disposition = %s; want not-applicable", exclusion.Disposition)
-			}
-			liveSandbox = append(liveSandbox, exclusion.Runnable)
-		}
+	pkg := listedPackage{ImportPath: "fixture", Dir: root, TestGoFiles: []string{"composition_test.go"}}
+	contracts := []GoTest{{Package: "fixture", Name: "TestComposition", Dependencies: []string{"postgresql", "sdk"}}}
+	fast, excluded, err := classifyGoTests(pkg, contracts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantLiveSandbox := []string{
-		"TestLiveResourceProjectionFUSEBindSmoke",
-		"TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWritable",
-		"TestLiveResourceProjectionTempCredentialPrefixIsolation",
+	if len(fast) != 0 || len(excluded) != 1 || excluded[0].Runnable != "TestComposition" {
+		t.Fatalf("Fast disposition = selected %v, excluded %+v", fast, excluded)
 	}
-	if !slices.Equal(liveSandbox, wantLiveSandbox) {
-		t.Errorf("live Sandbox exclusions = %v; want %v", liveSandbox, wantLiveSandbox)
+	if got := dependenciesForCapabilities(excluded); !slices.Equal(got, contracts[0].Dependencies) {
+		t.Fatalf("execution dependencies = %v; want %v", got, contracts[0].Dependencies)
 	}
 }
 
@@ -351,47 +362,5 @@ func repositoryRootForTest(t *testing.T) string {
 			t.Fatal("repository root not found")
 		}
 		root = parent
-	}
-}
-
-func TestGoClassificationRetainsDependenciesWithoutTreatingChildEnvironmentAsLive(t *testing.T) {
-	sdkEnv := strings.Join([]string{"TETRAL", "ENGINE", "SDK", "ROOT"}, "_")
-	liveEnv := strings.Join([]string{"FIXTURE", "LIVE"}, "_")
-	for _, tc := range []struct {
-		name string
-		body string
-		live bool
-	}{
-		{"child assignment after dependencies", `sdk(); database(); _ = "FIXTURE_LIVE=1"`, false},
-		{"child assignment before dependencies", `_ = "FIXTURE_LIVE=1"; database(); sdk()`, false},
-		{"live read before dependencies", fmt.Sprintf(`_ = os.Getenv(%q); sdk(); database()`, liveEnv), true},
-		{"live read after dependencies", fmt.Sprintf(`database(); sdk(); _, _ = os.LookupEnv(%q)`, liveEnv), true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			source := fmt.Sprintf(`package fixture
-import "os"
-import "github.com/tetral-ai/tetral/internal/storage/storagetest"
-func sdk() { _ = os.Getenv(%q) }
-func database() { storagetest.NewPostgreSQLDB(nil) }
-func TestFixture() { %s }
-`, sdkEnv, tc.body)
-			if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(source), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, exclusions, err := noInfrastructureTests(listedPackage{Dir: root, TestGoFiles: []string{"fixture_test.go"}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(exclusions) != 1 {
-				t.Fatalf("classified tests = %v; want one infrastructure test", exclusions)
-			}
-			if got := exclusions[0].Capability == "live-external-service"; got != tc.live {
-				t.Errorf("live classification = %v; want %v", got, tc.live)
-			}
-			if got := dependenciesForCapabilities(exclusions); !slices.Equal(got, []string{"postgresql", "sdk"}) {
-				t.Errorf("dependencies = %v; want [postgresql sdk]", got)
-			}
-		})
 	}
 }

@@ -14,13 +14,28 @@ passing test.
 - `make test-full` runs the complete local evidence set. It includes Race and
   can take materially longer.
 
-The local SDK integration topology is part of Full Go evidence: it starts real
-Engine API services against disposable PostgreSQL and runs the pinned SDK's
-integration suite. Its selected dependencies include both `sdk` and `postgresql`.
-The child-process `TETRAL_COMPAT_LIVE=1` flag enables that suite against the local
-topology; it does not declare an external service requirement. The Go planner
-accumulates dependencies and recognizes generic `_LIVE` contracts at environment
-reads, rather than treating child-process assignments or diagnostics as opt-ins.
+The local SDK integration test is declared in `internal/testinfra/inventory.json`
+under `go_tests`, with its exact package, test name, and complete `sdk` and
+`postgresql` dependencies. These declarations replace source inference for the
+named test. Full runs it, Affected runs it when its package is in the dependency
+closure, and Fast compiles it without starting its infrastructure.
+
+The runner prepares disposable PostgreSQL and a clean, pinned SDK checkout,
+checking Bun and Node and installing the SDK's frozen Yarn dependencies. The Go
+test then starts local Engine Auth and API services, issues a test API key, and launches
+the SDK suite against that local address. Its child-process execution flag is
+only an SDK launch contract, not a CI selection rule. Jest's structured report
+must contain executed, passing assertions with no skipped or failed cases.
+This proves API authentication and database write/read behavior; it does not
+start a Sandbox or execute Git. Dependency setup failures and unexpected skips
+fail verification.
+
+When reusing a clean SDK checkout at the pinned commit, the runner installs
+dependencies in that directory. This applies to `TETRAL_ENGINE_SDK_ROOT` and
+an automatically discovered sibling `tetral-sdk-typescript` checkout. The
+installation can update ignored files such as `node_modules` even while Git
+reports a clean working tree. These installed files remain after verification;
+the runner removes only temporary checkouts it created itself.
 
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing

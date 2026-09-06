@@ -324,10 +324,7 @@ and driver snapshot checks use the shared `internal/gitidentity` rules.
 Repository CI builds the unmodified Sandbox Dockerfile and exercises the local
 image and Helper without Daytona credentials. Published-image Daytona behavior
 belongs to the separately operated release rehearsal, which records the exact
-candidate image and Chart digests before promotion. The opt-in live
-resource-projection test remains a diagnostic tool for an operator-provided
-Daytona environment; it is not selected by pull-request, main, or release
-workflows and is not release evidence by itself.
+candidate image and Chart digests before promotion.
 
 ## Boundaries
 
