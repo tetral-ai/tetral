@@ -27,17 +27,27 @@ const (
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed        ProviderErrorKind = "auth_failed"
-	ProviderErrorConfigInvalid     ProviderErrorKind = "config_invalid"
-	ProviderErrorUnavailable       ProviderErrorKind = "unavailable"
-	ProviderErrorQuotaExceeded     ProviderErrorKind = "quota_exceeded"
-	ProviderErrorTimeout           ProviderErrorKind = "timeout"
-	ProviderErrorInvalidRequest    ProviderErrorKind = "invalid_request"
-	ProviderErrorNotFound          ProviderErrorKind = "not_found"
-	ProviderErrorConflict          ProviderErrorKind = "conflict"
-	ProviderErrorMalformedResponse ProviderErrorKind = "malformed_response"
-	ProviderErrorUnknown           ProviderErrorKind = "unknown"
+	ProviderErrorAuthFailed         ProviderErrorKind = "auth_failed"
+	ProviderErrorConfigInvalid      ProviderErrorKind = "config_invalid"
+	ProviderErrorUnavailable        ProviderErrorKind = "unavailable"
+	ProviderErrorQuotaExceeded      ProviderErrorKind = "quota_exceeded"
+	ProviderErrorTimeout            ProviderErrorKind = "timeout"
+	ProviderErrorInvalidRequest     ProviderErrorKind = "invalid_request"
+	ProviderErrorNotFound           ProviderErrorKind = "not_found"
+	ProviderErrorConflict           ProviderErrorKind = "conflict"
+	ProviderErrorMalformedResponse  ProviderErrorKind = "malformed_response"
+	ProviderErrorUnknown            ProviderErrorKind = "unknown"
+	ProviderErrorStorageFull        ProviderErrorKind = "storage_full"
+	ProviderErrorFilesystemDenied   ProviderErrorKind = "filesystem_access_denied"
+	ProviderErrorFilesystemReadOnly ProviderErrorKind = "filesystem_read_only"
 )
+
+// ProviderDiagnostic is private operational context, separate from the message
+// delivered to a tool caller. It must never contain raw payloads or credentials.
+type ProviderDiagnostic struct {
+	Operation string
+	Message   string
+}
 
 type ProviderError struct {
 	Provider    string
@@ -47,6 +57,7 @@ type ProviderError struct {
 	StatusCode  int
 	SafeMessage string
 	Cause       error
+	Diagnostic  ProviderDiagnostic
 }
 
 func (e *ProviderError) Error() string {

@@ -48,6 +48,7 @@ type ProviderOutcome[T any] struct {
 	SafeMessage         string
 	ProviderSafeMessage string
 	ProviderStatusCode  int
+	Diagnostic          sandbox.ProviderDiagnostic
 }
 
 func (o ProviderOutcome[T]) Failed() bool {
@@ -599,6 +600,7 @@ func (a *DaytonaAdapter) ExecuteTool(ctx context.Context, request ToolExecutionR
 				SafeMessage:         "daytona tool execution outcome is unknown",
 				ProviderSafeMessage: providerFailure.ProviderSafeMessage,
 				ProviderStatusCode:  providerFailure.ProviderStatusCode,
+				Diagnostic:          providerFailure.Diagnostic,
 			}
 		}
 		if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
@@ -704,6 +706,7 @@ func outcomeFromProviderError[T any](err error, boundary ProviderEffectBoundary)
 		SafeMessage:         providerErr.SafeMessage,
 		ProviderSafeMessage: providerErr.SafeMessage,
 		ProviderStatusCode:  providerErr.StatusCode,
+		Diagnostic:          providerErr.Diagnostic,
 	}
 }
 

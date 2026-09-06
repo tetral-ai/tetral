@@ -188,7 +188,20 @@ func (e *DaytonaHelperExecutor) PrepareTool(ctx context.Context, invocation Tool
 	limits := helperLimits(helperCommand, input)
 	payloadPath, process, err := e.stageHelperPayload(ctx, invocation.Target, invocation.ToolUseEventID, helperCommand, payload)
 	if err != nil {
-		return PreparedToolExecution{}, mapDaytonaError(sandbox.StageExecuteTool, err)
+		mapped := mapDaytonaError(sandbox.StageExecuteTool, err)
+		var providerErr *sandbox.ProviderError
+		if errors.As(mapped, &providerErr) && providerErr.Diagnostic.Operation != "" {
+			failure := *providerErr
+			if failure.Kind == sandbox.ProviderErrorInvalidRequest {
+				failure.SafeMessage = "Execution environment preparation failed; the provider rejected the request."
+			}
+			failure.SafeMessage += " The tool operation was not started."
+			mapped = &failure
+			if ProviderOperationWasNotSubmitted(err) {
+				mapped = MarkProviderOperationNotSubmitted(mapped)
+			}
+		}
+		return PreparedToolExecution{}, mapped
 	}
 	return PreparedToolExecution{
 		target: invocation.Target, process: process, toolUseEventID: invocation.ToolUseEventID,
@@ -710,7 +723,7 @@ func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target T
 		return e.client.Get(ctx, target.ProviderSandboxID)
 	}, nil)
 	if err != nil {
-		return "", nil, MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageExecuteTool, err))
+		return "", nil, MarkProviderOperationNotSubmitted(daytonaToolError("get_sandbox", err))
 	}
 	if providerSandbox.Process == nil || providerSandbox.FileSystem == nil {
 		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona sandbox is missing process or filesystem service", nil)
@@ -726,13 +739,13 @@ func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target T
 	if err := retryDaytonaTransientError(ctx, func() error {
 		return providerSandbox.FileSystem.CreateFolder(ctx, stageDir, options.WithMode("0700"))
 	}); err != nil {
-		return "", nil, err
+		return "", nil, daytonaToolError("create_payload_directory", err, stageDir)
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
 		return providerSandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), stagePath)
 	}); err != nil {
 		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return "", nil, err
+		return "", nil, daytonaToolError("upload_payload", err, stagePath)
 	}
 	// The freeze runs the privileged chain under one sudo sh -c so no
 	// intermediate state is observable: the final root is root-owned before
@@ -755,7 +768,7 @@ func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target T
 	}, nil)
 	if err != nil {
 		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return "", nil, err
+		return "", nil, daytonaToolError("freeze_payload", err, stageDir, payloadDir)
 	}
 	if permissionResponse == nil {
 		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
@@ -774,7 +787,7 @@ func (e *DaytonaHelperExecutor) executePreparedHelper(ctx context.Context, proce
 	}
 	response, err := process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
 	if err != nil {
-		return helperResult{}, err
+		return helperResult{}, daytonaToolError("execute_helper", err, payloadPath)
 	}
 	if response == nil {
 		return helperResult{}, errors.New("sandbox helper returned no response")

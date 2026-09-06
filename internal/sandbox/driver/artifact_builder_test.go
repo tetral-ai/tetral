@@ -40,6 +40,9 @@ func TestDaytonaArtifactBuilderCreatesSnapshotFromDeterministicDockerfile(t *tes
 	if client.params == nil {
 		t.Fatal("snapshot create params missing")
 	}
+	if resources := client.params.Resources; resources == nil || resources.CPU != 4 || resources.Memory != 8 || resources.Disk != 10 {
+		t.Fatalf("snapshot resources = %+v; want 4 vCPU, 8 GiB RAM, 10 GiB disk", resources)
+	}
 	if !strings.HasPrefix(client.params.Name, "tetral-") || len(client.params.Name) > 63 {
 		t.Fatalf("snapshot name = %q; want bounded deterministic name", client.params.Name)
 	}

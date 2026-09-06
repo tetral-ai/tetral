@@ -221,7 +221,12 @@ below).
 
 Register the snapshot in the Daytona dashboard (Snapshots → Create), or
 through the API. Set the snapshot name to the stable numbered lookup name and
-set the image to the exact sandbox digest recorded by the selected release:
+set the image to the exact sandbox digest recorded by the selected release.
+Set **4 vCPU, 8 GiB memory, and 10 GiB disk** (Large-equivalent); Sandboxes
+inherit their snapshot's resources. Use the Tetral image, which contains the
+required helper, rather than Daytona's stock `daytona-large` snapshot. Custom
+package snapshots use the same fixed resources in the artifact builder.
+See [Daytona snapshot resources](https://www.daytona.io/docs/en/snapshots/).
 
 ```bash
 SNAPSHOT_NAME="ghcr.io/tetral-ai/sandbox:<platform version>"
@@ -229,7 +234,7 @@ SOURCE_IMAGE="ghcr.io/tetral-ai/sandbox@sha256:<sandbox-image-digest>"
 curl -sS -X POST https://app.daytona.io/api/snapshots \
   -H "Authorization: Bearer ${DAYTONA_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{\"name\": \"${SNAPSHOT_NAME}\", \"imageName\": \"${SOURCE_IMAGE}\"}"
+  -d "{\"name\": \"${SNAPSHOT_NAME}\", \"imageName\": \"${SOURCE_IMAGE}\", \"cpu\": 4, \"memory\": 8, \"disk\": 10}"
 ```
 
 Then poll `GET https://app.daytona.io/api/snapshots` until the entry whose
@@ -242,6 +247,20 @@ organization, in the dashboard or via `POST /api/docker-registry`).
 Every platform version needs its own numbered snapshot name. Register that
 name from the matching release digest before the sandbox service rolls to the
 new version.
+
+Changing the default reference does not rewrite artifacts already stored for
+existing Environments or resize existing Sandboxes. In particular, a new
+Session using an old Environment can still inherit its old snapshot's size.
+Create a new Environment to adopt the new defaults; changing only networking
+can reuse the old package snapshot. Existing-instance migration is separate.
+In-flight builds can still adopt their already-created snapshots, preserving
+the allocation that was chosen before the upgrade.
+
+During release rehearsal, exercise both a new default Environment and one with
+custom packages. Read back each created Sandbox's CPU, memory, and disk and
+execute a tool to verify the Tetral helper remains usable. A successful API
+admission alone does not verify either allocation or tool execution. The
+10 GiB allocation is not a guarantee that an arbitrary repository workload fits.
 
 ## 7. Add a model provider key
 
