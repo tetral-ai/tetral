@@ -182,6 +182,32 @@ responses and non-Create stages retain terminal `invalid_request` semantics.
 Provider completion logs record the normalized `quota_exceeded` category and
 fixed safe message, never the resource, response text, or capacity value.
 
+Tool preparation has separate filesystem diagnostics. With the pinned Daytona
+SDK, directory creation returns a `message` while streaming upload returns a
+bulk-upload `errors` array. The driver recognizes Linux filesystem errors only
+for the Engine-owned payload path and these specific operations; HTTP 400 alone
+does not imply exhausted storage. Known no-space, permission, and read-only
+failures become distinct English Tool Result messages. These SDK preparation
+failures state that the tool operation was not started. A failure after helper
+submission retains unknown-outcome semantics and does not make that claim.
+Unknown messages keep a generic caller-facing failure. This path uses the
+existing Tool Result delivery and does not create a separate Session error
+event. See the pinned
+[directory handler](https://github.com/daytonaio/daytona/blob/8c07569d1f4f88c4b84a8859c905da8b9cb7573f/apps/daemon/pkg/toolbox/fs/create_folder.go)
+and [bulk-upload handler](https://github.com/daytonaio/daytona/blob/8c07569d1f4f88c4b84a8859c905da8b9cb7573f/apps/daemon/pkg/toolbox/fs/upload_files.go)
+for the upstream response shapes.
+
+New package snapshots allocate 4 vCPU, 8 GiB memory, and 10 GiB disk. Existing
+snapshot lookup identities stay stable so in-flight builds can adopt a
+previously-created snapshot, including its previous allocation. Prebuilt default
+snapshots must be registered with the same allocation during release preparation; see
+[bootstrap](../../docs/bootstrap.md#6-register-the-sandbox-snapshot-with-daytona)
+for registration and existing Environment compatibility.
+Each 4/8/10 allocation consumes the organization's regional quota and reduces
+concurrent Sandbox capacity; verify actual limits and remaining headroom before
+rollout. Exhaustion continues through the existing `quota_exceeded` activation
+path, while Session admission remains independent of Sandbox allocation.
+
 The Daytona adapter owns the R2/rclone/FUSE path and the Daytona Linux Helper.
 File resources are copied into a Session-scoped Blob prefix, mounted read-only,
 bound to their declared paths, and verified as the runtime user. GitHub
@@ -297,8 +323,14 @@ Sandbox component, a fixed error class (`database_permission_denied` for SQLSTAT
 diagnostics. Existing polling backoff and wake behavior govern retries; normal
 shutdown cancellation emits no failure warning.
 
-Provider failures retain only a safe status code and a bounded message that
-passes the provider-message validator. Credentials, headers, request bodies,
+Tool SDK failures additionally carry `provider.operation` (the failed SDK
+sub-operation) and `provider.error_detail` in private provider completion logs.
+Details replace known payload paths, pass the existing secret/internal-path
+checks, and are bounded; unsafe details are explicitly redacted. These
+diagnostics are not persisted in the public Tool Result.
+
+Provider failure messages pass the provider-message validator and are bounded.
+Credentials, headers, request bodies,
 tool JSON, commands, mount URLs, tokens, and raw stacks are omitted. Startup
 failure categories distinguish configuration, schema, listener, dependency
 readiness, and unknown failures. `TETRAL_SANDBOX_DEBUG_LOGGING=true` enables
@@ -320,6 +352,17 @@ identities at the provider adapter boundary; provider responses are fixtures,
 so this does not prove remote Git execution. Driver tests separately execute
 clone/configuration commands and inspect actual local Git commits. Admission
 and driver snapshot checks use the shared `internal/gitidentity` rules.
+
+`TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK` exercises the
+pinned SDK against a local HTTP server using Daytona's directory and bulk-upload
+error formats. It checks the real helper preparation, adapter, and completion
+logger, including English messages, no tool submission, and diagnostic redaction.
+
+Driver tests additionally check payload-path scope and the four upstream
+bulk-upload error wrappers.
+A nonzero exit from the payload permission script still uses the existing
+generic retryable preparation error, with no script-output diagnostic; SDK
+request failures are the scope of this mapping.
 
 Repository CI builds the unmodified Sandbox Dockerfile and exercises the local
 image and Helper without Daytona credentials. Published-image Daytona behavior

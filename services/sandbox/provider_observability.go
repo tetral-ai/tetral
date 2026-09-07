@@ -88,6 +88,7 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 			slog.Int("provider.status_code", outcome.ProviderStatusCode),
 			slog.String("error.message_safe", boundedProviderLogMessage(message)),
 		)
+		attrs = appendProviderDiagnosticAttrs(attrs, outcome.Diagnostic)
 	}
 	logger.LogAttrs(ctx, level, "sandbox.provider.operation_completed", attrs...)
 }
@@ -100,6 +101,7 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 	outcome := "success"
 	errorKind := ""
 	statusCode := 0
+	var diagnostic sandbox.ProviderDiagnostic
 	safeMessage := ""
 	if err != nil {
 		level = slog.LevelError
@@ -108,6 +110,7 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 		safeMessage = "sandbox provider operation failed"
 		var providerErr *sandbox.ProviderError
 		if errors.As(err, &providerErr) {
+			diagnostic = providerErr.Diagnostic
 			errorKind = string(providerErr.Kind)
 			statusCode = providerErr.StatusCode
 			if sandbox.ValidateProviderSafeMessage(providerErr.SafeMessage) == nil {
@@ -133,8 +136,23 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 			slog.Int("provider.status_code", statusCode),
 			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
 		)
+		attrs = appendProviderDiagnosticAttrs(attrs, diagnostic)
 	}
 	logger.LogAttrs(ctx, level, "sandbox.provider.operation_completed", attrs...)
+}
+
+func appendProviderDiagnosticAttrs(attrs []slog.Attr, diagnostic sandbox.ProviderDiagnostic) []slog.Attr {
+	if diagnostic.Operation != "" && sandbox.ValidateProviderSafeMessage(diagnostic.Operation) == nil {
+		attrs = append(attrs, slog.String("provider.operation", boundedProviderLogMessage(diagnostic.Operation)))
+	}
+	if diagnostic.Message != "" {
+		message := diagnostic.Message
+		if sandbox.ValidateProviderSafeMessage(message) != nil {
+			message = "Provider diagnostic detail redacted."
+		}
+		attrs = append(attrs, slog.String("provider.error_detail", boundedProviderLogMessage(message)))
+	}
+	return attrs
 }
 
 func appendProviderIdentityAttrs(attrs []slog.Attr, identity providerOperationIdentity) []slog.Attr {

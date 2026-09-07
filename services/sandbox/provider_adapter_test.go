@@ -359,6 +359,10 @@ func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableR
 			Kind:        sandbox.ProviderErrorUnavailable,
 			StatusCode:  503,
 			SafeMessage: "daytona tool service unavailable",
+			Diagnostic: sandbox.ProviderDiagnostic{
+				Operation: "execute_helper",
+				Message:   "toolbox upstream unavailable",
+			},
 		}},
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 	}
@@ -376,6 +380,8 @@ func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableR
 		`"outcome":"error"`,
 		`"provider.status_code":503`,
 		`"error.message_safe":"daytona tool service unavailable"`,
+		`"provider.operation":"execute_helper"`,
+		`"provider.error_detail":"toolbox upstream unavailable"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("provider execution log missing %s: %s", want, got)

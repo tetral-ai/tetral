@@ -21,6 +21,14 @@ type daytonaSnapshotService interface {
 	Create(context.Context, *types.CreateSnapshotParams) (*types.Snapshot, <-chan string, error)
 }
 
+// Sandbox creation inherits these resources from its snapshot. Keep the
+// prebuilt default snapshot registration in docs/bootstrap.md aligned.
+const (
+	defaultSandboxCPU       = 4
+	defaultSandboxMemoryGiB = 8
+	defaultSandboxDiskGiB   = 10
+)
+
 type DaytonaArtifactBuilder struct {
 	snapshots daytonaSnapshotService
 	baseImage string
@@ -67,6 +75,9 @@ func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sand
 	snapshot, logs, err := b.snapshots.Create(ctx, &types.CreateSnapshotParams{
 		Name:  name,
 		Image: daytona.FromDockerfile(dockerfile),
+		Resources: &types.Resources{
+			CPU: defaultSandboxCPU, Memory: defaultSandboxMemoryGiB, Disk: defaultSandboxDiskGiB,
+		},
 	})
 	drainAvailableSnapshotLogs(logs)
 	if err != nil {
