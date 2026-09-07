@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 
@@ -48,7 +47,7 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, stder
 		return prepareError("PostgreSQL role declaration must be valid JSON with only supported fields")
 	}
 	if err := requireJSONEnd(decoder); err != nil {
-		return prepareError("PostgreSQL role declaration must contain one JSON value")
+		return err
 	}
 	if err := declarations.Validate(); err != nil {
 		return err
@@ -96,10 +95,8 @@ func requireJSONEnd(decoder *json.Decoder) error {
 	var trailing any
 	if err := decoder.Decode(&trailing); err == io.EOF {
 		return nil
-	} else if err != nil {
-		return err
 	}
-	return fmt.Errorf("PostgreSQL role declaration must contain one JSON value")
+	return prepareError("PostgreSQL role declaration must contain one JSON value")
 }
 
 // Only explicitly safe error types may supply log messages. JSON, connection,

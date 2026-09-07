@@ -43,6 +43,9 @@
 //     preserve the default; fresh and upgraded databases have the same schema.
 //   - The DDL uses only ordinary table/index DDL plus row-level security, so
 //     it stays portable across self-managed PostgreSQL and managed providers.
+//     The complete database preparation command additionally requires a
+//     PostgreSQL superuser for its current role installer; managed-provider
+//     customer administrators without that privilege cannot run it.
 //
 // UPDATE-WITH:
 //   - postgresql_schema.go (immutable V1 table/index/policy DDL)

@@ -25,7 +25,9 @@ import (
 // The DDL only relies on ordinary table/index DDL plus the standard
 // row-level security feature, so it stays portable across self-managed
 // PostgreSQL and managed providers (RDS, Cloud SQL, Azure Database for
-// PostgreSQL).
+// PostgreSQL). This portability applies to the DDL, not the complete database
+// preparation command: the current role installer requires a PostgreSQL
+// superuser, which these managed providers do not grant to customer accounts.
 const (
 	// sessions.status is a projected surface, not a single stored axis.
 	//
