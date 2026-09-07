@@ -25,6 +25,9 @@
 //	ahead            registry newer than this binary      -               (rejected: SchemaErrorAhead)
 //	checksum drift   an applied checksum != its pinned     -               (rejected: SchemaErrorChecksumDrift)
 //
+// Production migration is invoked only by cmd/tetral-db-prepare; serving
+// processes call VerifySchema without schema repair.
+//
 // Only one connection migrates at a time: every migrator holds
 // PostgreSQLSchemaAdvisoryLockID while inspecting and applying history.
 //

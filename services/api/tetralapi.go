@@ -30,7 +30,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/skill"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -84,14 +83,8 @@ func (a *Application) Close() error {
 
 // StartupDatabase is the opened DB state used during production bootstrap.
 type StartupDatabase struct {
-	OpenResult      dbconnect.OpenResult
-	RuntimeClient   StartupRuntimeClient
-	MigrationClient StartupMigrationClient
-}
-
-type StartupMigrationClient interface {
-	MigrateSchema(context.Context) error
-	Close() error
+	OpenResult    dbconnect.OpenResult
+	RuntimeClient StartupRuntimeClient
 }
 
 // StartupRuntimeClient validates the serving role and live schema before the
@@ -111,12 +104,7 @@ func OpenStartupDatabaseFromEnv(ctx context.Context) (StartupDatabase, error) {
 	if err != nil {
 		return StartupDatabase{}, err
 	}
-	migration, err := dbconnect.OpenPlainDSN(ctx, "TETRAL_MIGRATION_DATABASE_URL", os.Getenv("TETRAL_MIGRATION_DATABASE_URL"))
-	if err != nil {
-		_ = openResult.Client.Close()
-		return StartupDatabase{}, err
-	}
-	return StartupDatabase{OpenResult: openResult, RuntimeClient: openResult.Client, MigrationClient: migration.Client}, nil
+	return StartupDatabase{OpenResult: openResult, RuntimeClient: openResult.Client}, nil
 }
 
 // BuildProductionApplication initializes DB readiness and builds the router.
@@ -128,7 +116,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 	if open == nil {
 		open = OpenStartupDatabaseFromEnv
 	}
-	database, err := PrepareStartupDatabase(storage.WithMigrationLogger(ctx, cfg.Logger), open)
+	database, err := PrepareStartupDatabase(ctx, open)
 	if err != nil {
 		return nil, err
 	}
@@ -158,32 +146,15 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 	return &Application{Handler: router, Client: database.OpenResult.Client}, nil
 }
 
-// PrepareStartupDatabase migrates schema and verifies runtime role before serving.
+// PrepareStartupDatabase verifies schema and runtime role before serving.
 func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {
 	database, err := open(ctx)
 	if err != nil {
 		return StartupDatabase{}, err
 	}
 	if database.RuntimeClient == nil {
-		if database.MigrationClient != nil {
-			_ = database.MigrationClient.Close()
-		}
 		return StartupDatabase{}, fmt.Errorf("runtime database client is required")
 	}
-	if database.MigrationClient == nil {
-		_ = database.RuntimeClient.Close()
-		return StartupDatabase{}, fmt.Errorf("migration database client is required")
-	}
-	if err := database.MigrationClient.MigrateSchema(ctx); err != nil {
-		_ = database.MigrationClient.Close()
-		_ = database.RuntimeClient.Close()
-		return StartupDatabase{}, fmt.Errorf("schema migration: %w", err)
-	}
-	if err := database.MigrationClient.Close(); err != nil {
-		_ = database.RuntimeClient.Close()
-		return StartupDatabase{}, fmt.Errorf("close migration database: %w", err)
-	}
-	database.MigrationClient = nil
 	if err := database.RuntimeClient.VerifySchema(ctx); err != nil {
 		_ = database.RuntimeClient.Close()
 		return StartupDatabase{}, fmt.Errorf("schema verification: %w", err)

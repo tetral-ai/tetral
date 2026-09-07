@@ -172,8 +172,6 @@ func TestTetralAPICommandRunsWorkloadAfterApplicationBootstrap(t *testing.T) {
 	defer eventsMu.Unlock()
 	for _, want := range []string{
 		"open",
-		"migrate",
-		"migration_close",
 		"schema_verify",
 		"role_verify",
 		"bootstrap",
@@ -184,8 +182,8 @@ func TestTetralAPICommandRunsWorkloadAfterApplicationBootstrap(t *testing.T) {
 			t.Fatalf("startup events = %v; missing %s", events, want)
 		}
 	}
-	if len(events) != 8 {
-		t.Fatalf("startup events = %v; want exactly 8 events", events)
+	if len(events) != 6 {
+		t.Fatalf("startup events = %v; want exactly 6 events", events)
 	}
 }
 
@@ -209,9 +207,8 @@ func TestTetralAPICommandStartupConfigLogsSafeFieldsAndStopsBeforeServing(t *tes
 	}{
 		{name: "vault key", env: envMap{"ENGINE_VAULT_KEY": "short", "ENGINE_DATA_DIR": secureCommandDataDir(t)}},
 		{name: "database", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1},
-		{name: "migrate", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1, events: "open,migrate,migration_close", client: &recordingCommandStartupClient{migrateErr: errors.New("schema migration failed for Secret/k8s-secret-startup-sentinel raw-mcp-auth-fragment")}},
-		{name: "verify role", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1, events: "open,migrate,migration_close,schema_verify,role_verify", client: &recordingCommandStartupClient{verifyErr: errors.New("verify failed provider body bearer-startup-sentinel")}},
-		{name: "runtime config", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t), "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": commandInternalPrincipalPublicKey(t), "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "-1 credential-startup-sentinel"}, openCalls: 1, events: "open,migrate,migration_close,schema_verify,role_verify"},
+		{name: "verify role", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1, events: "open,schema_verify,role_verify", client: &recordingCommandStartupClient{verifyErr: errors.New("verify failed provider body bearer-startup-sentinel")}},
+		{name: "runtime config", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t), "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": commandInternalPrincipalPublicKey(t), "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "-1 credential-startup-sentinel"}, openCalls: 1, events: "open,schema_verify,role_verify"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stderr, finishCapture := captureCommandStderr(t)
@@ -517,7 +514,6 @@ type recordingCommandStartupClient struct {
 	delegate   *dbconnect.Client
 	rawDB      *sql.DB
 	rawRuntime *sql.DB
-	migrateErr error
 	verifyErr  error
 }
 
@@ -527,27 +523,8 @@ func (c *recordingCommandStartupClient) database() tetralapi.StartupDatabase {
 			Client:                       c.delegate,
 			RawDatabaseForExcludedStores: c.rawDB,
 		},
-		RuntimeClient:   c,
-		MigrationClient: &recordingCommandMigrationClient{owner: c},
+		RuntimeClient: c,
 	}
-}
-
-type recordingCommandMigrationClient struct {
-	owner *recordingCommandStartupClient
-}
-
-func (c *recordingCommandMigrationClient) MigrateSchema(context.Context) error {
-	owner := c.owner
-	*owner.events = append(*owner.events, "migrate")
-	if owner.migrateErr != nil {
-		return owner.migrateErr
-	}
-	return nil
-}
-
-func (c *recordingCommandMigrationClient) Close() error {
-	*c.owner.events = append(*c.owner.events, "migration_close")
-	return nil
 }
 
 func (c *recordingCommandStartupClient) VerifySchema(context.Context) error {

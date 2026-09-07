@@ -12,7 +12,7 @@ import (
 type migrationLoggerKey struct{}
 
 // WithMigrationLogger routes migration records through the caller's logger,
-// before database adapters can redact the returned error. It does not change
+// at the transaction owner before returning the safe error. It does not change
 // the process-wide default logger or expose private driver errors.
 func WithMigrationLogger(ctx context.Context, logger *slog.Logger) context.Context {
 	if logger == nil {

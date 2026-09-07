@@ -15,7 +15,7 @@ contracts.
   boundary; application startup verifies schema and role posture but does not
   repair either.
 
-Run `tetral-postgresql-roles` before a fresh installation and before starting
+Run `tetral-db-prepare` before a fresh installation and before starting
 updated workloads whenever the schema or role contract changes. The command
 applies pending schema migrations with the administrative connection, then
 applies the role contract. Repeating the command preserves applied migrations.
@@ -35,8 +35,28 @@ rejects the V2 schema as ahead; upgrading the schema therefore also changes the
 rollback requirements. Preserve a database backup before an upgrade that may
 need to return to an older binary.
 
-Runtime services then use only their serving DSNs; API alone also
-receives the separate migration-owner DSN for its pinned migration transaction.
+Runtime services use only their serving DSNs. No serving process, including API,
+receives an administrative or migration-owner DSN or runs schema/role repair.
+The migration role remains the owner of schema objects; it is not an API login.
+The executable entrypoint lives in `cmd/tetral-db-prepare`; schema implementation
+stays in `internal/storage`, and role implementation stays in this directory.
+The separate `cmd/tetral-bootstrap` command seeds the initial workspace using
+the API serving role. Auth still owns startup refresh of its bootstrap API key.
+
+The preparation command validates all role declarations before touching the
+database, then migrates and applies grants in that order. It exits zero only
+when both stages succeed. These are separate transactions: a role-installation
+failure does not undo an already committed migration. Stop the release on a
+nonzero exit, correct the reported stage and rerun the same revision with the
+same declarations. Serialize database preparation and workload rollout; the
+schema and role locks do not serialize the entire deployment.
+
+For schema-changing upgrades without a verified compatibility guarantee, stop
+application traffic and workers (including scheduled cleanup and autoscaling)
+before preparation, preserving the database. Resume only with the matching
+workload revision after preparation succeeds. This command does not stop
+workloads or change Kubernetes resources. See the
+[upgrade procedure](../deploy/helm/tetral/README.md#upgrade-and-rollback).
 
 ### Migration diagnostics
 
@@ -59,13 +79,15 @@ Failure records contain a constant safe message and classification, plus
 messages, SQL, parameters, connection strings and error details are not logged.
 An up-to-date database produces no per-version migration records.
 
-API startup passes its JSON logger through the database adapter to the migrator.
-The role installer also emits JSON on stderr with `service.name=postgresql-roles`.
-Detailed migration failures are written before the outer startup/command failure
-summary, so adapter redaction cannot erase the operator record. Container stderr
-can be collected by the deployment's log agent; an arbitrary local or SSH command
-needs its own log collection. This code does not send requests to Loki, alter
-PostgreSQL server logging, perform backups or downgrade committed migrations.
+The preparation command emits JSON on stderr with `service.name=db-prepare`.
+`database.prepare.started`, `.completed`, and `.failed` describe the whole
+command; failures identify `step` without serializing input or raw errors.
+Detailed `schema.migration.failed` records precede the command failure summary.
+A role-stage failure may follow successfully committed migration records.
+Container stderr can be collected by the deployment's log agent; an arbitrary
+local or SSH command needs its own log collection. This code does not send
+requests to Loki, alter PostgreSQL server logging, perform backups or downgrade
+committed migrations.
 
 Tests use a different capability model. `internal/storage/storagetest` creates
 one immutable schema template per exact migration-history identity, then gives

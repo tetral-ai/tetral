@@ -235,7 +235,6 @@ func TestDiagnosticErrorTextExcludesDescriptorAcrossPhases(t *testing.T) {
 		PhaseParseConfig,
 		PhaseOpenConnection,
 		PhasePing,
-		PhaseMigrateSchema,
 		PhaseVerifySchema,
 		PhaseVerifyRuntimeRole,
 		PhaseRuntimeQuery,
@@ -258,22 +257,11 @@ func TestDiagnosticErrorTextExcludesDescriptorAcrossPhases(t *testing.T) {
 }
 
 func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
-	runtimeDB := storagetest.NewPostgreSQLDB(t)
-	if err := runtimeDB.Close(); err != nil {
-		t.Fatalf("close runtime db: %v", err)
-	}
-	client := newTestClient(runtimeDB)
-	err := client.MigrateSchema(context.Background())
-	diagnostic := assertDiagnostic(t, err, PhaseMigrateSchema, KindSchemaMigrationFailed)
 	var migrationErr *storage.SchemaMigrationError
-	if !errors.As(diagnostic, &migrationErr) {
-		t.Fatalf("diagnostic must unwrap SchemaMigrationError, got %T", diagnostic.Unwrap())
-	}
-
 	emptyAdmin := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	emptyClient := newTestClient(emptyAdmin)
-	err = emptyClient.VerifySchema(context.Background())
-	diagnostic = assertDiagnostic(t, err, PhaseVerifySchema, KindSchemaVerificationFailed)
+	err := emptyClient.VerifySchema(context.Background())
+	diagnostic := assertDiagnostic(t, err, PhaseVerifySchema, KindSchemaVerificationFailed)
 	if !errors.As(diagnostic, &migrationErr) || migrationErr.Kind != storage.SchemaErrorMissing {
 		t.Fatalf("diagnostic must unwrap missing SchemaMigrationError, got %#v", migrationErr)
 	}

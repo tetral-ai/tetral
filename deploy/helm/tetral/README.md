@@ -6,8 +6,8 @@ without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
 
-Complete prerequisites 1–7 before running the install command. Prerequisite 8
-finishes bootstrap after API has created the schema.
+Complete prerequisites 1–8 before running the install command. Database
+preparation and workspace seeding run independently before any service starts.
 
 1. **Create the two namespaces.** The default chart does not own namespaces:
 
@@ -107,23 +107,22 @@ finishes bootstrap after API has created the schema.
    need no custom label; Kubernetes supplies their
    `kubernetes.io/metadata.name` labels.
 
-7. **Install the repository-owned database roles.** Use
-   `go run ./services/api/cmd/tetral-postgresql-roles` with an administrative connection in
+7. **Prepare the database.** Use
+   `go run ./cmd/tetral-db-prepare` with an administrative connection in
    `TETRAL_DATABASE_ADMIN_URL` and a JSON declaration on stdin containing the
    operator-chosen role names and passwords for every workload key in
    `database/roles.json`, plus `migration`. Run it before installing workloads.
    The command idempotently constructs the current schema, revokes public access,
    gives each serving workload only its declared tables and operations, and
    assigns schema objects to the separate migration owner. Put the API serving
-   DSN in the `url` key of `api-database` and the schema-owner DSN in its
-   `migration-url` key. All serving processes reject superuser and row-security
+   DSN in the `url` key of `api-database`. Keep administrative and schema-owner
+   DSNs out of serving workload Secrets. All serving processes reject superuser and row-security
    bypass roles before readiness.
 
 8. **Seed the bootstrap workspace.** Auth resolves
    `bootstrapWorkspaceID` against the `workspaces` table during startup.
-   Set that value to the chosen ID, install the platform after the database
-   contract is installed, allow Auth to crash-loop while the row is absent, then run the
-   one-shot seed and let Auth self-heal. The default `existing-workspace-id` is
+   Set that value to the chosen ID, prepare the database, and run the
+   one-shot `tetral-bootstrap` command before installing workloads. The default `existing-workspace-id` is
    a placeholder. Follow the complete
    [from-zero bootstrap sequence](../../../docs/bootstrap.md) for key
    generation, the Secret inventory, the seed command, and the Daytona
@@ -269,48 +268,54 @@ The following remain deliberately fixed for the initial numbered Alpha line:
 
 ## Upgrade and rollback
 
-Use plain `helm upgrade` as the supported upgrade mode:
+Database preparation is a separate deployment step, not an API startup action
+or an automatic Helm hook. Use the same immutable release revision for
+`tetral-db-prepare` and the workloads.
+
+For an upgrade that changes the schema:
+
+1. Record the current release and take a restorable database backup. Register
+   the candidate's numbered Daytona snapshot from its matching sandbox image
+   digest before testing tool execution.
+2. Stop admission and drain or stop application workloads, including runtime
+   workers. Suspend cleanup scheduling and autoscalers so they do not recreate
+   stopped workloads. Preserve PostgreSQL and application data. This is a
+   maintenance-window upgrade; the chart does not orchestrate this pause.
+3. Run `tetral-db-prepare` with administrative credentials and the existing
+   operator-selected role declarations. The [bootstrap command examples](../../../docs/bootstrap.md)
+   show source and one-shot Pod execution. Wait for exit zero, confirming both
+   migration and role application completed. On any failure, keep the rollout
+   stopped and inspect the structured logs; committed migrations remain applied.
+4. Apply the matching workload revision with plain `helm upgrade`, then restore
+   the intended worker, scheduler and autoscaler state and verify readiness.
+5. Run the release's rehearsal checks before reopening normal traffic.
 
 ```bash
 helm upgrade tetral ./deploy/helm/tetral -f values.yaml
 ```
 
-Before upgrading, register the new version's numbered sandbox snapshot name
-with Daytona from the matching immutable sandbox image digest (see the
-bootstrap sequence). A skipped registration does not fail the upgrade; it
-fails the first tool execution afterwards.
+All eleven DB-connected containers now only verify schema and serving-role
+state. If preparation was skipped or failed, they stop startup rather than
+repairing the database. `agent-runtime` has no direct database connection.
+There is no API-first rollout barrier. Do not let old and new binaries overlap
+across a schema change unless compatibility has been independently established:
+running processes do not recheck schema, and restarted old binaries reject
+newer schema history.
 
-Helm applies every object at once. All eleven DB-connected containers validate
-schema and serving-role state at boot. API alone uses the dedicated migration
-owner for forward migrations under a pinned-connection advisory lock. During an upgrade, new non-api pods enter
-`CrashLoopBackOff` until api completes migration; operators observe restart
-counts, not merely unready pods. Existing ReplicaSet pods continue serving. At
-the manifest scale of one or two replicas, the default RollingUpdate 25%
-`maxUnavailable` rounds down to zero. At HPA scale, gateway and git-proxy may
-make up to two of ten old replicas unavailable, so old capacity remains at
-least 80% while replacements wait.
+For a release without schema changes, run preparation before rollout if the
+role contract changes. A normal rolling upgrade still requires application
+compatibility; schema equality alone does not prove it.
 
-The cleanup CronJob has no old ReplicaSet: its per-minute Jobs fail with
-`schema_behind` until api finishes. `agent-runtime` has no database and is not
-part of schema convergence.
+**Rollback:** migrations are forward-only. `helm rollback` changes workloads,
+not the database. After V2 commits, V1-only binaries reject it as `schema_ahead`;
+returning to that release requires an explicit compatible database recovery or
+a forward fix. A nonzero preparation exit does not imply the whole upgrade was
+rolled back: migration versions and role application use separate transactions.
 
-There is an unavoidable schema-ahead window after api reaches N+1 while old
-N pods are still serving; running pods do not re-check schema. The chart does
-not guarantee one-version-back migration compatibility.
-
-> **Rollback warning:** `helm rollback` across a schema migration causes a
-> total outage. Migrations are forward-only, and the rolled-back api fails on
-> `schema_ahead`. Rollback is safe only between versions with no schema change.
-
-Do not use `--atomic` or `--wait` as an upgrade safety mechanism. `--atomic`
-waits for readiness, so a crash-loop window can exceed its timeout and trigger
-the unsafe rollback. `--wait` alone can time out and leave the release applied
-but not converged; it does not roll back. On a failed first install, `--atomic`
-uninstalls the release and, when `namespaces.create=true`, deletes both
-namespaces and their operator-owned contents.
-
-`deploy/kubernetes/rollout-schema-ordered.sh` is a partial nine-file re-roll
-tool, not an installation path and not a strict-order alternative to Helm.
+Do not use `--atomic` as a database rollback mechanism. `--wait` can observe
+workload readiness but neither validates rehearsal nor restores the database.
+On a failed first install, `--atomic` also uninstalls the release and, when
+`namespaces.create=true`, can delete namespaces and their operator-owned contents.
 
 ## Ownership metadata
 
@@ -324,8 +329,7 @@ objects are not byte-identical to the files.
 
 ## Registered follow-ups
 
-Three follow-ups are intentionally outside this chart:
+Two follow-ups are intentionally outside this chart:
 
 1. Parameterize the two fixed namespaces as one security-reviewed change.
-2. Define migration compatibility or a documented stop-the-world upgrade mode.
-3. Drop stale `kustomize` managed-by labels from the canonical manifests.
+2. Drop stale `kustomize` managed-by labels from the canonical manifests.

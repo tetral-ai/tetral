@@ -20,8 +20,18 @@ type RoleDeclarations struct {
 	Roles map[string]RoleCredential `json:"roles"`
 }
 
+// Validate checks the complete operator input before database preparation mutates
+// schema or roles. ApplyRoleContract enforces the same contract for direct callers.
+func (d RoleDeclarations) Validate() error {
+	contract, err := LoadRoleContract()
+	if err != nil {
+		return err
+	}
+	return validateRoleDeclarations(append(contract.WorkloadNames(), contract.MigrationOwner), d)
+}
+
 // ApplyRoleContract installs the exact serving-role boundary after the schema
-// owner has constructed the current Version 1 catalog. Names and credentials
+// owner has constructed the current catalog. Names and credentials
 // come from the operator; the repository owns only workload capabilities.
 func ApplyRoleContract(ctx context.Context, connection *pgx.Conn, declarations RoleDeclarations) error {
 	if connection == nil {

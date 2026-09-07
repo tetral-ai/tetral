@@ -22,7 +22,7 @@ not own their trees.
 
 ### Boot requirements
 
-Booting requires `TETRAL_DATABASE_URL`, `TETRAL_MIGRATION_DATABASE_URL`, `ENGINE_VAULT_KEY`,
+Booting requires `TETRAL_DATABASE_URL`, `ENGINE_VAULT_KEY`,
 `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64`, and
 `TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF`; the rest are optional or test-only
 as noted.
@@ -30,7 +30,6 @@ as noted.
 | Variable | Purpose |
 |----------|---------|
 | `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. TLS settings are honored verbatim; the engine never overrides `sslmode`. PostgreSQL 18 is the tested target. |
-| `TETRAL_MIGRATION_DATABASE_URL` | PostgreSQL DSN for the schema owner. Startup closes it after migration, then verifies the live schema and serving role through `TETRAL_DATABASE_URL`. |
 | `TETRAL_TEST_DATABASE_URL` | Test-only administrative DSN for focused `go test`; not read by the running server. The helper clones one immutable schema template into a private database and unique NOBYPASSRLS login per test. |
 | `ENGINE_DATA_DIR` | Optional; defaults to `/var/tetral`. Local filesystem state root — control-plane records never live here, so moving it migrates no SQL data. |
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
@@ -41,13 +40,15 @@ as noted.
 The public API listener binds `:8080` (`TETRAL_API_HTTP_ADDR`); metrics bind
 `:8081` (`TETRAL_API_METRICS_ADDR`); the two addresses must differ.
 
-Schema migration runs before the public listener starts. It uses the API's JSON
-logger to record the migration version, failed step and acknowledged transaction
-outcome before the database adapter redacts errors. `startup.failed` remains the
-outer startup summary; use `schema.migration.failed` for migration diagnostics.
-See [migration diagnostics](../../database/README.md#migration-diagnostics) for
-field meanings and commit-uncertainty handling. No raw SQL or driver details are
-added to the public response or startup log.
+Startup verifies the installed schema and the restricted serving role before
+opening the public listener. It never migrates schema or installs roles, and
+receives no administrative or migration-owner credential. An unprepared,
+outdated, or incompatible database stops startup with a safe `startup.failed`
+log; it does not trigger a repair.
+
+Run the release's standalone `tetral-db-prepare` command before starting updated
+services. See [database preparation](../../database/README.md) for ordering,
+failure handling and migration diagnostics.
 
 ### Workspace isolation
 
