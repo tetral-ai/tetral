@@ -41,6 +41,14 @@ as noted.
 The public API listener binds `:8080` (`TETRAL_API_HTTP_ADDR`); metrics bind
 `:8081` (`TETRAL_API_METRICS_ADDR`); the two addresses must differ.
 
+Schema migration runs before the public listener starts. It uses the API's JSON
+logger to record the migration version, failed step and acknowledged transaction
+outcome before the database adapter redacts errors. `startup.failed` remains the
+outer startup summary; use `schema.migration.failed` for migration diagnostics.
+See [migration diagnostics](../../database/README.md#migration-diagnostics) for
+field meanings and commit-uncertainty handling. No raw SQL or driver details are
+added to the public response or startup log.
+
 ### Workspace isolation
 
 Isolation rests on signed principal binding, `workspace_id` in every primary

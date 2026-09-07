@@ -30,6 +30,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/skill"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -127,7 +128,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 	if open == nil {
 		open = OpenStartupDatabaseFromEnv
 	}
-	database, err := PrepareStartupDatabase(ctx, open)
+	database, err := PrepareStartupDatabase(storage.WithMigrationLogger(ctx, cfg.Logger), open)
 	if err != nil {
 		return nil, err
 	}

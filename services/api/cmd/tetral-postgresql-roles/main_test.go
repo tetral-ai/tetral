@@ -40,10 +40,28 @@ func TestRunConstructsFreshSchemaBeforeInstallingRoles(t *testing.T) {
 		}
 		return storagetest.AdminDatabaseURL(t, admin)
 	}
-	if err := run(context.Background(), getenv, bytes.NewReader(payload)); err != nil {
+	var logs bytes.Buffer
+	if err := run(context.Background(), getenv, bytes.NewReader(payload), &logs); err != nil {
 		t.Fatalf("install roles on empty database: %v", err)
 	}
 
+	var committed []int
+	decoder := json.NewDecoder(&logs)
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatal(err)
+		}
+		if record["msg"] == "schema.migration.completed" {
+			if record["transaction.outcome"] != "committed" || record["service.name"] != "postgresql-roles" {
+				t.Fatalf("unexpected migration record: %#v", record)
+			}
+			committed = append(committed, int(record["schema.version"].(float64)))
+		}
+	}
+	if fmt.Sprint(committed) != "[1 2]" {
+		t.Fatalf("committed versions = %v", committed)
+	}
 	var tables, stamps int
 	if err := admin.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public'`).Scan(&tables); err != nil {
 		t.Fatal(err)
@@ -94,7 +112,7 @@ type queryExecer interface {
 }
 
 func TestRunRejectsTrailingRoleDeclaration(t *testing.T) {
-	err := run(context.Background(), func(string) string { return "unused" }, bytes.NewBufferString(`{"roles":{}} {}`))
+	err := run(context.Background(), func(string) string { return "unused" }, bytes.NewBufferString(`{"roles":{}} {}`), &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("accepted more than one role declaration")
 	}

@@ -45,6 +45,7 @@
 //   - postgresql_schema.go (immutable V1 table/index/policy DDL)
 //   - postgresql_migration_git_identity.go (V2 upgrade DDL)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
+//   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
 //
 // # Durable row-family ownership

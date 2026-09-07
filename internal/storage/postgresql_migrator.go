@@ -117,16 +117,24 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 // MigrateSchema serializes migration owners on one pinned PostgreSQL
 // connection, rejects invalid history before mutation, and applies each
 // pending migration and its stamp in one transaction on that connection.
-func MigrateSchema(ctx context.Context, db *sql.DB) error {
+func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
+	diagnostics := newMigrationDiagnostics(ctx)
+	defer func() {
+		if result != nil {
+			diagnostics.failed(ctx, result)
+		}
+	}()
 	registry := postgresqlMigrationRegistry()
 	if err := validatePostgreSQLMigrationRegistry(registry); err != nil {
 		return err
 	}
+	diagnostics.step = "acquire_connection"
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return newSchemaMigrationError(SchemaErrorLock, 0, err)
 	}
 	defer func() { _ = conn.Close() }()
+	diagnostics.step = "acquire_lock"
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, PostgreSQLSchemaAdvisoryLockID); err != nil {
 		return newSchemaMigrationError(SchemaErrorLock, 0, err)
 	}
@@ -141,11 +149,13 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, PostgreSQLSchemaAdvisoryLockID)
 	}()
 
+	diagnostics.step = "read_history"
 	exists, history, historyErr := readPostgreSQLMigrationHistory(ctx, conn)
 	if historyErr != nil {
 		return historyErr
 	}
 	if exists {
+		diagnostics.step = "validate_history"
 		if historyErr := validateAppliedPostgreSQLMigrations(history, registry); historyErr != nil {
 			return historyErr
 		}
@@ -153,41 +163,15 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 
 	for index := len(history); index < len(registry); index++ {
 		migration := registry[index]
-		tx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+		diagnostics.start(ctx, migration.version)
+		if err := applyPostgreSQLMigration(ctx, conn, migration, !exists, diagnostics); err != nil {
+			return err
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback()
-			}
-		}()
-		if !exists {
-			if _, err := tx.ExecContext(ctx, createPostgreSQLSchemaMigrationsTable); err != nil {
-				_ = tx.Rollback()
-				return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
-			}
-			exists = true
-		}
-		if err := executePostgreSQLSchemaSteps(ctx, tx, migration.steps); err != nil {
-			_ = tx.Rollback()
-			return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO tetral_schema_migrations (version, checksum) VALUES ($1, $2)`,
-			migration.version,
-			migration.checksum,
-		); err != nil {
-			_ = tx.Rollback()
-			return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
-		}
-		committed = true
+		exists = true
+		diagnostics.completed(ctx)
 	}
 
+	diagnostics.step = "release_lock"
 	unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var unlocked bool
@@ -195,6 +179,55 @@ func MigrateSchema(ctx context.Context, db *sql.DB) error {
 		return newSchemaMigrationError(SchemaErrorLock, 0, err)
 	}
 	locked = false
+	return nil
+}
+
+// applyPostgreSQLMigration keeps rollback and its observed outcome inside the
+// transaction's lifetime, before the caller emits its failure record.
+func applyPostgreSQLMigration(ctx context.Context, conn *sql.Conn, migration postgresqlMigration, createHistory bool, diagnostics *migrationDiagnostics) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+	}
+	diagnostics.outcome = "unknown"
+	commitAttempted := false
+	defer func() {
+		if diagnostics.outcome == "committed" {
+			return
+		}
+		rollbackErr := tx.Rollback()
+		// ErrTxDone is not proof of rollback. In particular a lost COMMIT
+		// response may mean the database committed even though Commit errored.
+		if !commitAttempted && rollbackErr == nil {
+			diagnostics.outcome = "rolled_back"
+		}
+	}()
+	if createHistory {
+		diagnostics.step = "create_history"
+		if _, err := tx.ExecContext(ctx, createPostgreSQLSchemaMigrationsTable); err != nil {
+			return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+		}
+	}
+	diagnostics.step = "apply_schema"
+	if err := executePostgreSQLSchemaSteps(ctx, tx, migration.steps); err != nil {
+		if stepError, ok := err.(*PostgreSQLSchemaError); ok {
+			diagnostics.step = stepError.Stage
+		}
+		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+	}
+	diagnostics.step = "write_history"
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO tetral_schema_migrations (version, checksum) VALUES ($1, $2)`,
+		migration.version, migration.checksum,
+	); err != nil {
+		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+	}
+	diagnostics.step = "commit"
+	commitAttempted = true
+	if err := tx.Commit(); err != nil {
+		return newSchemaMigrationError(SchemaErrorApply, migration.version, err)
+	}
+	diagnostics.outcome = "committed"
 	return nil
 }
 

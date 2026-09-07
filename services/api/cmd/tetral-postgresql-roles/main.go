@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 
 	"github.com/jackc/pgx/v5"
@@ -14,18 +13,25 @@ import (
 
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const adminDatabaseURLEnv = "TETRAL_DATABASE_ADMIN_URL"
 
 func main() {
-	if err := run(context.Background(), os.Getenv, os.Stdin); err != nil {
-		slog.Error("postgresql_role_contract_failed")
+	if err := run(context.Background(), os.Getenv, os.Stdin, os.Stderr); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, getenv func(string) string, input io.Reader) error {
+func run(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer) (result error) {
+	logger := workload.NewLogger(stderr, "postgresql-roles", getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), getenv("TETRAL_SERVICE_VERSION"))
+	ctx = storage.WithMigrationLogger(ctx, logger)
+	defer func() {
+		if result != nil {
+			logger.Error("postgresql_role_contract_failed")
+		}
+	}()
 	dsn := getenv(adminDatabaseURLEnv)
 	if dsn == "" {
 		return fmt.Errorf("%s is required", adminDatabaseURLEnv)

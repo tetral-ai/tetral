@@ -38,6 +38,35 @@ need to return to an older binary.
 Runtime services then use only their serving DSNs; API alone also
 receives the separate migration-owner DSN for its pinned migration transaction.
 
+### Migration diagnostics
+
+The migrator emits `schema.migration.started` and `schema.migration.completed`
+for each pending version, or `schema.migration.failed` when migration fails.
+Records include `operation=database.migrate`, `schema.version` when known,
+`schema.step`, `duration_ms`, and `transaction.outcome`. Outcomes describe the
+individual migration transaction, not the complete deployment:
+
+- `not_started`: no transaction was established for this attempt.
+- `committed`: `Commit` acknowledged success. A later lock-release failure does
+  not undo it.
+- `rolled_back`: an explicit rollback before any commit attempt succeeded.
+- `unknown`: no acknowledgement establishes the transaction result, including a
+  failed `Commit` or an unconfirmed rollback. Reconnect and check history before
+  deciding whether to retry; never infer rollback from a connection error.
+
+Failure records contain a constant safe message and classification, plus
+`db.sqlstate` when the PostgreSQL driver supplies a valid code. Raw driver
+messages, SQL, parameters, connection strings and error details are not logged.
+An up-to-date database produces no per-version migration records.
+
+API startup passes its JSON logger through the database adapter to the migrator.
+The role installer also emits JSON on stderr with `service.name=postgresql-roles`.
+Detailed migration failures are written before the outer startup/command failure
+summary, so adapter redaction cannot erase the operator record. Container stderr
+can be collected by the deployment's log agent; an arbitrary local or SSH command
+needs its own log collection. This code does not send requests to Loki, alter
+PostgreSQL server logging, perform backups or downgrade committed migrations.
+
 Tests use a different capability model. `internal/storage/storagetest` creates
 one immutable schema template per exact migration-history identity, then gives
 every native test a private cloned database and unique NOBYPASSRLS login. Those broad
