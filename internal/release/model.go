@@ -143,7 +143,7 @@ func ValidateCandidate(candidate CandidateManifest) error {
 	if err != nil || parsed != candidate.Version {
 		return fmt.Errorf("candidate version is invalid")
 	}
-	if candidate.SchemaVersion != 1 || !digestPattern.MatchString(candidate.SchemaChecksum) {
+	if (candidate.SchemaVersion != 1 && candidate.SchemaVersion != 2) || !digestPattern.MatchString(candidate.SchemaChecksum) {
 		return fmt.Errorf("candidate database identity is invalid")
 	}
 	for _, name := range []string{"tetral", "gateway", "agent-runtime", "sandbox"} {

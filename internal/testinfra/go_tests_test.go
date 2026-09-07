@@ -339,7 +339,7 @@ func TestAffectedGoSelectionIncludesRepositoryReverseDependencies(t *testing.T) 
 		"github.com/tetral-ai/tetral/database",
 		"github.com/tetral-ai/tetral/internal/storage",
 		"github.com/tetral-ai/tetral/internal/storage/storagetest",
-		"github.com/tetral-ai/tetral/services/api/cmd/tetral-postgresql-roles",
+		"github.com/tetral-ai/tetral/cmd/tetral-db-prepare",
 	} {
 		if !slices.Contains(selected, importPath) {
 			t.Errorf("affected selection omitted reverse dependency %s; selected=%v", importPath, selected)

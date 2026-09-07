@@ -6,9 +6,9 @@
  * before concrete SQL-backed stores or resolvers are constructed. The
  * provider-gateway and MCP connector startup paths pass this module a tagged
  * SQL client; the verifier asks PostgreSQL for the registry's presence and
- * ordered contents through SELECT statements only. `api` startup is the
- * sole production migration owner and uses Engine storage to apply and stamp
- * migrations.
+ * ordered contents through SELECT statements only. `cmd/tetral-db-prepare`
+ * is the sole production migration entrypoint and uses Engine storage to apply
+ * and stamp migrations. Serving processes only verify the prepared schema.
  *
  * A usable history starts at version one, is contiguous and duplicate-free,
  * has exactly the versions known to this binary, and matches every pinned
@@ -21,9 +21,16 @@ import postgresqlContractJSON from "../../../../../database/postgresql.json";
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"6f1ec030d986cec0ae83cc9a5abc818045b5d3a388a9434483d05a5bcdd9fc44";
+	"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6";
 
-const PostgreSQLSchemaRegistry = [PostgreSQLSchemaVersionOneChecksum] as const;
+/** Pins the additive Git identity migration. */
+export const PostgreSQLSchemaVersionTwoChecksum =
+	"36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458";
+
+const PostgreSQLSchemaRegistry = [
+	PostgreSQLSchemaVersionOneChecksum,
+	PostgreSQLSchemaVersionTwoChecksum,
+] as const;
 
 /** Enumerates the public-safe failure classifications produced by schema verification. */
 export type SchemaVerificationErrorKind =

@@ -633,7 +633,7 @@ func TestProductionCommandsDoNotEmitPlainStartupStderr(t *testing.T) {
 		if strings.HasPrefix(rel, "internal/testinfra/cmd/") || strings.HasPrefix(rel, "internal/release/cmd/") {
 			return nil
 		}
-		if !strings.Contains(rel, "/cmd/") && !strings.HasPrefix(rel, "internal/workload/") {
+		if !strings.Contains(rel, "/cmd/") && !strings.HasPrefix(rel, "cmd/") && !strings.HasPrefix(rel, "internal/workload/") {
 			return nil
 		}
 		body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
@@ -704,7 +704,6 @@ func finalArchitectureAllowsGRPCOrProtobuf(rel string) bool {
 func TestFinalArchitectureObsoleteCentralRootsAreAbsent(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	for _, deleted := range []string{
-		"cmd",
 		filepath.Join("proto", "tetral"),
 		filepath.Join("internal", "gen", "tetral"),
 	} {

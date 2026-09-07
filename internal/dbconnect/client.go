@@ -137,13 +137,6 @@ func (tx *Tx) QueryRowScanner(ctx context.Context, query string, args ...any) in
 	return tx.QueryRow(ctx, query, args...)
 }
 
-func (c *Client) MigrateSchema(ctx context.Context) error {
-	if err := storage.MigrateSchema(ctx, c.db); err != nil {
-		return diagnostic(c.provider, c.descriptor, PhaseMigrateSchema, KindSchemaMigrationFailed, "", "schema migration failed", err)
-	}
-	return nil
-}
-
 func (c *Client) VerifySchema(ctx context.Context) error {
 	if err := storage.VerifySchema(ctx, c.db); err != nil {
 		return diagnostic(c.provider, c.descriptor, PhaseVerifySchema, KindSchemaVerificationFailed, "", "schema verification failed", err)

@@ -55,9 +55,6 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 	"PrepareStartupDatabase": {
 		{expression: "err", bucket: bucketDependency, count: 2},
 		{expression: `fmt.Errorf("runtime database client is required")`, bucket: bucketDependency, count: 1},
-		{expression: `fmt.Errorf("migration database client is required")`, bucket: bucketDependency, count: 1},
-		{expression: `fmt.Errorf("schema migration: %w", err)`, bucket: bucketDependency, count: 1},
-		{expression: `fmt.Errorf("close migration database: %w", err)`, bucket: bucketDependency, count: 1},
 		{expression: `fmt.Errorf("schema verification: %w", err)`, bucket: bucketDependency, count: 1},
 	},
 	"BuildRouter": {
@@ -142,9 +139,6 @@ var startupDecidedBuckets = map[string]string{
 	`loadPositiveInt|workload.NewConfigError(fmt.Sprintf("%s must be a positive integer", key))`:         bucketConfig,
 	`loadPositiveInt64|workload.NewConfigError(fmt.Sprintf("%s must be a positive integer", key))`:       bucketConfig,
 	// db-open propagation in PrepareStartupDatabase stays Dependency
-	`PrepareStartupDatabase|fmt.Errorf("runtime database client is required")`:   bucketDependency,
-	`PrepareStartupDatabase|fmt.Errorf("migration database client is required")`: bucketDependency,
-	`PrepareStartupDatabase|fmt.Errorf("schema migration: %w", err)`:             bucketDependency,
-	`PrepareStartupDatabase|fmt.Errorf("close migration database: %w", err)`:     bucketDependency,
-	`PrepareStartupDatabase|fmt.Errorf("schema verification: %w", err)`:          bucketDependency,
+	`PrepareStartupDatabase|fmt.Errorf("runtime database client is required")`: bucketDependency,
+	`PrepareStartupDatabase|fmt.Errorf("schema verification: %w", err)`:        bucketDependency,
 }

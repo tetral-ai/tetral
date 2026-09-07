@@ -2,10 +2,9 @@
 
 Tetral needs one deployment-owned workspace row before Auth can register the
 bootstrap API key. Before starting workloads, the repository-owned PostgreSQL
-installer constructs the current schema, creates the separate migration and
-serving roles, and applies their exact grants. The API then performs an
-idempotent migration check under the migration owner. Auth crash-loops until
-the workspace seed exists and then recovers through its normal restart backoff.
+preparation command constructs the current schema, creates the separate migration
+and serving roles, and applies their exact grants. Seed the workspace before
+starting workloads; every service then only verifies database readiness.
 
 ## 1. Choose the workspace ID
 
@@ -60,7 +59,7 @@ workloads.
 
 | Secret | Required keys |
 | --- | --- |
-| `api-database` | `url`, `migration-url` |
+| `api-database` | `url` |
 | `api-secrets` | `engine-vault-key` |
 | `auth-bootstrap` | `engine-api-key` |
 | `auth-database` | `url` |
@@ -123,7 +122,7 @@ The blob key casing is intentionally documented as it exists:
 `TETRAL_BLOB_*` keys for the same logical settings. Unifying this surface is a
 registered follow-up, not part of bootstrap.
 
-Before installing the platform, run the role installer from the exact source or
+Before installing the platform, run `tetral-db-prepare` from the exact source or
 image revision being installed. Give it an administrative connection only for
 this one-shot operation, and pipe one protected JSON declaration on stdin. The
 declaration must contain exactly the workload keys in `database/roles.json`,
@@ -131,33 +130,67 @@ plus `migration`; every value supplies an operator-chosen `name` and
 `password`. Do not put the JSON or administrative DSN in the repository,
 command arguments, shell history, or Kubernetes manifest.
 
+`TETRAL_DATABASE_ADMIN_URL` must connect as a PostgreSQL superuser
+(`rolsuper=true`). A `CREATEROLE` administrator or migration-role membership
+alone does not satisfy the current installer's requirements. The command checks
+this privilege before changing schema or roles; a failed check stops preparation
+with a safe error message.
+
 ```bash
 export TETRAL_DATABASE_ADMIN_URL
-go run ./services/api/cmd/tetral-postgresql-roles \
+go run ./cmd/tetral-db-prepare \
   < /secure/path/tetral-postgresql-roles.json
 ```
 
-The idempotent command constructs Version 1, revokes public database/schema
+The idempotent command applies all pending versions, revokes public database/schema
 access, assigns catalog ownership to the migration role, and grants each
 serving role only its declared operations. Use the resulting role DSNs in the
-Secret inventory above; `api-database/url` is the API serving role and
-`api-database/migration-url` is the migration owner. Runtime workloads reject
+Secret inventory above; `api-database/url` is the API serving role. Keep the
+schema-owner credential out of serving Secrets. Runtime workloads reject
 superuser or BYPASSRLS credentials before readiness. The administrative
 credential is not a serving credential and must not be placed in a workload
 Secret.
 
-## 4. Install the platform
+To run preparation inside Kubernetes using the release image, provision a
+separate operator-managed `database-preparation` Secret with key `url` containing
+the administrative DSN. The following one-shot Pod receives that Secret only;
+the role JSON is streamed over stdin. Keep the completed Pod available for
+`kubectl logs` and the cluster's Pod log collector, if configured:
 
-Set Helm's `bootstrapWorkspaceID` to the chosen ID, or set the corresponding
-environment value in the raw manifests, and install Tetral. The API verifies
-and idempotently migrates through the dedicated owner, then starts through its
-restricted serving role. Auth fails its workspace lookup and crash-loops at
-this point by design.
+```bash
+kubectl -n tetral-system run tetral-db-prepare \
+  -i --restart=Never \
+  --image=ghcr.io/tetral-ai/tetral@sha256:<tetral-image-digest> \
+  --override-type=strategic \
+  --overrides='{
+    "apiVersion": "v1",
+    "spec": {
+      "containers": [{
+        "name": "tetral-db-prepare",
+        "env": [{
+          "name": "TETRAL_DATABASE_ADMIN_URL",
+          "valueFrom": {
+            "secretKeyRef": {"name": "database-preparation", "key": "url"}
+          }
+        }]
+      }]
+    }
+  }' \
+  --command -- /usr/local/bin/tetral-db-prepare \
+  < /secure/path/tetral-postgresql-roles.json
+```
 
-See the [Helm chart instructions](../deploy/helm/tetral/README.md) for the
-remaining cluster prerequisites and install command.
+Inspect `kubectl -n tetral-system logs tetral-db-prepare` before deleting the
+completed Pod with `kubectl -n tetral-system delete pod tetral-db-prepare`;
+delete it before reusing the same name for another attempt.
 
-## 5. Seed the workspace
+Proceed only after a zero exit. A failure after migration may leave that schema
+version committed; inspect the structured logs and rerun the same command after
+correcting the cause. Neither invocation deploys services or resets data. For
+existing installations, use the [upgrade sequence](../deploy/helm/tetral/README.md#upgrade-and-rollback)
+before invoking this command; do not replay from-zero bootstrap as an upgrade.
+
+## 4. Seed the workspace
 
 Use the same immutable Tetral image digest recorded by the selected GitHub
 Release. Reference the API role's
@@ -189,8 +222,18 @@ kubectl -n tetral-system run tetral-bootstrap \
 ```
 
 The command reports either `created` or `already present`; rerunning it is
-safe. Auth then finds the row, registers the bootstrap API key from
-`auth-bootstrap/engine-api-key`, and self-heals within its restart backoff.
+safe. This seeds a workspace row, not an API key.
+
+## 5. Install the platform
+
+Set Helm's `bootstrapWorkspaceID` to the seeded ID, or set the corresponding
+environment value in the raw manifests, and install Tetral. Every database
+consumer verifies the schema and its serving role before becoming ready.
+Auth finds the workspace and registers the bootstrap API key from
+`auth-bootstrap/engine-api-key`.
+
+See the [Helm chart instructions](../deploy/helm/tetral/README.md) for the
+remaining cluster prerequisites and install command.
 
 ## 6. Register the sandbox snapshot with Daytona
 

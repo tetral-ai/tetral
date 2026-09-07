@@ -653,7 +653,7 @@ func testBaselineDigest(ctx context.Context, db *sql.DB) (string, error) {
 	}
 	return digestBaselineInputs(baselineInputs{
 		helperFormat:       helperFormat,
-		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum,
+		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum + ":" + storage.PostgreSQLSchemaVersionTwoChecksum,
 		postgresqlContract: database.PostgreSQLContractDigest(),
 		roleContract:       database.RoleContractDigest(),
 		seed:               strings.Join([]string{testSeedStatement, string(workspace.DefaultID), testSeedName, testSeedCreatedAt}, "\x00"),

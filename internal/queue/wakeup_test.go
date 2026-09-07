@@ -91,11 +91,22 @@ func TestWakeSignalDoesNotLoseBroadcastBetweenPollAndWait(t *testing.T) {
 }
 
 func TestRunNotificationListenerBroadcastsCatchupAndRelevantPayloadAfterReconnect(t *testing.T) {
-	listener := &scriptedNotificationListener{calls: make(chan int, 2), hold: make(chan struct{})}
+	listener := &scriptedNotificationListener{calls: make(chan int, 2), allowDisconnect: make(chan struct{})}
 	wake := NewWakeSignal()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("RunNotificationListener: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("listener did not stop")
+		}
+	})
+	initial := wake.Snapshot()
 	go func() {
 		done <- RunNotificationListener(ctx, listener, ConsumerClassBridge, wake, nil)
 	}()
@@ -109,13 +120,21 @@ func TestRunNotificationListenerBroadcastsCatchupAndRelevantPayloadAfterReconnec
 		}
 	}
 
-	initial := wake.Snapshot()
-	if call := <-listener.calls; call != 1 {
-		t.Fatalf("first listen call = %d", call)
+	select {
+	case call := <-listener.calls:
+		if call != 1 {
+			t.Fatalf("first listen call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not connect")
 	}
 	waitForGeneration(initial)
 
+	// Capture the baseline before allowing a disconnect. Otherwise the
+	// reconnect broadcast can precede this snapshot, leaving us waiting for
+	// an additional notification that the test has not sent.
 	reconnect := wake.Snapshot()
+	close(listener.allowDisconnect)
 	select {
 	case call := <-listener.calls:
 		if call != 2 {
@@ -136,25 +155,14 @@ func TestRunNotificationListenerBroadcastsCatchupAndRelevantPayloadAfterReconnec
 	unchangedCancel()
 	listener.notify(ConsumerClassBridge)
 	waitForGeneration(payload)
-
-	close(listener.hold)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunNotificationListener: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("listener did not stop")
-	}
 }
 
 type scriptedNotificationListener struct {
-	mu       sync.Mutex
-	count    int
-	calls    chan int
-	hold     chan struct{}
-	onNotify func(string)
+	mu              sync.Mutex
+	count           int
+	calls           chan int
+	allowDisconnect chan struct{}
+	onNotify        func(string)
 }
 
 func (l *scriptedNotificationListener) Listen(ctx context.Context, _ string, onReady func(), onNotification func(string)) error {
@@ -163,17 +171,22 @@ func (l *scriptedNotificationListener) Listen(ctx context.Context, _ string, onR
 	call := l.count
 	l.onNotify = onNotification
 	l.mu.Unlock()
-	l.calls <- call
-	onReady()
-	if call == 1 {
-		return errors.New("connection lost")
-	}
 	select {
+	case l.calls <- call:
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-l.hold:
-		return errors.New("connection lost")
 	}
+	onReady()
+	if call == 1 {
+		select {
+		case <-l.allowDisconnect:
+			return errors.New("connection lost")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func (l *scriptedNotificationListener) notify(payload string) {

@@ -25,7 +25,9 @@ import (
 // The DDL only relies on ordinary table/index DDL plus the standard
 // row-level security feature, so it stays portable across self-managed
 // PostgreSQL and managed providers (RDS, Cloud SQL, Azure Database for
-// PostgreSQL).
+// PostgreSQL). This portability applies to the DDL, not the complete database
+// preparation command: the current role installer requires a PostgreSQL
+// superuser, which these managed providers do not grant to customer accounts.
 const (
 	// sessions.status is a projected surface, not a single stored axis.
 	//
@@ -1242,18 +1244,12 @@ const (
 		mount_path TEXT,
 		checkout_type TEXT,
 		checkout_ref TEXT,
-		git_identity_name TEXT,
-		git_identity_email TEXT,
 		authorization_token_encrypted BYTEA NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, resource_id),
 		FOREIGN KEY (workspace_id, session_id, resource_id) REFERENCES session_resources(workspace_id, session_id, resource_id) ON DELETE CASCADE,
 		CONSTRAINT session_github_repository_checkout_shape CHECK (
 			(checkout_type IS NULL AND checkout_ref IS NULL)
 			OR (checkout_type IS NOT NULL AND checkout_type IN ('branch', 'commit') AND checkout_ref IS NOT NULL AND checkout_ref <> '')
-		),
-		CONSTRAINT session_github_repository_git_identity_shape CHECK (
-			(git_identity_name IS NULL AND git_identity_email IS NULL)
-			OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> '')
 		),
 		CONSTRAINT session_github_repository_authorization_token_required CHECK (
 			authorization_token_encrypted IS NOT NULL
@@ -1812,9 +1808,8 @@ func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchema
 }
 
 // postgresqlBaselineSteps is the single ordered payload owned by migration
-// version 1. Before the first release,
-// schema edits replace this clean baseline and its checksum together. After
-// that release, later schema changes belong in new migration versions.
+// version 1, already applied by Alpha 1 installations. Keep its SQL bytes
+// immutable; later schema changes belong in new migration versions.
 func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	steps := []postgresqlSchemaStep{
 		// Tables. Order follows foreign-key ownership: workspaces before

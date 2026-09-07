@@ -25,6 +25,9 @@
 //	ahead            registry newer than this binary      -               (rejected: SchemaErrorAhead)
 //	checksum drift   an applied checksum != its pinned     -               (rejected: SchemaErrorChecksumDrift)
 //
+// Production migration is invoked only by cmd/tetral-db-prepare; serving
+// processes call VerifySchema without schema repair.
+//
 // Only one connection migrates at a time: every migrator holds
 // PostgreSQLSchemaAdvisoryLockID while inspecting and applying history.
 //
@@ -32,18 +35,23 @@
 //   - Durable rows are the source of truth. Runtime Pod hot state is
 //     residency and execution state only; it is recoverable from the durable
 //     state Bridge loads, so losing pod hot state loses no committed fact.
-//   - Every current-state DDL statement is idempotent (IF NOT EXISTS, or DROP
-//   - CREATE for policies), while MigrateSchema is the only public writer.
-//   - Before the first public release, the version-one baseline is the clean
-//     bootstrap schema and its checksum is regenerated when pre-release
-//     shapes are folded into their final definitions. After release, schema
-//     changes append migrations without rewriting an applied version.
+//   - MigrateSchema is the only public schema writer. Applied history makes
+//     reruns idempotent; individual ALTER statements need not be idempotent.
+//   - The deployed Alpha 1 version-one baseline is immutable. Later changes
+//     append migrations, each committed atomically with its history entry.
+//   - Version two adds per-repository Git identity. Existing NULL identities
+//     preserve the default; fresh and upgraded databases have the same schema.
 //   - The DDL uses only ordinary table/index DDL plus row-level security, so
 //     it stays portable across self-managed PostgreSQL and managed providers.
+//     The complete database preparation command additionally requires a
+//     PostgreSQL superuser for its current role installer; managed-provider
+//     customer administrators without that privilege cannot run it.
 //
 // UPDATE-WITH:
-//   - postgresql_schema.go (table/index/policy DDL)
+//   - postgresql_schema.go (immutable V1 table/index/policy DDL)
+//   - postgresql_migration_git_identity.go (V2 upgrade DDL)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
+//   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
 //
 // # Durable row-family ownership

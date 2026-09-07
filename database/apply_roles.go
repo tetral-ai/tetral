@@ -11,6 +11,14 @@ import (
 
 const roleContractAdvisoryLock int64 = 0x7465_7472_616c_524c
 
+// RoleContractError contains only code-owned diagnostics, never operator role
+// names, passwords, or PostgreSQL driver details.
+type RoleContractError struct {
+	message string
+}
+
+func (e *RoleContractError) Error() string { return e.message }
+
 type RoleCredential struct {
 	Name     string `json:"name"`
 	Password string `json:"password"`
@@ -20,8 +28,18 @@ type RoleDeclarations struct {
 	Roles map[string]RoleCredential `json:"roles"`
 }
 
+// Validate checks the complete operator input before database preparation mutates
+// schema or roles. ApplyRoleContract enforces the same contract for direct callers.
+func (d RoleDeclarations) Validate() error {
+	contract, err := LoadRoleContract()
+	if err != nil {
+		return err
+	}
+	return validateRoleDeclarations(append(contract.WorkloadNames(), contract.MigrationOwner), d)
+}
+
 // ApplyRoleContract installs the exact serving-role boundary after the schema
-// owner has constructed the current Version 1 catalog. Names and credentials
+// owner has constructed the current catalog. Names and credentials
 // come from the operator; the repository owns only workload capabilities.
 func ApplyRoleContract(ctx context.Context, connection *pgx.Conn, declarations RoleDeclarations) error {
 	if connection == nil {
@@ -105,13 +123,13 @@ func ApplyRoleContract(ctx context.Context, connection *pgx.Conn, declarations R
 
 func validateRoleDeclarations(required []string, declarations RoleDeclarations) error {
 	if len(declarations.Roles) != len(required) {
-		return fmt.Errorf("PostgreSQL role declarations must exactly match the contract")
+		return &RoleContractError{message: "PostgreSQL role declarations must exactly match the contract"}
 	}
 	seenNames := map[string]bool{}
 	for _, workload := range required {
 		declaration, ok := declarations.Roles[workload]
 		if !ok || declaration.Name == "" || declaration.Password == "" || seenNames[declaration.Name] {
-			return fmt.Errorf("invalid PostgreSQL role declaration for workload %q", workload)
+			return &RoleContractError{message: fmt.Sprintf("invalid PostgreSQL role declaration for workload %q", workload)}
 		}
 		seenNames[declaration.Name] = true
 	}
@@ -139,7 +157,7 @@ func ensureManagedRole(ctx context.Context, tx pgx.Tx, workload string, declarat
 		return fmt.Errorf("inspect PostgreSQL role declaration: %w", err)
 	}
 	if superuser || bypassRLS || createDB || createRole || replication || inherit || memberships != 0 || (exists && existingComment != comment) {
-		return fmt.Errorf("PostgreSQL role declaration conflicts with an existing role")
+		return &RoleContractError{message: "PostgreSQL role declaration conflicts with an existing role"}
 	}
 	role := identifier(declaration.Name)
 	if !exists {

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-var databaseEnvironmentPattern = regexp.MustCompile(`(?m)^\s*- name: (?:TETRAL_DATABASE_URL|TETRAL_MIGRATION_DATABASE_URL|TETRAL_POSTGRES_DSN|TETRAL_EVENT_STREAM_DATABASE_URL)\s*$`)
+var databaseEnvironmentPattern = regexp.MustCompile(`(?m)^\s*- name: (?:TETRAL_DATABASE_URL|TETRAL_POSTGRES_DSN|TETRAL_EVENT_STREAM_DATABASE_URL)\s*$`)
 var databaseConfigurationSourcePattern = regexp.MustCompile(`(?mi)^\s+name:\s*[A-Za-z0-9_.-]*(?:database|postgres)[A-Za-z0-9_.-]*\s*$`)
 var yamlNamePattern = regexp.MustCompile(`^(\s*)- name: ([A-Za-z0-9_.-]+)\s*$`)
 
@@ -35,7 +35,7 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 	local := discoverDatabaseContainers(t, localFiles)
 	top := discoverDatabaseContainers(t, topFiles)
 	want := []string{
-		"api=migrate",
+		"api=verify",
 		"auth=verify",
 		"bridge-api=verify",
 		"cleanup=verify",
@@ -55,7 +55,7 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 	}
 }
 
-func TestSchemaOwnershipProductionWiringHasOneMigratorAndNoOtherDDL(t *testing.T) {
+func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
 	entrypoints := map[string]struct {
 		path     string
@@ -85,12 +85,12 @@ func TestSchemaOwnershipProductionWiringHasOneMigratorAndNoOtherDDL(t *testing.T
 		if strings.Index(text, entrypoint.roleGate) < strings.Index(text, entrypoint.gate) {
 			t.Errorf("%s startup checks runtime role before schema in %s", name, entrypoint.path)
 		}
-		if name != "api" && strings.Contains(text, "MigrateSchema") {
+		if strings.Contains(text, "MigrateSchema") {
 			t.Errorf("non-owner %s references MigrateSchema", name)
 		}
 	}
 
-	forbiddenDDL := []string{"CREATE TABLE", "ALTER TABLE", "DROP TABLE", "CREATE INDEX", "CREATE POLICY"}
+	forbiddenDDL := []string{"CREATE TABLE", "ALTER TABLE", "DROP TABLE", "CREATE INDEX", "CREATE POLICY", "MigrateSchema(", "ApplyRoleContract("}
 	err := filepath.WalkDir(filepath.Join(root, "services"), func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -188,6 +188,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 	}
 	if goRegistryLiteral == nil {
 		t.Fatal("could not locate Go postgresqlMigrationRegistry composite literal")
+		return
 	}
 	type goRegistryEntry struct {
 		version  string
@@ -248,6 +249,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 		steps           string
 	}{
 		{checksumVersion: "One", steps: "postgresqlBaselineSteps"},
+		{checksumVersion: "Two", steps: "postgresqlGitIdentitySteps"},
 	}
 	if len(wantRegistry) != len(goChecksums) {
 		t.Fatalf("Go executable schema registry expectation count = %d; want %d checksum declarations", len(wantRegistry), len(goChecksums))
@@ -306,33 +308,6 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 				registryEntries[index],
 				wantEntry,
 			)
-		}
-	}
-}
-
-func TestSchemaOwnershipRolloutWaitsForAPIBeforeEveryNonOwner(t *testing.T) {
-	root := schemaOwnershipEngineRoot(t)
-	text := readSchemaOwnershipFile(t, filepath.Join(root, "deploy", "kubernetes", "rollout-schema-ordered.sh"))
-	apiApply := strings.Index(text, "api.yaml")
-	wait := strings.Index(text, "rollout status deployment/api")
-	if apiApply < 0 || wait < 0 || apiApply >= wait {
-		t.Fatalf("rollout must apply api then wait for its rollout; script was:\n%s", text)
-	}
-	for _, manifest := range []string{
-		"auth.yaml",
-		"queue.yaml",
-		"sandbox.yaml",
-		"bridge.yaml",
-		"event-stream.yaml",
-		"cleanup.yaml",
-		"git-proxy.yaml",
-		"gateway.yaml",
-	} {
-		index := strings.Index(text, manifest)
-		if index < 0 {
-			t.Errorf("rollout missing non-owner manifest %s", manifest)
-		} else if index <= wait {
-			t.Errorf("rollout applies %s before api wait", manifest)
 		}
 	}
 }

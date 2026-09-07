@@ -15,15 +15,91 @@ contracts.
   boundary; application startup verifies schema and role posture but does not
   repair either.
 
-Run `tetral-postgresql-roles` once before a fresh installation and whenever the
-repository-owned role contract changes. The command constructs the current V1
-schema with the administrative connection, applies the role contract, and is
-idempotent. Runtime services then use only their serving DSNs; API alone also
-receives the separate migration-owner DSN for its pinned migration transaction.
+Run `tetral-db-prepare` before a fresh installation and before starting
+updated workloads whenever the schema or role contract changes. The command
+applies pending schema migrations with the administrative connection, then
+applies the role contract. Repeating the command preserves applied migrations.
+The administrative connection must authenticate as a PostgreSQL superuser
+(`rolsuper=true`); `CREATEROLE` or membership in the migration role is not
+sufficient for the installer's role attributes and ownership operations. The
+command checks the effective connected role before applying any migration and
+fails without changing schema or roles if it is not a superuser.
+
+The deployed Alpha 1 schema is immutable V1. V2 adds nullable
+`git_identity_name` / `git_identity_email` columns and their paired-value
+constraint to `session_github_repository_resources`. Existing repository data
+and V1 history remain unchanged; NULL identities retain the default Git
+identity. Fresh databases apply V1 then V2; existing V1 databases apply only V2.
+The V2 DDL and its history entry commit in one transaction, so a failed V2 can be
+retried without partial columns. Go and Gateway readiness require both versions.
+Do not edit stored checksums to bypass a mismatch: a database created from a
+rewritten V1 is not the deployed Alpha 1 baseline and is rejected as drift.
+
+This is a forward migration, with no automatic downgrade. An older binary
+rejects the V2 schema as ahead; upgrading the schema therefore also changes the
+rollback requirements. Preserve a database backup before an upgrade that may
+need to return to an older binary.
+
+Runtime services use only their serving DSNs. No serving process, including API,
+receives an administrative or migration-owner DSN or runs schema/role repair.
+The migration role remains the owner of schema objects; it is not an API login.
+The executable entrypoint lives in `cmd/tetral-db-prepare`; schema implementation
+stays in `internal/storage`, and role implementation stays in this directory.
+The separate `cmd/tetral-bootstrap` command seeds the initial workspace using
+the API serving role. Auth still owns startup refresh of its bootstrap API key.
+
+The preparation command validates all role declarations before touching the
+database, then migrates and applies grants in that order. It exits zero only
+when both stages succeed. These are separate transactions: a role-installation
+failure does not undo an already committed migration. Stop the release on a
+nonzero exit, correct the reported stage and rerun the same revision with the
+same declarations. Serialize database preparation and workload rollout; the
+schema and role locks do not serialize the entire deployment.
+
+For schema-changing upgrades without a verified compatibility guarantee, stop
+application traffic and workers (including scheduled cleanup and autoscaling)
+before preparation, preserving the database. Resume only with the matching
+workload revision after preparation succeeds. This command does not stop
+workloads or change Kubernetes resources. See the
+[upgrade procedure](../deploy/helm/tetral/README.md#upgrade-and-rollback).
+
+### Migration diagnostics
+
+The migrator emits `schema.migration.started` and `schema.migration.completed`
+for each pending version, or `schema.migration.failed` when migration fails.
+Records include `operation=database.migrate`, `schema.version` when known,
+`schema.step`, `duration_ms`, and `transaction.outcome`. Outcomes describe the
+individual migration transaction, not the complete deployment:
+
+- `not_started`: no transaction was established for this attempt.
+- `committed`: `Commit` acknowledged success. A later lock-release failure does
+  not undo it.
+- `rolled_back`: an explicit rollback before any commit attempt succeeded.
+- `unknown`: no acknowledgement establishes the transaction result, including a
+  failed `Commit` or an unconfirmed rollback. Reconnect and check history before
+  deciding whether to retry; never infer rollback from a connection error.
+
+Failure records contain a constant safe message and classification, plus
+`db.sqlstate` when the PostgreSQL driver supplies a valid code. Raw driver
+messages, SQL, parameters, connection strings and error details are not logged.
+An up-to-date database produces no per-version migration records.
+
+The preparation command emits JSON on stderr with `service.name=db-prepare`.
+`database.prepare.started`, `.completed`, and `.failed` describe the whole
+command; failures identify `step` and `error.message_safe` without serializing
+input or raw errors. Safe reasons distinguish invalid input, insufficient
+administrative privileges, and role conflicts; unclassified driver failures use
+a generic message for the failed stage.
+Detailed `schema.migration.failed` records precede the command failure summary.
+A role-stage failure may follow successfully committed migration records.
+Container stderr can be collected by the deployment's log agent; an arbitrary
+local or SSH command needs its own log collection. This code does not send
+requests to Loki, alter PostgreSQL server logging, perform backups or downgrade
+committed migrations.
 
 Tests use a different capability model. `internal/storage/storagetest` creates
-one immutable schema template per exact baseline identity, then gives every
-native test a private cloned database and unique NOBYPASSRLS login. Those broad
+one immutable schema template per exact migration-history identity, then gives
+every native test a private cloned database and unique NOBYPASSRLS login. Those broad
 test-only grants never define production privileges. Production authorization
 tests use `storagetest.OpenWorkloadDB`: it applies the real installer contract
 to a private clone and authenticates as the selected workload's unique login.
