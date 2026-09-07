@@ -14,7 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
-// The pinned Daytona daemon returns os.MkdirAll / file write errors in
+// At the SDK's source revision, Daytona returns os.MkdirAll / file write errors in
 // HTTP 400 responses. The SDK preserves message, but not a filesystem errno.
 // Classify only a PathError for the exact Engine-owned payload path (or its
 // staging ancestor), never an arbitrary 400 or a substring of user output.
@@ -44,6 +44,11 @@ func daytonaToolError(operation string, err error, payloadPaths ...string) error
 		message = validation.Message
 	} else if errors.As(err, &base) && base.StatusCode == http.StatusBadRequest {
 		message = base.Message
+		// The SDK's base and typed errors describe the same HTTP rejection.
+		// Keep unclassified upload failures consistent with directory failures.
+		result.Kind = sandbox.ProviderErrorInvalidRequest
+		result.Retryable = false
+		result.SafeMessage = "daytona rejected sandbox request"
 	}
 	if operation == "upload_payload" {
 		message = bulkUploadPathError(message, payloadPaths)
@@ -94,7 +99,7 @@ func payloadPathError(message, operation string, paths []string, errno syscall.E
 // UploadFileStream sends one file to /files/bulk-upload. Unlike CreateFolder,
 // that endpoint responds with {errors: [...], files: [...]}; SDK v0.189.0 keeps
 // that JSON as DaytonaError.Message. Unwrap only the single-file error shapes
-// emitted by the pinned daemon, including its destination-path prefix.
+// emitted by that daemon source, including its destination-path prefix.
 func bulkUploadPathError(message string, paths []string) string {
 	var response struct {
 		Errors []string `json:"errors"`

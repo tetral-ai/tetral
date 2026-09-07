@@ -31,12 +31,15 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 	for _, tc := range []struct {
 		name, endpoint, kind, message string
 		errno                         syscall.Errno
+		status                        int
 	}{
-		{"directory full", "folder", "storage_full", "Execution environment storage is full.", syscall.ENOSPC},
-		{"upload full", "bulk-upload", "storage_full", "Execution environment storage is full.", syscall.ENOSPC},
-		{"directory denied", "folder", "filesystem_access_denied", "Execution environment filesystem access was denied.", syscall.EACCES},
-		{"upload read-only", "bulk-upload", "filesystem_read_only", "Execution environment filesystem is read-only.", syscall.EROFS},
-		{"unclassified sensitive response", "folder", "invalid_request", "Execution environment preparation failed; the provider rejected the request.", 0},
+		{"directory full", "folder", "storage_full", "Execution environment storage is full.", syscall.ENOSPC, 400},
+		{"upload full", "bulk-upload", "storage_full", "Execution environment storage is full.", syscall.ENOSPC, 400},
+		{"directory denied", "folder", "filesystem_access_denied", "Execution environment filesystem access was denied.", syscall.EACCES, 400},
+		{"upload read-only", "bulk-upload", "filesystem_read_only", "Execution environment filesystem is read-only.", syscall.EROFS, 400},
+		{"unclassified sensitive response", "folder", "invalid_request", "Execution environment preparation failed; the provider rejected the request.", 0, 400},
+		{"upload unclassified", "bulk-upload", "invalid_request", "Execution environment preparation failed; the provider rejected the request.", 0, 400},
+		{"directory timeout", "folder", "unknown", "daytona sandbox request failed.", 0, 408},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
@@ -87,8 +90,8 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 						// response for the Engine-owned filesystem operation.
 						message = "rejected " + sensitive + "; no space left on device"
 					}
-					w.WriteHeader(http.StatusBadRequest)
-					_ = json.NewEncoder(w).Encode(map[string]any{"statusCode": 400, "message": message, "code": "Bad Request"})
+					w.WriteHeader(tc.status)
+					_ = json.NewEncoder(w).Encode(map[string]any{"statusCode": tc.status, "message": message, "code": http.StatusText(tc.status)})
 					return
 				}
 				r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -104,7 +107,10 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 				}()
 				failedPath = r.FormValue("files[0].path")
 				message := fmt.Sprintf("%s: write: %v", failedPath, &os.PathError{Op: "write", Path: failedPath, Err: tc.errno})
-				w.WriteHeader(http.StatusBadRequest)
+				if tc.errno == 0 {
+					message = failedPath + ": write: rejected " + sensitive + "; no space left on device"
+				}
+				w.WriteHeader(tc.status)
 				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{message}, "files": []any{}})
 			}))
 			defer server.Close()
@@ -142,7 +148,7 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 			if tc.endpoint == "bulk-upload" {
 				operation = "upload_payload"
 			}
-			if logged["provider.operation"] != operation || logged["provider.status_code"] != float64(400) || logged["error.code"] != tc.kind {
+			if logged["provider.operation"] != operation || logged["provider.status_code"] != float64(tc.status) || logged["error.code"] != tc.kind {
 				t.Fatalf("missing operational diagnosis: %s", logs.String())
 			}
 			detail, _ := logged["provider.error_detail"].(string)

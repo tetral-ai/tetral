@@ -195,7 +195,7 @@ func (e *DaytonaHelperExecutor) PrepareTool(ctx context.Context, invocation Tool
 			if failure.Kind == sandbox.ProviderErrorInvalidRequest {
 				failure.SafeMessage = "Execution environment preparation failed; the provider rejected the request."
 			}
-			failure.SafeMessage += " The tool operation was not started."
+			failure.SafeMessage = strings.TrimRight(failure.SafeMessage, ".") + ". The tool operation was not started."
 			mapped = &failure
 			if ProviderOperationWasNotSubmitted(err) {
 				mapped = MarkProviderOperationNotSubmitted(mapped)
