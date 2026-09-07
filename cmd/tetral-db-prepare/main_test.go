@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -166,11 +167,68 @@ type queryExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func TestRunRejectsTrailingRoleDeclaration(t *testing.T) {
-	err := run(context.Background(), func(string) string { return "unused" }, bytes.NewBufferString(`{"roles":{}} {}`), &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("accepted more than one role declaration")
+func TestRunLogsSafeInputFailures(t *testing.T) {
+	declarations := testRoleDeclarations(t)
+	payload, err := json.Marshal(declarations)
+	if err != nil {
+		t.Fatal(err)
 	}
+	incomplete := testRoleDeclarations(t)
+	credential := incomplete.Roles["api"]
+	credential.Password = ""
+	incomplete.Roles["api"] = credential
+	incompletePayload, err := json.Marshal(incomplete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, dsn, input, want string
+	}{
+		{"missing DSN", "", string(payload), "TETRAL_DATABASE_ADMIN_URL is required"},
+		{"malformed JSON", "private-dsn", "{", "must be valid JSON"},
+		{"unknown field", "private-dsn", `{"private-input-secret":"private-password"}`, "must be valid JSON"},
+		{"trailing value", "private-dsn", string(payload) + " {}", "must contain one JSON value"},
+		{"invalid DSN", "postgres://private-user:private-password@private-host:invalid/private-db", string(payload), "connection string is invalid"},
+		{"missing credential", "private-dsn", string(incompletePayload), `invalid PostgreSQL role declaration for workload "api"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			err := run(context.Background(), func(key string) string {
+				if key == adminDatabaseURLEnv {
+					return test.dsn
+				}
+				return ""
+			}, strings.NewReader(test.input), &logs)
+			if err == nil {
+				t.Fatal("accepted invalid preparation input")
+			}
+			assertPreparationFailure(t, logs.String(), "validate_input", test.want)
+			for _, private := range []string{"private-", credential.Name, declarations.Roles["api"].Password} {
+				if strings.Contains(logs.String(), private) {
+					t.Fatal("input leaked into preparation logs")
+				}
+			}
+		})
+	}
+}
+
+func assertPreparationFailure(t *testing.T, logs, step, message string) {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(logs))
+	for decoder.More() {
+		var record map[string]any
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatal(err)
+		}
+		if record["msg"] == "database.prepare.failed" {
+			safe, _ := record["error.message_safe"].(string)
+			if record["step"] != step || !strings.Contains(safe, message) {
+				t.Fatalf("unexpected failure diagnostic: %#v", record)
+			}
+			return
+		}
+	}
+	t.Fatal("missing preparation failure diagnostic")
 }
 
 func testRoleDeclarations(t *testing.T) database.RoleDeclarations {
@@ -201,6 +259,7 @@ func TestRunRejectsInvalidRolesBeforeMigrating(t *testing.T) {
 	if err == nil {
 		t.Fatal("accepted incomplete role declarations")
 	}
+	assertPreparationFailure(t, logs.String(), "validate_input", "role declarations must exactly match the contract")
 	var tables int
 	if err := admin.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public'`).Scan(&tables); err != nil {
 		t.Fatal(err)
@@ -257,5 +316,101 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE 
 	}
 	if installed {
 		t.Fatal("installed roles after migration failure")
+	}
+}
+
+func TestRunRejectsNonSuperuserBeforeMigrating(t *testing.T) {
+	admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	role := fmt.Sprintf("tetral_prepare_admin_%d", time.Now().UnixNano())
+	quotedRole := pgx.Identifier{role}.Sanitize()
+	if _, err := admin.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER CREATEROLE PASSWORD 'private-admin-password'"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := admin.Exec("DROP OWNED BY " + quotedRole); err != nil {
+			t.Error(err)
+		}
+		if _, err := admin.Exec("DROP ROLE " + quotedRole); err != nil {
+			t.Error(err)
+		}
+	}()
+	// The private test database revokes PUBLIC CONNECT. Give this account
+	// connectivity so the command reaches the superuser prerequisite check.
+	var databaseName string
+	if err := admin.QueryRow("SELECT current_database()").Scan(&databaseName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec("GRANT CONNECT ON DATABASE " + pgx.Identifier{databaseName}.Sanitize() + " TO " + quotedRole); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := url.Parse(storagetest.AdminDatabaseURL(t, admin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn.User = url.UserPassword(role, "private-admin-password")
+	payload, err := json.Marshal(testRoleDeclarations(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err = run(context.Background(), func(key string) string {
+		if key == adminDatabaseURLEnv {
+			return dsn.String()
+		}
+		return ""
+	}, bytes.NewReader(payload), &logs)
+	if err == nil {
+		t.Fatal("accepted CREATEROLE administrator without superuser")
+	}
+	assertPreparationFailure(t, logs.String(), "verify_admin", "requires a superuser connection")
+	if strings.Contains(logs.String(), role) || strings.Contains(logs.String(), "private-admin-password") {
+		t.Fatal("administrative credentials escaped")
+	}
+	var tables int
+	if err := admin.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("privilege preflight created %d tables", tables)
+	}
+}
+
+func TestRunLogsRoleConflictAfterCommittedMigration(t *testing.T) {
+	admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	declarations := testRoleDeclarations(t)
+	conflict := declarations.Roles["api"]
+	quotedRole := pgx.Identifier{conflict.Name}.Sanitize()
+	if _, err := admin.Exec("CREATE ROLE " + quotedRole + " NOLOGIN NOINHERIT"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := admin.Exec("DROP ROLE " + quotedRole); err != nil {
+			t.Error(err)
+		}
+	}()
+	payload, err := json.Marshal(declarations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err = run(context.Background(), func(key string) string {
+		if key == adminDatabaseURLEnv {
+			return storagetest.AdminDatabaseURL(t, admin)
+		}
+		return ""
+	}, bytes.NewReader(payload), &logs)
+	if err == nil {
+		t.Fatal("accepted an unmanaged existing role")
+	}
+	assertPreparationFailure(t, logs.String(), "apply_roles", "role declaration conflicts with an existing role")
+	if strings.Contains(logs.String(), conflict.Name) || strings.Contains(logs.String(), conflict.Password) {
+		t.Fatal("role credentials escaped")
+	}
+	var versions int
+	if err := admin.QueryRow("SELECT count(*) FROM tetral_schema_migrations").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 {
+		t.Fatalf("role failure changed migration history: %d versions", versions)
 	}
 }

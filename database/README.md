@@ -19,6 +19,11 @@ Run `tetral-db-prepare` before a fresh installation and before starting
 updated workloads whenever the schema or role contract changes. The command
 applies pending schema migrations with the administrative connection, then
 applies the role contract. Repeating the command preserves applied migrations.
+The administrative connection must authenticate as a PostgreSQL superuser
+(`rolsuper=true`); `CREATEROLE` or membership in the migration role is not
+sufficient for the installer's role attributes and ownership operations. The
+command checks the effective connected role before applying any migration and
+fails without changing schema or roles if it is not a superuser.
 
 The deployed Alpha 1 schema is immutable V1. V2 adds nullable
 `git_identity_name` / `git_identity_email` columns and their paired-value
@@ -81,7 +86,10 @@ An up-to-date database produces no per-version migration records.
 
 The preparation command emits JSON on stderr with `service.name=db-prepare`.
 `database.prepare.started`, `.completed`, and `.failed` describe the whole
-command; failures identify `step` without serializing input or raw errors.
+command; failures identify `step` and `error.message_safe` without serializing
+input or raw errors. Safe reasons distinguish invalid input, insufficient
+administrative privileges, and role conflicts; unclassified driver failures use
+a generic message for the failed stage.
 Detailed `schema.migration.failed` records precede the command failure summary.
 A role-stage failure may follow successfully committed migration records.
 Container stderr can be collected by the deployment's log agent; an arbitrary

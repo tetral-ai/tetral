@@ -6,9 +6,9 @@
  * before concrete SQL-backed stores or resolvers are constructed. The
  * provider-gateway and MCP connector startup paths pass this module a tagged
  * SQL client; the verifier asks PostgreSQL for the registry's presence and
- * ordered contents through SELECT statements only. `api` startup is the
- * sole production migration owner and uses Engine storage to apply and stamp
- * migrations.
+ * ordered contents through SELECT statements only. `cmd/tetral-db-prepare`
+ * is the sole production migration entrypoint and uses Engine storage to apply
+ * and stamp migrations. Serving processes only verify the prepared schema.
  *
  * A usable history starts at version one, is contiguous and duplicate-free,
  * has exactly the versions known to this binary, and matches every pinned

@@ -130,6 +130,12 @@ plus `migration`; every value supplies an operator-chosen `name` and
 `password`. Do not put the JSON or administrative DSN in the repository,
 command arguments, shell history, or Kubernetes manifest.
 
+`TETRAL_DATABASE_ADMIN_URL` must connect as a PostgreSQL superuser
+(`rolsuper=true`). A `CREATEROLE` administrator or migration-role membership
+alone does not satisfy the current installer's requirements. The command checks
+this privilege before changing schema or roles; a failed check stops preparation
+with a safe error message.
+
 ```bash
 export TETRAL_DATABASE_ADMIN_URL
 go run ./cmd/tetral-db-prepare \
