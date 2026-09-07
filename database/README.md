@@ -15,15 +15,32 @@ contracts.
   boundary; application startup verifies schema and role posture but does not
   repair either.
 
-Run `tetral-postgresql-roles` once before a fresh installation and whenever the
-repository-owned role contract changes. The command constructs the current V1
-schema with the administrative connection, applies the role contract, and is
-idempotent. Runtime services then use only their serving DSNs; API alone also
+Run `tetral-postgresql-roles` before a fresh installation and before starting
+updated workloads whenever the schema or role contract changes. The command
+applies pending schema migrations with the administrative connection, then
+applies the role contract. Repeating the command preserves applied migrations.
+
+The deployed Alpha 1 schema is immutable V1. V2 adds nullable
+`git_identity_name` / `git_identity_email` columns and their paired-value
+constraint to `session_github_repository_resources`. Existing repository data
+and V1 history remain unchanged; NULL identities retain the default Git
+identity. Fresh databases apply V1 then V2; existing V1 databases apply only V2.
+The V2 DDL and its history entry commit in one transaction, so a failed V2 can be
+retried without partial columns. Go and Gateway readiness require both versions.
+Do not edit stored checksums to bypass a mismatch: a database created from a
+rewritten V1 is not the deployed Alpha 1 baseline and is rejected as drift.
+
+This is a forward migration, with no automatic downgrade. An older binary
+rejects the V2 schema as ahead; upgrading the schema therefore also changes the
+rollback requirements. Preserve a database backup before an upgrade that may
+need to return to an older binary.
+
+Runtime services then use only their serving DSNs; API alone also
 receives the separate migration-owner DSN for its pinned migration transaction.
 
 Tests use a different capability model. `internal/storage/storagetest` creates
-one immutable schema template per exact baseline identity, then gives every
-native test a private cloned database and unique NOBYPASSRLS login. Those broad
+one immutable schema template per exact migration-history identity, then gives
+every native test a private cloned database and unique NOBYPASSRLS login. Those broad
 test-only grants never define production privileges. Production authorization
 tests use `storagetest.OpenWorkloadDB`: it applies the real installer contract
 to a private clone and authenticates as the selected workload's unique login.

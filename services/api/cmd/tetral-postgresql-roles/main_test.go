@@ -51,8 +51,8 @@ func TestRunConstructsFreshSchemaBeforeInstallingRoles(t *testing.T) {
 	if err := admin.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
 		t.Fatal(err)
 	}
-	if tables == 0 || stamps != 1 {
-		t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and one stamp", tables, stamps)
+	if tables == 0 || stamps != 2 {
+		t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and two stamps", tables, stamps)
 	}
 }
 

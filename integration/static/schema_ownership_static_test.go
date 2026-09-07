@@ -188,6 +188,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 	}
 	if goRegistryLiteral == nil {
 		t.Fatal("could not locate Go postgresqlMigrationRegistry composite literal")
+		return
 	}
 	type goRegistryEntry struct {
 		version  string
@@ -248,6 +249,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 		steps           string
 	}{
 		{checksumVersion: "One", steps: "postgresqlBaselineSteps"},
+		{checksumVersion: "Two", steps: "postgresqlGitIdentitySteps"},
 	}
 	if len(wantRegistry) != len(goChecksums) {
 		t.Fatalf("Go executable schema registry expectation count = %d; want %d checksum declarations", len(wantRegistry), len(goChecksums))

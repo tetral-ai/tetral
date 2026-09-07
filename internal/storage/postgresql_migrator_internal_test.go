@@ -1,25 +1,16 @@
 package storage
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
 )
 
-func TestPostgreSQLSchemaVersionOneChecksumMatchesExactOrderedPayload(t *testing.T) {
-	hash := sha256.New()
-	var length [8]byte
-	for _, step := range postgresqlBaselineSteps() {
-		binary.BigEndian.PutUint64(length[:], uint64(len(step.ddl)))
-		_, _ = hash.Write(length[:])
-		_, _ = hash.Write([]byte(step.ddl))
-	}
-	got := hex.EncodeToString(hash.Sum(nil))
-	if got != PostgreSQLSchemaVersionOneChecksum {
-		t.Fatalf("exact ordered baseline checksum = %q, declared = %q", got, PostgreSQLSchemaVersionOneChecksum)
+func TestPostgreSQLMigrationChecksumsMatchExactOrderedPayloads(t *testing.T) {
+	for _, migration := range postgresqlMigrationRegistry() {
+		if got := checksumPostgreSQLSchemaSteps(migration.steps); got != migration.checksum {
+			t.Fatalf("version %d payload checksum = %q, declared = %q", migration.version, got, migration.checksum)
+		}
 	}
 }
 

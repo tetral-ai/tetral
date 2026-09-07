@@ -26,8 +26,8 @@ func TestMigrateSchemaCreatesAndStampsBaselineAtomically(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("read migration stamp count: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("migration stamp count = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("migration stamp count = %d, want 2", count)
 	}
 	assertTableExists(t, db, "sessions", true)
 	assertTableExists(t, db, "session_turn_retries", true)
@@ -48,7 +48,7 @@ func TestMigrateSchemaCreatesQueuePartitionSequenceSchema(t *testing.T) {
 	var version int64
 	var checksum string
 	if err := db.QueryRowContext(ctx,
-		`SELECT version, checksum FROM tetral_schema_migrations`,
+		`SELECT version, checksum FROM tetral_schema_migrations WHERE version = 1`,
 	).Scan(&version, &checksum); err != nil {
 		t.Fatalf("read schema migration stamp: %v", err)
 	}
@@ -78,16 +78,6 @@ func TestMigrateSchemaOwnsAttachmentAuthorityInboxIndex(t *testing.T) {
 	}
 	assertAttachmentAuthorityInboxIndex(t, db)
 
-	if _, err := db.ExecContext(ctx, `DROP INDEX session_runtime_inbox_attachment_authority_lookup`); err != nil {
-		t.Fatalf("drop attachment authority Inbox index: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM tetral_schema_migrations WHERE version = 1`); err != nil {
-		t.Fatalf("clear disposable baseline stamp: %v", err)
-	}
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("reseed disposable baseline: %v", err)
-	}
-	assertAttachmentAuthorityInboxIndex(t, db)
 }
 
 func assertAttachmentAuthorityInboxIndex(t testing.TB, db *sql.DB) {
@@ -120,8 +110,8 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&stampCount); err != nil {
 		t.Fatalf("count migration stamps: %v", err)
 	}
-	if stampCount != 1 {
-		t.Fatalf("migration stamp count = %d, want 1", stampCount)
+	if stampCount != 2 {
+		t.Fatalf("migration stamp count = %d, want 2", stampCount)
 	}
 
 	var nullable string
@@ -167,7 +157,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "6f1ec030d986cec0ae83cc9a5abc818045b5d3a388a9434483d05a5bcdd9fc44"
+	const want = "d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -179,25 +169,20 @@ func TestMigrateSchemaRerunKeepsAllStampsUnchanged(t *testing.T) {
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("first MigrateSchema: %v", err)
 	}
-	var firstChecksum string
-	var firstAppliedAt time.Time
-	if err := db.QueryRowContext(ctx, `SELECT checksum, applied_at FROM tetral_schema_migrations WHERE version = 1`).Scan(&firstChecksum, &firstAppliedAt); err != nil {
-		t.Fatalf("read first stamp: %v", err)
+	stamp := func() string {
+		t.Helper()
+		var value string
+		if err := db.QueryRowContext(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM tetral_schema_migrations m`).Scan(&value); err != nil {
+			t.Fatalf("read migration stamps: %v", err)
+		}
+		return value
 	}
+	before := stamp()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("second MigrateSchema: %v", err)
 	}
-	var count int
-	var checksum string
-	var appliedAt time.Time
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
-		t.Fatalf("read rerun stamp: %v", err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT checksum, applied_at FROM tetral_schema_migrations WHERE version = 1`).Scan(&checksum, &appliedAt); err != nil {
-		t.Fatalf("read rerun version-one stamp: %v", err)
-	}
-	if count != 1 || checksum != firstChecksum || !appliedAt.Equal(firstAppliedAt) {
-		t.Fatalf("rerun stamp = count %d version-one checksum %q applied_at %v; want unchanged count 1 checksum %q applied_at %v", count, checksum, appliedAt, firstChecksum, firstAppliedAt)
+	if after := stamp(); after != before {
+		t.Fatal("rerun changed migration history")
 	}
 }
 
@@ -241,7 +226,7 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			name: "ahead",
 			setup: func(t *testing.T, db *sql.DB) {
 				migrateForHistoryTest(t, db)
-				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (2, $1)`, strings.Repeat("a", 64)); err != nil {
+				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (3, $1)`, strings.Repeat("a", 64)); err != nil {
 					t.Fatalf("insert ahead row: %v", err)
 				}
 			},
@@ -355,15 +340,15 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("initial MigrateSchema: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM tetral_schema_migrations`); err != nil {
-		t.Fatalf("make version one pending for cancellation proof: %v", err)
+	if _, err := db.ExecContext(ctx, `ALTER TABLE session_github_repository_resources DROP CONSTRAINT session_github_repository_git_identity_shape, DROP COLUMN git_identity_name, DROP COLUMN git_identity_email; DELETE FROM tetral_schema_migrations WHERE version = 2`); err != nil {
+		t.Fatalf("make version two pending for cancellation proof: %v", err)
 	}
 	blocker, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin blocker: %v", err)
 	}
-	if _, err := blocker.ExecContext(ctx, `LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE`); err != nil {
-		t.Fatalf("lock sessions: %v", err)
+	if _, err := blocker.ExecContext(ctx, `LOCK TABLE session_github_repository_resources IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock repository resources: %v", err)
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
 	result := make(chan error, 1)
@@ -376,7 +361,7 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	case err = <-result:
 	case <-time.After(2 * time.Second):
 		_ = blocker.Rollback()
-		t.Fatal("MigrateSchema did not honor cancellation while blocked in baseline DDL")
+		t.Fatal("MigrateSchema did not honor cancellation while blocked in upgrade DDL")
 	}
 	if rollbackErr := blocker.Rollback(); rollbackErr != nil {
 		t.Fatalf("rollback blocker: %v", rollbackErr)
@@ -390,8 +375,8 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&migrationRows); err != nil {
 		t.Fatalf("read migration rows after cancellation: %v", err)
 	}
-	if migrationRows != 0 {
-		t.Fatalf("migration rows after cancellation = %d; want 0", migrationRows)
+	if migrationRows != 1 {
+		t.Fatalf("migration rows after cancellation = %d; want 1", migrationRows)
 	}
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema after cancellation (lock must be released): %v", err)
@@ -439,8 +424,8 @@ func TestMigrateSchemaConcurrentReplicasSerialize(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count stamps: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("stamp count = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("stamp count = %d, want 2", count)
 	}
 }
 

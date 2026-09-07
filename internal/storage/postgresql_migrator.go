@@ -17,12 +17,11 @@ const (
 	// cross-connection serialization contract.
 	PostgreSQLSchemaAdvisoryLockID int64 = 0x7465_7472_616c_7363 // "tetralsc"
 
-	// PostgreSQLSchemaVersionOneChecksum pins the canonical byte stream of the
-	// exact ordered baseline statements returned by postgresqlBaselineSteps.
-	// Before the first release baseline is declared, schema-file edits replace
-	// that payload and digest together. After declaration, changes append a new
-	// migration and leave this digest immutable.
-	PostgreSQLSchemaVersionOneChecksum = "6f1ec030d986cec0ae83cc9a5abc818045b5d3a388a9434483d05a5bcdd9fc44"
+	// PostgreSQLSchemaVersionOneChecksum pins the immutable Alpha 1 baseline.
+	PostgreSQLSchemaVersionOneChecksum = "d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6"
+
+	// PostgreSQLSchemaVersionTwoChecksum pins the additive Git identity migration.
+	PostgreSQLSchemaVersionTwoChecksum = "36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458"
 
 	createPostgreSQLSchemaMigrationsTable = `CREATE TABLE tetral_schema_migrations (
 		version BIGINT PRIMARY KEY,
@@ -106,6 +105,11 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 			version:  1,
 			checksum: PostgreSQLSchemaVersionOneChecksum,
 			steps:    postgresqlBaselineSteps(),
+		},
+		{
+			version:  2,
+			checksum: PostgreSQLSchemaVersionTwoChecksum,
+			steps:    postgresqlGitIdentitySteps(),
 		},
 	}
 }
