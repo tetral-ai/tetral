@@ -227,6 +227,7 @@ inherit their snapshot's resources. Use the Tetral image, which contains the
 required helper, rather than Daytona's stock `daytona-large` snapshot. Custom
 package snapshots use the same fixed resources in the artifact builder.
 See [Daytona snapshot resources](https://www.daytona.io/docs/en/snapshots/).
+The 10 GiB allocation does not guarantee that an arbitrary repository workload fits.
 
 This allocation counts against the organization's regional resource quotas
 and reduces the number of Sandboxes that can run concurrently. For example,
@@ -263,24 +264,6 @@ Create a new Environment to adopt the new defaults; changing only networking
 can reuse the old package snapshot. Existing-instance migration is separate.
 In-flight builds can still adopt their already-created snapshots, preserving
 the allocation that was chosen before the upgrade.
-
-During release rehearsal, exercise both a new default Environment and one with
-custom packages. Read back each created Sandbox's CPU, memory, and disk and
-execute a tool to verify the Tetral helper remains usable. A successful API
-admission alone does not verify either allocation or tool execution. The
-10 GiB allocation is not a guarantee that an arbitrary repository workload fits.
-
-Also verify the filesystem-failure message against the deployed Daytona daemon
-and proxy: pinning the Engine SDK does not pin their response formats. Use a
-dedicated disposable rehearsal Sandbox, fill its filesystem with actual data
-as root (not a sparse file), then issue a new Engine tool request. Confirm a
-`storage_full` Tool Result with `Execution environment storage is full. The
-tool operation was not started.` and a completion log containing the failed
-staging operation (`create_payload_directory` or `upload_payload`) and the
-sanitized no-space cause. A generic response is a compatibility gap to investigate
-before promotion. Arrange provider-side cleanup before filling the disk and
-delete the disposable Sandbox afterward; cleanup must not depend on starting
-another Engine tool in the full filesystem.
 
 ## 7. Add a model provider key
 

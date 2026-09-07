@@ -11,20 +11,24 @@ func TestPayloadFilesystemFailureScope(t *testing.T) {
 	const destination = root + "/invocation/payload.json"
 	const noSpace = ": no space left on device"
 	for _, tc := range []struct {
-		name, message string
-		want          bool
+		name, operation, message string
+		want                     bool
 	}{
-		{"exact file", "write " + destination + noSpace, true},
-		{"staging parent", "mkdir " + root + noSpace, true},
-		{"unrelated path", "write /workspace/output" + noSpace, false},
-		{"sibling prefix", "mkdir " + root + "-evil" + noSpace, false},
-		{"above staging root", "mkdir /tmp/tetral-runtime" + noSpace, false},
-		{"wrong operation", "remove " + destination + noSpace, false},
-		{"different cause", "write " + destination + ": permission denied", false},
-		{"quoted user output", "command said: write " + destination + noSpace, false},
+		{"exact file", "upload_payload", "write " + destination + noSpace, true},
+		{"staging parent", "upload_payload", "mkdir " + root + noSpace, true},
+		{"unrelated path", "upload_payload", "write /workspace/output" + noSpace, false},
+		{"sibling prefix", "upload_payload", "mkdir " + root + "-evil" + noSpace, false},
+		{"above staging root", "upload_payload", "mkdir /tmp/tetral-runtime" + noSpace, false},
+		{"wrong operation", "upload_payload", "remove " + destination + noSpace, false},
+		{"different cause", "upload_payload", "write " + destination + ": permission denied", false},
+		{"quoted user output", "upload_payload", "command said: write " + destination + noSpace, false},
+		{"directory mkdir", "create_payload_directory", "mkdir " + destination + noSpace, true},
+		{"directory rejects open", "create_payload_directory", "open " + destination + noSpace, false},
+		{"directory rejects write", "create_payload_directory", "write " + destination + noSpace, false},
+		{"directory rejects close", "create_payload_directory", "close " + destination + noSpace, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := payloadPathError(tc.message, "upload_payload", []string{destination}, syscall.ENOSPC); got != tc.want {
+			if got := payloadPathError(tc.message, tc.operation, []string{destination}, syscall.ENOSPC); got != tc.want {
 				t.Fatalf("classify %q = %t; want %t", tc.message, got, tc.want)
 			}
 		})

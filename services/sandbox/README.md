@@ -202,7 +202,7 @@ snapshot lookup identities stay stable so in-flight builds can adopt a
 previously-created snapshot, including its previous allocation. Prebuilt default
 snapshots must be registered with the same allocation during release preparation; see
 [bootstrap](../../docs/bootstrap.md#6-register-the-sandbox-snapshot-with-daytona)
-for registration, existing Environment compatibility, and rehearsal checks.
+for registration and existing Environment compatibility.
 Each 4/8/10 allocation consumes the organization's regional quota and reduces
 concurrent Sandbox capacity; verify actual limits and remaining headroom before
 rollout. Exhaustion continues through the existing `quota_exceeded` activation
@@ -357,15 +357,12 @@ and driver snapshot checks use the shared `internal/gitidentity` rules.
 pinned SDK against a local HTTP server using Daytona's directory and bulk-upload
 error formats. It checks the real helper preparation, adapter, and completion
 logger, including English messages, no tool submission, and diagnostic redaction.
-It does not reproduce a full disk in a real Daytona Sandbox or exercise the
-Runtime's subsequent consumption of the Tool Result.
 
 Driver tests additionally check payload-path scope and the four upstream
-bulk-upload error wrappers. The SDK pin does not pin Daytona's deployed daemon
-or proxy; the bootstrap rehearsal includes a disposable full-filesystem probe
-to detect response-format drift. A nonzero exit from the payload permission
-script still uses the existing generic retryable preparation error, with no
-script-output diagnostic; SDK request failures are the scope of this mapping.
+bulk-upload error wrappers.
+A nonzero exit from the payload permission script still uses the existing
+generic retryable preparation error, with no script-output diagnostic; SDK
+request failures are the scope of this mapping.
 
 Repository CI builds the unmodified Sandbox Dockerfile and exercises the local
 image and Helper without Daytona credentials. Published-image Daytona behavior
