@@ -30,40 +30,10 @@ on:
         description: Rehearsal Evidence digest for promotion
         required: false
         type: string
-      case_manifest_digest:
-        description: External rehearsal case-manifest SHA-256
+      report_digest:
+        description: Verified Kit report OCI digest in the release metadata repository
         required: false
         type: string
-      case_count:
-        description: Number of externally rehearsed cases
-        required: false
-        type: number
-      local_evidence_digest:
-        description: External rehearsal evidence SHA-256
-        required: false
-        type: string
-      rehearsal_values_digest:
-        description: SHA-256 of the exact values exercised by rehearsal
-        required: false
-        type: string
-      rehearsal_render_digest:
-        description: SHA-256 of the exact rendered candidate exercised by rehearsal
-        required: false
-        type: string
-      rehearsal_started_at:
-        description: Rehearsal start time in RFC3339
-        required: false
-        type: string
-      rehearsal_finished_at:
-        description: Rehearsal finish time in RFC3339
-        required: false
-        type: string
-      rehearsal_result:
-        description: External rehearsal result
-        required: false
-        default: pass
-        type: choice
-        options: [pass, fail]
       cleanup_apply:
         description: Apply the exact printed cleanup set
         required: false
@@ -134,12 +104,14 @@ jobs:
           MODE: ${{ inputs.mode }}
           CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
           EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
+          REPORT_DIGEST: ${{ inputs.report_digest }}
         run: |
           set -euo pipefail
           digest='^sha256:[0-9a-f]{64}$'
           case "$MODE" in
             state|candidate) ;;
-            record-rehearsal|retire-candidate|cleanup-candidates) [[ "$CANDIDATE_DIGEST" =~ $digest ]] ;;
+            record-rehearsal) [[ "$CANDIDATE_DIGEST" =~ $digest && "$REPORT_DIGEST" =~ $digest ]] ;;
+            retire-candidate|cleanup-candidates) [[ "$CANDIDATE_DIGEST" =~ $digest ]] ;;
             promote) [[ "$CANDIDATE_DIGEST" =~ $digest && "$EVIDENCE_DIGEST" =~ $digest ]] ;;
             *) exit 1 ;;
           esac
@@ -456,7 +428,7 @@ jobs:
           echo "Candidate Chart: $RELEASE_METADATA_REPOSITORY@$chart_manifest" >> "$GITHUB_STEP_SUMMARY"
 
   record-rehearsal:
-    name: Record bounded rehearsal attestation
+    name: Record verified rehearsal report
     if: inputs.mode == 'record-rehearsal'
     needs: validate
     environment: release
@@ -484,34 +456,31 @@ jobs:
           ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
-          CASE_MANIFEST_DIGEST: ${{ inputs.case_manifest_digest }}
-          CASE_COUNT: ${{ inputs.case_count }}
-          LOCAL_EVIDENCE_DIGEST: ${{ inputs.local_evidence_digest }}
-          REHEARSAL_VALUES_DIGEST: ${{ inputs.rehearsal_values_digest }}
-          REHEARSAL_RENDER_DIGEST: ${{ inputs.rehearsal_render_digest }}
-          STARTED_AT: ${{ inputs.rehearsal_started_at }}
-          FINISHED_AT: ${{ inputs.rehearsal_finished_at }}
-          RESULT: ${{ inputs.rehearsal_result }}
+          REPORT_DIGEST: ${{ inputs.report_digest }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$RESULT" = pass
           digest='^sha256:[0-9a-f]{64}$'
-          [[ "$CASE_MANIFEST_DIGEST" =~ $digest && "$LOCAL_EVIDENCE_DIGEST" =~ $digest && "$REHEARSAL_VALUES_DIGEST" =~ $digest && "$REHEARSAL_RENDER_DIGEST" =~ $digest ]]
-          test "$CASE_COUNT" -ge 1
+          [[ "$REPORT_DIGEST" =~ $digest ]]
           fixed_candidate="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$RELEASE_METADATA_REPOSITORY:candidate-$ARTIFACT_VERSION")"
           test "$fixed_candidate" = "$CANDIDATE_DIGEST"
           ./scripts/release-oci-record.sh fetch candidate "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" candidate.json >/dev/null
           go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
+          test "$(jq -r .source_commit candidate.json)" = "$SOURCE_COMMIT"
+          test "$(jq -r .version.git candidate.json)" = "$VERSION"
           deployment_id="$(./scripts/release-github-deployment.sh "$SOURCE_COMMIT" '${{ github.run_id }}')"
           test "$deployment_id" -ge 1
+          ./scripts/release-oci-record.sh fetch rehearsal-report "$RELEASE_METADATA_REPOSITORY@$REPORT_DIGEST" report.json >/dev/null
           evidence_ref="$RELEASE_METADATA_REPOSITORY:rehearsal-$ARTIFACT_VERSION"
           if existing="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$evidence_ref" 2>/dev/null)"; then
             ./scripts/release-oci-record.sh fetch rehearsal "$RELEASE_METADATA_REPOSITORY@$existing" existing-evidence.json >/dev/null
             jq -S 'del(.workflow_run_id,.workflow_run_attempt,.deployment_id,.recorded_at)' existing-evidence.json > existing-semantic.json
           fi
-          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --arg candidate "$CANDIDATE_DIGEST" --arg case_manifest "$CASE_MANIFEST_DIGEST" --argjson case_count "$CASE_COUNT" --arg local "$LOCAL_EVIDENCE_DIGEST" --arg values "$REHEARSAL_VALUES_DIGEST" --arg render "$REHEARSAL_RENDER_DIGEST" --arg result "$RESULT" --arg started "$STARTED_AT" --arg finished "$FINISHED_AT" --arg recorded "$(date -u +%FT%TZ)" --argjson run_id "${{ github.run_id }}" --argjson attempt "${{ github.run_attempt }}" --argjson deployment "$deployment_id" \
-            '{schema:"tetral.rehearsal-evidence/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,candidate_digest:$candidate,case_manifest_digest:$case_manifest,case_count:$case_count,local_evidence_digest:$local,values_digest:$values,render_digest:$render,result:$result,workflow_run_id:$run_id,workflow_run_attempt:$attempt,deployment_id:$deployment,started_at:$started,finished_at:$finished,recorded_at:$recorded}' > evidence.json
+          go run ./internal/release/cmd/tetral-release record-rehearsal \
+            --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" \
+            --report report.json --report-digest "$REPORT_DIGEST" \
+            --workflow-run-id '${{ github.run_id }}' --workflow-run-attempt '${{ github.run_attempt }}' \
+            --deployment-id "$deployment_id" --now "$(date -u +%FT%TZ)" > evidence.json
           go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
           echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
           if test -n "${existing:-}"; then

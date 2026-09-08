@@ -18,6 +18,7 @@ const (
 	CandidateType               = "application/vnd.tetral.release-candidate.v1+json"
 	HelmCandidateType           = "application/vnd.tetral.release-helm-candidate.v1"
 	HelmChartLayerType          = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+	RehearsalReportType         = "application/vnd.tetral.rehearsal-report.v1+json"
 	RehearsalType               = "application/vnd.tetral.rehearsal-evidence.v1+json"
 	AuthorizationType           = "application/vnd.tetral.release-authorization.v1+json"
 	DispositionType             = "application/vnd.tetral.release-disposition.v1+json"

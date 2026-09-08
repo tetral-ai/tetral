@@ -85,6 +85,8 @@ Pull request jobs have read-only repository permission, do not receive external
 service credentials, and never execute PR code through `pull_request_target`.
 External Provider, Daytona, MCP, publication, and deployment rehearsals remain
 operator-owned release activities.
+Their step-level report and protected publication handoff are described in
+[Rehearsal evidence and release](rehearsal-release.md).
 
 Fork pull requests follow the repository's `all_external_contributors` policy:
 the workflow stays pending until a maintainer approves execution. Approval runs
