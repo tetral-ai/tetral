@@ -97,22 +97,26 @@ type CandidateManifest struct {
 }
 
 type RehearsalEvidence struct {
-	Schema              string    `json:"schema"`
-	Version             Version   `json:"version"`
-	SourceCommit        string    `json:"source_commit"`
-	CandidateDigest     string    `json:"candidate_digest"`
-	CaseManifestDigest  string    `json:"case_manifest_digest"`
-	CaseCount           int       `json:"case_count"`
-	LocalEvidenceDigest string    `json:"local_evidence_digest"`
-	ValuesDigest        string    `json:"values_digest"`
-	RenderDigest        string    `json:"render_digest"`
-	Result              string    `json:"result"`
-	WorkflowRunID       int64     `json:"workflow_run_id"`
-	WorkflowRunAttempt  int       `json:"workflow_run_attempt"`
-	DeploymentID        int64     `json:"deployment_id"`
-	StartedAt           time.Time `json:"started_at"`
-	FinishedAt          time.Time `json:"finished_at"`
-	RecordedAt          time.Time `json:"recorded_at"`
+	// Historical evidence omitted the report. It remains readable for state
+	// reconstruction; new recording and promotion require the report.
+	ReportDigest        string           `json:"report_digest,omitempty"`
+	Report              *RehearsalReport `json:"report,omitempty"`
+	Schema              string           `json:"schema"`
+	Version             Version          `json:"version"`
+	SourceCommit        string           `json:"source_commit"`
+	CandidateDigest     string           `json:"candidate_digest"`
+	CaseManifestDigest  string           `json:"case_manifest_digest"`
+	CaseCount           int              `json:"case_count"`
+	LocalEvidenceDigest string           `json:"local_evidence_digest"`
+	ValuesDigest        string           `json:"values_digest"`
+	RenderDigest        string           `json:"render_digest"`
+	Result              string           `json:"result"`
+	WorkflowRunID       int64            `json:"workflow_run_id"`
+	WorkflowRunAttempt  int              `json:"workflow_run_attempt"`
+	DeploymentID        int64            `json:"deployment_id"`
+	StartedAt           time.Time        `json:"started_at"`
+	FinishedAt          time.Time        `json:"finished_at"`
+	RecordedAt          time.Time        `json:"recorded_at"`
 }
 
 type Authorization struct {
@@ -202,6 +206,31 @@ func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evid
 		if !digestPattern.MatchString(digest) {
 			return fmt.Errorf("rehearsal contains an invalid digest")
 		}
+	}
+	if evidence.Report != nil {
+		report := *evidence.Report
+		if err := ValidateRehearsalReport(report, now); err != nil {
+			return err
+		}
+		cases := map[string]bool{}
+		for _, step := range report.Plan.Steps {
+			cases[step.CaseID] = true
+		}
+		reportDigest, err := RehearsalReportArtifactDigest(report)
+		if err != nil || reportDigest != evidence.ReportDigest {
+			return fmt.Errorf("rehearsal evidence report identity is invalid")
+		}
+		localDigest, err := ContentDigest(report)
+		if err != nil || localDigest != evidence.LocalEvidenceDigest ||
+			report.PlanDigest != evidence.CaseManifestDigest || len(cases) != evidence.CaseCount ||
+			report.Plan.CandidateDigest != candidateDigest || report.Plan.SourceCommit != candidate.SourceCommit ||
+			report.Plan.Version != candidate.Version.Git || report.Plan.ValuesDigest != evidence.ValuesDigest ||
+			report.Plan.RenderDigest != evidence.RenderDigest || !report.StartedAt.Equal(evidence.StartedAt) ||
+			!report.FinishedAt.Equal(evidence.FinishedAt) {
+			return fmt.Errorf("rehearsal evidence does not match its report")
+		}
+	} else if evidence.ReportDigest != "" {
+		return fmt.Errorf("rehearsal evidence report is missing")
 	}
 	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.RecordedAt.After(now) || evidence.FinishedAt.After(now) || now.Sub(evidence.FinishedAt) > 7*24*time.Hour {
 		return fmt.Errorf("rehearsal result or time window is invalid")

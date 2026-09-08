@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan>")
+		fail("usage: tetral-release <validate-version|validate-candidate|record-rehearsal|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan>")
 	}
 	var err error
 	switch os.Args[1] {
@@ -21,6 +21,8 @@ func main() {
 		err = validateVersion(os.Args[2:])
 	case "validate-candidate":
 		err = validateCandidate(os.Args[2:])
+	case "record-rehearsal":
+		err = recordRehearsal(os.Args[2:])
 	case "validate-rehearsal":
 		err = validateRehearsal(os.Args[2:])
 	case "validate-authorization":
@@ -81,6 +83,7 @@ func validateRehearsal(arguments []string) error {
 	candidatePath := flags.String("candidate", "", "candidate JSON")
 	candidateDigest := flags.String("candidate-digest", "", "Candidate Manifest digest")
 	evidencePath := flags.String("evidence", "", "rehearsal evidence JSON")
+	requireReport := flags.Bool("require-report", false, "require verified step-level report for a new publication")
 	nowValue := flags.String("now", "", "RFC3339 decision time")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -97,7 +100,47 @@ func validateRehearsal(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if *requireReport && evidence.Report == nil {
+		return fmt.Errorf("new rehearsal publication requires a verified step-level report")
+	}
 	return releasecontract.ValidateRehearsal(candidate, *candidateDigest, evidence, now)
+}
+
+func recordRehearsal(arguments []string) error {
+	flags := flag.NewFlagSet("record-rehearsal", flag.ContinueOnError)
+	candidatePath := flags.String("candidate", "", "candidate JSON")
+	candidateDigest := flags.String("candidate-digest", "", "Candidate Manifest digest")
+	reportPath := flags.String("report", "", "sanitized rehearsal report JSON")
+	reportDigest := flags.String("report-digest", "", "Rehearsal Report OCI manifest digest")
+	runID := flags.Int64("workflow-run-id", 0, "protected workflow run ID")
+	attempt := flags.Int("workflow-run-attempt", 0, "protected workflow attempt")
+	deploymentID := flags.Int64("deployment-id", 0, "protected deployment ID")
+	nowValue := flags.String("now", "", "RFC3339 recording time")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	var candidate releasecontract.CandidateManifest
+	if err := readJSON(*candidatePath, &candidate); err != nil {
+		return err
+	}
+	body, err := os.ReadFile(*reportPath)
+	if err != nil {
+		return fmt.Errorf("cannot read rehearsal report")
+	}
+	report, err := releasecontract.DecodeRehearsalReport(body)
+	if err != nil {
+		return err
+	}
+	now, err := parseTime(*nowValue)
+	if err != nil {
+		return err
+	}
+	evidence, err := releasecontract.RecordRehearsal(candidate, *candidateDigest, report, *reportDigest,
+		releasecontract.RehearsalRecording{WorkflowRunID: *runID, WorkflowRunAttempt: *attempt, DeploymentID: *deploymentID, RecordedAt: now})
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, evidence)
 }
 
 func validateAuthorization(arguments []string) error {
@@ -122,7 +165,7 @@ func validateAuthorization(arguments []string) error {
 
 func buildArtifact(arguments []string) error {
 	flags := flag.NewFlagSet("artifact", flag.ContinueOnError)
-	kind := flags.String("kind", "", "reservation, candidate, rehearsal, authorization, disposition, or helm-candidate")
+	kind := flags.String("kind", "", "reservation, candidate, rehearsal, rehearsal-report, authorization, disposition, or helm-candidate")
 	input := flags.String("input", "", "canonical layer bytes")
 	output := flags.String("output", "", "output directory")
 	if err := flags.Parse(arguments); err != nil {
@@ -135,6 +178,21 @@ func buildArtifact(arguments []string) error {
 	artifactType, layerType, err := artifactMedia(*kind)
 	if err != nil {
 		return err
+	}
+	if *kind == "rehearsal-report" {
+		report, err := releasecontract.DecodeRehearsalReport(body)
+		if err != nil {
+			return err
+		}
+		// Artifact packaging preserves historical reports. Recording/promotion
+		// additionally enforce freshness against the actual decision time.
+		if err := releasecontract.ValidateRehearsalReport(report, report.FinishedAt); err != nil {
+			return err
+		}
+		body, err = releasecontract.CanonicalJSON(report)
+		if err != nil {
+			return err
+		}
 	}
 	if *kind != "helm-candidate" {
 		var value any
@@ -167,7 +225,7 @@ func buildArtifact(arguments []string) error {
 
 func validateLayout(arguments []string) error {
 	flags := flag.NewFlagSet("validate-layout", flag.ContinueOnError)
-	kind := flags.String("kind", "", "reservation, candidate, rehearsal, authorization, disposition, or helm-candidate")
+	kind := flags.String("kind", "", "reservation, candidate, rehearsal, rehearsal-report, authorization, disposition, or helm-candidate")
 	root := flags.String("root", "", "OCI layout root")
 	output := flags.String("output-layer", "", "validated layer output")
 	if err := flags.Parse(arguments); err != nil {
@@ -319,6 +377,8 @@ func artifactMedia(kind string) (string, string, error) {
 		return releasecontract.ReservationType, releasecontract.ReservationType, nil
 	case "candidate":
 		return releasecontract.CandidateType, releasecontract.CandidateType, nil
+	case "rehearsal-report":
+		return releasecontract.RehearsalReportType, releasecontract.RehearsalReportType, nil
 	case "rehearsal":
 		return releasecontract.RehearsalType, releasecontract.RehearsalType, nil
 	case "authorization":
