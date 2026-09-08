@@ -474,10 +474,6 @@ jobs:
           evidence_ref="$RELEASE_METADATA_REPOSITORY:rehearsal-$ARTIFACT_VERSION"
           if existing="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$evidence_ref" 2>/dev/null)"; then
             ./scripts/release-oci-record.sh fetch rehearsal "$RELEASE_METADATA_REPOSITORY@$existing" existing-evidence.json >/dev/null
-            if ! jq -e '.report != null' existing-evidence.json >/dev/null; then
-              echo 'This candidate has immutable legacy rehearsal evidence. Retire the unpublished candidate and issue a new version with a verified report; do not overwrite the existing evidence.' >&2
-              exit 1
-            fi
             jq -S 'del(.workflow_run_id,.workflow_run_attempt,.deployment_id,.recorded_at)' existing-evidence.json > existing-semantic.json
           fi
           go run ./internal/release/cmd/tetral-release record-rehearsal \
@@ -485,7 +481,7 @@ jobs:
             --report report.json --report-digest "$REPORT_DIGEST" \
             --workflow-run-id '${{ github.run_id }}' --workflow-run-attempt '${{ github.run_attempt }}' \
             --deployment-id "$deployment_id" --now "$(date -u +%FT%TZ)" > evidence.json
-          go run ./internal/release/cmd/tetral-release validate-rehearsal --require-report --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
+          go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
           echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
           if test -n "${existing:-}"; then
             jq -S 'del(.workflow_run_id,.workflow_run_attempt,.deployment_id,.recorded_at)' evidence.json > evidence-semantic.json
@@ -555,7 +551,7 @@ jobs:
           ./scripts/release-oci-record.sh fetch candidate "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" candidate.json >/dev/null
           ./scripts/release-oci-record.sh fetch rehearsal "$RELEASE_METADATA_REPOSITORY@$EVIDENCE_DIGEST" evidence.json >/dev/null
           go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
-          go run ./internal/release/cmd/tetral-release validate-rehearsal --require-report --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
+          go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
 
           reconstruct_release() {
             local phase="$1" facts="$phase-facts.json" state

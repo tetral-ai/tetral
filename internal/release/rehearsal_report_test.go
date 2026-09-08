@@ -22,7 +22,8 @@ func TestKitReportThroughReleaseCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := report.FinishedAt.Add(time.Minute).Format(time.RFC3339Nano)
+	// A valid report remains usable without re-exporting it to refresh its age.
+	now := report.FinishedAt.Add(10 * 24 * time.Hour).Format(time.RFC3339Nano)
 	candidate := validCandidate(t)
 	candidate.Version = mustVersion(t, report.Plan.Version)
 	candidate.SourceCommit = report.Plan.SourceCommit
@@ -74,13 +75,12 @@ func TestKitReportThroughReleaseCLI(t *testing.T) {
 	evidencePath := write("evidence.json", evidence)
 	validation := []string{"validate-rehearsal", "--candidate", candidatePath, "--candidate-digest", report.Plan.CandidateDigest,
 		"--evidence", evidencePath, "--now", now}
-	run(append(validation, "--require-report")...)
-	// Historical metadata remains readable, but cannot authorize a new promotion.
+	run(validation...)
+	// The same command must reject evidence without its required report.
 	evidence.Report, evidence.ReportDigest = nil, ""
 	write("evidence.json", evidence)
-	run(validation...)
-	if _, err := exec.Command(binary, append(validation, "--require-report")...).CombinedOutput(); err == nil {
-		t.Fatal("legacy metadata authorized a new publication without a report")
+	if _, err := exec.Command(binary, validation...).CombinedOutput(); err == nil {
+		t.Fatal("accepted evidence without a report")
 	}
 	// The complete OCI/CLI path must reject a failed sibling even if another leg
 	// of the same parent case passed later.
@@ -94,9 +94,13 @@ func TestKitReportThroughReleaseCLI(t *testing.T) {
 
 func reportFixture(t *testing.T) (CandidateManifest, string, RehearsalReport, time.Time) {
 	t.Helper()
+	return reportFixtureAt(t, time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC))
+}
+
+func reportFixtureAt(t *testing.T, now time.Time) (CandidateManifest, string, RehearsalReport, time.Time) {
+	t.Helper()
 	candidate := validCandidate(t)
 	digest := testDigest("candidate")
-	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	start := now.Add(-time.Hour)
 	observation := func(offset time.Duration, verdict string) RehearsalObservation {
 		return RehearsalObservation{
@@ -215,10 +219,6 @@ func TestRecordRehearsalDerivesAndBindsPublishedFacts(t *testing.T) {
 	}
 	if _, err := RecordRehearsal(candidate, testDigest("other candidate"), report, reportDigest, recording); err == nil {
 		t.Fatal("accepted report for another candidate")
-	}
-	recording.RecordedAt = now.Add(8 * 24 * time.Hour)
-	if _, err := RecordRehearsal(candidate, candidateDigest, report, reportDigest, recording); err == nil {
-		t.Fatal("accepted expired report")
 	}
 }
 

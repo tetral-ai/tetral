@@ -105,7 +105,7 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 		}
 	}
 	text := string(body)
-	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "report_digest", "record-rehearsal", "fetch rehearsal-report", "--require-report", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "authorization-$VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
+	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "report_digest", "record-rehearsal", "fetch rehearsal-report", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "authorization-$VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing immutable boundary %q", required)
 		}

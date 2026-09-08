@@ -97,10 +97,8 @@ type CandidateManifest struct {
 }
 
 type RehearsalEvidence struct {
-	// Historical evidence omitted the report. It remains readable for state
-	// reconstruction; new recording and promotion require the report.
-	ReportDigest        string           `json:"report_digest,omitempty"`
-	Report              *RehearsalReport `json:"report,omitempty"`
+	ReportDigest        string           `json:"report_digest"`
+	Report              *RehearsalReport `json:"report"`
 	Schema              string           `json:"schema"`
 	Version             Version          `json:"version"`
 	SourceCommit        string           `json:"source_commit"`
@@ -207,32 +205,31 @@ func ValidateRehearsal(candidate CandidateManifest, candidateDigest string, evid
 			return fmt.Errorf("rehearsal contains an invalid digest")
 		}
 	}
-	if evidence.Report != nil {
-		report := *evidence.Report
-		if err := ValidateRehearsalReport(report, now); err != nil {
-			return err
-		}
-		cases := map[string]bool{}
-		for _, step := range report.Plan.Steps {
-			cases[step.CaseID] = true
-		}
-		reportDigest, err := RehearsalReportArtifactDigest(report)
-		if err != nil || reportDigest != evidence.ReportDigest {
-			return fmt.Errorf("rehearsal evidence report identity is invalid")
-		}
-		localDigest, err := ContentDigest(report)
-		if err != nil || localDigest != evidence.LocalEvidenceDigest ||
-			report.PlanDigest != evidence.CaseManifestDigest || len(cases) != evidence.CaseCount ||
-			report.Plan.CandidateDigest != candidateDigest || report.Plan.SourceCommit != candidate.SourceCommit ||
-			report.Plan.Version != candidate.Version.Git || report.Plan.ValuesDigest != evidence.ValuesDigest ||
-			report.Plan.RenderDigest != evidence.RenderDigest || !report.StartedAt.Equal(evidence.StartedAt) ||
-			!report.FinishedAt.Equal(evidence.FinishedAt) {
-			return fmt.Errorf("rehearsal evidence does not match its report")
-		}
-	} else if evidence.ReportDigest != "" {
+	if evidence.Report == nil {
 		return fmt.Errorf("rehearsal evidence report is missing")
 	}
-	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.RecordedAt.After(now) || evidence.FinishedAt.After(now) || now.Sub(evidence.FinishedAt) > 7*24*time.Hour {
+	report := *evidence.Report
+	if err := ValidateRehearsalReport(report, now); err != nil {
+		return err
+	}
+	cases := map[string]bool{}
+	for _, step := range report.Plan.Steps {
+		cases[step.CaseID] = true
+	}
+	reportDigest, err := RehearsalReportArtifactDigest(report)
+	if err != nil || reportDigest != evidence.ReportDigest {
+		return fmt.Errorf("rehearsal evidence report identity is invalid")
+	}
+	localDigest, err := ContentDigest(report)
+	if err != nil || localDigest != evidence.LocalEvidenceDigest ||
+		report.PlanDigest != evidence.CaseManifestDigest || len(cases) != evidence.CaseCount ||
+		report.Plan.CandidateDigest != candidateDigest || report.Plan.SourceCommit != candidate.SourceCommit ||
+		report.Plan.Version != candidate.Version.Git || report.Plan.ValuesDigest != evidence.ValuesDigest ||
+		report.Plan.RenderDigest != evidence.RenderDigest || !report.StartedAt.Equal(evidence.StartedAt) ||
+		!report.FinishedAt.Equal(evidence.FinishedAt) {
+		return fmt.Errorf("rehearsal evidence does not match its report")
+	}
+	if evidence.CaseCount < 1 || evidence.Result != "pass" || evidence.WorkflowRunID < 1 || evidence.WorkflowRunAttempt < 1 || evidence.DeploymentID < 1 || evidence.StartedAt.IsZero() || !evidence.FinishedAt.After(evidence.StartedAt) || evidence.RecordedAt.Before(evidence.FinishedAt) || evidence.RecordedAt.After(now) || evidence.FinishedAt.After(now) {
 		return fmt.Errorf("rehearsal result or time window is invalid")
 	}
 	return nil

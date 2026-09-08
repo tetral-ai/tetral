@@ -102,7 +102,7 @@ func ValidateRehearsalReport(report RehearsalReport, now time.Time) error {
 		return fmt.Errorf("rehearsal plan digest does not match its contents")
 	}
 	if report.StartedAt.IsZero() || !report.FinishedAt.After(report.StartedAt) ||
-		report.FinishedAt.After(now) || now.Sub(report.FinishedAt) > 7*24*time.Hour {
+		report.FinishedAt.After(now) {
 		return fmt.Errorf("rehearsal report time window is invalid")
 	}
 	if len(plan.Steps) == 0 || len(plan.Steps) > 10000 || len(report.Attempts) > 100000 {

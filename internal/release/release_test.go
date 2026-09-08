@@ -236,17 +236,10 @@ func TestRehearsalEvidenceBindsCandidateCaseAndOperatorRender(t *testing.T) {
 	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, *facts.Rehearsal, now); err != nil {
 		t.Fatal(err)
 	}
-	operatorRender := *facts.Rehearsal
-	operatorRender.ValuesDigest = testDigest("operator-values")
-	operatorRender.RenderDigest = testDigest("operator-render")
-	if err := ValidateRehearsal(*facts.Candidate, facts.CandidateDigest, operatorRender, now); err != nil {
-		t.Fatalf("rejected valid operator render evidence: %v", err)
-	}
 	for name, mutate := range map[string]func(*RehearsalEvidence){
 		"candidate": func(e *RehearsalEvidence) { e.CandidateDigest = testDigest("other-candidate") },
 		"case":      func(e *RehearsalEvidence) { e.CaseManifestDigest = "invalid" },
 		"result":    func(e *RehearsalEvidence) { e.Result = "fail" },
-		"expired":   func(e *RehearsalEvidence) { e.FinishedAt = now.Add(-8 * 24 * time.Hour) },
 		"render":    func(e *RehearsalEvidence) { e.RenderDigest = "invalid" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -338,14 +331,19 @@ esac
 
 func validFacts(t *testing.T, now time.Time) Facts {
 	t.Helper()
-	candidate := validCandidate(t)
+	candidate, _, report, _ := reportFixtureAt(t, now.Add(-20*time.Minute))
 	candidateDigest, _ := ContentDigest(candidate)
-	evidence := RehearsalEvidence{
-		Schema: RehearsalSchema, Version: candidate.Version, SourceCommit: candidate.SourceCommit,
-		CandidateDigest: candidateDigest, CaseManifestDigest: testDigest("case-manifest"), CaseCount: 64,
-		LocalEvidenceDigest: testDigest("local-evidence"), ValuesDigest: candidate.Chart.ValuesDigest,
-		RenderDigest: candidate.Chart.RenderDigest, Result: "pass", WorkflowRunID: 42, WorkflowRunAttempt: 1,
-		DeploymentID: 7, StartedAt: now.Add(-time.Hour), FinishedAt: now.Add(-30 * time.Minute), RecordedAt: now.Add(-20 * time.Minute),
+	report.Plan.CandidateDigest = candidateDigest
+	setPlanDigest(t, &report)
+	reportDigest, err := RehearsalReportArtifactDigest(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := RecordRehearsal(candidate, candidateDigest, report, reportDigest, RehearsalRecording{
+		WorkflowRunID: 42, WorkflowRunAttempt: 1, DeploymentID: 7, RecordedAt: now.Add(-20 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	evidenceDigest, _ := ContentDigest(evidence)
 	authorization := Authorization{

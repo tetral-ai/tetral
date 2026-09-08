@@ -83,7 +83,6 @@ func validateRehearsal(arguments []string) error {
 	candidatePath := flags.String("candidate", "", "candidate JSON")
 	candidateDigest := flags.String("candidate-digest", "", "Candidate Manifest digest")
 	evidencePath := flags.String("evidence", "", "rehearsal evidence JSON")
-	requireReport := flags.Bool("require-report", false, "require verified step-level report for a new publication")
 	nowValue := flags.String("now", "", "RFC3339 decision time")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -99,9 +98,6 @@ func validateRehearsal(arguments []string) error {
 	now, err := parseTime(*nowValue)
 	if err != nil {
 		return err
-	}
-	if *requireReport && evidence.Report == nil {
-		return fmt.Errorf("new rehearsal publication requires a verified step-level report")
 	}
 	return releasecontract.ValidateRehearsal(candidate, *candidateDigest, evidence, now)
 }
