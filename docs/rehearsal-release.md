@@ -83,6 +83,11 @@ report and its artifact digest. After owner review, dispatch `mode=promote`
 with the same Candidate identity and the recorded `evidence_digest`. The
 existing protected authorization and artifact/tag/Release checks still apply.
 
+The GitHub environment deployment is matched to the executing workflow commit
+and run URL. Its `ref` can be `main`; lookup uses the recorded `sha` instead.
+The Candidate source is checked separately, so a later release-workflow fix can
+publish the already rehearsed Candidate without rebuilding it.
+
 ## What acceptance proves
 
 The release validator independently checks the supplied report's integrity,
