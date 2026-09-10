@@ -47,9 +47,11 @@ chart=''
 chart_package=''
 if chart="$(oras manifest fetch --format go-template --template '{{ .digest }}' "ghcr.io/tetral-ai/charts/tetral:$version" 2>/dev/null)"; then
   oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$chart" > "$work/chart.json"
+  # OCI permits omitting the top-level mediaType, as Helm push does. When
+  # present it must match; Helm config and the single chart layer remain required.
   jq -e '
     .schemaVersion == 2 and
-    .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+    ((has("mediaType") | not) or .mediaType == "application/vnd.oci.image.manifest.v1+json") and
     .config.mediaType == "application/vnd.cncf.helm.config.v1+json" and
     ([.layers[] | select(.mediaType=="application/vnd.cncf.helm.chart.content.v1.tar+gzip")] | length) == 1 and
     (.layers | length) == 1

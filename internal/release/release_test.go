@@ -373,6 +373,51 @@ printf '{"candidate_digest":"candidate","rehearsal_digest":"evidence"}' > "$2"
 	}
 }
 
+func TestReleaseStateReadsPublishedHelmManifest(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	for name, script := range map[string]string{
+		"oras": `#!/usr/bin/env bash
+case "$*" in
+  *charts/tetral:0.1.0-alpha.2*) printf '%s' "$CHART_DIGEST" ;;
+  *charts/tetral@*) cat "$HELM_MANIFEST" ;;
+  *) exit 1 ;;
+esac
+`,
+		"gh": "#!/usr/bin/env bash\nexit 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This fixture is the manifest emitted by the release workflow's Helm push.
+	// Registry reads are replaced; the complete state-discovery script executes.
+	const chartDigest = "sha256:c5a836252393b4d741a463fd8a00d671e7b258ae47292836d6e4c74a061ad936"
+	factsPath := filepath.Join(directory, "facts.json")
+	command := exec.Command(filepath.Join(root, "scripts", "release-state.sh"), "0.1.0-alpha.2", factsPath) //nolint:gosec // Repository-owned script with bounded fake remote CLIs.
+	command.Dir = root
+	command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "CHART_DIGEST="+chartDigest,
+		"HELM_MANIFEST="+filepath.Join(root, "internal", "release", "testdata", "helm-push-manifest.json"),
+		"RELEASE_METADATA_REPOSITORY=ghcr.io/tetral-ai/tetral-release-metadata", "GITHUB_REPOSITORY=tetral-ai/tetral")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("published Helm discovery = %q, %v", output, err)
+	}
+	body, err := os.ReadFile(factsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var facts Facts
+	if err := json.Unmarshal(body, &facts); err != nil {
+		t.Fatal(err)
+	}
+	if facts.Final.ChartManifest != chartDigest || facts.Final.ChartPackageDigest != "sha256:f3d5552cdaef38dc90249380b61a5fadd5425803b064b9d40162c8d936a72b78" {
+		t.Fatalf("published chart identity = %#v", facts.Final)
+	}
+}
+
 func validFacts(t *testing.T, now time.Time) Facts {
 	t.Helper()
 	candidate, _, report, _ := reportFixtureAt(t, now.Add(-20*time.Minute))
