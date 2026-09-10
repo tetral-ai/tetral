@@ -330,6 +330,49 @@ esac
 	}
 }
 
+func TestPromotionStateChecksUseEachPhaseFactsFile(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "engine-release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, found := strings.Cut(string(workflow), "          reconstruct_release() {")
+	if !found {
+		t.Fatal("promotion state function not found")
+	}
+	body, _, found = strings.Cut(body, "\n          }")
+	if !found {
+		t.Fatal("promotion state function is not closed")
+	}
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string]string{
+		"scripts/release-state.sh": `#!/usr/bin/env bash
+printf '{"candidate_digest":"candidate","rehearsal_digest":"evidence"}' > "$2"
+`,
+		"go": "#!/usr/bin/env bash\nprintf '{\"state\":\"rehearsed\"}'\n",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Execute the workflow's actual function; only registry discovery and the
+	// separately tested Go state validator are replaced at their command boundary.
+	script := "set -euo pipefail\nunset phase\nreconstruct_release() {" + body + "\n}\nreconstruct_release pre-authorization\nreconstruct_release completed\n"
+	command := exec.Command("bash", "-c", script) //nolint:gosec // Repository-owned workflow body with bounded fake commands.
+	command.Dir = directory
+	command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "VERSION=0.1.0-alpha.2", "CANDIDATE_DIGEST=candidate", "EVIDENCE_DIGEST=evidence")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("promotion state checks = %q, %v", output, err)
+	}
+	for _, phase := range []string{"pre-authorization", "completed"} {
+		if _, err := os.Stat(filepath.Join(directory, phase+"-facts.json")); err != nil {
+			t.Fatalf("missing facts for %s: %v", phase, err)
+		}
+	}
+}
+
 func validFacts(t *testing.T, now time.Time) Facts {
 	t.Helper()
 	candidate, _, report, _ := reportFixtureAt(t, now.Add(-20*time.Minute))

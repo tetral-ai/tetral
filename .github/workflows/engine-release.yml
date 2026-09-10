@@ -554,7 +554,8 @@ jobs:
           go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
 
           reconstruct_release() {
-            local phase="$1" facts="$phase-facts.json" state
+            local phase="$1" facts state
+            facts="$phase-facts.json"
             ./scripts/release-state.sh "$VERSION" "$facts"
             test "$(jq -r .candidate_digest "$facts")" = "$CANDIDATE_DIGEST"
             test "$(jq -r .rehearsal_digest "$facts")" = "$EVIDENCE_DIGEST"
