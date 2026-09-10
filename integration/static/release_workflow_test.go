@@ -89,7 +89,7 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 			t.Fatalf("candidate build is missing %q", token)
 		}
 	}
-	for _, token := range []string{"helm package", "release-oci-record.sh publish helm-candidate", "release-oci-record.sh publish candidate", "render_command"} {
+	for _, token := range []string{"release-candidate-chart.sh", "release-oci-record.sh publish helm-candidate", "release-oci-record.sh publish candidate", "render_command"} {
 		if !strings.Contains(finalize, token) {
 			t.Fatalf("candidate finalizer is missing %q", token)
 		}
@@ -99,20 +99,28 @@ func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing
 			t.Fatalf("promotion rebuilds or repackages through %q", forbidden)
 		}
 	}
-	for _, required := range []string{"docker buildx imagetools create", "candidate_manifest_digest", "helm push", "publish authorization", "fetch authorization", "validate-authorization", "promotion-plan", "reconstruct_release pre-images", "reconstruct_release pre-chart", "reconstruct_release pre-tag", "reconstruct_release pre-github-release", "git/tags", "gh release create", "gh release upload"} {
-		if !strings.Contains(promote, required) {
-			t.Fatalf("promotion is missing digest-preserving step %q", required)
+	if !strings.Contains(promote, "./scripts/release-promote.sh") {
+		t.Fatal("promotion job does not call the tested publication entrypoint")
+	}
+	// Actual publication and restart behavior is exercised by the release script
+	// tests. Keep this guard about authority and build ownership, not call counts.
+	promoteBody, err := os.ReadFile(filepath.Join(root, "scripts", "release-promote.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"docker build ", "helm package"} {
+		if strings.Contains(string(promoteBody), forbidden) {
+			t.Fatalf("promotion rebuilds through %q", forbidden)
 		}
 	}
+
 	text := string(body)
-	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "report_digest", "record-rehearsal", "fetch rehearsal-report", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "authorization-$VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
+	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "report_digest", "record-rehearsal", "fetch rehearsal-report", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing immutable boundary %q", required)
 		}
 	}
-	if strings.Count(text, `^v0\.1\.0-alpha\.[0-9]+$`) != 2 || strings.Count(text, `^reservation-0\.1\.0-alpha\.[0-9]+$`) != 2 {
-		t.Fatal("candidate and promotion must exclude the historical alpha.rc tag from numeric monotonicity")
-	}
+
 	for _, forbidden := range []string{"oras blob fetch \"$RELEASE_METADATA_REPOSITORY\"", "--output json", "git merge-base --is-ancestor", "test -z \"$(git tag"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("release workflow retains unverified or non-resumable operation %q", forbidden)

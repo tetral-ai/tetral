@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|record-rehearsal|validate-rehearsal|validate-authorization|artifact|validate-layout|state|promotion-plan|cleanup-plan|verify-bases|environment-plan>")
+		fail("usage: tetral-release <validate-version|validate-candidate|record-rehearsal|validate-rehearsal|validate-authorization|artifact|validate-layout|state|cleanup-plan|verify-bases|environment-plan>")
 	}
 	var err error
 	switch os.Args[1] {
@@ -33,8 +33,6 @@ func main() {
 		err = validateLayout(os.Args[2:])
 	case "state":
 		err = printState(os.Args[2:])
-	case "promotion-plan":
-		err = printPromotionPlan(os.Args[2:])
 	case "cleanup-plan":
 		err = printCleanupPlan(os.Args[2:])
 	case "verify-bases":
@@ -180,8 +178,7 @@ func buildArtifact(arguments []string) error {
 		if err != nil {
 			return err
 		}
-		// Artifact packaging preserves historical reports. Recording/promotion
-		// additionally enforce freshness against the actual decision time.
+		// Validate the report before accepting it as a publishable artifact.
 		if err := releasecontract.ValidateRehearsalReport(report, report.FinishedAt); err != nil {
 			return err
 		}
@@ -262,18 +259,6 @@ func printState(arguments []string) error {
 		return err
 	}
 	return writeJSON(os.Stdout, map[string]any{"state": state, "facts": facts})
-}
-
-func printPromotionPlan(arguments []string) error {
-	facts, now, err := factsFlags("promotion-plan", arguments)
-	if err != nil {
-		return err
-	}
-	steps, err := releasecontract.PromotionPlan(facts, now)
-	if err != nil {
-		return err
-	}
-	return writeJSON(os.Stdout, map[string]any{"steps": steps})
 }
 
 func printCleanupPlan(arguments []string) error {

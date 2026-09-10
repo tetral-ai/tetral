@@ -168,7 +168,7 @@ func TestCandidateRejectsWrongRepositoryMediaAndRenderRecipe(t *testing.T) {
 	}
 }
 
-func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
+func TestReleaseStateClassifiesPublicationProgress(t *testing.T) {
 	now := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 	facts := validFacts(t, now)
 	wantStates := []State{StateAuthorized, StatePartiallyPromoted, StatePartiallyPromoted, StatePartiallyPromoted, StateReleased}
@@ -176,10 +176,6 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 		state, err := Reconstruct(facts, now)
 		if err != nil || state != want {
 			t.Fatalf("prefix %d state = %q, %v; want %q", index, state, err, want)
-		}
-		steps, err := PromotionPlan(facts, now)
-		if err != nil {
-			t.Fatal(err)
 		}
 		switch index {
 		case 0:
@@ -193,6 +189,7 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 			facts.Final.ChartPackageDigest = facts.Candidate.Chart.PackageDigest
 		case 3:
 			facts.Final.GitTagCommit = facts.Candidate.SourceCommit
+			facts.Final.GitHubRelease = &GitHubRelease{Prerelease: true}
 			candidatePayloadDigest, _ := ContentDigest(facts.Candidate)
 			evidencePayloadDigest, _ := ContentDigest(facts.Rehearsal)
 			authorizationPayloadDigest, _ := ContentDigest(facts.Authorization)
@@ -201,12 +198,23 @@ func TestReleaseStateReconstructsCrashPrefixesWithoutRebuild(t *testing.T) {
 				"evidence.json":      evidencePayloadDigest,
 				"authorization.json": authorizationPayloadDigest,
 			}
-		case 4:
-			if len(steps) != 0 {
-				t.Fatalf("released plan = %v; want empty", steps)
-			}
 		}
 	}
+
+	t.Run("draft with complete assets", func(t *testing.T) {
+		draft := facts
+		draft.Final.GitHubRelease = &GitHubRelease{Draft: true, Prerelease: true}
+		if state, err := Reconstruct(draft, now); err != nil || state != StatePartiallyPromoted {
+			t.Fatalf("draft state = %q, %v; want partially promoted", state, err)
+		}
+	})
+	t.Run("published alpha missing prerelease flag", func(t *testing.T) {
+		published := facts
+		published.Final.GitHubRelease = &GitHubRelease{}
+		if _, err := Reconstruct(published, now); err == nil {
+			t.Fatal("accepted an alpha release published without its prerelease flag")
+		}
+	})
 
 	conflict := facts
 	conflict.Final.Images = cloneStrings(facts.Final.Images)
@@ -327,49 +335,6 @@ esac
 	output, err := command.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "11" {
 		t.Fatalf("deployment adapter = %q, %v", output, err)
-	}
-}
-
-func TestPromotionStateChecksUseEachPhaseFactsFile(t *testing.T) {
-	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "engine-release.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, body, found := strings.Cut(string(workflow), "          reconstruct_release() {")
-	if !found {
-		t.Fatal("promotion state function not found")
-	}
-	body, _, found = strings.Cut(body, "\n          }")
-	if !found {
-		t.Fatal("promotion state function is not closed")
-	}
-	directory := t.TempDir()
-	if err := os.Mkdir(filepath.Join(directory, "scripts"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, script := range map[string]string{
-		"scripts/release-state.sh": `#!/usr/bin/env bash
-printf '{"candidate_digest":"candidate","rehearsal_digest":"evidence"}' > "$2"
-`,
-		"go": "#!/usr/bin/env bash\nprintf '{\"state\":\"rehearsed\"}'\n",
-	} {
-		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Execute the workflow's actual function; only registry discovery and the
-	// separately tested Go state validator are replaced at their command boundary.
-	script := "set -euo pipefail\nunset phase\nreconstruct_release() {" + body + "\n}\nreconstruct_release pre-authorization\nreconstruct_release completed\n"
-	command := exec.Command("bash", "-c", script) //nolint:gosec // Repository-owned workflow body with bounded fake commands.
-	command.Dir = directory
-	command.Env = append(os.Environ(), "PATH="+directory+":"+os.Getenv("PATH"), "VERSION=0.1.0-alpha.2", "CANDIDATE_DIGEST=candidate", "EVIDENCE_DIGEST=evidence")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("promotion state checks = %q, %v", output, err)
-	}
-	for _, phase := range []string{"pre-authorization", "completed"} {
-		if _, err := os.Stat(filepath.Join(directory, phase+"-facts.json")); err != nil {
-			t.Fatalf("missing facts for %s: %v", phase, err)
-		}
 	}
 }
 

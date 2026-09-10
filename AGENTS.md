@@ -31,6 +31,9 @@ is restated here.
 
 ## Build and test
 
+Local test prerequisites include Python 3 (`python3` on PATH) for the release
+command fixtures, in addition to Go and Bun.
+
 Go (one module, run from the repository root): `make build` / `make test` /
 `make test-affected` / `make test-full` / `make lint` / `make vulncheck`;
 `make run-<workload>` boots one workload locally. `make test` is the fast,
