@@ -69,7 +69,7 @@ if [[ -z "$(jq -r '.final.chart_manifest // empty' "$work/facts.json")" ]]; then
 fi
 
 if [[ -z "$(jq -r '.final.git_tag_commit // empty' "$work/facts.json")" ]]; then
-  annotated="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" -f tag="$GIT_VERSION" -f message="Tetral $GIT_VERSION" -f object="$SOURCE_COMMIT" -f type=commit --jq .sha)"
+  annotated="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" -f tag="$GIT_VERSION" -f message="Tetral $GIT_VERSION" -f object="$(jq -r .source_commit "$work/candidate.json")" -f type=commit --jq .sha)"
   gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$GIT_VERSION" -f sha="$annotated" >/dev/null
 fi
 

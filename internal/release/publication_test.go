@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,9 @@ import (
 // These tests execute the publication scripts and release CLI. Only external
 // GitHub/registry commands are replaced by a persistent remote fixture.
 func TestPublicationScriptsResumeAfterRemoteWrites(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Fatal("release script tests require python3 on PATH")
+	}
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -34,12 +38,17 @@ func TestPublicationScriptsResumeAfterRemoteWrites(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte("#!/usr/bin/env bash\nshift 2\nexec \"$RELEASE_CLI\" \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, interruption := range []string{"", "authorization", "chart", "asset:candidate.json"} {
-		name := interruption
-		if name == "" {
-			name = "uninterrupted"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, scenario := range []struct {
+		name, interruption, newerVersion string
+	}{
+		{name: "uninterrupted with historical rc tags"},
+		{name: "authorization", interruption: "authorization"},
+		{name: "chart", interruption: "chart"},
+		{name: "partial attachments", interruption: "asset:candidate.json"},
+		{name: "newer release", newerVersion: "git_tags"},
+		{name: "newer reservation", newerVersion: "reservation_tags"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
 			remote := t.TempDir()
 			tags := map[string]string{}
 			const repository = "ghcr.io/tetral-ai/tetral-release-metadata"
@@ -82,7 +91,19 @@ func TestPublicationScriptsResumeAfterRemoteWrites(t *testing.T) {
 			}
 			evidenceDigest := record("rehearsal-"+version, RehearsalType, evidence)
 			statePath := filepath.Join(remote, "state.json")
-			body, err := json.Marshal(map[string]any{"tags": tags, "assets": map[string]string{}})
+			remoteFacts := map[string]any{
+				"tags": tags, "assets": map[string]string{},
+				"git_tags":         []string{"v0.1.0-alpha.rc19.6"},
+				"reservation_tags": []string{"reservation-0.1.0-alpha.rc19.6"},
+			}
+			if scenario.newerVersion != "" {
+				prefix := "v0.1.0-alpha."
+				if scenario.newerVersion == "reservation_tags" {
+					prefix = "reservation-0.1.0-alpha."
+				}
+				remoteFacts[scenario.newerVersion] = []string{prefix + strconv.Itoa(candidate.Version.Sequence+1)}
+			}
+			body, err := json.Marshal(remoteFacts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,16 +120,45 @@ func TestPublicationScriptsResumeAfterRemoteWrites(t *testing.T) {
 				command.Env = append(append([]string{}, env...), overrides...)
 				return command.CombinedOutput()
 			}
-			// Wrong source must be rejected before the first authorization or tag write.
-			if out, err := run("release-promote.sh", nil, "SOURCE_COMMIT="+strings.Repeat("b", 40)); err == nil {
-				t.Fatalf("accepted wrong source: %s", out)
+			if scenario.newerVersion != "" {
+				if out, err := run("release-promote.sh", nil); err == nil {
+					t.Fatalf("accepted a newer version: %s", out)
+				}
+				if _, err := os.Stat(filepath.Join(remote, "writes")); !os.IsNotExist(err) {
+					t.Fatalf("newer version allowed remote writes: %v", err)
+				}
+				return
 			}
-			if _, err := os.Stat(filepath.Join(remote, "writes")); !os.IsNotExist(err) {
-				t.Fatalf("wrong source made remote writes: %v", err)
+			if scenario.interruption == "" {
+				// Check initial rejection once; the recovery case below must not rely
+				// on new-authorization validation to reject a changed input.
+				if out, err := run("release-promote.sh", nil, "SOURCE_COMMIT="+strings.Repeat("b", 40)); err == nil {
+					t.Fatalf("accepted wrong source: %s", out)
+				}
+				if _, err := os.Stat(filepath.Join(remote, "writes")); !os.IsNotExist(err) {
+					t.Fatalf("wrong source made remote writes: %v", err)
+				}
+			} else {
+				if out, err := run("release-promote.sh", nil, "FAIL_AFTER="+scenario.interruption); err == nil {
+					t.Fatalf("did not stop after %s: %s", scenario.interruption, out)
+				}
 			}
-			if interruption != "" {
-				if out, err := run("release-promote.sh", nil, "FAIL_AFTER="+interruption); err == nil {
-					t.Fatalf("did not stop after %s: %s", interruption, out)
+			if scenario.interruption == "authorization" {
+				before, err := os.ReadFile(filepath.Join(remote, "writes"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, changedInput := range []string{"SOURCE_COMMIT=" + strings.Repeat("b", 40), "GIT_VERSION=v0.1.0-alpha.999"} {
+					if out, err := run("release-promote.sh", nil, changedInput); err == nil {
+						t.Fatalf("accepted changed input on resume: %s", out)
+					}
+					after, err := os.ReadFile(filepath.Join(remote, "writes"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if string(after) != string(before) {
+						t.Fatalf("changed input caused publication writes:\n%s", after)
+					}
 				}
 			}
 			if out, err := run("release-promote.sh", nil); err != nil {
@@ -155,18 +205,20 @@ func TestPublicationScriptsResumeAfterRemoteWrites(t *testing.T) {
 			if remoteState.Assets["candidate.json"] != string(expected) {
 				t.Fatal("Release does not contain the original candidate bytes")
 			}
-			// A candidate finalizer must fetch its already persisted package, not package
-			// again. The fixture would record a 'package' write on that branch.
-			destination := t.TempDir()
-			if out, err := run("release-candidate-chart.sh", []string{version, destination}); err != nil {
-				t.Fatalf("resume candidate chart: %v\n%s", err, out)
-			}
-			replayed, err := os.ReadFile(filepath.Join(destination, "tetral-"+version+".tgz"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(replayed) != string(packageBody) {
-				t.Fatal("candidate resume changed the package")
+			if scenario.interruption == "chart" {
+				// A candidate finalizer must fetch its already persisted package, not package
+				// again. The fixture rejects unexpected packaging commands.
+				destination := t.TempDir()
+				if out, err := run("release-candidate-chart.sh", []string{version, destination}); err != nil {
+					t.Fatalf("resume candidate chart: %v\n%s", err, out)
+				}
+				replayed, err := os.ReadFile(filepath.Join(destination, "tetral-"+version+".tgz"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(replayed) != string(packageBody) {
+					t.Fatal("candidate resume changed the package")
+				}
 			}
 		})
 	}

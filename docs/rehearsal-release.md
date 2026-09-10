@@ -143,7 +143,10 @@ deployment rehearsal.
 Publication tests execute the same shell entrypoints and Go CLI as the workflow.
 Stateful command fixtures stand in for GitHub and the registry, preserving remote
 writes across interrupted runs. They cover source mismatch before any write,
-resuming after authorization, Chart publication and a partially uploaded draft,
-and rerunning a completed release. They do not contact GitHub or GHCR; actual
-service responses remain an external integration boundary. State-model tests
-classify supplied facts and do not by themselves demonstrate script recovery.
+rejecting changed inputs after authorization, honoring version order while
+ignoring historical rc tags, resuming after Chart publication and a partially
+uploaded draft, and rerunning a completed release through annotated Git tags.
+They do not contact GitHub or GHCR; actual service responses remain an external
+integration boundary. The fixture does not
+model registry credentials, so it does not prove that logout makes real package
+reads anonymous. State-model tests classify supplied facts and do not by themselves demonstrate script recovery.

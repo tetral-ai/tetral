@@ -201,6 +201,21 @@ func TestReleaseStateClassifiesPublicationProgress(t *testing.T) {
 		}
 	}
 
+	t.Run("draft with complete assets", func(t *testing.T) {
+		draft := facts
+		draft.Final.GitHubRelease = &GitHubRelease{Draft: true, Prerelease: true}
+		if state, err := Reconstruct(draft, now); err != nil || state != StatePartiallyPromoted {
+			t.Fatalf("draft state = %q, %v; want partially promoted", state, err)
+		}
+	})
+	t.Run("published alpha missing prerelease flag", func(t *testing.T) {
+		published := facts
+		published.Final.GitHubRelease = &GitHubRelease{}
+		if _, err := Reconstruct(published, now); err == nil {
+			t.Fatal("accepted an alpha release published without its prerelease flag")
+		}
+	})
+
 	conflict := facts
 	conflict.Final.Images = cloneStrings(facts.Final.Images)
 	conflict.Final.Images["tetral"] = testDigest("different-image")

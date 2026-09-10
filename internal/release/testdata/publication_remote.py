@@ -42,12 +42,14 @@ def resolve(ref):
     return state['tags'][ref]
 
 
-if tool == 'git' and args[:1] in (['fetch'], ['tag']):
+if tool == 'git' and args[:1] == ['fetch']:
     pass
+elif tool == 'git' and args[:2] == ['tag', '-l']:
+    print('\n'.join(state.get('git_tags', [])))
 elif tool == 'oras' and args[:1] == ['logout']:
     pass
 elif tool == 'oras' and args[:2] == ['repo', 'tags']:
-    emit({'tags': []})
+    emit({'tags': state.get('reservation_tags', [])})
 elif tool == 'oras' and args[:2] == ['manifest', 'fetch']:
     digest = resolve(args[-1])
     if '--format' in args:
@@ -62,14 +64,11 @@ elif tool == 'oras' and args[0] == 'cp':
         directory, digest = source.rsplit('@', 1)
         shutil.copytree(directory, layout(digest), dirs_exist_ok=True)
         state['tags'][destination] = digest
-        write('authorization' if ':authorization-' in destination else 'candidate-chart')
+        assert ':authorization-' in destination
+        write('authorization')
 elif tool == 'docker' and args[:3] == ['buildx', 'imagetools', 'create']:
     state['tags'][option('--tag')] = args[-1].rsplit('@', 1)[1]
     write('image:' + option('--tag').split('/')[-1].split(':')[0])
-elif tool == 'helm' and args[0] == 'package':
-    package = Path(option('--destination')) / ('tetral-' + option('--version') + '.tgz')
-    package.write_bytes(b'packaged chart; a later invocation would have other timestamps')
-    write('package')
 elif tool == 'helm' and args[0] == 'push':
     package = Path(args[1]).read_bytes()
     manifest = {'schemaVersion': 2, 'config': {'mediaType': 'application/vnd.cncf.helm.config.v1+json'},
@@ -92,15 +91,21 @@ elif tool == 'gh' and args[0] == 'api':
         emit([[{'id': 11, 'sha': os.environ['WORKFLOW_SHA']}]] )
     elif endpoint.endswith('/git/tags'):
         state['tag_target'] = next(a.split('=', 1)[1] for a in args if a.startswith('object='))
+        state['tag_object'] = 'a' * 40
         write('tag-object')
-        print('a' * 40)
+        print(state['tag_object'])
     elif endpoint.endswith('/git/refs'):
+        assert 'sha=' + state['tag_object'] in args
         state['tag'] = state['tag_target']
         write('tag')
     elif '/git/ref/tags/' in endpoint:
         if not state.get('tag'):
             sys.exit(1)
-        emit({'object': {'type': 'commit', 'sha': state['tag']}})
+        emit({'object': {'type': 'tag', 'sha': state['tag_object']}})
+    elif '/git/tags/' in endpoint:
+        assert endpoint.endswith('/' + state['tag_object'])
+        assert option('--jq') == '.object.sha'
+        print(state['tag_target'])
     else:
         raise AssertionError(args)
 elif tool == 'gh' and args[:2] == ['release', 'view']:
@@ -119,13 +124,8 @@ elif tool == 'gh' and args[:2] == ['release', 'upload']:
     write('asset:' + path.name)
 elif tool == 'gh' and args[:2] == ['release', 'download']:
     body = state['assets'][option('--pattern')].encode()
-    if '--output' in args:
-        assert option('--output') == '-'
-        sys.stdout.buffer.write(body)
-    else:
-        path = Path(option('--dir')) / option('--pattern')
-        with path.open('xb') as output:  # gh refuses an existing file unless explicitly told to overwrite.
-            output.write(body)
+    assert option('--output') == '-'
+    sys.stdout.buffer.write(body)
 elif tool == 'gh' and args[:2] == ['release', 'edit']:
     assert '--draft=false' in args and '--prerelease' in args
     assert set(state['assets']) == {'candidate.json', 'evidence.json', 'authorization.json'}
