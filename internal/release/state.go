@@ -20,7 +20,13 @@ const (
 	StateRevoked           State = "revoked"
 )
 
+type GitHubRelease struct {
+	Draft      bool `json:"draft"`
+	Prerelease bool `json:"prerelease"`
+}
+
 type FinalReferences struct {
+	GitHubRelease       *GitHubRelease    `json:"github_release,omitempty"`
 	Images              map[string]string `json:"images,omitempty"`
 	ChartManifest       string            `json:"chart_manifest,omitempty"`
 	ChartPackageDigest  string            `json:"chart_package_digest,omitempty"`
@@ -116,35 +122,6 @@ func Reconstruct(facts Facts, now time.Time) (State, error) {
 	return StateAuthorized, nil
 }
 
-func PromotionPlan(facts Facts, now time.Time) ([]string, error) {
-	state, err := Reconstruct(facts, now)
-	if err != nil {
-		return nil, err
-	}
-	if state != StateAuthorized && state != StatePartiallyPromoted && state != StateReleased {
-		return nil, fmt.Errorf("release state %q cannot be promoted", state)
-	}
-	if state == StateReleased {
-		return nil, nil
-	}
-	var steps []string
-	for _, name := range SortedImageNames(facts.Candidate.Images) {
-		if facts.Final.Images[name] == "" {
-			steps = append(steps, "publish-image-reference:"+name)
-		}
-	}
-	if facts.Final.ChartManifest == "" {
-		steps = append(steps, "publish-chart")
-	}
-	if facts.Final.GitTagCommit == "" {
-		steps = append(steps, "create-git-tag")
-	}
-	if len(facts.Final.GitHubReleaseAssets) != 3 {
-		steps = append(steps, "create-github-release")
-	}
-	return steps, nil
-}
-
 type CleanupCandidate struct {
 	Version   Version   `json:"version"`
 	State     State     `json:"state"`
@@ -211,6 +188,12 @@ func validateFinalReferences(facts Facts) (bool, int, error) {
 		count++
 	}
 	releaseAssetsComplete := false
+	if facts.Final.GitHubRelease != nil {
+		if !facts.Final.GitHubRelease.Draft && !facts.Final.GitHubRelease.Prerelease {
+			return false, 0, fmt.Errorf("alpha GitHub Release is not marked as a prerelease")
+		}
+		count++
+	}
 	if len(facts.Final.GitHubReleaseAssets) > 0 {
 		candidatePayloadDigest, err := ContentDigest(facts.Candidate)
 		if err != nil {
@@ -238,12 +221,11 @@ func validateFinalReferences(facts Facts) (bool, int, error) {
 			}
 		}
 		releaseAssetsComplete = len(facts.Final.GitHubReleaseAssets) == len(expectedAssets)
-		count++
 	}
 	want := len(facts.Candidate.Images) + 3
-	return count == want && releaseAssetsComplete, count, nil
+	return count == want && releaseAssetsComplete && facts.Final.GitHubRelease != nil && !facts.Final.GitHubRelease.Draft, count, nil
 }
 
 func hasFinalReferences(references FinalReferences) bool {
-	return len(references.Images) > 0 || references.ChartManifest != "" || references.ChartPackageDigest != "" || references.GitTagCommit != "" || len(references.GitHubReleaseAssets) > 0
+	return references.GitHubRelease != nil || len(references.Images) > 0 || references.ChartManifest != "" || references.ChartPackageDigest != "" || references.GitTagCommit != "" || len(references.GitHubReleaseAssets) > 0
 }

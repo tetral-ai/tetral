@@ -88,6 +88,33 @@ and run URL. Its `ref` can be `main`; lookup uses the recorded `sha` instead.
 The Candidate source is checked separately, so a later release-workflow fix can
 publish the already rehearsed Candidate without rebuilding it.
 
+## Publication and interrupted runs
+
+After approval, `scripts/release-promote.sh` reads the immutable Candidate,
+rehearsal evidence and any existing authorization once. It verifies the input
+version and source commit against the Candidate before any remote write, then
+validates a new authorization before publishing it.
+
+Publication follows one sequence: image version references, the original Helm
+package, the source Git tag, and the GitHub Release with its three JSON
+attachments. The initial discovery rejects conflicting existing targets and
+identifies missing ones. Matching targets are reused; missing targets are
+created. A final read checks the published targets against the validated records
+and reads the registry anonymously so private packages cannot count as released.
+It also requires the Release to be public (not a draft) and marked as an Alpha
+prerelease. Immutable metadata is not downloaded again at every step.
+
+Release creation starts with a draft. If interrupted, a rerun uploads only missing
+attachments and publishes the existing draft. An already complete release causes
+no new publication writes. During Candidate creation, if the Helm package was
+published before finalization stopped, the next attempt fetches that exact
+package instead of repackaging the sources with different tar timestamps.
+
+The existing version-order and approval policies still apply: Candidate creation
+requires the current main commit; promotion refuses a higher existing release or
+reservation; the protected approval must belong to the invoking actor. Resuming
+publication does not bypass these policies.
+
 ## What acceptance proves
 
 The release validator independently checks the supplied report's integrity,
@@ -112,3 +139,11 @@ through the actual Release CLI's OCI packaging, layout readback, recording and
 promotion validation. It also rejects a failed sibling step and evidence without
 an embedded report. These tests verify the protocol handoff; they are not a live
 deployment rehearsal.
+
+Publication tests execute the same shell entrypoints and Go CLI as the workflow.
+Stateful command fixtures stand in for GitHub and the registry, preserving remote
+writes across interrupted runs. They cover source mismatch before any write,
+resuming after authorization, Chart publication and a partially uploaded draft,
+and rerunning a completed release. They do not contact GitHub or GHCR; actual
+service responses remain an external integration boundary. State-model tests
+classify supplied facts and do not by themselves demonstrate script recovery.

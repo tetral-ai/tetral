@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -267,13 +266,4 @@ func ContentDigest(value any) (string, error) {
 	}
 	digest := sha256.Sum256(body)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
-}
-
-func SortedImageNames(images map[string]ImageIdentity) []string {
-	names := make([]string, 0, len(images))
-	for name := range images {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }

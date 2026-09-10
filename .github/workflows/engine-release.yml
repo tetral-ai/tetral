@@ -98,7 +98,6 @@ jobs:
           test "$artifact_version" != "dev"
           echo "artifact_version=$artifact_version" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=candidate-$artifact_version" >> "$GITHUB_OUTPUT"
-          go run ./internal/release/cmd/tetral-release verify-bases --repository-root . > base-images.json
       - name: Validate transition-specific digests
         env:
           MODE: ${{ inputs.mode }}
@@ -389,11 +388,13 @@ jobs:
       - name: Package and render the exact candidate chart once
         env:
           VERSION: ${{ needs.validate.outputs.artifact_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
           jq -s 'map({key:.image,value:.}) | from_entries' image-identities/image-*.json > images.json
           jq --arg version "$VERSION" '{image:{digests:(to_entries|map({key:.key,value:.value.top_level_digest})|from_entries)},observability:{serviceVersion:$version}}' images.json > release-values.json
-          helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION" --destination dist
+          ./scripts/release-candidate-chart.sh "$VERSION" dist
           helm template tetral "dist/tetral-$VERSION.tgz" -f release-values.json > rendered.yaml
           sha256sum "dist/tetral-$VERSION.tgz" | awk '{print "sha256:"$1}' > chart.digest
           sha256sum release-values.json | awk '{print "sha256:"$1}' > values.digest
@@ -415,7 +416,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
           chart_manifest="$(./scripts/release-oci-record.sh publish helm-candidate "dist/tetral-$VERSION.tgz" "$RELEASE_METADATA_REPOSITORY:helm-candidate-$VERSION")"
           jq --arg digest "$chart_manifest" '.chart.candidate_manifest_digest=$digest' candidate.json > candidate.final.json
           mv candidate.final.json candidate.json
@@ -529,163 +529,15 @@ jobs:
           EVIDENCE_DIGEST: ${{ inputs.evidence_digest }}
           GH_TOKEN: ${{ github.token }}
           ACTOR_ID: ${{ github.actor_id }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           echo "$GH_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
           echo "$GH_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           echo "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
-          git fetch --force origin main
-          target_sequence="${VERSION##*.}"
-          while IFS= read -r existing; do
-            [[ "$existing" =~ ^v0\.1\.0-alpha\.[0-9]+$ ]] || continue
-            test "${existing##*.}" -le "$target_sequence" || { echo "a newer release version already exists" >&2; exit 1; }
-          done < <(git tag -l 'v0.1.0-alpha.*')
-          while IFS= read -r tag; do
-            [[ "$tag" =~ ^reservation-0\.1\.0-alpha\.[0-9]+$ ]] || continue
-            test "${tag##*.}" -le "$target_sequence" || { echo "a newer release reservation already exists" >&2; exit 1; }
-          done < <(oras repo tags "$RELEASE_METADATA_REPOSITORY" --format json | jq -r '.tags[]')
-          fixed_candidate="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$RELEASE_METADATA_REPOSITORY:candidate-$VERSION")"
-          fixed_evidence="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$RELEASE_METADATA_REPOSITORY:rehearsal-$VERSION")"
-          test "$fixed_candidate" = "$CANDIDATE_DIGEST"
-          test "$fixed_evidence" = "$EVIDENCE_DIGEST"
-          ./scripts/release-oci-record.sh fetch candidate "$RELEASE_METADATA_REPOSITORY@$CANDIDATE_DIGEST" candidate.json >/dev/null
-          ./scripts/release-oci-record.sh fetch rehearsal "$RELEASE_METADATA_REPOSITORY@$EVIDENCE_DIGEST" evidence.json >/dev/null
-          go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
-          go run ./internal/release/cmd/tetral-release validate-rehearsal --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence evidence.json --now "$(date -u +%FT%TZ)"
-
-          reconstruct_release() {
-            local phase="$1" facts state
-            facts="$phase-facts.json"
-            ./scripts/release-state.sh "$VERSION" "$facts"
-            test "$(jq -r .candidate_digest "$facts")" = "$CANDIDATE_DIGEST"
-            test "$(jq -r .rehearsal_digest "$facts")" = "$EVIDENCE_DIGEST"
-            state="$(go run ./internal/release/cmd/tetral-release state --facts "$facts" --now "$(date -u +%FT%TZ)" | jq -r .state)"
-            case "$state" in rehearsed|authorized|partially_promoted|released) ;; *) echo "release state $state cannot enter promotion" >&2; exit 1 ;; esac
-          }
-          reconstruct_release pre-authorization
-
-          deployment_id="$(./scripts/release-github-deployment.sh '${{ github.workflow_sha }}' '${{ github.run_id }}' "$ACTOR_ID")"
-          authorization_ref="$RELEASE_METADATA_REPOSITORY:authorization-$VERSION"
-          if authorization_digest="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$authorization_ref" 2>/dev/null)"; then
-            ./scripts/release-oci-record.sh fetch authorization "$RELEASE_METADATA_REPOSITORY@$authorization_digest" authorization.json >/dev/null
-          else
-            jq -n --arg version "$GIT_VERSION" --arg artifact "$VERSION" --argjson sequence "${VERSION##*.}" --arg source "$SOURCE_COMMIT" --arg candidate "$CANDIDATE_DIGEST" --arg evidence "$EVIDENCE_DIGEST" --argjson run_id "${{ github.run_id }}" --argjson attempt "${{ github.run_attempt }}" --argjson deployment "$deployment_id" --arg now "$(date -u +%FT%TZ)" \
-              '{schema:"tetral.release-authorization/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,candidate_digest:$candidate,evidence_digest:$evidence,workflow_run_id:$run_id,workflow_run_attempt:$attempt,deployment_id:$deployment,authorized_at:$now}' > authorization.json
-            authorization_digest="$(./scripts/release-oci-record.sh publish authorization authorization.json "$authorization_ref")"
-            ./scripts/release-oci-record.sh fetch authorization "$RELEASE_METADATA_REPOSITORY@$authorization_digest" authorization.canonical.json >/dev/null
-            mv authorization.canonical.json authorization.json
-          fi
-          go run ./internal/release/cmd/tetral-release validate-authorization --candidate candidate.json --candidate-digest "$CANDIDATE_DIGEST" --evidence-digest "$EVIDENCE_DIGEST" --authorization authorization.json >/dev/null
-          reconstruct_release post-authorization
-          test "$(jq -r .authorization_digest post-authorization-facts.json)" = "$authorization_digest"
-
-          reservation_digest="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$RELEASE_METADATA_REPOSITORY:reservation-$VERSION")"
-          ./scripts/release-oci-record.sh fetch reservation "$RELEASE_METADATA_REPOSITORY@$reservation_digest" reservation.json >/dev/null
-          final_images='{}'
-          for image in tetral gateway agent-runtime sandbox; do
-            if existing="$(docker buildx imagetools inspect "ghcr.io/tetral-ai/$image:$VERSION" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
-              final_images="$(jq -c --arg image "$image" --arg digest "$existing" '. + {($image):$digest}' <<<"$final_images")"
-            fi
-          done
-          final_chart=''
-          final_chart_package=''
-          if final_chart="$(oras manifest fetch --format go-template --template '{{ .digest }}' "ghcr.io/tetral-ai/charts/tetral:$VERSION" 2>/dev/null)"; then
-            oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$final_chart" > current-chart.json
-            final_chart_package="$(jq -r '.layers[] | select(.mediaType=="application/vnd.cncf.helm.chart.content.v1.tar+gzip") | .digest' current-chart.json)"
-          fi
-          final_tag=''
-          if tag_object="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GIT_VERSION" 2>/dev/null)"; then
-            final_tag="$(jq -r .object.sha <<<"$tag_object")"
-            if test "$(jq -r .object.type <<<"$tag_object")" = tag; then
-              final_tag="$(gh api "repos/${{ github.repository }}/git/tags/$final_tag" --jq .object.sha)"
-            fi
-          fi
-          final_assets='{}'
-          if gh release view "$GIT_VERSION" >/dev/null 2>&1; then
-            mkdir -p discovered-assets
-            for asset in candidate.json evidence.json authorization.json; do
-              if gh release download "$GIT_VERSION" --pattern "$asset" --dir discovered-assets 2>/dev/null; then
-                digest="sha256:$(sha256sum "discovered-assets/$asset" | awk '{print $1}')"
-                final_assets="$(jq -c --arg name "$asset" --arg digest "$digest" '. + {($name):$digest}' <<<"$final_assets")"
-              fi
-            done
-          fi
-          jq -n --slurpfile reservation reservation.json --slurpfile candidate candidate.json --slurpfile rehearsal evidence.json --slurpfile authorization authorization.json --arg candidate_digest "$CANDIDATE_DIGEST" --arg rehearsal_digest "$EVIDENCE_DIGEST" --arg authorization_digest "$authorization_digest" --argjson images "$final_images" --arg chart "$final_chart" --arg chart_package "$final_chart_package" --arg tag "$final_tag" --argjson assets "$final_assets" \
-            '{reservation:$reservation[0],candidate:$candidate[0],candidate_digest:$candidate_digest,rehearsal:$rehearsal[0],rehearsal_digest:$rehearsal_digest,authorization:$authorization[0],authorization_digest:$authorization_digest,final:{images:$images,chart_manifest:$chart,chart_package_digest:$chart_package,git_tag_commit:$tag,github_release_assets:$assets}}' > facts.json
-          go run ./internal/release/cmd/tetral-release promotion-plan --facts facts.json --now "$(date -u +%FT%TZ)" > promotion-plan.json
-
-          # Each step accepts an exact existing result and rejects a conflict,
-          # so a rerun resumes after the last durable publication.
-          reconstruct_release pre-images
-          for image in tetral gateway agent-runtime sandbox; do
-            digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
-            final="ghcr.io/tetral-ai/$image:$VERSION"
-            if existing="$(docker buildx imagetools inspect "$final" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
-              test "$existing" = "$digest"
-            else
-              docker buildx imagetools create --tag "$final" "ghcr.io/tetral-ai/$image@$digest"
-            fi
-          done
-          reconstruct_release pre-chart
-          chart_digest="$(jq -r .chart.package_sha256 candidate.json)"
-          chart_manifest="$(jq -r .chart.candidate_manifest_digest candidate.json)"
-          ./scripts/release-oci-record.sh fetch helm-candidate "$RELEASE_METADATA_REPOSITORY@$chart_manifest" "tetral-$VERSION.tgz" >/dev/null
-          test "sha256:$(sha256sum "tetral-$VERSION.tgz" | awk '{print $1}')" = "$chart_digest"
-          if chart_existing="$(oras manifest fetch --format go-template --template '{{ .digest }}' "ghcr.io/tetral-ai/charts/tetral:$VERSION" 2>/dev/null)"; then
-            oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$chart_existing" > released-chart.json
-            test "$(jq -r '.layers[] | select(.mediaType=="application/vnd.cncf.helm.chart.content.v1.tar+gzip") | .digest' released-chart.json)" = "$chart_digest"
-          else
-            helm push "tetral-$VERSION.tgz" oci://ghcr.io/tetral-ai/charts
-          fi
-          released_chart_digest="$(oras manifest fetch --format go-template --template '{{ .digest }}' "ghcr.io/tetral-ai/charts/tetral:$VERSION")"
-          oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$released_chart_digest" > released-chart.json
-          test "$(jq -r '.layers[] | select(.mediaType=="application/vnd.cncf.helm.chart.content.v1.tar+gzip") | .digest' released-chart.json)" = "$chart_digest"
-          oras logout ghcr.io
-          oras manifest fetch "ghcr.io/tetral-ai/charts/tetral@$released_chart_digest" >/dev/null
-          reconstruct_release pre-tag
-          if tag_sha="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GIT_VERSION" --jq .object.sha 2>/dev/null)"; then
-            tag_type="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GIT_VERSION" --jq .object.type)"
-            if test "$tag_type" = tag; then
-              tag_sha="$(gh api "repos/${{ github.repository }}/git/tags/$tag_sha" --jq .object.sha)"
-            fi
-            test "$tag_sha" = "$SOURCE_COMMIT"
-          else
-            annotated="$(gh api --method POST "repos/${{ github.repository }}/git/tags" -f tag="$GIT_VERSION" -f message="Tetral $GIT_VERSION" -f object="$SOURCE_COMMIT" -f type=commit --jq .sha)"
-            gh api --method POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$GIT_VERSION" -f sha="$annotated" >/dev/null
-          fi
-          reconstruct_release pre-github-release
-          if ! gh release view "$GIT_VERSION" >/dev/null 2>&1; then
-            gh release create "$GIT_VERSION" --verify-tag --prerelease --title "Tetral $GIT_VERSION" candidate.json evidence.json authorization.json
-          else
-            gh release view "$GIT_VERSION" --json tagName --jq '.tagName' | grep -Fx "$GIT_VERSION"
-            mkdir -p release-assets
-            mapfile -t remote_assets < <(gh release view "$GIT_VERSION" --json assets --jq '.assets[].name' | sort)
-            for remote_asset in "${remote_assets[@]}"; do
-              case "$remote_asset" in authorization.json|candidate.json|evidence.json) ;; *) echo "GitHub Release has unexpected asset $remote_asset" >&2; exit 1 ;; esac
-            done
-            for asset in authorization.json candidate.json evidence.json; do
-              if printf '%s\n' "${remote_assets[@]}" | grep -Fx "$asset" >/dev/null; then
-                gh release download "$GIT_VERSION" --pattern "$asset" --dir release-assets
-                cmp "$asset" "release-assets/$asset"
-              else
-                gh release upload "$GIT_VERSION" "$asset"
-              fi
-            done
-          fi
-          mkdir -p verified-release-assets
-          mapfile -t verified_assets < <(gh release view "$GIT_VERSION" --json assets --jq '.assets[].name' | sort)
-          test "${verified_assets[*]}" = "authorization.json candidate.json evidence.json"
-          for asset in authorization.json candidate.json evidence.json; do
-            gh release download "$GIT_VERSION" --pattern "$asset" --dir verified-release-assets
-            cmp "$asset" "verified-release-assets/$asset"
-          done
-          reconstruct_release completed
-          test "$(go run ./internal/release/cmd/tetral-release state --facts completed-facts.json --now "$(date -u +%FT%TZ)" | jq -r .state)" = released
-          {
-            echo "Candidate Manifest: $CANDIDATE_DIGEST"
-            echo "Rehearsal Evidence: $EVIDENCE_DIGEST"
-            echo "Authorization: $authorization_digest"
-          } >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/release-promote.sh
 
   retire-candidate:
     name: Retire candidate identity
