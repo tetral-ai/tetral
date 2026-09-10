@@ -313,7 +313,8 @@ func TestGitHubDeploymentAdapterJoinsApprovalAndStatusToCurrentRun(t *testing.T)
 case "$*" in
   *actions/runs/42/approvals*) echo '[{"state":"approved","user":{"id":7},"environments":[{"name":"release"}]}]' ;;
   *deployments/11/statuses*) echo '[{"log_url":"https://github.com/tetral-ai/tetral/actions/runs/42/job/99"}]' ;;
-  *deployments?environment=release*) echo '[[{"id":11,"sha":"0123456789abcdef0123456789abcdef01234567"}]]' ;;
+  *deployments?environment=release*ref=*) echo '[[]]' ;; # GitHub stores the branch name in ref.
+  *deployments?environment=release\&sha=0123456789abcdef0123456789abcdef01234567\&per_page=100*) echo '[[{"id":11,"ref":"main","sha":"0123456789abcdef0123456789abcdef01234567"}]]' ;;
   *) exit 1 ;;
 esac
 `

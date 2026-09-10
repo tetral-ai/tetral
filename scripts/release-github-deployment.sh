@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_commit="${1:?source commit is required}"
+workflow_commit="${1:?workflow commit is required}"
 run_id="${2:?workflow run ID is required}"
 expected_approver_id="${3:-}"
 : "${GH_TOKEN:?GitHub job token is required}"
@@ -23,7 +23,9 @@ while IFS= read -r deployment_id; do
   if [[ "$log_url" == "https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id/"* ]]; then
     matches+=("$deployment_id")
   fi
-done < <(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/deployments?environment=release&ref=$source_commit&per_page=100" | jq -r --arg source "$source_commit" '.[][] | select(.sha==$source) | .id')
+# Environment deployments belong to the workflow revision; ref may be "main"
+# even when sha is exact. The Candidate source is validated by the caller.
+done < <(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/deployments?environment=release&sha=$workflow_commit&per_page=100" | jq -r --arg workflow "$workflow_commit" '.[][] | select(.sha==$workflow) | .id')
 
 if ((${#matches[@]} != 1)); then
   echo "current workflow run does not own exactly one release deployment" >&2

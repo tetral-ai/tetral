@@ -468,7 +468,7 @@ jobs:
           go run ./internal/release/cmd/tetral-release validate-candidate --input candidate.json >/dev/null
           test "$(jq -r .source_commit candidate.json)" = "$SOURCE_COMMIT"
           test "$(jq -r .version.git candidate.json)" = "$VERSION"
-          deployment_id="$(./scripts/release-github-deployment.sh "$SOURCE_COMMIT" '${{ github.run_id }}')"
+          deployment_id="$(./scripts/release-github-deployment.sh '${{ github.workflow_sha }}' '${{ github.run_id }}')"
           test "$deployment_id" -ge 1
           ./scripts/release-oci-record.sh fetch rehearsal-report "$RELEASE_METADATA_REPOSITORY@$REPORT_DIGEST" report.json >/dev/null
           evidence_ref="$RELEASE_METADATA_REPOSITORY:rehearsal-$ARTIFACT_VERSION"
@@ -563,7 +563,7 @@ jobs:
           }
           reconstruct_release pre-authorization
 
-          deployment_id="$(./scripts/release-github-deployment.sh "$SOURCE_COMMIT" '${{ github.run_id }}' "$ACTOR_ID")"
+          deployment_id="$(./scripts/release-github-deployment.sh '${{ github.workflow_sha }}' '${{ github.run_id }}' "$ACTOR_ID")"
           authorization_ref="$RELEASE_METADATA_REPOSITORY:authorization-$VERSION"
           if authorization_digest="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$authorization_ref" 2>/dev/null)"; then
             ./scripts/release-oci-record.sh fetch authorization "$RELEASE_METADATA_REPOSITORY@$authorization_digest" authorization.json >/dev/null
