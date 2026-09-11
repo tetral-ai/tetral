@@ -97,6 +97,66 @@ describe("McpConnectorServiceShell", () => {
     expect(JSON.stringify(logger.records)).not.toContain("Bearer");
   });
 
+  test("preserves default tools and all four Actions tools through manifest composition", async () => {
+    const client = new RecordingMcpClient();
+    const defaultTools = ["create_issue", "create_pull_request", "get_file_contents"];
+    const actionsTools = ["actions_list", "actions_get", "get_job_logs", "actions_run_trigger"];
+    client.tools = [...defaultTools, ...actionsTools].map((name) => ({
+      name,
+      description: `${name} tool.`,
+      inputSchema: { type: "object" },
+    }));
+    const service = createService(client);
+
+    const response = await service.listMcpTools(validListRequest(), new Metadata());
+
+    expect(response.tools.map((tool) => tool.name)).toEqual([...defaultTools, ...actionsTools]);
+    expect(response.omittedTools).toEqual([]);
+  });
+
+  test("runs a controlled Actions trigger call through the normal MCP execution route", async () => {
+    const client = new RecordingMcpClient();
+    client.callToolResult = { content: [{ type: "text", text: "workflow queued" }] };
+    const store = new InMemoryMcpIdempotencyStore({
+      mcpServerName: "github",
+      toolName: "actions_run_trigger",
+      inputJson: JSON.stringify({ action: "trigger", workflow_id: "ci.yaml", ref: "main" }),
+    });
+    const service = createService(client, new RecordingManifestChangeNotifier(), new MemoryLogger(), undefined, store);
+
+    const response = await service.runMcpTool(validRunRequest(), new Metadata());
+
+    expect(response).toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "workflow queued",
+    });
+    expect(client.callToolInputs).toEqual([
+      { toolName: "actions_run_trigger", input: { action: "trigger", workflow_id: "ci.yaml", ref: "main" } },
+    ]);
+  });
+
+  test("delivers a permission-denied Actions call as a failed tool result, never as success", async () => {
+    const client = new RecordingMcpClient();
+    client.callToolResult = {
+      isError: true,
+      content: [{ type: "text", text: "Resource not accessible by integration" }],
+    };
+    const store = new InMemoryMcpIdempotencyStore({
+      mcpServerName: "github",
+      toolName: "actions_run_trigger",
+      inputJson: JSON.stringify({ action: "trigger", workflow_id: "ci.yaml", ref: "main" }),
+    });
+    const service = createService(client, new RecordingManifestChangeNotifier(), new MemoryLogger(), undefined, store);
+
+    const response = await service.runMcpTool(validRunRequest(), new Metadata());
+
+    expect(response).toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,
+      resultText: "Resource not accessible by integration",
+      errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+    });
+  });
+
   test("keeps discovery, notification, and Tool settlement independent of logger failure", async () => {
     const client = new RecordingMcpClient();
     const notifier = new RecordingManifestChangeNotifier();
@@ -1056,6 +1116,7 @@ function signedRuntimeBindingToken(request: RuntimeBindingRequestIdentity, runti
 
 class RecordingMcpClient implements McpClient {
   calls: string[] = [];
+  callToolInputs: Array<{ readonly toolName: string; readonly input: Record<string, unknown> }> = [];
   resultText = "ok";
   connectionCountValue = 0;
   callToolDelay: Promise<void> | undefined;
@@ -1070,8 +1131,9 @@ class RecordingMcpClient implements McpClient {
     return this.tools;
   }
 
-  async callTool() {
+  async callTool(input: { readonly toolName: string; readonly input: Record<string, unknown> }) {
     this.calls.push("callTool");
+    this.callToolInputs.push({ toolName: input.toolName, input: input.input });
     await this.callToolDelay;
     if (this.callToolError !== undefined) {
       throw this.callToolError;

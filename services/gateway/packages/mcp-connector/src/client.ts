@@ -1,12 +1,17 @@
 /**
  * Owns the MCP SDK client boundary for tool discovery and tool execution. Each
  * operation resolves current bearer material, admits only cataloged servers,
- * and shares a connection by workspace, session, server, and token hash. The
- * module guards bounded authentication refresh, bounded SDK requests,
- * exactly-once settlement of tracked calls on reconnect exhaustion, cache
- * eviction, and idle connection closure. Credential resolution may perform a
- * proactive refresh; connection initialization and the later SDK operation
- * then keep separate one-refresh rejection budgets.
+ * and shares a connection by workspace, session, server, and token hash. Every
+ * transport carries the catalog's Engine-owned toolset selection header
+ * alongside Vault-based authorization. Discovery follows opaque `nextCursor`
+ * values within one listing until absent, bounded by page and accumulated-tool
+ * ceilings with repeated-cursor detection, and never publishes a partial page
+ * sequence as a successful manifest. The module guards bounded authentication
+ * refresh, bounded SDK requests, exactly-once settlement of tracked calls on
+ * reconnect exhaustion, cache eviction, and idle connection closure.
+ * Credential resolution may perform a proactive refresh; connection
+ * initialization and the later SDK operation then keep separate one-refresh
+ * rejection budgets.
  *
  * Command assembly constructs {@link McpSDKClient}; the connector service calls
  * it for tool lists and tool results and receives successful tool-list change
@@ -40,6 +45,12 @@ export const MCP_SESSION_IDLE_SECONDS = 1800;
 export const MCP_RECONNECT_DELAYS_MS = [1000, 4000, 16000] as const;
 /** Defines the maximum number of automatic reconnect attempts for a dropped stream. */
 export const MCP_RECONNECT_MAX_RETRIES = 3;
+/** Bounds the number of `tools/list` pages one discovery follows. */
+export const MCP_DISCOVERY_MAX_PAGES = 100;
+/** Bounds the accumulated tool count one discovery may compose into a manifest. */
+export const MCP_DISCOVERY_MAX_TOOLS = 1024;
+/** Names the Engine-owned header that carries the catalog's toolset selection. */
+export const MCP_TOOLSETS_HEADER = "X-MCP-Toolsets";
 export { MCP_CONNECT_TIMEOUT_MS, MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS } from "./phase-budgets.js";
 
 type McpIdentity = {
@@ -78,11 +89,13 @@ export interface McpSDKClientOptions {
   readonly onToolsListChanged: (input: McpIdentity) => Promise<void>;
   readonly logger?: Pick<McpConnectorLogger, "error"> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
-  readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined }) => unknown) | undefined;
+  readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }) => unknown) | undefined;
   readonly idleTimeoutMs?: number | undefined;
   readonly callTimeoutMs?: number | undefined;
   readonly credentialTimeoutMs?: number | undefined;
   readonly connectTimeoutMs?: number | undefined;
+  readonly discoveryMaxPages?: number | undefined;
+  readonly discoveryMaxTools?: number | undefined;
   readonly setTimer?: ((callback: () => void, ms: number) => ReturnType<typeof setTimeout>) | undefined;
   readonly clearTimer?: ((timer: ReturnType<typeof setTimeout>) => void) | undefined;
 }
@@ -152,6 +165,8 @@ export class McpSDKClient implements McpClient {
   readonly #callTimeoutMs: number;
   readonly #credentialTimeoutMs: number;
   readonly #connectTimeoutMs: number;
+  readonly #discoveryMaxPages: number;
+  readonly #discoveryMaxTools: number;
   readonly #setTimer: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
   readonly #clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
 
@@ -161,14 +176,26 @@ export class McpSDKClient implements McpClient {
     this.#callTimeoutMs = options.callTimeoutMs ?? MCP_CALL_TIMEOUT_SECONDS * 1000;
     this.#credentialTimeoutMs = options.credentialTimeoutMs ?? MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS;
     this.#connectTimeoutMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
+    this.#discoveryMaxPages = options.discoveryMaxPages ?? MCP_DISCOVERY_MAX_PAGES;
+    this.#discoveryMaxTools = options.discoveryMaxTools ?? MCP_DISCOVERY_MAX_TOOLS;
     this.#setTimer = options.setTimer ?? setTimeout;
     this.#clearTimer = options.clearTimer ?? clearTimeout;
   }
 
-  /** Lists tools through the current credential-bound connection and re-arms its idle timer after success. */
+  /**
+   * Lists tools through the current credential-bound connection and re-arms its
+   * idle timer after success.
+   *
+   * Discovery follows opaque `nextCursor` values within this one listing until
+   * absent, composing a single complete manifest. A repeated cursor, the page
+   * bound, or the accumulated-tool bound fails the listing terminally: the
+   * partial pages are never returned as a successful manifest. Each listing
+   * starts cursorless on its own connection, so a re-list on a new MCP session
+   * restarts pagination rather than reusing a cursor from the old session.
+   */
   async listTools(input: McpIdentity): Promise<readonly McpClientTool[]> {
     const result = await this.withAuthRefreshRetry(input, async (connection) => {
-      const listed = await this.runConnectionOperation(connection, () => connection.client.listTools(undefined, { timeout: this.#callTimeoutMs }));
+      const listed = await this.listAllToolPages(input, connection);
       this.touch(connection);
       return listed;
     });
@@ -178,6 +205,50 @@ export class McpSDKClient implements McpClient {
       inputSchema: tool.inputSchema,
       enabled: (tool as typeof tool & { readonly enabled?: boolean | undefined }).enabled,
     }));
+  }
+
+  /**
+   * Follows one discovery's cursor chain on an established connection.
+   *
+   * The SDK issues exactly one `tools/list` per call and does not paginate, so
+   * each page request runs through {@link runConnectionOperation} with the
+   * per-call timeout; the page and accumulated-tool bounds cap the overall
+   * listing. Failure of any page rejects the whole listing.
+   */
+  private async listAllToolPages(identity: McpIdentity, connection: ConnectionEntry): Promise<ListToolsResult> {
+    const tools: ListToolsResult["tools"] = [];
+    const cursorsSent = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 1; ; page += 1) {
+      if (page > this.#discoveryMaxPages) {
+        throw this.discoveryPaginationFailure(identity, "page_bound", page - 1, tools.length);
+      }
+      const listed = await this.runConnectionOperation(connection, () =>
+        connection.client.listTools(cursor === undefined ? undefined : { cursor }, { timeout: this.#callTimeoutMs }));
+      tools.push(...listed.tools);
+      if (tools.length > this.#discoveryMaxTools) {
+        throw this.discoveryPaginationFailure(identity, "tool_bound", page, tools.length);
+      }
+      const nextCursor = typeof listed.nextCursor === "string" && listed.nextCursor !== "" ? listed.nextCursor : undefined;
+      if (nextCursor === undefined) {
+        return { ...listed, tools };
+      }
+      if (cursorsSent.has(nextCursor)) {
+        throw this.discoveryPaginationFailure(identity, "repeated_cursor", page, tools.length);
+      }
+      cursorsSent.add(nextCursor);
+      cursor = nextCursor;
+    }
+  }
+
+  /** Classifies a discovery pagination-invariant violation as terminal and logs it without credential material. */
+  private discoveryPaginationFailure(identity: McpIdentity, reason: "page_bound" | "tool_bound" | "repeated_cursor", pages: number, toolCount: number): McpConnectorError {
+    try {
+      this.options.logger?.error(mcpDiscoveryPaginationFailureLogRecord(identity, reason, pages, toolCount));
+    } catch {
+      // Discovery classification must not depend on observability.
+    }
+    return new McpConnectorError("mcp_connection_failed", `MCP tool discovery pagination failed (${reason}).`, "terminal");
   }
 
   /** Calls one MCP tool and reports whether credential refresh contributes to the successful attempt. */
@@ -294,6 +365,7 @@ export class McpSDKClient implements McpClient {
     const transport = this.createTransport({
       url: new URL(catalog.url),
       token: credential.token,
+      toolsets: catalog.toolsets,
     });
     try {
       await withPhaseTimeout(
@@ -462,7 +534,7 @@ export class McpSDKClient implements McpClient {
     });
   }
 
-  private createTransport(input: { readonly url: URL; readonly token?: string | undefined }): unknown {
+  private createTransport(input: { readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }): unknown {
     if (this.options.createTransport !== undefined) {
       return this.options.createTransport(input);
     }
@@ -544,10 +616,13 @@ export class McpSDKClient implements McpClient {
 }
 
 /**
- * Builds Streamable HTTP transport options with optional bearer authorization
- * and the connector's bounded exponential reconnect schedule.
+ * Builds Streamable HTTP transport options with optional bearer authorization,
+ * the catalog-owned toolset selection, and the connector's bounded exponential
+ * reconnect schedule. Every newly created GitHub transport carries the
+ * `X-MCP-Toolsets` header alongside `Authorization`, including connection
+ * recreation after credential replacement.
  */
-export function streamableHTTPTransportOptions(input: { readonly token?: string | undefined }): {
+export function streamableHTTPTransportOptions(input: { readonly token?: string | undefined; readonly toolsets?: string | undefined }): {
   readonly requestInit: RequestInit;
   readonly reconnectionOptions: {
     readonly initialReconnectionDelay: number;
@@ -556,9 +631,14 @@ export function streamableHTTPTransportOptions(input: { readonly token?: string 
     readonly maxRetries: number;
   };
 } {
-  const requestInit: RequestInit = input.token === undefined
-    ? {}
-    : { headers: { Authorization: `Bearer ${input.token}` } };
+  const headers: Record<string, string> = {};
+  if (input.token !== undefined) {
+    headers.Authorization = `Bearer ${input.token}`;
+  }
+  if (input.toolsets !== undefined) {
+    headers[MCP_TOOLSETS_HEADER] = input.toolsets;
+  }
+  const requestInit: RequestInit = Object.keys(headers).length === 0 ? {} : { headers };
   return {
     requestInit,
     reconnectionOptions: {
@@ -571,8 +651,7 @@ export function streamableHTTPTransportOptions(input: { readonly token?: string 
 }
 
 /** Builds a bounded structured error record for tool-list refresh or callback failure. */
-export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure): McpLogRecord {
-  const suffix = failure === "refresh_failed" ? "refresh_failed" : "notify_failed";
+export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure): McpLogRecord {  const suffix = failure === "refresh_failed" ? "refresh_failed" : "notify_failed";
   return {
     event: `mcp_tools_list_changed_${suffix}`,
     "event.kind": `mcp_tools_list_changed_${suffix}`,
@@ -585,6 +664,32 @@ export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failu
       errorClass: "mcp_connection_failed",
       errorCode: "mcp_connection_failed",
       messageSafe: `mcp tools/list_changed ${failure === "refresh_failed" ? "refresh" : "notify"} failed`,
+    }),
+  };
+}
+
+/** Builds a bounded structured error record for a discovery pagination-invariant violation. */
+export function mcpDiscoveryPaginationFailureLogRecord(
+  identity: McpIdentity,
+  reason: "page_bound" | "tool_bound" | "repeated_cursor",
+  pages: number,
+  toolCount: number,
+): McpLogRecord {
+  return {
+    event: "mcp_discovery_pagination_failed",
+    "event.kind": "mcp_discovery_pagination_failed",
+    operation: "mcp_manifest_list",
+    component: "mcp-connector",
+    "workspace.id": identity.workspaceId,
+    "session.id": identity.sessionId,
+    mcp_server_name: identity.mcpServerName,
+    "mcp.discovery.failure_reason": reason,
+    "mcp.discovery.pages": pages,
+    "mcp.discovery.tool_count": toolCount,
+    ...semanticErrorFields({
+      errorClass: "mcp_connection_failed",
+      errorCode: "mcp_connection_failed",
+      messageSafe: `mcp discovery pagination failed: ${reason}`,
     }),
   };
 }

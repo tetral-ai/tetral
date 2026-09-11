@@ -374,6 +374,20 @@ connection whose URL, after single-trailing-slash normalization
 (`normalizeCatalogURL`), is not in the constant; catalog-only admission is
 enforced upstream and this is defense in depth. Adding a server is a code change.
 
+The entry also pins the Engine-owned toolset selection `default,actions`, sent
+verbatim as the `X-MCP-Toolsets` header on every newly created transport —
+including connection recreation after credential replacement — alongside the
+Vault-based `Authorization: Bearer` header (`streamableHTTPTransportOptions`).
+`default` is GitHub's supported alias for its baseline issue/PR toolsets, so
+those tools stay available without enumerating constituents; `actions` adds
+exactly the four Actions tools: `actions_list` (list workflows, runs, jobs, and
+artifacts), `actions_get` (workflow/run/job details, artifacts, usage and
+log-download information), `get_job_logs` (job or failed-job logs), and
+`actions_run_trigger` (start a workflow, rerun a run or its failed jobs, cancel
+a run, delete run logs). Tool availability is not scheduling: the connector adds
+no automatic CI retry or deployment policy, and every Actions call flows through
+the same `RunMcpTool` pipeline as any other MCP tool.
+
 ### States & lifecycle
 
 #### `RunMcpTool` turn (`packages/mcp-connector/src/service.ts`)
@@ -448,7 +462,8 @@ refresh on a repeated same-phase failure.
 
 #### MCP client connection (`packages/mcp-connector/src/client.ts`)
 
-`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header via
+`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header
+plus the catalog's `X-MCP-Toolsets` selection via
 `streamableHTTPTransportOptions`). Clients are cached by `(workspace_id,
 session_id, mcp_server_name, sha256(token))`; a per-call resolution that yields
 different material creates a new client and closes the old, so credential
@@ -526,6 +541,31 @@ written `unready` and contributes no tools while its last-accepted content is
 preserved; discovery failure leaves the row and Queue unchanged. Restore is
 readiness-aware, so a re-notify matching the stored etag while `unready` is a
 restore (not a duplicate no-op).
+
+The installed MCP SDK issues exactly one `tools/list` per call and does not
+paginate, so the connector follows the cursor chain itself
+(`McpSDKClient.listTools` → `listAllToolPages`): each listing starts cursorless,
+follows opaque `nextCursor` values until absent, and composes one complete
+manifest from all pages. The listing is bounded by `MCP_DISCOVERY_MAX_PAGES`
+(100) and `MCP_DISCOVERY_MAX_TOOLS` (1024), with every page request carrying the
+per-call timeout, so the overall discovery is time- and size-bounded. A repeated
+cursor, the page bound, or the tool bound fails the listing as a terminal
+`mcp_connection_failed` with a structured `mcp_discovery_pagination_failed` log
+record (identity, reason, page and tool counts — never credential material); a
+failed page request flows through the existing timeout/auth/connection
+classification. In every case the partial pages are discarded: nothing is
+returned as a successful manifest, so Bridge's last-accepted durable manifest is
+never replaced by an incomplete list. Because cursor state is local to one
+listing, a re-list on a new MCP session restarts pagination rather than reusing
+an old cursor.
+
+Tool selection is independent of call authorization. The three Actions read
+tools are published upstream with public-read visibility, so a credential
+without `repo` scope does not hide their definitions; any call — including any
+`actions_run_trigger` operation — can still be denied by GitHub at execution
+time, and that denial returns as a model-visible `tool_error` result, never a
+success. The connector performs no Actions permission preflight and infers no
+missing scope from an absent tool.
 
 #### Tool-system mapping
 
@@ -620,7 +660,13 @@ it preserves the stated invariants and passes the named suites.
 - **Lifecycle.** Lazy establish on first use, idle close at 1800 s, bounded
   reconnect, terminal-exhaustion settlement with cache eviction.
 - **Invariants.** The connector opens a connection only to a catalog URL (defense
-  in depth on top of upstream admission). Reconnect exhaustion is synthesized in
+  in depth on top of upstream admission). Every newly created transport carries
+  the catalog's `X-MCP-Toolsets: default,actions` selection alongside bearer
+  authorization. Discovery follows opaque `nextCursor` values within one listing
+  until absent and composes a single manifest; repeated cursors and the
+  page/tool bounds (`MCP_DISCOVERY_MAX_PAGES`, `MCP_DISCOVERY_MAX_TOOLS`) fail
+  the listing terminally and a partial page sequence is never published as a
+  successful manifest. Reconnect exhaustion is synthesized in
   the handler, never mapped from SDK wording, and settles every in-flight call on
   the client exactly once. The connection cache key includes `sha256(token)`, so a
   credential switch is a new client.
