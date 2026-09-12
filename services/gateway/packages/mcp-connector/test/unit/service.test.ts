@@ -120,7 +120,7 @@ describe("McpConnectorServiceShell", () => {
     const store = new InMemoryMcpIdempotencyStore({
       mcpServerName: "github",
       toolName: "actions_run_trigger",
-      inputJson: JSON.stringify({ action: "trigger", workflow_id: "ci.yaml", ref: "main" }),
+      inputJson: JSON.stringify({ method: "run_workflow", owner: "tetral-ai", repo: "tetral", workflow_id: "ci.yaml", ref: "main" }),
     });
     const service = createService(client, new RecordingManifestChangeNotifier(), new MemoryLogger(), undefined, store);
 
@@ -131,7 +131,7 @@ describe("McpConnectorServiceShell", () => {
       resultText: "workflow queued",
     });
     expect(client.callToolInputs).toEqual([
-      { toolName: "actions_run_trigger", input: { action: "trigger", workflow_id: "ci.yaml", ref: "main" } },
+      { toolName: "actions_run_trigger", input: { method: "run_workflow", owner: "tetral-ai", repo: "tetral", workflow_id: "ci.yaml", ref: "main" } },
     ]);
   });
 
@@ -144,7 +144,7 @@ describe("McpConnectorServiceShell", () => {
     const store = new InMemoryMcpIdempotencyStore({
       mcpServerName: "github",
       toolName: "actions_run_trigger",
-      inputJson: JSON.stringify({ action: "trigger", workflow_id: "ci.yaml", ref: "main" }),
+      inputJson: JSON.stringify({ method: "run_workflow", owner: "tetral-ai", repo: "tetral", workflow_id: "ci.yaml", ref: "main" }),
     });
     const service = createService(client, new RecordingManifestChangeNotifier(), new MemoryLogger(), undefined, store);
 
@@ -188,6 +188,7 @@ describe("McpConnectorServiceShell", () => {
       [new McpConnectorError("mcp_credential_required", "secret credential", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
       [new McpConnectorError("mcp_authentication_failed", "secret token response", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
       [new McpConnectorError("mcp_connection_failed", "upstream body", "exhausted"), status.UNAVAILABLE, "server_unavailable"],
+      [new McpConnectorError("mcp_connection_failed", "refresh unavailable", "terminal"), status.UNAVAILABLE, "server_unavailable"],
       [new McpConnectorError("mcp_timeout", "upstream timeout detail"), status.DEADLINE_EXCEEDED, "discovery_timeout"],
     ] as const;
     for (const [failure, code, kind] of cases) {

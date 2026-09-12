@@ -62,7 +62,18 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
   });
   const implementation: McpConnectorServiceServer = {
     runMcpTool: unaryHandler((request, metadata) => service.runMcpTool(request, metadata)),
-    listMcpTools: unaryHandler((request, metadata) => service.listMcpTools(request, metadata)),
+    listMcpTools: (call, callback) => {
+      const controller = new AbortController();
+      const cancel = () => controller.abort(new Error("MCP discovery caller cancelled"));
+      call.on("cancelled", cancel);
+      if (call.cancelled) cancel();
+      const deadline = call.getDeadline();
+      const remaining = (deadline instanceof Date ? deadline.getTime() : deadline) - Date.now();
+      void unary(() => service.listMcpTools(call.request, call.metadata, {
+        signal: controller.signal,
+        ...(Number.isFinite(remaining) ? { timeoutMs: Math.max(1, remaining) } : {}),
+      }), callback).finally(() => call.removeListener("cancelled", cancel));
+    },
   };
   server.addService(McpConnectorServiceService, implementation);
   return {

@@ -538,26 +538,40 @@ durably committed over-cap transition
 as terminal and returns it without connector retry. The durable row carries a
 `(readiness, diagnostic)` pair orthogonal to content: an over-cap manifest is
 written `unready` and contributes no tools while its last-accepted content is
-preserved; discovery failure leaves the row and Queue unchanged. Restore is
+preserved; notification refresh failure leaves the row and Queue unchanged. Restore is
 readiness-aware, so a re-notify matching the stored etag while `unready` is a
 restore (not a duplicate no-op).
 
-The installed MCP SDK issues exactly one `tools/list` per call and does not
-paginate, so the connector follows the cursor chain itself
-(`McpSDKClient.listTools` → `listAllToolPages`): each listing starts cursorless,
-follows opaque `nextCursor` values until absent, and composes one complete
-manifest from all pages. The listing is bounded by `MCP_DISCOVERY_MAX_PAGES`
-(100) and `MCP_DISCOVERY_MAX_TOOLS` (1024), with every page request carrying the
-per-call timeout, so the overall discovery is time- and size-bounded. A repeated
-cursor, the page bound, or the tool bound fails the listing as a terminal
-`mcp_connection_failed` with a structured `mcp_discovery_pagination_failed` log
-record (identity, reason, page and tool counts — never credential material); a
-failed page request flows through the existing timeout/auth/connection
-classification. In every case the partial pages are discarded: nothing is
-returned as a successful manifest, so Bridge's last-accepted durable manifest is
-never replaced by an incomplete list. Because cursor state is local to one
-listing, a re-list on a new MCP session restarts pagination rather than reusing
-an old cursor.
+The connector invokes inherited SDK `listTools()` once per complete discovery.
+`DiscoverySDKClient` overrides the public `request()` method for `tools/list`
+only: each page uses `super.request()`, validates the response, and appends to a
+request-local array. The complete result returns to SDK `listTools()`, which
+updates output validators and task metadata once for the entire directory. A
+failed page leaves the previous SDK metadata intact. Other protocol methods
+retain the SDK implementation; no private SDK fields are modified. SDK clients
+remain isolated by workspace, session, server, credential identity and token.
+
+Each discovery starts cursorless and follows every present opaque `nextCursor`,
+including an empty string, until the field is absent. Repeated cursors, more
+than 100 pages or 1024 tools, and raw definitions exceeding 1 MiB fail discovery.
+UTF-8 JSON bytes are counted while accumulating tools, including SDK-only
+metadata. This limits retained definitions; it is not a hard limit on the HTTP
+body being parsed. Bridge separately limits its canonical projection to 256 KiB.
+The shared 120-second discovery deadline includes credential resolution,
+connection, all pages and bounded authentication refresh. A Bridge gRPC deadline
+can shorten it; cancellation stops further page requests without closing the
+shared client or canceling unrelated calls. Authentication restart begins again
+without a cursor, within the same deadline.
+
+Protocol/bound failures use a discovery-specific error and the existing typed
+`manifest_invalid` trailer, with safe reason/page/tool counts in operator logs.
+Bridge owns whole-discovery retries for an input and the final decision to
+execute or fail that input; the connector never presents a partial directory as
+successful. SDK metadata update and Bridge's later database acceptance are
+separate commits, not a distributed transaction. A transport failure during a
+refresh preserves the previously accepted durable manifest; existing invalid
+or over-cap acceptance remains fail-closed. No discovery retry is added to
+`tools/call` or Actions workflow writes.
 
 Tool selection is independent of call authorization. The three Actions read
 tools are published upstream with public-read visibility, so a credential
@@ -664,13 +678,13 @@ it preserves the stated invariants and passes the named suites.
   the catalog's `X-MCP-Toolsets: default,actions` selection alongside bearer
   authorization. Discovery follows opaque `nextCursor` values within one listing
   until absent and composes a single manifest; repeated cursors and the
-  page/tool bounds (`MCP_DISCOVERY_MAX_PAGES`, `MCP_DISCOVERY_MAX_TOOLS`) fail
+  page/tool/byte bounds and the shared deadline fail
   the listing terminally and a partial page sequence is never published as a
   successful manifest. Reconnect exhaustion is synthesized in
   the handler, never mapped from SDK wording, and settles every in-flight call on
   the client exactly once. The connection cache key includes `sha256(token)`, so a
   credential switch is a new client.
-- **Conformance.** `catalog.test.ts`, `client.test.ts`.
+- **Conformance.** `catalog.test.ts`, `client.test.ts`, `discovery.test.ts` (real SDK and gRPC).
 
 #### Credential resolution and single-flight refresh
 

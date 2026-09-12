@@ -4,8 +4,6 @@ import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   MCP_CONNECT_TIMEOUT_MS,
   MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS,
-  MCP_DISCOVERY_MAX_PAGES,
-  MCP_DISCOVERY_MAX_TOOLS,
   MCP_RECONNECT_DELAYS_MS,
   MCP_RECONNECT_MAX_RETRIES,
   MCP_TOOLSETS_HEADER,
@@ -14,7 +12,6 @@ import {
   streamableHTTPTransportOptions,
 } from "../../src/client.js";
 import type { SDKClientLike } from "../../src/client.js";
-import type { McpSDKClientOptions } from "../../src/client.js";
 import type { GitHubMcpCredentialResolver } from "../../src/credential.js";
 
 type RecordingSDKTool = Awaited<ReturnType<SDKClientLike["listTools"]>>["tools"][number] & {
@@ -844,202 +841,6 @@ describe("McpSDKClient", () => {
   });
 });
 
-describe("McpSDKClient discovery pagination", () => {
-  test("pins the discovery page and accumulated-tool bounds", () => {
-    expect(MCP_DISCOVERY_MAX_PAGES).toBe(100);
-    expect(MCP_DISCOVERY_MAX_TOOLS).toBe(1024);
-  });
-
-  test("composes one complete manifest across pages with Actions tools on later pages", async () => {
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": {
-        tools: [
-          { name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } },
-          { name: "create_pull_request", description: "Create a pull request.", inputSchema: { type: "object" as const } },
-        ],
-        nextCursor: "cursor-2",
-      },
-      "cursor-2": {
-        tools: [
-          { name: "actions_list", description: "List workflows, runs, jobs, and artifacts.", inputSchema: { type: "object" as const } },
-          { name: "actions_get", description: "Read workflow, run, and job details.", inputSchema: { type: "object" as const } },
-        ],
-        nextCursor: "cursor-3",
-      },
-      "cursor-3": {
-        tools: [
-          { name: "get_job_logs", description: "Read job logs.", inputSchema: { type: "object" as const } },
-          { name: "actions_run_trigger", description: "Trigger, rerun, or cancel runs.", inputSchema: { type: "object" as const } },
-        ],
-      },
-    };
-    const client = pagedTestClient(sdk);
-
-    const tools = await client.listTools(validIdentity());
-
-    expect(tools.map((tool) => tool.name)).toEqual([
-      "create_issue",
-      "create_pull_request",
-      "actions_list",
-      "actions_get",
-      "get_job_logs",
-      "actions_run_trigger",
-    ]);
-    expect(sdk.listToolsParams).toEqual([undefined, { cursor: "cursor-2" }, { cursor: "cursor-3" }]);
-    expect(sdk.listToolsOptions.map((options) => options?.timeout)).toEqual([120_000, 120_000, 120_000]);
-  });
-
-  test("starts every listing cursorless, including a re-list after the previous pagination", async () => {
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": {
-        tools: [{ name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } }],
-        nextCursor: "cursor-2",
-      },
-      "cursor-2": {
-        tools: [{ name: "actions_list", description: "List workflows and runs.", inputSchema: { type: "object" as const } }],
-      },
-    };
-    const client = pagedTestClient(sdk);
-
-    await expect(client.listTools(validIdentity())).resolves.toHaveLength(2);
-    await expect(client.listTools(validIdentity())).resolves.toHaveLength(2);
-
-    expect(sdk.listToolsParams).toEqual([undefined, { cursor: "cursor-2" }, undefined, { cursor: "cursor-2" }]);
-  });
-
-  test("rejects the whole listing when a later page fails and returns no partial manifest", async () => {
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": {
-        tools: [{ name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } }],
-        nextCursor: "cursor-2",
-      },
-      "cursor-2": { tools: [], error: new Error("page two unavailable") },
-    };
-    const client = pagedTestClient(sdk);
-
-    await expect(client.listTools(validIdentity())).rejects.toThrow("page two unavailable");
-    expect(sdk.listToolsParams).toEqual([undefined, { cursor: "cursor-2" }]);
-  });
-
-  test("rejects a repeated cursor terminally and logs the violation without credential material", async () => {
-    const records: Record<string, unknown>[] = [];
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": {
-        tools: [{ name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } }],
-        nextCursor: "cursor-2",
-      },
-      "cursor-2": {
-        tools: [{ name: "actions_list", description: "List workflows and runs.", inputSchema: { type: "object" as const } }],
-        nextCursor: "cursor-2",
-      },
-    };
-    const client = pagedTestClient(sdk, {}, records);
-
-    await expect(client.listTools(validIdentity())).rejects.toMatchObject({
-      code: "mcp_connection_failed",
-      retryStatus: "terminal",
-    });
-
-    expect(records).toContainEqual(expect.objectContaining({
-      event: "mcp_discovery_pagination_failed",
-      "event.kind": "mcp_discovery_pagination_failed",
-      operation: "mcp_manifest_list",
-      component: "mcp-connector",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      mcp_server_name: "github",
-      "mcp.discovery.failure_reason": "repeated_cursor",
-      "error.class": "mcp_connection_failed",
-    }));
-    expect(JSON.stringify(records)).not.toContain("token-a");
-  });
-
-  test("bounds the number of pages one listing follows", async () => {
-    const records: Record<string, unknown>[] = [];
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": { tools: [{ name: "tool_0", description: "", inputSchema: { type: "object" as const } }], nextCursor: "cursor-1" },
-      "cursor-1": { tools: [{ name: "tool_1", description: "", inputSchema: { type: "object" as const } }], nextCursor: "cursor-2" },
-      "cursor-2": { tools: [{ name: "tool_2", description: "", inputSchema: { type: "object" as const } }], nextCursor: "cursor-3" },
-    };
-    const client = pagedTestClient(sdk, { discoveryMaxPages: 3 }, records);
-
-    await expect(client.listTools(validIdentity())).rejects.toMatchObject({
-      code: "mcp_connection_failed",
-      retryStatus: "terminal",
-    });
-
-    expect(sdk.listToolsParams).toEqual([undefined, { cursor: "cursor-1" }, { cursor: "cursor-2" }]);
-    expect(records).toContainEqual(expect.objectContaining({ "mcp.discovery.failure_reason": "page_bound" }));
-  });
-
-  test("bounds the accumulated tool count across pages", async () => {
-    const records: Record<string, unknown>[] = [];
-    const sdk = new RecordingSDKClient();
-    sdk.pagesByCursor = {
-      "": {
-        tools: [
-          { name: "tool_0", description: "", inputSchema: { type: "object" as const } },
-          { name: "tool_1", description: "", inputSchema: { type: "object" as const } },
-        ],
-        nextCursor: "cursor-1",
-      },
-      "cursor-1": {
-        tools: [
-          { name: "tool_2", description: "", inputSchema: { type: "object" as const } },
-          { name: "tool_3", description: "", inputSchema: { type: "object" as const } },
-        ],
-      },
-    };
-    const client = pagedTestClient(sdk, { discoveryMaxTools: 3 }, records);
-
-    await expect(client.listTools(validIdentity())).rejects.toMatchObject({
-      code: "mcp_connection_failed",
-      retryStatus: "terminal",
-    });
-
-    expect(records).toContainEqual(expect.objectContaining({ "mcp.discovery.failure_reason": "tool_bound" }));
-  });
-
-  test("executes an Actions trigger call through the same MCP route as any other tool", async () => {
-    const sdk = new RecordingSDKClient();
-    const client = pagedTestClient(sdk);
-
-    const result = await client.callTool({
-      ...validIdentity(),
-      sessionThreadId: "thrd_1",
-      toolName: "actions_run_trigger",
-      input: { action: "trigger", workflow_id: "ci.yaml", ref: "main" },
-    });
-
-    expect(result).toEqual({ content: [{ type: "text", text: "ok" }], refreshTriggered: false });
-    expect(sdk.callToolParams).toEqual([
-      { name: "actions_run_trigger", arguments: { action: "trigger", workflow_id: "ci.yaml", ref: "main" } },
-    ]);
-  });
-});
-
-function pagedTestClient(
-  sdk: RecordingSDKClient,
-  overrides: Partial<McpSDKClientOptions> = {},
-  records?: Record<string, unknown>[],
-): McpSDKClient {
-  return new McpSDKClient({
-    credentialResolver: new RotatingCredentialResolver(["token-a"]),
-    onToolsListChanged: async () => undefined,
-    createClient: () => sdk,
-    createTransport: (input) => input,
-    setTimer: fakeSetTimer,
-    clearTimer: () => undefined,
-    ...(records === undefined ? {} : { logger: { error: (record) => { records.push({ ...record }); } } }),
-    ...overrides,
-  });
-}
-
 function validIdentity() {
   return {
     workspaceId: "wksp_1",
@@ -1129,13 +930,10 @@ class RecordingSDKClient implements SDKClientLike {
 	listToolsGate: Promise<void> | undefined;
   callToolOptions: Array<{ readonly timeout?: number } | undefined> = [];
   listToolsOptions: Array<{ readonly timeout?: number } | undefined> = [];
-  listToolsParams: unknown[] = [];
   callToolParams: Array<{ readonly name: string; readonly arguments?: Record<string, unknown> | undefined }> = [];
   tools: RecordingSDKTool[] = [
     { name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } },
   ];
-  /** Cursor-keyed discovery pages; the "" key serves the first (cursorless) page. */
-  pagesByCursor: Record<string, { readonly tools: RecordingSDKTool[]; readonly nextCursor?: string | undefined; readonly error?: unknown }> | undefined;
 
   async connect(_transport: unknown, options?: { readonly timeout?: number; readonly signal?: AbortSignal }) {
     this.connects += 1;
@@ -1148,25 +946,13 @@ class RecordingSDKClient implements SDKClientLike {
     }
   }
 
-  async listTools(params?: unknown, options?: { readonly timeout?: number }) {
-    this.listToolsParams.push(params);
+  async listTools(_params?: unknown, options?: { readonly timeout?: number }) {
     this.listToolsOptions.push(options);
 		if (this.listToolsGate !== undefined) {
 			await this.listToolsGate;
 		}
     if (this.listToolsError !== undefined) {
       throw this.listToolsError;
-    }
-    if (this.pagesByCursor !== undefined) {
-      const cursor = (params as { readonly cursor?: string | undefined } | undefined)?.cursor ?? "";
-      const page = this.pagesByCursor[cursor];
-      if (page === undefined) {
-        throw new Error(`unexpected discovery cursor: ${cursor}`);
-      }
-      if (page.error !== undefined) {
-        throw page.error;
-      }
-      return page.nextCursor === undefined ? { tools: page.tools } : { tools: page.tools, nextCursor: page.nextCursor };
     }
     return {
       tools: this.tools,
