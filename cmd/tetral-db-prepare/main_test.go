@@ -26,7 +26,7 @@ func TestRunPreparesSchemaAndServingRoles(t *testing.T) {
 			admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
 			declarations := testRoleDeclarations(t)
 			defer cleanupInstalledRoles(t, admin, declarations)
-			wantVersions := "[1 2]"
+			wantVersions := "[1 2 3]"
 			var originalStamp time.Time
 			if existing {
 				// The historical-baseline test owns V1 SQL equivalence. This fixture
@@ -35,7 +35,7 @@ func TestRunPreparesSchemaAndServingRoles(t *testing.T) {
 				if err := storage.MigrateSchema(context.Background(), admin); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := admin.Exec(`ALTER TABLE session_github_repository_resources DROP COLUMN git_identity_name, DROP COLUMN git_identity_email;
+				if _, err := admin.Exec(`ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic; DELETE FROM tetral_schema_migrations WHERE version=3; ALTER TABLE session_github_repository_resources DROP COLUMN git_identity_name, DROP COLUMN git_identity_email;
 DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 					t.Fatal(err)
 				}
@@ -51,7 +51,7 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 				if err := admin.QueryRow(`SELECT applied_at FROM tetral_schema_migrations WHERE version=1`).Scan(&originalStamp); err != nil {
 					t.Fatal(err)
 				}
-				wantVersions = "[2]"
+				wantVersions = "[2 3]"
 			}
 			payload, err := json.Marshal(declarations)
 			if err != nil {
@@ -92,8 +92,8 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 			if err := admin.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
 				t.Fatal(err)
 			}
-			if tables == 0 || stamps != 2 {
-				t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and two stamps", tables, stamps)
+			if tables == 0 || stamps != 3 {
+				t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and three stamps", tables, stamps)
 			}
 			if existing {
 				var stamp time.Time
@@ -410,7 +410,7 @@ func TestRunLogsRoleConflictAfterCommittedMigration(t *testing.T) {
 	if err := admin.QueryRow("SELECT count(*) FROM tetral_schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 2 {
+	if versions != 3 {
 		t.Fatalf("role failure changed migration history: %d versions", versions)
 	}
 }

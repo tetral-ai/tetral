@@ -487,9 +487,33 @@ and active lifecycle facts directly from durable rows.
   replay; it returns stale without changing stored results or a different active claim. Manifests are
   captured before delivery through two connector clients: `McpManifestChanged`
   handles hot changes from a running pod, while the Job Runner lists and
-  captures the initial manifest before a session's first input. Both write the
+  captures a missing or unready manifest before executing a user message. Both write the
   bounded, generation-ordered `session_mcp_manifests` row and enqueue
   redelivery over `runtime_config_update`.
+- **Discovery lifecycle.** For a configured server without a usable complete
+  manifest, one queued user input owns at most 3 whole-discovery attempts and a shared
+  120-second deadline. Bridge reserves attempts in `session_runtime_inbox`
+  before external I/O; process restart and Queue lease replay cannot replenish
+  them. Once delivery may have reached Runtime, existing custody reconciliation
+  applies instead of retroactively failing that input for discovery. PostgreSQL migration V3 adds these counters, deadline and safe diagnostic
+  fields without changing the baseline migration. Connector authentication
+  refresh consumes the same wall-clock budget. Validation and the final 256 KiB
+  canonical cap are part of discovery acceptance. All discovery errors, including
+  internal/protocol failures, consume this finite budget.
+  After exhaustion, one transaction records unready state, marks the input
+  processed/dead-lettered, and emits one safe `session.error` to the application.
+  Operator logs identify the input, server, attempt and failure class. This input
+  never reaches Runtime/model execution. An otherwise inactive main Session
+  emits idle; other running threads and control operations remain intact. The
+  Session is not terminated. A distinct later user input may retry and restore
+  `unready -> ready` with a higher generation; a matching etag does not prevent
+  recovery. Inputs that performed discovery apply the accepted manifest through
+  Runtime config control before `AcceptInput`. A cold Pod's `no_residency` result
+  defers installation to its existing `LoadContext` path. Busy/rejected config
+  application does not send the input; Queue delivery retry reuses the durable
+  manifest and discovery budget. The independent config carrier remains durable.
+  Existing usable manifests are reused on cold restoration. Stop/interrupt does
+  not wait for discovery. Discovery retry never retries a tool's external write.
 - **Lifecycle.** Each Connector execution attempt creates a `claimId`.
   Same-claim replay renews its lease; a different unexpired claim returns
   in-flight; expiry admits a new `claimId` takeover. Commit and relinquish both
@@ -509,7 +533,9 @@ and active lifecycle facts directly from durable rows.
   adoption.
 - **Conformance.** `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`,
   `mcp_collision_split_test.go`, `mcp_connector_production_composition_test.go`,
-  `TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`.
+  `TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`,
+  `mcp_discovery_input_test.go` (budget, cancellation, replay, next-input recovery,
+  real Runtime warm/cold registration and connector routing).
 
 ### Resource roots snapshot and credential-expiry readiness gate
 
