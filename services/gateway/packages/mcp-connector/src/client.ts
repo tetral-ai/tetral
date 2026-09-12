@@ -1,12 +1,17 @@
 /**
  * Owns the MCP SDK client boundary for tool discovery and tool execution. Each
  * operation resolves current bearer material, admits only cataloged servers,
- * and shares a connection by workspace, session, server, and token hash. The
- * module guards bounded authentication refresh, bounded SDK requests,
- * exactly-once settlement of tracked calls on reconnect exhaustion, cache
- * eviction, and idle connection closure. Credential resolution may perform a
- * proactive refresh; connection initialization and the later SDK operation
- * then keep separate one-refresh rejection budgets.
+ * and shares a connection by workspace, session, server, and token hash. Every
+ * transport carries the catalog's Engine-owned toolset selection header
+ * alongside Vault-based authorization. Discovery follows opaque `nextCursor`
+ * values within one listing until absent, bounded by page and accumulated-tool
+ * and raw-byte ceilings with a shared deadline and repeated-cursor detection.
+ * It never publishes a partial page sequence as a successful manifest. The module guards bounded authentication
+ * refresh, bounded SDK requests, exactly-once settlement of tracked calls on
+ * reconnect exhaustion, cache eviction, and idle connection closure.
+ * Credential resolution may perform a proactive refresh; connection
+ * initialization and the later SDK operation then keep separate one-refresh
+ * rejection budgets.
  *
  * Command assembly constructs {@link McpSDKClient}; the connector service calls
  * it for tool lists and tool results and receives successful tool-list change
@@ -17,7 +22,8 @@
  * @packageDocumentation
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { DiscoverySDKClient, McpDiscoveryError, MCP_DISCOVERY_TIMEOUT_MS } from "./discovery.js";
+import type { DiscoveryFailureReason } from "./discovery.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { semanticErrorFields } from "@tetral/ts-observability";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -40,6 +46,10 @@ export const MCP_SESSION_IDLE_SECONDS = 1800;
 export const MCP_RECONNECT_DELAYS_MS = [1000, 4000, 16000] as const;
 /** Defines the maximum number of automatic reconnect attempts for a dropped stream. */
 export const MCP_RECONNECT_MAX_RETRIES = 3;
+/** Bounds the number of `tools/list` pages one discovery follows. */
+export { MCP_DISCOVERY_MAX_PAGES, MCP_DISCOVERY_MAX_TOOLS, MCP_DISCOVERY_MAX_BYTES } from "./discovery.js";
+/** Names the Engine-owned header that carries the catalog's toolset selection. */
+export const MCP_TOOLSETS_HEADER = "X-MCP-Toolsets";
 export { MCP_CONNECT_TIMEOUT_MS, MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS } from "./phase-budgets.js";
 
 type McpIdentity = {
@@ -59,7 +69,7 @@ type ToolsListChangedFailure = "refresh_failed" | "notify_failed";
 export interface SDKClientLike {
 	onerror?: ((error: Error) => void) | undefined;
   connect(transport: unknown, options?: { readonly timeout?: number; readonly signal?: AbortSignal }): Promise<void>;
-  listTools(params?: unknown, options?: { readonly timeout?: number }): Promise<ListToolsResult>;
+  listTools(params?: unknown, options?: { readonly timeout?: number; readonly signal?: AbortSignal }): Promise<ListToolsResult>;
   callTool(
     params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined },
     resultSchema?: unknown,
@@ -78,11 +88,15 @@ export interface McpSDKClientOptions {
   readonly onToolsListChanged: (input: McpIdentity) => Promise<void>;
   readonly logger?: Pick<McpConnectorLogger, "error"> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
-  readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined }) => unknown) | undefined;
+  readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }) => unknown) | undefined;
   readonly idleTimeoutMs?: number | undefined;
   readonly callTimeoutMs?: number | undefined;
   readonly credentialTimeoutMs?: number | undefined;
   readonly connectTimeoutMs?: number | undefined;
+  readonly discoveryMaxPages?: number | undefined;
+  readonly discoveryMaxTools?: number | undefined;
+  readonly discoveryMaxBytes?: number | undefined;
+  readonly discoveryTimeoutMs?: number | undefined;
   readonly setTimer?: ((callback: () => void, ms: number) => ReturnType<typeof setTimeout>) | undefined;
   readonly clearTimer?: ((timer: ReturnType<typeof setTimeout>) => void) | undefined;
 }
@@ -165,19 +179,51 @@ export class McpSDKClient implements McpClient {
     this.#clearTimer = options.clearTimer ?? clearTimeout;
   }
 
-  /** Lists tools through the current credential-bound connection and re-arms its idle timer after success. */
-  async listTools(input: McpIdentity): Promise<readonly McpClientTool[]> {
-    const result = await this.withAuthRefreshRetry(input, async (connection) => {
-      const listed = await this.runConnectionOperation(connection, () => connection.client.listTools(undefined, { timeout: this.#callTimeoutMs }));
-      this.touch(connection);
-      return listed;
-    });
-    return result.value.tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
-      inputSchema: tool.inputSchema,
-      enabled: (tool as typeof tool & { readonly enabled?: boolean | undefined }).enabled,
-    }));
+  /**
+   * Lists tools through the current credential-bound connection and re-arms its
+   * idle timer after success.
+   *
+   * Discovery follows opaque `nextCursor` values within this one listing until
+   * absent, composing a single complete manifest. A repeated cursor, the page
+   * bound, or the accumulated-tool/byte bound fails the listing: the
+   * partial pages are never returned as a successful manifest. Each listing
+   * starts cursorless on its own connection, so a re-list on a new MCP session
+   * restarts pagination rather than reusing a cursor from the old session.
+   */
+  async listTools(input: McpIdentity, options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<readonly McpClientTool[]> {
+    const timeoutMs = Math.min(options?.timeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS, this.options.discoveryTimeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS);
+    const deadline = Date.now() + timeoutMs;
+    try {
+      const result = await withPhaseTimeout(async (signal) => {
+        const result = await this.withAuthRefreshRetry(input, async (connection) => {
+          signal.throwIfAborted();
+          const listed = await this.runConnectionOperation(connection, () => connection.client.listTools(undefined, {
+            timeout: Math.max(1, Math.min(this.#callTimeoutMs, deadline - Date.now())), signal,
+          }));
+          signal.throwIfAborted();
+          this.touch(connection);
+          return listed;
+        }, signal);
+        return result.value;
+      }, timeoutMs, "MCP tool discovery timed out.", options?.signal);
+      return result.tools.map((tool) => ({
+        name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema,
+        enabled: (tool as typeof tool & { readonly enabled?: boolean }).enabled,
+      }));
+    } catch (error) {
+      if (isTimeoutError(error) || (error instanceof DOMException && error.name === "TimeoutError")) {
+        throw new McpConnectorError("mcp_timeout", "MCP tool discovery timed out.");
+      }
+      if (error instanceof McpConnectorError && error.code === "mcp_invalid_input") {
+        error = new McpDiscoveryError("invalid_response");
+      }
+      if (error instanceof McpDiscoveryError) {
+        try {
+          this.options.logger?.error(mcpDiscoveryPaginationFailureLogRecord(input, error.reason, error.pages, error.toolCount));
+        } catch { /* Logging must not change discovery settlement. */ }
+      }
+      throw error;
+    }
   }
 
   /** Calls one MCP tool and reports whether credential refresh contributes to the successful attempt. */
@@ -211,7 +257,7 @@ export class McpSDKClient implements McpClient {
     return this.#connections.size;
   }
 
-  private async connection(identity: McpIdentity, markRefresh: () => void): Promise<ConnectionEntry> {
+  private async connection(identity: McpIdentity, markRefresh: () => void, signal?: AbortSignal): Promise<ConnectionEntry> {
     const catalog = catalogEntryByName(identity.mcpServerName);
     if (catalog === undefined) {
       throw new McpConnectorError("mcp_invalid_input", "MCP server is outside the curated catalog.");
@@ -220,7 +266,9 @@ export class McpSDKClient implements McpClient {
       (signal) => this.options.credentialResolver.resolve({ ...identity, signal }),
       this.#credentialTimeoutMs,
       "MCP credential resolution timed out.",
+      signal,
     );
+    signal?.throwIfAborted();
     if (!credential.ok) {
       if (credential.error === "credential_required") {
         throw new McpConnectorError("mcp_credential_required", `MCP server ${identity.mcpServerName} requires a configured credential.`, "terminal");
@@ -294,6 +342,7 @@ export class McpSDKClient implements McpClient {
     const transport = this.createTransport({
       url: new URL(catalog.url),
       token: credential.token,
+      toolsets: catalog.toolsets,
     });
     try {
       await withPhaseTimeout(
@@ -328,14 +377,16 @@ export class McpSDKClient implements McpClient {
     return entry;
   }
 
-  private async withAuthRefreshRetry<T>(identity: McpIdentity, operation: (connection: ConnectionEntry) => Promise<T>): Promise<{ readonly value: T; readonly refreshTriggered: boolean }> {
+  private async withAuthRefreshRetry<T>(identity: McpIdentity, operation: (connection: ConnectionEntry) => Promise<T>, signal?: AbortSignal): Promise<{ readonly value: T; readonly refreshTriggered: boolean }> {
     let refreshTriggered = false;
     const markRefresh = () => {
       refreshTriggered = true;
     };
     let connection: ConnectionEntry;
     try {
-      connection = await this.connection(identity, markRefresh);
+      signal?.throwIfAborted();
+      connection = await this.connection(identity, markRefresh, signal);
+      signal?.throwIfAborted();
     } catch (error) {
       if (isTimeoutError(error)) {
         throw new McpConnectorError("mcp_timeout", "MCP tool call timed out.");
@@ -368,7 +419,9 @@ export class McpSDKClient implements McpClient {
         }
         throw error;
       }
-      const refreshed = await this.refreshConnection(identity, connection, markRefresh);
+      signal?.throwIfAborted();
+      const refreshed = await this.refreshConnection(identity, connection, markRefresh, signal);
+      signal?.throwIfAborted();
       try {
         return { value: await operation(refreshed), refreshTriggered };
       } catch (retryError) {
@@ -390,8 +443,9 @@ export class McpSDKClient implements McpClient {
     }
   }
 
-  private async refreshConnection(identity: McpIdentity, previous: ConnectionEntry, markRefresh: () => void): Promise<ConnectionEntry> {
-    const refreshed = await this.refreshCredential(identity, previous.tokenHash, previous.vaultId, previous.credentialId, markRefresh);
+  private async refreshConnection(identity: McpIdentity, previous: ConnectionEntry, markRefresh: () => void, signal?: AbortSignal): Promise<ConnectionEntry> {
+    const refreshed = await this.refreshCredential(identity, previous.tokenHash, previous.vaultId, previous.credentialId, markRefresh, signal);
+    signal?.throwIfAborted();
     await this.closeConnection(previous);
     return await this.openConnection(identity, refreshed, false, markRefresh);
   }
@@ -402,6 +456,7 @@ export class McpSDKClient implements McpClient {
     vaultId: string,
     credentialId: string,
     markRefresh: () => void,
+    signal?: AbortSignal,
   ): Promise<Extract<CredentialMaterial, { readonly mode: "bearer" }>> {
     markRefresh();
     let refreshed: GitHubMcpCredentialResolution;
@@ -417,6 +472,7 @@ export class McpSDKClient implements McpClient {
         }),
         this.#credentialTimeoutMs,
         "MCP credential refresh timed out.",
+        signal,
       );
     } catch (error) {
       if (isTimeoutError(error)) {
@@ -437,7 +493,7 @@ export class McpSDKClient implements McpClient {
     if (this.options.createClient !== undefined) {
       return this.options.createClient(identity);
     }
-    return new Client({
+    return new DiscoverySDKClient({
       name: "tetral-mcp-connector",
       version: "0.1.0",
     }, {
@@ -459,10 +515,14 @@ export class McpSDKClient implements McpClient {
           },
         },
       },
+    }, {
+      ...(this.options.discoveryMaxPages === undefined ? {} : { maxPages: this.options.discoveryMaxPages }),
+      ...(this.options.discoveryMaxTools === undefined ? {} : { maxTools: this.options.discoveryMaxTools }),
+      ...(this.options.discoveryMaxBytes === undefined ? {} : { maxBytes: this.options.discoveryMaxBytes }),
     });
   }
 
-  private createTransport(input: { readonly url: URL; readonly token?: string | undefined }): unknown {
+  private createTransport(input: { readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }): unknown {
     if (this.options.createTransport !== undefined) {
       return this.options.createTransport(input);
     }
@@ -544,10 +604,13 @@ export class McpSDKClient implements McpClient {
 }
 
 /**
- * Builds Streamable HTTP transport options with optional bearer authorization
- * and the connector's bounded exponential reconnect schedule.
+ * Builds Streamable HTTP transport options with optional bearer authorization,
+ * the catalog-owned toolset selection, and the connector's bounded exponential
+ * reconnect schedule. Every newly created GitHub transport carries the
+ * `X-MCP-Toolsets` header alongside `Authorization`, including connection
+ * recreation after credential replacement.
  */
-export function streamableHTTPTransportOptions(input: { readonly token?: string | undefined }): {
+export function streamableHTTPTransportOptions(input: { readonly token?: string | undefined; readonly toolsets?: string | undefined }): {
   readonly requestInit: RequestInit;
   readonly reconnectionOptions: {
     readonly initialReconnectionDelay: number;
@@ -556,9 +619,14 @@ export function streamableHTTPTransportOptions(input: { readonly token?: string 
     readonly maxRetries: number;
   };
 } {
-  const requestInit: RequestInit = input.token === undefined
-    ? {}
-    : { headers: { Authorization: `Bearer ${input.token}` } };
+  const headers: Record<string, string> = {};
+  if (input.token !== undefined) {
+    headers.Authorization = `Bearer ${input.token}`;
+  }
+  if (input.toolsets !== undefined) {
+    headers[MCP_TOOLSETS_HEADER] = input.toolsets;
+  }
+  const requestInit: RequestInit = Object.keys(headers).length === 0 ? {} : { headers };
   return {
     requestInit,
     reconnectionOptions: {
@@ -589,6 +657,32 @@ export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failu
   };
 }
 
+/** Builds a bounded structured error record for a discovery pagination-invariant violation. */
+export function mcpDiscoveryPaginationFailureLogRecord(
+  identity: McpIdentity,
+  reason: DiscoveryFailureReason,
+  pages: number,
+  toolCount: number,
+): McpLogRecord {
+  return {
+    event: "mcp_discovery_pagination_failed",
+    "event.kind": "mcp_discovery_pagination_failed",
+    operation: "mcp_manifest_list",
+    component: "mcp-connector",
+    "workspace.id": identity.workspaceId,
+    "session.id": identity.sessionId,
+    mcp_server_name: identity.mcpServerName,
+    "mcp.discovery.failure_reason": reason,
+    "mcp.discovery.pages": pages,
+    "mcp.discovery.tool_count": toolCount,
+    ...semanticErrorFields({
+      errorClass: "mcp_connection_failed",
+      errorCode: "mcp_connection_failed",
+      messageSafe: `mcp discovery pagination failed: ${reason}`,
+    }),
+  };
+}
+
 function connectionBaseKey(identity: McpIdentity): string {
   return `${identity.workspaceId}\u0000${identity.sessionId}\u0000${identity.mcpServerName}`;
 }
@@ -608,9 +702,16 @@ async function withPhaseTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
   message: string,
+  parentSignal?: AbortSignal,
 ): Promise<T> {
+  parentSignal?.throwIfAborted();
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => { controller.abort(parentSignal?.reason); reject(parentSignal?.reason); };
+    parentSignal?.addEventListener("abort", abort, { once: true });
+  });
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       const error = Object.assign(new Error(message), { code: ErrorCode.RequestTimeout });
@@ -622,8 +723,9 @@ async function withPhaseTimeout<T>(
     }
   });
   try {
-    return await Promise.race([operation(controller.signal), expired]);
+    return await Promise.race([operation(controller.signal), expired, cancelled]);
   } finally {
+    if (abort !== undefined) parentSignal?.removeEventListener("abort", abort);
     if (timer !== undefined) {
       clearTimeout(timer);
     }

@@ -31,7 +31,7 @@ const (
 // Upgrade a database created by the historical source through the real migrator.
 // Fresh and upgraded catalogs must match exactly, including column positions,
 // constraints, dependencies, RLS and privileges. The old helper snapshot is
-// independently extended by the explicit Git identity delta below.
+// independently extended by the explicit Git identity and discovery budget deltas below.
 func TestGitIdentityMigrationPreservesDataAndMatchesFreshCatalog(t *testing.T) {
 	controlDSN := os.Getenv(storagetest.EnvTestDatabaseURL)
 	if controlDSN == "" {
@@ -160,7 +160,7 @@ func TestGitIdentityMigrationPreservesDataAndMatchesFreshCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(baselineSnapshot) != string(currentSnapshot) {
-		t.Fatalf("upgraded catalog differs from fresh V1 + V2: %s", firstSnapshotDifference(baselineSnapshot, currentSnapshot))
+		t.Fatalf("upgraded catalog differs from fresh V1 + V2 + V3: %s", firstSnapshotDifference(baselineSnapshot, currentSnapshot))
 	}
 
 	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -173,7 +173,7 @@ func TestGitIdentityMigrationPreservesDataAndMatchesFreshCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(baselineHelperSnapshot) != string(currentHelperSnapshot) {
-		t.Fatalf("storage-test catalog, seed, runtime-role, or privileges differ from Stage A plus Git identity: %s", firstSnapshotDifference(baselineHelperSnapshot, currentHelperSnapshot))
+		t.Fatalf("storage-test catalog, seed, runtime-role, or privileges differ from Stage A plus Git identity and discovery budget: %s", firstSnapshotDifference(baselineHelperSnapshot, currentHelperSnapshot))
 	}
 }
 
@@ -295,6 +295,8 @@ func applyExpectedGitIdentityDelta(t *testing.T, db *sql.DB) {
     "ALTER TABLE session_github_repository_resources ADD COLUMN git_identity_name TEXT, ADD COLUMN git_identity_email TEXT",
     "ALTER TABLE session_github_repository_resources ADD CONSTRAINT session_github_repository_git_identity_shape CHECK ((git_identity_name IS NULL AND git_identity_email IS NULL) OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> ''))",
     "INSERT INTO tetral_schema_migrations (version, checksum) VALUES (2, '36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458')",
+    "ALTER TABLE session_runtime_inbox ADD COLUMN mcp_discovery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN mcp_discovery_deadline_at TIMESTAMPTZ, ADD COLUMN mcp_discovery_diagnostic TEXT, ADD CONSTRAINT session_runtime_inbox_mcp_discovery_budget_shape CHECK ((mcp_discovery_attempts = 0 AND mcp_discovery_deadline_at IS NULL) OR (mcp_discovery_attempts > 0 AND mcp_discovery_deadline_at IS NOT NULL)), ADD CONSTRAINT session_runtime_inbox_mcp_discovery_diagnostic_shape CHECK (mcp_discovery_diagnostic IS NULL OR mcp_discovery_diagnostic IN ('credential_unavailable', 'discovery_unavailable', 'manifest_invalid', 'internal'))",
+    "INSERT INTO tetral_schema_migrations (version, checksum) VALUES (3, 'be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f')",
   }
   for _, statement := range statements {
     if _, err := db.ExecContext(context.Background(), statement); err != nil { t.Fatal(err) }

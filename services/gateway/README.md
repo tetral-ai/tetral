@@ -374,6 +374,20 @@ connection whose URL, after single-trailing-slash normalization
 (`normalizeCatalogURL`), is not in the constant; catalog-only admission is
 enforced upstream and this is defense in depth. Adding a server is a code change.
 
+The entry also pins the Engine-owned toolset selection `default,actions`, sent
+verbatim as the `X-MCP-Toolsets` header on every newly created transport —
+including connection recreation after credential replacement — alongside the
+Vault-based `Authorization: Bearer` header (`streamableHTTPTransportOptions`).
+`default` is GitHub's supported alias for its baseline issue/PR toolsets, so
+those tools stay available without enumerating constituents; `actions` adds
+exactly the four Actions tools: `actions_list` (list workflows, runs, jobs, and
+artifacts), `actions_get` (workflow/run/job details, artifacts, usage and
+log-download information), `get_job_logs` (job or failed-job logs), and
+`actions_run_trigger` (start a workflow, rerun a run or its failed jobs, cancel
+a run, delete run logs). Tool availability is not scheduling: the connector adds
+no automatic CI retry or deployment policy, and every Actions call flows through
+the same `RunMcpTool` pipeline as any other MCP tool.
+
 ### States & lifecycle
 
 #### `RunMcpTool` turn (`packages/mcp-connector/src/service.ts`)
@@ -448,7 +462,8 @@ refresh on a repeated same-phase failure.
 
 #### MCP client connection (`packages/mcp-connector/src/client.ts`)
 
-`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header via
+`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header
+plus the catalog's `X-MCP-Toolsets` selection via
 `streamableHTTPTransportOptions`). Clients are cached by `(workspace_id,
 session_id, mcp_server_name, sha256(token))`; a per-call resolution that yields
 different material creates a new client and closes the old, so credential
@@ -523,9 +538,48 @@ durably committed over-cap transition
 as terminal and returns it without connector retry. The durable row carries a
 `(readiness, diagnostic)` pair orthogonal to content: an over-cap manifest is
 written `unready` and contributes no tools while its last-accepted content is
-preserved; discovery failure leaves the row and Queue unchanged. Restore is
+preserved; notification refresh failure leaves the row and Queue unchanged. Restore is
 readiness-aware, so a re-notify matching the stored etag while `unready` is a
 restore (not a duplicate no-op).
+
+The connector invokes inherited SDK `listTools()` once per complete discovery.
+`DiscoverySDKClient` overrides the public `request()` method for `tools/list`
+only: each page uses `super.request()`, validates the response, and appends to a
+request-local array. The complete result returns to SDK `listTools()`, which
+updates output validators and task metadata once for the entire directory. A
+failed page leaves the previous SDK metadata intact. Other protocol methods
+retain the SDK implementation; no private SDK fields are modified. SDK clients
+remain isolated by workspace, session, server, credential identity and token.
+
+Each discovery starts cursorless and follows every present opaque `nextCursor`,
+including an empty string, until the field is absent. Repeated cursors, more
+than 100 pages or 1024 tools, and raw definitions exceeding 1 MiB fail discovery.
+UTF-8 JSON bytes are counted while accumulating tools, including SDK-only
+metadata. This limits retained definitions; it is not a hard limit on the HTTP
+body being parsed. Bridge separately limits its canonical projection to 256 KiB.
+The shared 120-second discovery deadline includes credential resolution,
+connection, all pages and bounded authentication refresh. A Bridge gRPC deadline
+can shorten it; cancellation stops further page requests without closing the
+shared client or canceling unrelated calls. Authentication restart begins again
+without a cursor, within the same deadline.
+
+Protocol/bound failures use a discovery-specific error and the existing typed
+`manifest_invalid` trailer, with safe reason/page/tool counts in operator logs.
+Bridge owns whole-discovery retries for an input and the final decision to
+execute or fail that input; the connector never presents a partial directory as
+successful. SDK metadata update and Bridge's later database acceptance are
+separate commits, not a distributed transaction. A transport failure during a
+refresh preserves the previously accepted durable manifest; existing invalid
+or over-cap acceptance remains fail-closed. No discovery retry is added to
+`tools/call` or Actions workflow writes.
+
+Tool selection is independent of call authorization. The three Actions read
+tools are published upstream with public-read visibility, so a credential
+without `repo` scope does not hide their definitions; any call — including any
+`actions_run_trigger` operation — can still be denied by GitHub at execution
+time, and that denial returns as a model-visible `tool_error` result, never a
+success. The connector performs no Actions permission preflight and infers no
+missing scope from an absent tool.
 
 #### Tool-system mapping
 
@@ -620,11 +674,17 @@ it preserves the stated invariants and passes the named suites.
 - **Lifecycle.** Lazy establish on first use, idle close at 1800 s, bounded
   reconnect, terminal-exhaustion settlement with cache eviction.
 - **Invariants.** The connector opens a connection only to a catalog URL (defense
-  in depth on top of upstream admission). Reconnect exhaustion is synthesized in
+  in depth on top of upstream admission). Every newly created transport carries
+  the catalog's `X-MCP-Toolsets: default,actions` selection alongside bearer
+  authorization. Discovery follows opaque `nextCursor` values within one listing
+  until absent and composes a single manifest; repeated cursors and the
+  page/tool/byte bounds and the shared deadline fail
+  the listing terminally and a partial page sequence is never published as a
+  successful manifest. Reconnect exhaustion is synthesized in
   the handler, never mapped from SDK wording, and settles every in-flight call on
   the client exactly once. The connection cache key includes `sha256(token)`, so a
   credential switch is a new client.
-- **Conformance.** `catalog.test.ts`, `client.test.ts`.
+- **Conformance.** `catalog.test.ts`, `client.test.ts`, `discovery.test.ts` (real SDK and gRPC).
 
 #### Credential resolution and single-flight refresh
 

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
+import { RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
@@ -33,6 +34,7 @@ import { RuntimeControlService } from "../../src/runtime-service.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
 interface CompositionInput {
+	readonly recovery?: boolean;
 	readonly workspaceId: string;
 	readonly sessionId: string;
 	readonly runtimeConfigPayloadJson: string;
@@ -52,9 +54,9 @@ if (inputPath === undefined) {
 const input = JSON.parse(await readFile(inputPath, "utf8")) as CompositionInput;
 
 const warm = await applyWarmTransition(input);
-assertCatalogState(input, warm.events[0], warm.catalogs[0], true);
-assertCatalogState(input, warm.events[1], warm.catalogs[1], false);
-assertCatalogState(input, warm.events[2], warm.catalogs[2], false);
+assertCatalogState(input, warm.events[0], warm.catalogs[0], !input.recovery);
+assertCatalogState(input, warm.events[1], warm.catalogs[1], input.recovery === true);
+assertCatalogState(input, warm.events[2], warm.catalogs[2], input.recovery === true);
 if (
 	warm.commandResponse.applied === undefined ||
 	warm.events[1]?.source !== "runtime_config_update" ||
@@ -77,13 +79,13 @@ if (
 		"replacement runtime did not cold-load the durable unready generation",
 	);
 }
-assertCatalogState(input, cold.events[0], cold.catalogs[0], false);
+assertCatalogState(input, cold.events[0], cold.catalogs[0], input.recovery === true);
 
-const warmStaleToolProof = await proveNextProviderRejectsStaleTool(
+const warmStaleToolProof = await proveNextProviderToolVisibility(
 	input,
 	warm.catalogs[2]!,
 );
-const coldStaleToolProof = await proveNextProviderRejectsStaleTool(
+const coldStaleToolProof = await proveNextProviderToolVisibility(
 	input,
 	cold.catalogs[0]!,
 );
@@ -100,7 +102,7 @@ process.stdout.write(
 	}),
 );
 
-async function proveNextProviderRejectsStaleTool(
+async function proveNextProviderToolVisibility(
 	input: CompositionInput,
 	toolCatalog: ToolCatalog,
 ): Promise<{
@@ -116,9 +118,11 @@ async function proveNextProviderRejectsStaleTool(
 		tokenPath: "/unused/token",
 		metadataFactory: async () => new Metadata(),
 		mcpConnectorClient: {
-			runMcpTool: () => {
+			runMcpTool: (_request: unknown, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void) => {
 				mcpConnectorCalls += 1;
-				throw new Error("stale MCP tool reached the connector route");
+				if (!input.recovery) throw new Error("stale MCP tool reached the connector route");
+				callback(null, { status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED, resultText: "recovered tool completed", attachments: [], errorKind: 0, retryStatus: 0 });
+				return { cancel() {} };
 			},
 		} as never,
 	});
@@ -176,11 +180,11 @@ async function proveNextProviderRejectsStaleTool(
 			"next provider request did not complete through ThreadLoop",
 		);
 	}
-	if (providerToolNames.some((names) => names.includes(input.toolName))) {
-		throw new Error("removed MCP tool remained in the next provider request");
+	if (providerToolNames.some((names) => names.includes(input.toolName)) !== (input.recovery === true)) {
+		throw new Error("provider tool visibility disagrees with manifest readiness");
 	}
-	if (mcpConnectorCalls !== 0) {
-		throw new Error("removed MCP tool reached the connector route");
+	if (input.recovery ? mcpConnectorCalls < 1 : mcpConnectorCalls !== 0) {
+		throw new Error("connector routing disagrees with manifest readiness");
 	}
 	return { mcpConnectorCalls, providerRequests: providerToolNames.length };
 }

@@ -147,6 +147,7 @@ type RuntimeCommandPlan struct {
 	Interrupt             *agentruntimev1.InterruptRequest
 	ToolConfirmation      *agentruntimev1.ResolveToolConfirmationRequest
 	RuntimeConfig         *agentruntimev1.ApplyRuntimeConfigRequest
+	MCPBeforeInput        []*agentruntimev1.ApplyRuntimeConfigRequest
 	CleanupSession        *agentruntimev1.CleanupSessionRequest
 	RecoverThread         *agentruntimev1.RecoverThreadRequest
 	TaskNotification      *RuntimeTaskNotificationPlan
@@ -172,6 +173,13 @@ func (p RuntimeCommandPlan) hasCommand() bool {
 }
 
 func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSender) (RuntimeDeliveryResult, error) {
+	for _, config := range p.MCPBeforeInput {
+		response, err := sender.ApplyRuntimeConfig(ctx, p.Target, config)
+		result := runtimeResultFromRuntimeConfig(response)
+		if err != nil || (result.Status != RuntimeDeliveryAccepted && result.Status != RuntimeDeliveryDuplicate) {
+			return result, err
+		}
+	}
 	switch {
 	case p.RecoverThread != nil:
 		recoverySender, ok := sender.(RuntimeRecoveryCommandSender)
@@ -925,8 +933,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 				plan = RuntimeCommandPlan{StaleAccepted: true}
 				return nil
 			}
-			if err := requireInitialMCPManifestReadyTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
-				return err
+			if job.InputKind == "messages" {
+				if err := requireUserInputMCPReadyTx(ctx, tx, job); err != nil {
+					return err
+				}
+			} else if job.InputKind != "interrupt_control" {
+				if err := requireInitialMCPManifestReadyTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+					return err
+				}
 			}
 		}
 		binding, err := s.resolveRuntimeTarget(ctx, tx, job)
@@ -955,6 +969,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 		plan, err = runtimeCommandPlanForPayload(job, sessionThreadID, runtimeInputID, payloadJSON, binding, port)
 		if err != nil {
 			return err
+		}
+		if job.Kind == queue.KindRuntimeInput && job.InputKind == "messages" {
+			plan.MCPBeforeInput, err = mcpDiscoveryInstallationTx(ctx, tx, job, binding, port)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -2852,6 +2872,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifestsWithListTimeo
 	now time.Time,
 	listTimeout time.Duration,
 ) error {
+	if job.InputKind == "messages" {
+		return s.discoverUserInputMCP(ctx, job, toolsets, listTimeout)
+	}
 	if s.MCPManifestLister == nil {
 		return runtimeDeliveryPrepareError{kind: "mcp_manifest_discovery_unavailable", message: "mcp manifest lister is unavailable", retryable: true}
 	}
@@ -2925,14 +2948,17 @@ func captureInitialMCPManifestAcceptanceTx(
 	if err != nil {
 		return mcpManifestAcceptance{}, err
 	}
-	if exists {
-		return mcpManifestAcceptance{PreviousGeneration: current.Generation, Generation: current.Generation, Duplicate: true}, nil
+	if exists && current.Readiness == mcpManifestReadinessReady {
+		return mcpManifestAcceptance{PreviousGeneration: current.Generation, Generation: current.Generation, Readiness: mcpManifestReadinessReady, Duplicate: true}, nil
 	}
 	filtered, omissions := filterMCPManifestCollisions(toolset.BuiltinFamily, manifest.Tools)
 	toolsJSON, canonicalErr := canonicalMCPManifestToolsJSON(filtered)
 	if strings.TrimSpace(manifest.ManifestETag) == "" || canonicalErr != nil || len([]byte(toolsJSON)) > MaxMcpManifestBytes {
-		acceptance, err := captureInitialMCPManifestUnreadyLockedTx(ctx, tx, workspaceID, sessionID, toolset, mcpManifestDiagnosticInvalid, now)
+		acceptance, err := captureInitialMCPManifestUnreadyTx(ctx, tx, workspaceID, sessionID, toolset, mcpManifestDiagnosticInvalid, now)
 		return acceptance, err
+	}
+	if exists {
+		return captureMCPManifestAcceptanceTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName, manifest.ManifestETag, manifest.Tools, now)
 	}
 	acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, toolset.MCPServerName, manifest.ManifestETag, toolsJSON, 1, toolset, now)
 	acceptance.Readiness = mcpManifestReadinessReady
@@ -4506,6 +4532,10 @@ func (e runtimeDeliveryPrepareError) Error() string {
 }
 
 func runtimeDeliveryResultFromPrepareError(err error) RuntimeDeliveryResult {
+	var authorityLost mcpDiscoveryAuthorityLostError
+	if errors.As(err, &authorityLost) {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+	}
 	if isThreadInterruptBarrierStaleError(err) {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale}
 	}

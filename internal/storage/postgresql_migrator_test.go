@@ -26,8 +26,8 @@ func TestMigrateSchemaCreatesAndStampsBaselineAtomically(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("read migration stamp count: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("migration stamp count = %d, want 2", count)
+	if count != 3 {
+		t.Fatalf("migration stamp count = %d, want 3", count)
 	}
 	assertTableExists(t, db, "sessions", true)
 	assertTableExists(t, db, "session_turn_retries", true)
@@ -110,8 +110,8 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tetral_schema_migrations`).Scan(&stampCount); err != nil {
 		t.Fatalf("count migration stamps: %v", err)
 	}
-	if stampCount != 2 {
-		t.Fatalf("migration stamp count = %d, want 2", stampCount)
+	if stampCount != 3 {
+		t.Fatalf("migration stamp count = %d, want 3", stampCount)
 	}
 
 	var nullable string
@@ -226,7 +226,7 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			name: "ahead",
 			setup: func(t *testing.T, db *sql.DB) {
 				migrateForHistoryTest(t, db)
-				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (3, $1)`, strings.Repeat("a", 64)); err != nil {
+				if _, err := db.Exec(`INSERT INTO tetral_schema_migrations (version, checksum) VALUES (4, $1)`, strings.Repeat("a", 64)); err != nil {
 					t.Fatalf("insert ahead row: %v", err)
 				}
 			},
@@ -340,7 +340,7 @@ func TestMigrateSchemaCancellationRollsBackStampAndReleasesLock(t *testing.T) {
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("initial MigrateSchema: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE session_github_repository_resources DROP CONSTRAINT session_github_repository_git_identity_shape, DROP COLUMN git_identity_name, DROP COLUMN git_identity_email; DELETE FROM tetral_schema_migrations WHERE version = 2`); err != nil {
+	if _, err := db.ExecContext(ctx, `ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic; DELETE FROM tetral_schema_migrations WHERE version=3; ALTER TABLE session_github_repository_resources DROP CONSTRAINT session_github_repository_git_identity_shape, DROP COLUMN git_identity_name, DROP COLUMN git_identity_email; DELETE FROM tetral_schema_migrations WHERE version = 2`); err != nil {
 		t.Fatalf("make version two pending for cancellation proof: %v", err)
 	}
 	blocker, err := db.BeginTx(ctx, nil)
@@ -424,8 +424,8 @@ func TestMigrateSchemaConcurrentReplicasSerialize(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count stamps: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("stamp count = %d, want 2", count)
+	if count != 3 {
+		t.Fatalf("stamp count = %d, want 3", count)
 	}
 }
 

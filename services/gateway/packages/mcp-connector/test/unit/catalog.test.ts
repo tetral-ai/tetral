@@ -4,9 +4,14 @@ import { assertCatalogURL, catalogEntryByName, MCP_CATALOG } from "../../src/cat
 describe("MCP catalog", () => {
   test("pins the closed GitHub catalog entry", () => {
     expect(MCP_CATALOG).toEqual([
-      { name: "github", url: "https://api.githubcopilot.com/mcp/" },
+      { name: "github", url: "https://api.githubcopilot.com/mcp/", toolsets: "default,actions" },
     ]);
     expect(catalogEntryByName("github")).toEqual(MCP_CATALOG[0]);
+  });
+
+  test("keeps the default alias rather than enumerating its constituent toolsets", () => {
+    expect(MCP_CATALOG[0]?.toolsets).toBe("default,actions");
+    expect(MCP_CATALOG[0]?.toolsets.split(",")).toEqual(["default", "actions"]);
   });
 
   test("accepts only catalog URL variants and rejects off-catalog URLs", () => {

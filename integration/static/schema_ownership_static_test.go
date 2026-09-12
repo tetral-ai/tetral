@@ -250,6 +250,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 	}{
 		{checksumVersion: "One", steps: "postgresqlBaselineSteps"},
 		{checksumVersion: "Two", steps: "postgresqlGitIdentitySteps"},
+		{checksumVersion: "Three", steps: "postgresqlMCPDiscoverySteps"},
 	}
 	if len(wantRegistry) != len(goChecksums) {
 		t.Fatalf("Go executable schema registry expectation count = %d; want %d checksum declarations", len(wantRegistry), len(goChecksums))

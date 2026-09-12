@@ -23,6 +23,9 @@ const (
 	// PostgreSQLSchemaVersionTwoChecksum pins the additive Git identity migration.
 	PostgreSQLSchemaVersionTwoChecksum = "36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458"
 
+	// PostgreSQLSchemaVersionThreeChecksum pins durable input discovery budgets.
+	PostgreSQLSchemaVersionThreeChecksum = "be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f"
+
 	createPostgreSQLSchemaMigrationsTable = `CREATE TABLE tetral_schema_migrations (
 		version BIGINT PRIMARY KEY,
 		checksum TEXT NOT NULL,
@@ -111,6 +114,7 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 			checksum: PostgreSQLSchemaVersionTwoChecksum,
 			steps:    postgresqlGitIdentitySteps(),
 		},
+		{version: 3, checksum: PostgreSQLSchemaVersionThreeChecksum, steps: postgresqlMCPDiscoverySteps()},
 	}
 }
 

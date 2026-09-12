@@ -712,6 +712,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"input_kind", "rejection_reason_code", "event_ids_json", "sequence_from", "sequence_to", "status",
 			"binding_id", "binding_generation", "target_pod_uid", "created_at",
 			"updated_at", "committed_at",
+			"mcp_discovery_attempts", "mcp_discovery_deadline_at", "mcp_discovery_diagnostic",
 		},
 		"session_runtime_status": {
 			"workspace_id", "session_id", "status", "status_event_id", "idle_since",
