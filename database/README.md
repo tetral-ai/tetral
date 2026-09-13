@@ -42,8 +42,11 @@ refreshed or rewritten by this migration. Fresh databases apply V1, V2, then V3;
 existing databases apply only their pending versions. Each version's DDL and
 history entry commit together. Go and Gateway readiness require all three.
 
-Release candidates obtain their current version and checksum from this same Go
-migration registry through `tetral-release database-identity`. Candidate
+`internal/schemaidentity` owns the ordered version/checksum metadata without
+database or driver dependencies. Storage binds these identities to its migration
+DDL and verifies the exact ordered payload checksums. Release candidates read
+the same identities through `tetral-release database-identity`; the release CLI
+does not import storage or PostgreSQL drivers. Candidate
 validation accepts registered historical identities as well as the current one,
 and rejects unknown versions or mismatched checksums. Release metadata does not
 run migrations or replace the workload readiness checks.

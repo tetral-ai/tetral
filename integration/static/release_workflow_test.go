@@ -34,6 +34,35 @@ type releaseWorkflowJob struct {
 	Steps       []map[string]any  `yaml:"steps"`
 }
 
+func TestReleaseCLIDoesNotDependOnDatabaseRuntime(t *testing.T) {
+	command := exec.Command("go", "list", "-deps", "-f", `{{.ImportPath}}|{{join .Imports ","}}`, "./internal/release/cmd/tetral-release")
+	command.Dir = finalArchitectureEngineRoot(t)
+	body, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const identityPackage = "github.com/tetral-ai/tetral/internal/schemaidentity"
+	const storagePackage = "github.com/tetral-ai/tetral/internal/storage"
+	foundIdentity := false
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		name, imports, _ := strings.Cut(line, "|")
+		if name == identityPackage {
+			foundIdentity = true
+			if imports != "" {
+				t.Fatalf("shared schema identities must remain dependency-free; imports = %s", imports)
+			}
+		}
+		if name == storagePackage || strings.HasPrefix(name, storagePackage+"/") ||
+			name == "database/sql" || strings.HasPrefix(name, "database/sql/") ||
+			strings.HasPrefix(name, "github.com/jackc/") || name == "github.com/lib/pq" {
+			t.Fatalf("release CLI pulls database runtime dependency %s; read schemaidentity instead", name)
+		}
+	}
+	if !foundIdentity {
+		t.Fatal("release CLI must consume the shared schema identity owner")
+	}
+}
+
 func TestReleaseWorkflowCandidateUsesMigrationOwnedDatabaseIdentity(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "engine-release.yml"))

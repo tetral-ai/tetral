@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 func TestEveryEffectiveDockerBaseMatchesImmutableInventory(t *testing.T) {
@@ -37,7 +37,7 @@ func TestNumericAlphaVersionExcludesHistoricalRCLine(t *testing.T) {
 }
 
 func TestCandidateAcceptsHistoricalAndCurrentDatabaseVersions(t *testing.T) {
-	for _, identity := range storage.PostgreSQLSchemaIdentities() {
+	for _, identity := range schemaidentity.History() {
 		candidate := validCandidate(t)
 		candidate.SchemaVersion = int(identity.Version)
 		candidate.SchemaChecksum = "sha256:" + identity.Checksum
@@ -68,7 +68,7 @@ func TestDatabaseIdentityCommandUsesCurrentMigration(t *testing.T) {
 	if err := json.Unmarshal(body, &identity); err != nil {
 		t.Fatal(err)
 	}
-	registered := storage.PostgreSQLSchemaIdentities()
+	registered := schemaidentity.History()
 	want := registered[len(registered)-1]
 	if identity.Version != want.Version || identity.Checksum != "sha256:"+want.Checksum {
 		t.Fatalf("release command identity = %+v; current migration = %+v", identity, want)

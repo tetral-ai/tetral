@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 const (
@@ -104,13 +104,13 @@ type DatabaseIdentity struct {
 }
 
 func CurrentDatabaseIdentity() DatabaseIdentity {
-	identities := storage.PostgreSQLSchemaIdentities()
+	identities := schemaidentity.History()
 	current := identities[len(identities)-1]
 	return DatabaseIdentity{Version: current.Version, Checksum: "sha256:" + current.Checksum}
 }
 
 func registeredDatabaseIdentity(version int, checksum string) bool {
-	for _, identity := range storage.PostgreSQLSchemaIdentities() {
+	for _, identity := range schemaidentity.History() {
 		if int64(version) == identity.Version && checksum == "sha256:"+identity.Checksum {
 			return true
 		}
