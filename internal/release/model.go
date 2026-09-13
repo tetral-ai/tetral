@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/storage"
 )
 
 const (
@@ -95,6 +97,27 @@ type CandidateManifest struct {
 	CreatedAt      time.Time                `json:"created_at"`
 }
 
+// DatabaseIdentity is derived from the migration owner at the candidate source.
+type DatabaseIdentity struct {
+	Version  int64  `json:"version"`
+	Checksum string `json:"checksum"`
+}
+
+func CurrentDatabaseIdentity() DatabaseIdentity {
+	identities := storage.PostgreSQLSchemaIdentities()
+	current := identities[len(identities)-1]
+	return DatabaseIdentity{Version: current.Version, Checksum: "sha256:" + current.Checksum}
+}
+
+func registeredDatabaseIdentity(version int, checksum string) bool {
+	for _, identity := range storage.PostgreSQLSchemaIdentities() {
+		if int64(version) == identity.Version && checksum == "sha256:"+identity.Checksum {
+			return true
+		}
+	}
+	return false
+}
+
 type RehearsalEvidence struct {
 	ReportDigest        string           `json:"report_digest"`
 	Report              *RehearsalReport `json:"report"`
@@ -144,7 +167,7 @@ func ValidateCandidate(candidate CandidateManifest) error {
 	if err != nil || parsed != candidate.Version {
 		return fmt.Errorf("candidate version is invalid")
 	}
-	if (candidate.SchemaVersion != 1 && candidate.SchemaVersion != 2) || !digestPattern.MatchString(candidate.SchemaChecksum) {
+	if !registeredDatabaseIdentity(candidate.SchemaVersion, candidate.SchemaChecksum) {
 		return fmt.Errorf("candidate database identity is invalid")
 	}
 	for _, name := range []string{"tetral", "gateway", "agent-runtime", "sandbox"} {

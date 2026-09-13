@@ -118,6 +118,23 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 	}
 }
 
+// PostgreSQLSchemaIdentity is the immutable identity of a registered migration.
+// Release metadata uses these identities without owning or executing the DDL.
+type PostgreSQLSchemaIdentity struct {
+	Version  int64
+	Checksum string
+}
+
+// PostgreSQLSchemaIdentities returns a detached, ordered view of schema history.
+func PostgreSQLSchemaIdentities() []PostgreSQLSchemaIdentity {
+	registry := postgresqlMigrationRegistry()
+	identities := make([]PostgreSQLSchemaIdentity, len(registry))
+	for i, migration := range registry {
+		identities[i] = PostgreSQLSchemaIdentity{Version: migration.version, Checksum: migration.checksum}
+	}
+	return identities
+}
+
 // MigrateSchema serializes migration owners on one pinned PostgreSQL
 // connection, rejects invalid history before mutation, and applies each
 // pending migration and its stamp in one transaction on that connection.

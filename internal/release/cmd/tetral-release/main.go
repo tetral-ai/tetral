@@ -13,12 +13,18 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: tetral-release <validate-version|validate-candidate|record-rehearsal|validate-rehearsal|validate-authorization|artifact|validate-layout|state|cleanup-plan|verify-bases|environment-plan>")
+		fail("usage: tetral-release <validate-version|database-identity|validate-candidate|record-rehearsal|validate-rehearsal|validate-authorization|artifact|validate-layout|state|cleanup-plan|verify-bases|environment-plan>")
 	}
 	var err error
 	switch os.Args[1] {
 	case "validate-version":
 		err = validateVersion(os.Args[2:])
+	case "database-identity":
+		if len(os.Args) != 2 {
+			err = fmt.Errorf("database-identity accepts no arguments")
+		} else {
+			err = writeJSON(os.Stdout, releasecontract.CurrentDatabaseIdentity())
+		}
 	case "validate-candidate":
 		err = validateCandidate(os.Args[2:])
 	case "record-rehearsal":
