@@ -565,6 +565,13 @@ without a cursor, within the same deadline.
 
 Protocol/bound failures use a discovery-specific error and the existing typed
 `manifest_invalid` trailer, with safe reason/page/tool counts in operator logs.
+JSON-RPC invalid-parameter errors retain their original classification; an
+off-catalog rejection or rejected request is not logged as a pagination-bound
+violation. Discovery timeouts name tool discovery, including SDK timeout paths;
+tool-call timeouts continue to name the tool call. During discovery, terminal or
+exhausted connection failures map to the `server_unavailable` trailer, including
+unavailable credential refresh. These end one connector operation; Bridge owns
+the separate input-level retry budget.
 Bridge owns whole-discovery retries for an input and the final decision to
 execute or fail that input; the connector never presents a partial directory as
 successful. SDK metadata update and Bridge's later database acceptance are
@@ -633,7 +640,7 @@ compatibility, so appending unconditionally would duplicate it).
 
 #### Event mapping
 
-Runtime Core writes the public events; the connector supplies `mcp_server_name`,
+For tool execution, Runtime Core writes the public events; the connector supplies `mcp_server_name`,
 `retry_status`, and result payloads through the `RunMcpTool` envelope. A gated
 call emits `agent.mcp_tool_use`; the settlement emits `agent.mcp_tool_result`
 linked by `mcp_tool_use_id`. Each error surfaces as `session.error` wrapping a

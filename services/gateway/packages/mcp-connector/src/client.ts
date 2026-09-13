@@ -211,11 +211,9 @@ export class McpSDKClient implements McpClient {
         enabled: (tool as typeof tool & { readonly enabled?: boolean }).enabled,
       }));
     } catch (error) {
-      if (isTimeoutError(error) || (error instanceof DOMException && error.name === "TimeoutError")) {
+      if (isTimeoutError(error) || (error instanceof DOMException && error.name === "TimeoutError") ||
+          (error instanceof McpConnectorError && error.code === "mcp_timeout")) {
         throw new McpConnectorError("mcp_timeout", "MCP tool discovery timed out.");
-      }
-      if (error instanceof McpConnectorError && error.code === "mcp_invalid_input") {
-        error = new McpDiscoveryError("invalid_response");
       }
       if (error instanceof McpDiscoveryError) {
         try {

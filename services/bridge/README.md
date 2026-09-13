@@ -505,7 +505,14 @@ and active lifecycle facts directly from durable rows.
   Operator logs identify the input, server, attempt and failure class. This input
   never reaches Runtime/model execution. An otherwise inactive main Session
   emits idle; other running threads and control operations remain intact. The
-  Session is not terminated. A distinct later user input may retry and restore
+  error's `retry_status: exhausted` describes the input discovery budget,
+  including credential failures; it is distinct from a connector operation's
+  terminal status. While a configured directory remains unavailable, each new
+  user message can exhaust its own budget and be rejected before model execution.
+  The idle event may therefore have no preceding running event for that input;
+  it reports settlement, not proof that a model request ran. See the
+  [public event lifecycle](../event-stream/README.md#discovery-failure-before-model-execution).
+  The Session is not terminated. A distinct later user input may retry and restore
   `unready -> ready` with a higher generation; a matching etag does not prevent
   recovery. Inputs that performed discovery apply the accepted manifest through
   Runtime config control before `AcceptInput`. A cold Pod's `no_residency` result

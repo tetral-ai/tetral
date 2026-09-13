@@ -69,6 +69,30 @@ test("empty opaque cursor is followed and each complete listing restarts without
   expect(f.requests.map(p => p?.cursor)).toEqual([undefined, "", undefined, ""]);
 });
 
+test("SDK discovery timeout names discovery while tool-call timeout still names the call", async () => {
+  const f = fixture(() => { throw new McpError(ErrorCode.RequestTimeout, "synthetic timeout"); }, {}, async () => {
+    throw new McpError(ErrorCode.RequestTimeout, "synthetic timeout");
+  });
+  await expect(f.client.listTools(identity)).rejects.toMatchObject({ code: "mcp_timeout", message: "MCP tool discovery timed out." });
+  await expect(f.call("normal")).rejects.toMatchObject({ code: "mcp_timeout", message: "MCP tool call timed out." });
+});
+
+test("a rejected list request preserves its error without claiming a pagination violation", async () => {
+  const f = fixture(() => { throw new McpError(ErrorCode.InvalidParams, "synthetic rejection"); });
+  await expect(f.client.listTools(identity)).rejects.toMatchObject({ code: "mcp_invalid_input" });
+  expect(f.requests).toHaveLength(1);
+  expect(f.logs).toEqual([]);
+});
+
+test("catalog rejection before discovery does not claim an invalid page response", async () => {
+  const f = fixture(() => ({ tools: [] }));
+  await expect(f.client.listTools({ ...identity, mcpServerName: "unknown_test_server" })).rejects.toMatchObject({
+    code: "mcp_invalid_input", message: "MCP server is outside the curated catalog.",
+  });
+  expect(f.requests).toHaveLength(0);
+  expect(f.logs).toEqual([]);
+});
+
 test("failed later page preserves the previous SDK metadata and publishes no partial result", async () => {
   let refresh = false;
   const f = fixture(params => {
