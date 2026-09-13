@@ -27,9 +27,13 @@ export const PostgreSQLSchemaVersionOneChecksum =
 export const PostgreSQLSchemaVersionTwoChecksum =
 	"36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458";
 
+/** Pins durable input discovery budgets. */
+export const PostgreSQLSchemaVersionThreeChecksum = "be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f";
+
 const PostgreSQLSchemaRegistry = [
 	PostgreSQLSchemaVersionOneChecksum,
 	PostgreSQLSchemaVersionTwoChecksum,
+	PostgreSQLSchemaVersionThreeChecksum,
 ] as const;
 
 /** Enumerates the public-safe failure classifications produced by schema verification. */

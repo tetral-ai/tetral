@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	releasecontract "github.com/tetral-ai/tetral/internal/release"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
@@ -30,6 +32,91 @@ type releaseWorkflowJob struct {
 	Environment string            `yaml:"environment"`
 	Permissions map[string]string `yaml:"permissions"`
 	Steps       []map[string]any  `yaml:"steps"`
+}
+
+func TestReleaseCLIDoesNotDependOnDatabaseRuntime(t *testing.T) {
+	command := exec.Command("go", "list", "-deps", "-f", `{{.ImportPath}}|{{join .Imports ","}}`, "./internal/release/cmd/tetral-release")
+	command.Dir = finalArchitectureEngineRoot(t)
+	body, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const identityPackage = "github.com/tetral-ai/tetral/internal/schemaidentity"
+	const storagePackage = "github.com/tetral-ai/tetral/internal/storage"
+	foundIdentity := false
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		name, imports, _ := strings.Cut(line, "|")
+		if name == identityPackage {
+			foundIdentity = true
+			if imports != "" {
+				t.Fatalf("shared schema identities must remain dependency-free; imports = %s", imports)
+			}
+		}
+		if name == storagePackage || strings.HasPrefix(name, storagePackage+"/") ||
+			name == "database/sql" || strings.HasPrefix(name, "database/sql/") ||
+			strings.HasPrefix(name, "github.com/jackc/") || name == "github.com/lib/pq" {
+			t.Fatalf("release CLI pulls database runtime dependency %s; read schemaidentity instead", name)
+		}
+	}
+	if !foundIdentity {
+		t.Fatal("release CLI must consume the shared schema identity owner")
+	}
+}
+
+func TestReleaseWorkflowCandidateUsesMigrationOwnedDatabaseIdentity(t *testing.T) {
+	root := finalArchitectureEngineRoot(t)
+	body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "engine-release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow releaseWorkflow
+	if err := testinfra.DecodeWorkflowYAML(body, "engine-release.yml", &workflow); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, step := range workflow.Jobs["finalize-candidate"].Steps {
+		if step["name"] == "Build canonical Candidate Manifest" {
+			script, _ = step["run"].(string)
+		}
+	}
+	if !strings.Contains(script, `database="$(go run ./internal/release/cmd/tetral-release database-identity)"`) {
+		t.Fatal("candidate workflow must obtain its database identity from the migration owner")
+	}
+	start := strings.Index(script, "jq -n --arg version")
+	if start < 0 {
+		t.Fatal("candidate JSON construction is missing")
+	}
+	// Execute the actual workflow JSON construction with the current identity.
+	// This catches a hardcoded version/checksum even if the command still exists.
+	work := t.TempDir()
+	for _, name := range []string{"chart.digest", "values.digest", "render.digest"} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte("sha256:"+strings.Repeat("0", 64)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := releasecontract.CurrentDatabaseIdentity()
+	database, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-eu", "-c", script[start:])
+	command.Dir = work
+	command.Env = append(os.Environ(), "VERSION=v0.1.0-alpha.1", "ARTIFACT_VERSION=0.1.0-alpha.1",
+		"SOURCE_COMMIT="+strings.Repeat("0", 40), "images={}", "bases=[]", "database="+string(database))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("workflow candidate construction: %v\n%s", err, output)
+	}
+	result, err := os.ReadFile(filepath.Join(work, "candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate releasecontract.CandidateManifest
+	if err := json.Unmarshal(result, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if int64(candidate.SchemaVersion) != want.Version || candidate.SchemaChecksum != want.Checksum {
+		t.Fatalf("workflow database identity = %d/%s, want %+v", candidate.SchemaVersion, candidate.SchemaChecksum, want)
+	}
 }
 
 func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {

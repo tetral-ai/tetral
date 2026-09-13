@@ -6,6 +6,7 @@ import {
   MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS,
   MCP_RECONNECT_DELAYS_MS,
   MCP_RECONNECT_MAX_RETRIES,
+  MCP_TOOLSETS_HEADER,
   McpSDKClient,
   mcpToolsListChangedFailureLogRecord,
   streamableHTTPTransportOptions,
@@ -18,6 +19,17 @@ type RecordingSDKTool = Awaited<ReturnType<SDKClientLike["listTools"]>>["tools"]
 };
 
 describe("McpSDKClient", () => {
+  test("carries the catalog toolset selection header beside bearer authorization", () => {
+    const options = streamableHTTPTransportOptions({ token: "token-a", toolsets: "default,actions" });
+    expect(options.requestInit).toEqual({
+      headers: { Authorization: "Bearer token-a", [MCP_TOOLSETS_HEADER]: "default,actions" },
+    });
+    expect(streamableHTTPTransportOptions({ toolsets: "default,actions" }).requestInit).toEqual({
+      headers: { [MCP_TOOLSETS_HEADER]: "default,actions" },
+    });
+    expect(streamableHTTPTransportOptions({}).requestInit).toEqual({});
+  });
+
   test("pins Streamable HTTP reconnect backoff and retry budget", () => {
     const options = streamableHTTPTransportOptions({ token: "token-a" });
     const delays = Array.from({ length: MCP_RECONNECT_MAX_RETRIES }, (_, index) => {
@@ -226,9 +238,34 @@ describe("McpSDKClient", () => {
     const tools = await client.listTools(validIdentity());
 
     expect(tools).toEqual([{ name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" } }]);
-    expect(transports).toEqual([{ url: new URL("https://api.githubcopilot.com/mcp/"), token: "token-a" }]);
+    expect(transports).toEqual([{ url: new URL("https://api.githubcopilot.com/mcp/"), token: "token-a", toolsets: "default,actions" }]);
     expect(clients).toHaveLength(1);
     expect(clients[0]?.connects).toBe(1);
+  });
+
+  test("sends the catalog toolset selection on every newly created transport, including credential replacement", async () => {
+    const credentials = new RotatingCredentialResolver(["token-a", "token-b"]);
+    const transports: Array<{ readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }> = [];
+    const client = new McpSDKClient({
+      credentialResolver: credentials,
+      onToolsListChanged: async () => undefined,
+      createClient: () => new RecordingSDKClient(),
+      createTransport: (input) => {
+        transports.push(input);
+        return input;
+      },
+      setTimer: fakeSetTimer,
+      clearTimer: () => undefined,
+    });
+
+    await client.listTools(validIdentity());
+    await client.listTools(validIdentity());
+
+    expect(transports).toEqual([
+      { url: new URL("https://api.githubcopilot.com/mcp/"), token: "token-a", toolsets: "default,actions" },
+      { url: new URL("https://api.githubcopilot.com/mcp/"), token: "token-b", toolsets: "default,actions" },
+    ]);
+    expect(client.connectionCount()).toBe(1);
   });
 
   test("preserves disabled tool metadata from the SDK adapter", async () => {
@@ -893,6 +930,7 @@ class RecordingSDKClient implements SDKClientLike {
 	listToolsGate: Promise<void> | undefined;
   callToolOptions: Array<{ readonly timeout?: number } | undefined> = [];
   listToolsOptions: Array<{ readonly timeout?: number } | undefined> = [];
+  callToolParams: Array<{ readonly name: string; readonly arguments?: Record<string, unknown> | undefined }> = [];
   tools: RecordingSDKTool[] = [
     { name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } },
   ];
@@ -921,7 +959,8 @@ class RecordingSDKClient implements SDKClientLike {
     };
   }
 
-  async callTool(_params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined }, _resultSchema?: unknown, options?: { readonly timeout?: number }) {
+  async callTool(params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined }, _resultSchema?: unknown, options?: { readonly timeout?: number }) {
+    this.callToolParams.push(params);
     this.callToolOptions.push(options);
 		if (this.callToolGate !== undefined) {
 			await this.callToolGate;

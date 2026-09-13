@@ -1,4 +1,7 @@
-import { mock } from "bun:test";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpSDKClient } from "../../src/client.js";
 import { Metadata } from "@grpc/grpc-js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { BridgeAPIManifestChangeNotifier } from "../../src/bridge-client.js";
@@ -11,53 +14,21 @@ if (bridgeAddress === undefined || tokenPath === undefined) {
   throw new Error("bridge address and token path are required");
 }
 
-type ToolsChanged = (error?: unknown) => void;
-
-const sdkClients: FakeSDKClient[] = [];
-
-class FakeSDKClient {
-  onerror: ((error: Error) => void) | undefined;
-  listCalls = 0;
-  readonly #toolsChanged: ToolsChanged;
-
-  constructor(
-    _identity: unknown,
-    options: { readonly listChanged: { readonly tools: { readonly onChanged: ToolsChanged } } },
-  ) {
-    this.#toolsChanged = options.listChanged.tools.onChanged;
-    sdkClients.push(this);
-  }
-
-  async connect(): Promise<void> {}
-
-  async listTools() {
-    this.listCalls += 1;
-    return {
-      tools: [{ name: "github_search", description: "Search GitHub", inputSchema: { type: "object" } }],
-    };
-  }
-
-  async callTool() {
-    return { content: [] };
-  }
-
-  async close(): Promise<void> {}
-
-  emitToolsChanged(): void {
-    this.#toolsChanged(undefined);
-  }
-}
-
-mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({ Client: FakeSDKClient }));
-mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
-  StreamableHTTPClientTransport: class FakeTransport {},
-}));
-
-const { McpSDKClient } = await import("../../src/client.js");
+let listCalls = 0;
+const sdkServer = new Server({ name: "manifest-fixture", version: "1" }, { capabilities: { tools: { listChanged: true } } });
+sdkServer.setRequestHandler(ListToolsRequestSchema, async () => {
+  listCalls += 1;
+  return { tools: [{ name: "github_search", description: "Search GitHub", inputSchema: { type: "object" as const } }] };
+});
 const sleeps: number[] = [];
 const notificationResults: Array<Awaited<ReturnType<McpConnectorServiceShell["handleToolsListChangedNotification"]>>> = [];
 let service: McpConnectorServiceShell;
 const client = new McpSDKClient({
+  createTransport: () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    void sdkServer.connect(serverTransport);
+    return clientTransport;
+  },
   credentialResolver: {
     resolve: async () => ({
       ok: true as const,
@@ -104,18 +75,19 @@ service = new McpConnectorServiceShell({
 });
 const input = { workspaceId: "default", sessionId: "sesn_mcp_ack_loss", mcpServerName: "github" };
 const initial = await service.listMcpTools(input, new Metadata());
-const sdk = sdkClients[0];
-if (sdk === undefined) throw new Error("production MCP SDK client was not constructed");
-sdk.emitToolsChanged();
+await sdkServer.sendToolListChanged();
 await until(() => notificationResults.length === 1);
-sdk.emitToolsChanged();
+await sdkServer.sendToolListChanged();
 await until(() => notificationResults.length === 2);
+
+await client.closeAll();
+await sdkServer.close();
 
 process.stdout.write(`${JSON.stringify({
   initialManifestEtag: initial.manifestEtag,
   recovered: notificationResults[0],
   laterReplay: notificationResults[1],
-  listCalls: sdk.listCalls,
+  listCalls,
   sleeps,
 })}\n`);
 

@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 const (
@@ -18,10 +20,13 @@ const (
 	PostgreSQLSchemaAdvisoryLockID int64 = 0x7465_7472_616c_7363 // "tetralsc"
 
 	// PostgreSQLSchemaVersionOneChecksum pins the immutable Alpha 1 baseline.
-	PostgreSQLSchemaVersionOneChecksum = "d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6"
+	PostgreSQLSchemaVersionOneChecksum = schemaidentity.PostgreSQLSchemaVersionOneChecksum
 
 	// PostgreSQLSchemaVersionTwoChecksum pins the additive Git identity migration.
-	PostgreSQLSchemaVersionTwoChecksum = "36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458"
+	PostgreSQLSchemaVersionTwoChecksum = schemaidentity.PostgreSQLSchemaVersionTwoChecksum
+
+	// PostgreSQLSchemaVersionThreeChecksum pins durable input discovery budgets.
+	PostgreSQLSchemaVersionThreeChecksum = schemaidentity.PostgreSQLSchemaVersionThreeChecksum
 
 	createPostgreSQLSchemaMigrationsTable = `CREATE TABLE tetral_schema_migrations (
 		version BIGINT PRIMARY KEY,
@@ -100,18 +105,22 @@ type postgresqlMigrationQueryer interface {
 }
 
 func postgresqlMigrationRegistry() []postgresqlMigration {
-	return []postgresqlMigration{
-		{
-			version:  1,
-			checksum: PostgreSQLSchemaVersionOneChecksum,
-			steps:    postgresqlBaselineSteps(),
-		},
-		{
-			version:  2,
-			checksum: PostgreSQLSchemaVersionTwoChecksum,
-			steps:    postgresqlGitIdentitySteps(),
-		},
+	identities := schemaidentity.History()
+	registry := make([]postgresqlMigration, len(identities))
+	for i, identity := range identities {
+		var steps []postgresqlSchemaStep
+		switch identity.Version {
+		case 1:
+			steps = postgresqlBaselineSteps()
+		case 2:
+			steps = postgresqlGitIdentitySteps()
+		case 3:
+			steps = postgresqlMCPDiscoverySteps()
+		}
+		// An identity without matching DDL fails registry checksum validation.
+		registry[i] = postgresqlMigration{version: identity.Version, checksum: identity.Checksum, steps: steps}
 	}
+	return registry
 }
 
 // MigrateSchema serializes migration owners on one pinned PostgreSQL

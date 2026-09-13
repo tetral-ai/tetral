@@ -20,10 +20,9 @@ import (
 
 func TestMigrationLogsObserveRollbackAndRetryWithoutDriverDetails(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	_, err := db.Exec(`ALTER TABLE session_github_repository_resources
-DROP CONSTRAINT session_github_repository_git_identity_shape,
-DROP COLUMN git_identity_name, DROP COLUMN git_identity_email;
-DELETE FROM tetral_schema_migrations WHERE version = 2;
+	_, err := db.Exec(`ALTER TABLE session_runtime_inbox
+DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic;
+DELETE FROM tetral_schema_migrations WHERE version = 3;
 CREATE FUNCTION reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'private-migration-message' USING ERRCODE = '42501', DETAIL = 'private-migration-detail'; END $$;
 CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION reject_migration()`)
@@ -43,17 +42,17 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('ALTER T
 		t.Fatalf("records = %d; want start and failure", len(records))
 	}
 	failed := records[1]
-	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(2) || failed["schema.step"] != "add_git_identity_columns" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" {
+	if failed["msg"] != "schema.migration.failed" || failed["schema.version"] != float64(3) || failed["schema.step"] != "add_mcp_discovery_budget" || failed["db.sqlstate"] != "42501" || failed["transaction.outcome"] != "rolled_back" {
 		t.Fatalf("failure record = %#v", failed)
 	}
 	var stamps, columns int
 	if err := db.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_name='session_github_repository_resources' AND column_name LIKE 'git_identity_%'`).Scan(&columns); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_name='session_runtime_inbox' AND column_name LIKE 'mcp_discovery_%'`).Scan(&columns); err != nil {
 		t.Fatal(err)
 	}
-	if stamps != 1 || columns != 0 {
+	if stamps != 2 || columns != 0 {
 		t.Fatalf("rollback left stamps=%d columns=%d", stamps, columns)
 	}
 	if _, err := db.Exec(`DROP EVENT TRIGGER reject_migration; DROP FUNCTION reject_migration()`); err != nil {
@@ -63,7 +62,7 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('ALTER T
 		t.Fatal(err)
 	}
 	records = migrationLogRecords(t, &logs)
-	if len(records) != 2 || records[1]["msg"] != "schema.migration.completed" || records[1]["transaction.outcome"] != "committed" || records[1]["schema.version"] != float64(2) {
+	if len(records) != 2 || records[1]["msg"] != "schema.migration.completed" || records[1]["transaction.outcome"] != "committed" || records[1]["schema.version"] != float64(3) {
 		t.Fatalf("retry records = %#v", records)
 	}
 	if err := storage.VerifySchema(ctx, db); err != nil {

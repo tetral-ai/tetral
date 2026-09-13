@@ -42,6 +42,19 @@ restate that matrix.
 
 ## States & lifecycle
 
+### Discovery failure before model execution
+
+When a configured MCP directory is missing or unready, Bridge may reject a user
+input after its bounded discovery attempts fail. The input is marked processed
+without model execution, and one `session.error` reports the server and
+`retry_status: exhausted` for that input's discovery budget. An otherwise
+inactive main session also emits `session.status_idle`; there need not be a
+preceding running event for this input. Idle and processed markers therefore
+do not prove that a model request ran. Other active threads are not ended by
+this settlement. The session remains usable: a later distinct user input can
+retry discovery and execute once the configured directory is ready. While the
+directory remains unavailable, later messages can fail the same way.
+
 ### Two cursor sources
 
 Streams and lists never share a cursor. A stream pages the multi-revision

@@ -34,6 +34,7 @@ import { catalogEntryByName } from "./catalog.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
 import { McpConnectorError, mcpErrorKind } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
+import { McpDiscoveryError } from "./discovery.js";
 import { McpIdempotencyStaleCustodyError, canonicalJson } from "./idempotency.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import type { McpConnectorErrorCode } from "./errors.js";
@@ -70,7 +71,7 @@ export interface McpClient {
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
-  }): Promise<readonly McpClientTool[]>;
+  }, options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<readonly McpClientTool[]>;
   callTool(input: {
     readonly workspaceId: string;
     readonly sessionId: string;
@@ -206,7 +207,7 @@ export class McpConnectorServiceShell {
    * it cannot advance the identity acknowledged by durable Bridge state.
    * Family-specific collision filtering remains downstream of this service.
    */
-  async listMcpTools(request: ListMcpToolsRequest, metadata: Metadata): Promise<ListMcpToolsResponse> {
+  async listMcpTools(request: ListMcpToolsRequest, metadata: Metadata, options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<ListMcpToolsResponse> {
     const caller = await this.authorize(metadata, "/tetral.provider_gateway.v1.McpConnectorService/ListMcpTools");
     this.ensureReady();
     const validation = validateListMcpToolsRequest(request);
@@ -222,7 +223,7 @@ export class McpConnectorServiceShell {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
         mcpServerName: request.mcpServerName,
-      });
+      }, options);
     } catch (error) {
       const failure = initialDiscoveryFailure(error);
       logInitialDiscoveryFailure(this.options.logger, request, failure);
@@ -724,6 +725,9 @@ type InitialDiscoveryFailure = {
 };
 
 function initialDiscoveryFailure(error: unknown): InitialDiscoveryFailure | undefined {
+  if (error instanceof McpDiscoveryError) {
+    return { kind: "manifest_invalid", code: status.FAILED_PRECONDITION };
+  }
   if (!(error instanceof McpConnectorError)) {
     return undefined;
   }
@@ -734,7 +738,7 @@ function initialDiscoveryFailure(error: unknown): InitialDiscoveryFailure | unde
     case "mcp_timeout":
       return { kind: "discovery_timeout", code: status.DEADLINE_EXCEEDED };
     case "mcp_connection_failed":
-      return error.retryStatus === "exhausted"
+      return error.retryStatus === "exhausted" || error.retryStatus === "terminal"
         ? { kind: "server_unavailable", code: status.UNAVAILABLE }
         : undefined;
     default:

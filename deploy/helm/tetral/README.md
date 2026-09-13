@@ -307,8 +307,11 @@ role contract changes. A normal rolling upgrade still requires application
 compatibility; schema equality alone does not prove it.
 
 **Rollback:** migrations are forward-only. `helm rollback` changes workloads,
-not the database. After V2 commits, V1-only binaries reject it as `schema_ahead`;
-returning to that release requires an explicit compatible database recovery or
+not the database. After a new schema version commits, binaries whose registry
+ends at an older version reject it as `schema_ahead` (V1-only after V2, or
+V2-only after V3). V3 persists per-input MCP discovery budgets; it does not
+refresh existing tool directories. See [schema history](../../../database/README.md).
+Returning to that release requires an explicit compatible database recovery or
 a forward fix. A nonzero preparation exit does not imply the whole upgrade was
 rolled back: migration versions and role application use separate transactions.
 

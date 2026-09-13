@@ -14,11 +14,20 @@
 export interface McpCatalogEntry {
   readonly name: "github";
   readonly url: "https://api.githubcopilot.com/mcp/";
+  /**
+   * Engine-owned toolset selection sent verbatim as the `X-MCP-Toolsets`
+   * header on every transport to this server. The supported `default` alias
+   * keeps GitHub's baseline issue/PR tools without enumerating its
+   * constituents; `actions` adds the Actions toolset (`actions_list`,
+   * `actions_get`, `get_job_logs`, `actions_run_trigger`). The selection is a
+   * code change, never caller input.
+   */
+  readonly toolsets: "default,actions";
 }
 
 /** Lists the complete set of MCP server names and endpoints admitted by the connector. */
 export const MCP_CATALOG = [
-  { name: "github", url: "https://api.githubcopilot.com/mcp/" },
+  { name: "github", url: "https://api.githubcopilot.com/mcp/", toolsets: "default,actions" },
 ] as const satisfies readonly McpCatalogEntry[];
 
 /** Returns the catalog entry whose name exactly matches the supplied server name. */

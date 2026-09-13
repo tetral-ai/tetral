@@ -29,14 +29,33 @@ The deployed Alpha 1 schema is immutable V1. V2 adds nullable
 `git_identity_name` / `git_identity_email` columns and their paired-value
 constraint to `session_github_repository_resources`. Existing repository data
 and V1 history remain unchanged; NULL identities retain the default Git
-identity. Fresh databases apply V1 then V2; existing V1 databases apply only V2.
+identity.
 The V2 DDL and its history entry commit in one transaction, so a failed V2 can be
-retried without partial columns. Go and Gateway readiness require both versions.
+retried without partial columns.
+
+V3 adds input-owned MCP discovery budgets to `session_runtime_inbox`:
+`mcp_discovery_attempts` is non-null with default zero;
+`mcp_discovery_deadline_at` and `mcp_discovery_diagnostic` are nullable. Two CHECK
+constraints bind attempts to a deadline and constrain safe diagnostic values.
+Existing inputs start with no discovery attempt; existing MCP manifests are not
+refreshed or rewritten by this migration. Fresh databases apply V1, V2, then V3;
+existing databases apply only their pending versions. Each version's DDL and
+history entry commit together. Go and Gateway readiness require all three.
+
+`internal/schemaidentity` owns the ordered version/checksum metadata without
+database or driver dependencies. Storage binds these identities to its migration
+DDL and verifies the exact ordered payload checksums. Release candidates read
+the same identities through `tetral-release database-identity`; the release CLI
+does not import storage or PostgreSQL drivers. Candidate
+validation accepts registered historical identities as well as the current one,
+and rejects unknown versions or mismatched checksums. Release metadata does not
+run migrations or replace the workload readiness checks.
 Do not edit stored checksums to bypass a mismatch: a database created from a
 rewritten V1 is not the deployed Alpha 1 baseline and is rejected as drift.
 
 This is a forward migration, with no automatic downgrade. An older binary
-rejects the V2 schema as ahead; upgrading the schema therefore also changes the
+rejects schema versions beyond its own registry as ahead (including V2-only
+binaries after V3); upgrading the schema therefore also changes the
 rollback requirements. Preserve a database backup before an upgrade that may
 need to return to an older binary.
 

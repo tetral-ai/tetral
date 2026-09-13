@@ -655,8 +655,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 		lister.requests[0].ManifestETag != "" {
 		t.Fatalf("MCP manifest lister requests = %#v; want initial github list", lister.requests)
 	}
-	if len(sender.requests) != 1 || sender.requests[0].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
-		t.Fatalf("runtime commands = %#v; want the original input in the capture attempt", sender.requests)
+	if len(sender.requests) != 2 || sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest).GetMcpManifest().GetGeneration() != 1 || sender.requests[1].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
+		t.Fatalf("runtime commands = %#v; want manifest installation followed by the original input", sender.requests)
 	}
 	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_initial_mcp", "github", 1)
 	var operationRuntimeInputID string
@@ -768,7 +768,7 @@ func TestPostgreSQLRuntimeDeliveryPreparationBoundsStateDrivenReentry(t *testing
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInput(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureSettlesSingleAttemptInput(t *testing.T) {
 	connector := startInitialManifestFailureConnector(t)
 	tests := []struct {
 		name       string
@@ -826,8 +826,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInp
 			if err := runner.RunOnce(context.Background()); err != nil {
 				t.Fatalf("run single-attempt input: %v", err)
 			}
-			if len(sender.requests) != 1 || sender.requests[0].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
-				t.Fatalf("Runtime requests = %#v; want original input once", sender.requests)
+			if len(sender.requests) != 0 {
+				t.Fatalf("Runtime requests = %#v; want no model input", sender.requests)
 			}
 			var readiness, diagnostic, inboxStatus, inputQueueStatus string
 			if err := admin.QueryRowContext(context.Background(), `SELECT readiness, diagnostic FROM session_mcp_manifests
@@ -842,8 +842,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInp
 				WHERE workspace_id='default' AND kind='runtime_input' AND payload_json::jsonb ->> 'runtime_input_id'=$1`, job.RuntimeInputID).Scan(&inputQueueStatus); err != nil {
 				t.Fatalf("read original Queue custody: %v", err)
 			}
-			if readiness != "unready" || diagnostic != test.diagnostic || inboxStatus != "accepted" || inputQueueStatus != queue.StatusAcknowledged {
-				t.Fatalf("manifest/Inbox/Queue = %s/%s %s/%s; want unready/%s accepted/succeeded", readiness, diagnostic, inboxStatus, inputQueueStatus, test.diagnostic)
+			if readiness != "unready" || diagnostic != test.diagnostic || inboxStatus != "dead_lettered" || inputQueueStatus != queue.StatusDeadLettered {
+				t.Fatalf("manifest/Inbox/Queue = %s/%s %s/%s; want unready/%s dead_lettered/dead_lettered", readiness, diagnostic, inboxStatus, inputQueueStatus, test.diagnostic)
 			}
 			assertRuntimeMCPManifestQueueJob(t, admin, "default", sessionID, "github", 1)
 			var manifestJobs, sessionErrors int
@@ -856,18 +856,18 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureAdvancesSingleAttemptInp
 				WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, sessionID).Scan(&sessionErrors); err != nil {
 				t.Fatalf("count Session errors: %v", err)
 			}
-			if manifestJobs != 1 || sessionErrors != 0 {
-				t.Fatalf("manifest jobs/session errors = %d/%d; want 1/0", manifestJobs, sessionErrors)
+			if manifestJobs != 1 || sessionErrors != 1 {
+				t.Fatalf("manifest jobs/session errors = %d/%d; want 1/1", manifestJobs, sessionErrors)
 			}
 		})
 	}
 	stats := connector.finish(t)
-	if stats.ListCalls != 4 || !stats.LogsRedacted {
-		t.Fatalf("production Connector failure composition = %+v; want four typed calls with redacted logs", stats)
+	if stats.ListCalls != 12 || !stats.LogsRedacted {
+		t.Fatalf("production Connector failure composition = %+v; want twelve typed calls with redacted logs", stats)
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreRejectsUnclassifiedMCPFailureWithoutDurableTransition(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreSettlesUnclassifiedMCPFailureAfterBoundedRetries(t *testing.T) {
 	tests := []struct {
 		name   string
 		code   codes.Code
@@ -919,8 +919,8 @@ func TestPostgreSQLRuntimeDeliveryStoreRejectsUnclassifiedMCPFailureWithoutDurab
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error')`, sessionID).Scan(&manifests, &manifestJobs, &sessionErrors); err != nil {
 				t.Fatalf("count fail-closed discovery facts: %v", err)
 			}
-			if inboxStatus != "queued" || manifests != 0 || manifestJobs != 0 || sessionErrors != 0 {
-				t.Fatalf("fail-closed discovery facts = Inbox:%s manifests:%d jobs:%d errors:%d; want queued/0/0/0",
+			if inboxStatus != "dead_lettered" || manifests != 1 || manifestJobs != 1 || sessionErrors != 1 {
+				t.Fatalf("fail-closed discovery facts = Inbox:%s manifests:%d jobs:%d errors:%d; want dead_lettered/1/1/1",
 					inboxStatus, manifests, manifestJobs, sessionErrors)
 			}
 		})
@@ -992,8 +992,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 		if err := <-errorCh; err != nil {
 			t.Fatalf("deliver after notification winner: %v", err)
 		}
-		if result := <-resultCh; result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
-			t.Fatalf("delivery after notification winner = %#v requests %d; want accepted/1", result, len(sender.requests))
+		if result := <-resultCh; result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 2 {
+			t.Fatalf("delivery after notification winner = %#v requests %d; want accepted/2", result, len(sender.requests))
 		}
 		readState(t, admin, 1, "ready", 1)
 	})
@@ -1002,8 +1002,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 		lister := &racingInitialMCPManifestLister{}
 		admin, store, job, sender := setup(t, lister)
 		result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
-		if err != nil || result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
-			t.Fatalf("delivery after initial failure = %#v/%v requests %d; want accepted/nil/1", result, err, len(sender.requests))
+		if err != nil || result.Status != RuntimeDeliveryRejected || result.Retryable || len(sender.requests) != 0 {
+			t.Fatalf("delivery after initial failure = %#v/%v requests %d; want terminal rejection/nil/0", result, err, len(sender.requests))
 		}
 		readState(t, admin, 1, "unready", 1)
 		bridge := NewPostgreSQLBridgeAPIStore(store.Client)
@@ -1347,6 +1347,7 @@ type runtimeManifestCompositionResult struct {
 }
 
 type bunRuntimeManifestCompositionSender struct {
+	Recovery bool
 	recordingRuntimeCommandSender
 	InputPath                string
 	RuntimeConfigPayloadJSON string
@@ -1361,6 +1362,7 @@ type bunRuntimeManifestCompositionSender struct {
 
 func (s *bunRuntimeManifestCompositionSender) ApplyRuntimeConfig(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.ApplyRuntimeConfigRequest) (*agentruntimev1.ApplyRuntimeConfigResponse, error) {
 	inputJSON, err := json.Marshal(map[string]any{
+		"recovery":                 s.Recovery,
 		"workspaceId":              request.GetWorkspaceId(),
 		"sessionId":                request.GetSessionId(),
 		"runtimeConfigPayloadJson": s.RuntimeConfigPayloadJSON,
@@ -1540,7 +1542,7 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 	}); err != nil {
 		t.Fatalf("build OAuth Runtime config: %v", err)
 	}
-	sender := &oauthReadyRuntimeSender{admin: admin, client: client, inputPath: t.TempDir() + "/oauth-ready-provider.json", runtimeConfigPayload: runtimeConfigPayload}
+	sender := &oauthReadyRuntimeSender{recordingRuntimeCommandSender: recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}, admin: admin, client: client, inputPath: t.TempDir() + "/oauth-ready-provider.json", runtimeConfigPayload: runtimeConfigPayload}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender},

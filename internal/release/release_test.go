@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 func TestEveryEffectiveDockerBaseMatchesImmutableInventory(t *testing.T) {
@@ -35,14 +37,46 @@ func TestNumericAlphaVersionExcludesHistoricalRCLine(t *testing.T) {
 }
 
 func TestCandidateAcceptsHistoricalAndCurrentDatabaseVersions(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3} {
+	for _, identity := range schemaidentity.History() {
+		candidate := validCandidate(t)
+		candidate.SchemaVersion = int(identity.Version)
+		candidate.SchemaChecksum = "sha256:" + identity.Checksum
+		if err := ValidateCandidate(candidate); err != nil {
+			t.Fatalf("registered database schema version %d: %v", identity.Version, err)
+		}
+		candidate.SchemaChecksum = testDigest("wrong schema")
+		if ValidateCandidate(candidate) == nil {
+			t.Fatalf("accepted checksum drift for database schema version %d", identity.Version)
+		}
+	}
+	for _, version := range []int{0, int(CurrentDatabaseIdentity().Version) + 1} {
 		candidate := validCandidate(t)
 		candidate.SchemaVersion = version
-		err := ValidateCandidate(candidate)
-		wantValid := version == 1 || version == 2
-		if (err == nil) != wantValid {
-			t.Fatalf("database schema version %d: error=%v, want valid=%t", version, err, wantValid)
+		if ValidateCandidate(candidate) == nil {
+			t.Fatalf("accepted unregistered database schema version %d", version)
 		}
+	}
+}
+
+func TestDatabaseIdentityCommandUsesCurrentMigration(t *testing.T) {
+	command := exec.Command("go", "run", "./cmd/tetral-release", "database-identity")
+	body, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity DatabaseIdentity
+	if err := json.Unmarshal(body, &identity); err != nil {
+		t.Fatal(err)
+	}
+	registered := schemaidentity.History()
+	want := registered[len(registered)-1]
+	if identity.Version != want.Version || identity.Checksum != "sha256:"+want.Checksum {
+		t.Fatalf("release command identity = %+v; current migration = %+v", identity, want)
+	}
+	candidate := validCandidate(t)
+	candidate.SchemaVersion, candidate.SchemaChecksum = int(identity.Version), identity.Checksum
+	if err := ValidateCandidate(candidate); err != nil {
+		t.Fatalf("current release command produces rejected candidate: %v", err)
 	}
 }
 
@@ -427,7 +461,7 @@ func validCandidate(t *testing.T) CandidateManifest {
 	return CandidateManifest{
 		Schema: CandidateSchema, Version: version, SourceCommit: "0123456789abcdef0123456789abcdef01234567", Platform: PlatformLinuxAMD64,
 		Images: images, Chart: ChartIdentity{CandidateManifestDigest: testDigest("chart-manifest"), PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values"), RenderCommand: "helm template tetral dist/tetral-0.1.0-alpha.1.tgz -f release-values.json"},
-		SchemaVersion: 2, SchemaChecksum: testDigest("schema"), CreatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
+		SchemaVersion: int(CurrentDatabaseIdentity().Version), SchemaChecksum: CurrentDatabaseIdentity().Checksum, CreatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
 		Bases: []BaseIdentity{{Reference: "docker.io/library/golang:1.25.13-alpine", TopLevelDigest: testDigest("base-top"), ChildDigest: testDigest("base-child"), Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 	}
 }

@@ -4,10 +4,23 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 func TestPostgreSQLMigrationChecksumsMatchExactOrderedPayloads(t *testing.T) {
-	for _, migration := range postgresqlMigrationRegistry() {
+	registry := postgresqlMigrationRegistry()
+	identities := schemaidentity.History()
+	if len(registry) != len(identities) {
+		t.Fatalf("executable migrations = %d, shared identities = %d", len(registry), len(identities))
+	}
+	if err := validatePostgreSQLMigrationRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	for i, migration := range registry {
+		if migration.version != identities[i].Version || migration.checksum != identities[i].Checksum || len(migration.steps) == 0 {
+			t.Fatalf("migration %d must bind the shared identity to executable DDL", i)
+		}
 		if got := checksumPostgreSQLSchemaSteps(migration.steps); got != migration.checksum {
 			t.Fatalf("version %d payload checksum = %q, declared = %q", migration.version, got, migration.checksum)
 		}

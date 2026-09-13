@@ -1,16 +1,14 @@
 package static_test
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
 var databaseEnvironmentPattern = regexp.MustCompile(`(?m)^\s*- name: (?:TETRAL_DATABASE_URL|TETRAL_POSTGRES_DSN|TETRAL_EVENT_STREAM_DATABASE_URL)\s*$`)
@@ -145,171 +143,41 @@ func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testin
 
 func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
-	goSource := readSchemaOwnershipFile(t, filepath.Join(root, "internal/storage/postgresql_migrator.go"))
 	gatewaySource := readSchemaOwnershipFile(t, filepath.Join(root, "services/gateway/packages/schema/src/verify.ts"))
-	declarationPattern := regexp.MustCompile(`PostgreSQLSchemaVersion([A-Za-z]+)Checksum\s*=\s*\n?\s*"([0-9a-f]{64})"`)
-	goChecksums := declarationPattern.FindAllStringSubmatch(goSource, -1)
-	gatewayChecksums := declarationPattern.FindAllStringSubmatch(gatewaySource, -1)
-	if len(goChecksums) == 0 || len(goChecksums) != len(gatewayChecksums) {
-		t.Fatalf("Go/Gateway schema checksum declaration counts = %d/%d; want one Gateway checksum per Go migration", len(goChecksums), len(gatewayChecksums))
+	identities := schemaidentity.History()
+	declarationPattern := regexp.MustCompile(`(PostgreSQLSchemaVersion[A-Za-z]+Checksum)\s*=\s*\n?\s*"([0-9a-f]{64})"`)
+	declarations := declarationPattern.FindAllStringSubmatch(gatewaySource, -1)
+	if len(identities) == 0 || len(declarations) != len(identities) {
+		t.Fatalf("Gateway declarations = %d, shared identities = %d", len(declarations), len(identities))
 	}
-	for index := range goChecksums {
-		if goChecksums[index][1] != gatewayChecksums[index][1] ||
-			goChecksums[index][2] != gatewayChecksums[index][2] {
-			t.Fatalf(
-				"Gateway schema checksum %d = v%s/%s; want Go v%s/%s",
-				index+1,
-				strings.ToLower(gatewayChecksums[index][1]),
-				gatewayChecksums[index][2],
-				strings.ToLower(goChecksums[index][1]),
-				goChecksums[index][2],
-			)
+	checksums := make(map[string]string, len(declarations))
+	for _, declaration := range declarations {
+		if _, exists := checksums[declaration[1]]; exists {
+			t.Fatalf("duplicate Gateway checksum declaration %s", declaration[1])
 		}
+		checksums[declaration[1]] = declaration[2]
 	}
-
-	goFile, err := parser.ParseFile(token.NewFileSet(), "postgresql_migrator.go", goSource, 0)
-	if err != nil {
-		t.Fatalf("parse Go schema registry source: %v", err)
-	}
-	var goRegistryLiteral *ast.CompositeLit
-	for _, declaration := range goFile.Decls {
-		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Name.Name != "postgresqlMigrationRegistry" || function.Body == nil {
-			continue
-		}
-		if len(function.Body.List) != 1 {
-			t.Fatalf("Go postgresqlMigrationRegistry body has %d statements; want one direct return", len(function.Body.List))
-		}
-		returnStatement, ok := function.Body.List[0].(*ast.ReturnStmt)
-		if !ok || len(returnStatement.Results) != 1 {
-			t.Fatal("Go postgresqlMigrationRegistry must directly return one composite literal")
-		}
-		goRegistryLiteral, _ = returnStatement.Results[0].(*ast.CompositeLit)
-	}
-	if goRegistryLiteral == nil {
-		t.Fatal("could not locate Go postgresqlMigrationRegistry composite literal")
-		return
-	}
-	type goRegistryEntry struct {
-		version  string
-		checksum string
-		steps    string
-	}
-	goRegistryEntries := make([]goRegistryEntry, 0, len(goRegistryLiteral.Elts))
-	for index, rawEntry := range goRegistryLiteral.Elts {
-		entryLiteral, ok := rawEntry.(*ast.CompositeLit)
-		if !ok {
-			t.Fatalf("Go executable schema registry entry %d is not a composite literal", index+1)
-		}
-		entry := goRegistryEntry{}
-		for _, rawField := range entryLiteral.Elts {
-			field, ok := rawField.(*ast.KeyValueExpr)
-			if !ok {
-				continue
-			}
-			key, ok := field.Key.(*ast.Ident)
-			if !ok {
-				continue
-			}
-			switch key.Name {
-			case "version":
-				value, ok := field.Value.(*ast.BasicLit)
-				if !ok || value.Kind != token.INT {
-					t.Fatalf("Go executable schema registry entry %d has a non-integer version", index+1)
-				}
-				entry.version = value.Value
-			case "checksum":
-				value, ok := field.Value.(*ast.Ident)
-				if !ok {
-					t.Fatalf("Go executable schema registry entry %d has a non-identifier checksum", index+1)
-				}
-				entry.checksum = value.Name
-			case "steps":
-				call, ok := field.Value.(*ast.CallExpr)
-				if !ok || len(call.Args) != 0 {
-					t.Fatalf("Go executable schema registry entry %d has a non-zero-argument steps call", index+1)
-				}
-				value, ok := call.Fun.(*ast.Ident)
-				if !ok {
-					t.Fatalf("Go executable schema registry entry %d has a non-identifier steps function", index+1)
-				}
-				entry.steps = value.Name
-			}
-		}
-		if entry.version == "" || entry.checksum == "" || entry.steps == "" {
-			t.Fatalf("Go executable schema registry entry %d omits version, checksum, or steps", index+1)
-		}
-		goRegistryEntries = append(goRegistryEntries, entry)
-	}
-	if len(goRegistryEntries) != len(goChecksums) {
-		t.Fatalf("Go executable schema registry length = %d; want %d checksum declarations", len(goRegistryEntries), len(goChecksums))
-	}
-	wantRegistry := []struct {
-		checksumVersion string
-		steps           string
-	}{
-		{checksumVersion: "One", steps: "postgresqlBaselineSteps"},
-		{checksumVersion: "Two", steps: "postgresqlGitIdentitySteps"},
-	}
-	if len(wantRegistry) != len(goChecksums) {
-		t.Fatalf("Go executable schema registry expectation count = %d; want %d checksum declarations", len(wantRegistry), len(goChecksums))
-	}
-	for index, checksumDeclaration := range goChecksums {
-		if len(checksumDeclaration) < 2 || index >= len(wantRegistry) || index >= len(goRegistryEntries) {
-			t.Fatalf("schema registry row %d is short: checksum fields=%d registry=%d expectations=%d", index+1, len(checksumDeclaration), len(goRegistryEntries), len(wantRegistry))
-		}
-		//nolint:gosec // G602: index bound is asserted on the line above; gosec cannot follow it.
-		want := wantRegistry[index]
-		entry := goRegistryEntries[index]
-		wantVersion := strconv.Itoa(index + 1)
-		wantChecksum := "PostgreSQLSchemaVersion" + want.checksumVersion + "Checksum"
-		if checksumDeclaration[1] != want.checksumVersion {
-			t.Fatalf(
-				"Go schema checksum declaration %d names version %s; want %s",
-				index+1,
-				checksumDeclaration[1],
-				want.checksumVersion,
-			)
-		}
-		if entry.version != wantVersion || entry.checksum != wantChecksum || entry.steps != want.steps {
-			t.Fatalf(
-				"Go executable schema registry entry %d = version %s/%s/%s; want version %s/%s/%s",
-				index+1,
-				entry.version,
-				entry.checksum,
-				entry.steps,
-				wantVersion,
-				wantChecksum,
-				want.steps,
-			)
-		}
-	}
-
 	registryPattern := regexp.MustCompile(`(?s)const PostgreSQLSchemaRegistry = \[(.*?)\] as const`)
 	registryMatch := registryPattern.FindStringSubmatch(gatewaySource)
 	if len(registryMatch) != 2 {
 		t.Fatal("could not locate Gateway PostgreSQLSchemaRegistry")
 	}
-	var registryEntries []string
+	var entries []string
 	for _, raw := range strings.Split(registryMatch[1], ",") {
 		if entry := strings.TrimSpace(raw); entry != "" {
-			registryEntries = append(registryEntries, entry)
+			entries = append(entries, entry)
 		}
 	}
-	if len(registryEntries) != len(goChecksums) {
-		t.Fatalf("Gateway schema registry length = %d; want %d Go migrations", len(registryEntries), len(goChecksums))
+	if len(entries) != len(identities) {
+		t.Fatalf("Gateway registry length = %d, shared identities = %d", len(entries), len(identities))
 	}
-	for index := range goChecksums {
-		wantEntry := "PostgreSQLSchemaVersion" + goChecksums[index][1] + "Checksum"
-		if registryEntries[index] != wantEntry {
-			t.Fatalf(
-				"Gateway schema registry entry %d = %q; want %q",
-				index+1,
-				registryEntries[index],
-				wantEntry,
-			)
+	for i, identity := range identities {
+		if identity.Version != int64(i+1) || checksums[entries[i]] != identity.Checksum {
+			t.Fatalf("Gateway schema version %d checksum = %q; shared identity = %+v", i+1, checksums[entries[i]], identity)
 		}
 	}
+	// Storage's TestPostgreSQLMigrationChecksumsMatchExactOrderedPayloads proves
+	// that every shared identity is bound to its exact executable migration DDL.
 }
 
 func discoverDatabaseContainers(t *testing.T, files []string) []string {
