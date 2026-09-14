@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
@@ -366,15 +367,23 @@ func TestDaytonaOutputCaptureRealHelperContinuesAfterMaxFiles(t *testing.T) {
 }
 
 func TestDaytonaOutputCaptureDoesNotHideAbortBehindExpiredScanBudget(t *testing.T) {
-	client := captureSandboxGetter{handle: daytonaSandboxHandle{Process: delayedErrorCaptureProcess{}}}
-	executor := NewDaytonaHelperExecutorForClient(client)
-	_, err := executor.captureOutputs(context.Background(), OutputCaptureTarget{
-		ProviderSandboxID: "provider_late_abort", MaxFiles: 10, MaxFileBytes: 10, MaxTotalBytes: 10,
-	}, 10, time.Now().Add(time.Millisecond))
-	var providerErr *sandbox.ProviderError
-	if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageExecuteTool {
-		t.Fatalf("late abort err = %#v; want classified execute-tool failure", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		// Fake time advances during the command's sleep, so CI scheduling
+		// cannot expire the scan budget before the command is invoked.
+		client := captureSandboxGetter{handle: daytonaSandboxHandle{Process: delayedErrorCaptureProcess{}}}
+		executor := NewDaytonaHelperExecutorForClient(client)
+		deadline := time.Now().Add(time.Millisecond)
+		_, err := executor.captureOutputs(context.Background(), OutputCaptureTarget{
+			ProviderSandboxID: "provider_late_abort", MaxFiles: 10, MaxFileBytes: 10, MaxTotalBytes: 10,
+		}, 10, deadline)
+		if time.Now().Before(deadline) {
+			t.Fatal("command returned before the scan budget expired")
+		}
+		var providerErr *sandbox.ProviderError
+		if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageExecuteTool {
+			t.Fatalf("late abort err = %#v; want classified execute-tool failure", err)
+		}
+	})
 }
 
 type captureSandboxGetter struct {
