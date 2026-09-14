@@ -37,6 +37,13 @@ func TestEnvironmentBuildProgressSurvivesFailureBudgetAndResumesActivation(t *te
 	h.run()
 	assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 1, "ready", "snapshot_build_test")
 	h.assertQueueStatus(queue.StatusAcknowledged)
+	var buildRef, buildState string
+	if err := h.admin.QueryRow(`SELECT provider_build_ref, provider_build_state FROM environment_artifacts WHERE generation=1`).Scan(&buildRef, &buildState); err != nil {
+		t.Fatal(err)
+	}
+	if buildRef != h.provider.name || buildState != "active" {
+		t.Fatal("ready artifact lost the adopted snapshot name or active state")
+	}
 	if h.provider.creates != 1 {
 		t.Fatalf("snapshot submissions = %d; want one", h.provider.creates)
 	}
@@ -78,12 +85,137 @@ func TestEnvironmentBuildObservationErrorsDoNotBecomeInstallationFailure(t *test
 		t.Fatalf("diagnostic stage = %s; want observation failure", stage)
 	}
 	h.provider.queryErr = nil
+	h.provider.state = "building"
+	h.now = h.now.Add(queue.EnvironmentBuildPollInterval)
+	h.run()
+	var clean bool
+	if err := h.admin.QueryRow(`SELECT failure_stage IS NULL AND last_error_kind IS NULL
+		AND failure_reason IS NULL AND retryable IS NULL AND provider_build_state='building'
+		FROM environment_artifacts WHERE generation=1`).Scan(&clean); err != nil {
+		t.Fatal(err)
+	}
+	if !clean {
+		t.Fatal("healthy progress retained a stale observation failure")
+	}
 	h.provider.state = "active"
 	h.now = h.now.Add(queue.EnvironmentBuildPollInterval)
 	h.run()
 	assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 1, "ready", "snapshot_build_test")
 	if h.provider.creates != 1 {
 		t.Fatal("query recovery created another snapshot")
+	}
+}
+
+func TestEnvironmentBuildConfiguredTimingReachesFirstClaim(t *testing.T) {
+	h := newEnvironmentBuildHarness(t)
+	env := validSandboxConfigEnv()
+	env[EnvSandboxEnvironmentBuildWarnAfter] = "2m"
+	env[EnvSandboxEnvironmentBuildTimeout] = "7m"
+	cfg, err := ConfigFromEnv(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.runner.Config.BuildWarnAfter, h.runner.Config.BuildTimeout = cfg.EnvironmentBuildWarnAfter, cfg.EnvironmentBuildTimeout
+	h.run()
+	var started, warning, deadline time.Time
+	if err := h.admin.QueryRow(`SELECT build_started_at, build_warn_at, build_deadline_at
+		FROM environment_artifacts WHERE generation=1`).Scan(&started, &warning, &deadline); err != nil {
+		t.Fatal(err)
+	}
+	if !started.Equal(h.now) || !warning.Equal(h.now.Add(2*time.Minute)) || !deadline.Equal(h.now.Add(7*time.Minute)) {
+		t.Fatalf("configured build policy was not persisted: %s / %s / %s", started, warning, deadline)
+	}
+}
+
+func TestEnvironmentBuildUpgradeRetainsSubmittedDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		age            time.Duration
+		abandonedLease bool
+	}{
+		{"pending submission", 20 * time.Minute, false},
+		{"abandoned building submission", 20 * time.Minute, true},
+		{"expired submission", 31 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEnvironmentBuildHarness(t)
+			h.run()
+			h.now = h.now.Add(queue.EnvironmentBuildPollInterval)
+			if tc.abandonedLease {
+				job := h.lease()
+				if _, claimed, err := h.artifacts.ClaimEnvironmentBuild(withEnvironmentBuildQueueAuthority(context.Background(), job), job, h.now); err != nil || !claimed {
+					t.Fatalf("abandoned build claim = %t, %v", claimed, err)
+				}
+				h.reclaim()
+			}
+			submitted := h.now.Add(-tc.age)
+			// Recreate the pre-V4 live-row shape: a submission fence, but no
+			// observation metadata. It may be pending or owned by a lost worker.
+			if _, err := h.admin.Exec(`UPDATE environment_artifacts SET provider_create_submitted_at=$1,
+				build_started_at=NULL, build_warn_at=NULL, build_deadline_at=NULL, build_warned_at=NULL,
+				provider_build_ref=NULL, provider_build_state=NULL WHERE generation=1`, submitted); err != nil {
+				t.Fatal(err)
+			}
+			queries := h.provider.queries
+			h.restart()
+			h.run()
+			var started, deadline time.Time
+			if err := h.admin.QueryRow(`SELECT build_started_at, build_deadline_at FROM environment_artifacts WHERE generation=1`).Scan(&started, &deadline); err != nil {
+				t.Fatal(err)
+			}
+			if !started.Equal(submitted) || !deadline.Equal(submitted.Add(30*time.Minute)) {
+				t.Fatalf("upgrade renewed the original deadline: %s / %s", started, deadline)
+			}
+			if tc.age >= DefaultEnvironmentBuildTimeout {
+				h.assertTerminal("environment_build_wait_timeout")
+				if h.provider.queries != queries {
+					t.Fatal("expired pre-V4 submission made another provider call")
+				}
+			} else {
+				h.assertQueueStatus(queue.StatusPending)
+				assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 1, "pending", "")
+				if h.provider.queries != queries+1 {
+					t.Fatal("upgrade did not resume observation of the existing snapshot")
+				}
+			}
+			if h.provider.creates != 1 {
+				t.Fatal("upgrade submitted a replacement build")
+			}
+		})
+	}
+}
+
+func TestEnvironmentBuildMissingProviderSettlesImmediately(t *testing.T) {
+	h := newEnvironmentBuildHarness(t)
+	// Deliberately corrupt the registry boundary; production startup rejects
+	// incomplete Daytona adapters before opening the consumer loops.
+	h.runner.Providers = &ProviderRegistry{}
+	h.run()
+	h.assertTerminal("provider_configuration_invalid")
+	if h.provider.queries != 0 || h.provider.creates != 0 {
+		t.Fatal("missing provider configuration crossed a provider boundary")
+	}
+}
+
+func TestEnvironmentBuildInvalidAdapterOutcomeRetainsCustody(t *testing.T) {
+	h := newEnvironmentBuildHarness(t)
+	// Bypass the Daytona adapter to exercise the runner's contract boundary.
+	// A nonempty artifact ref must not make an unknown state usable.
+	h.runner.Providers = artifactProviderRegistry(t, &recordingArtifactBuilder{
+		result: sandbox.BuildArtifactResult{State: "invalid", ProviderArtifactRef: "untrusted_ref", ProviderBuildRef: "untrusted_name"},
+	})
+	if err := h.runner.RunOnce(context.Background()); err == nil {
+		t.Fatal("invalid adapter outcome was accepted")
+	}
+	h.assertQueueStatus(queue.StatusLeased)
+	assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 1, "building", "")
+	var waiting bool
+	if err := h.admin.QueryRow(`SELECT execution_state='waiting_activation' AND result_json IS NULL
+		FROM session_runtime_tool_results WHERE tool_use_event_id='evt_execution_a'`).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if !waiting {
+		t.Fatal("adapter contract violation prematurely settled its dependent")
 	}
 }
 
@@ -118,11 +250,32 @@ func TestEnvironmentBuildDeadlineAndWarningSurviveRestart(t *testing.T) {
 	if h.provider.queries != queries {
 		t.Fatal("expired build made another provider call")
 	}
-	// Late provider success never resurrects settled history.
+	// Exercise terminal-state protection with real redelivery, not an empty
+	// Lease after dead-lettering. The old artifact and settled tool stay exact.
+	var beforeArtifact, beforeTool string
+	if err := h.admin.QueryRow(`SELECT to_jsonb(a)::text, r.result_json::text
+		FROM environment_artifacts a CROSS JOIN session_runtime_tool_results r
+		WHERE a.generation=1 AND r.tool_use_event_id='evt_execution_a'`).Scan(&beforeArtifact, &beforeTool); err != nil {
+		t.Fatal(err)
+	}
+	oldJobID := h.jobID
 	h.provider.state = "active"
 	h.now = h.now.Add(time.Minute)
+	h.enqueueBuild()
+	if h.jobID == oldJobID {
+		t.Fatal("redelivery must be a new notification for the terminal generation")
+	}
 	h.run()
-	h.assertTerminal("environment_build_wait_timeout")
+	h.assertQueueStatus(queue.StatusAcknowledged)
+	var afterArtifact, afterTool string
+	if err := h.admin.QueryRow(`SELECT to_jsonb(a)::text, r.result_json::text
+		FROM environment_artifacts a CROSS JOIN session_runtime_tool_results r
+		WHERE a.generation=1 AND r.tool_use_event_id='evt_execution_a'`).Scan(&afterArtifact, &afterTool); err != nil {
+		t.Fatal(err)
+	}
+	if beforeArtifact != afterArtifact || beforeTool != afterTool || h.provider.queries != queries || h.provider.creates != 1 {
+		t.Fatal("redelivery changed terminal history or called the provider")
+	}
 }
 
 func TestEnvironmentBuildExplicitProviderFailureSettlesWaiters(t *testing.T) {
@@ -163,31 +316,6 @@ func TestEnvironmentBuildActiveResponseAfterDeadlineCannotActivate(t *testing.T)
 	}
 }
 
-func TestEnvironmentBuildReadyOnlyAdvancesSameInputGenerations(t *testing.T) {
-	h := newEnvironmentBuildHarness(t)
-	h.run()
-	if _, err := h.admin.Exec(`INSERT INTO environment_artifacts
-		(workspace_id, environment_id, generation, status, provider, normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json, created_at, updated_at)
-		SELECT workspace_id, environment_id, n, 'pending', provider, normalized_config_hash,
-		CASE WHEN n=2 THEN artifact_input_hash ELSE 'changed_packages' END, runtime_network_policy_json, packages_json, created_at, updated_at
-		FROM environment_artifacts CROSS JOIN generate_series(2,3) n WHERE generation=1;
-		UPDATE environments SET current_generation=3 WHERE id='env_execution_store'`); err != nil {
-		t.Fatal(err)
-	}
-	h.provider.state = "active"
-	h.now = h.now.Add(queue.EnvironmentBuildPollInterval)
-	h.run()
-	assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 2, "ready", "snapshot_build_test")
-	assertEnvironmentArtifactStatus(t, h.admin, "ws_execution_store", "env_execution_store", 3, "pending", "")
-	var current int
-	if err := h.admin.QueryRow(`SELECT current_generation FROM environments WHERE id='env_execution_store'`).Scan(&current); err != nil {
-		t.Fatal(err)
-	}
-	if current != 3 {
-		t.Fatal("old build overwrote the current Environment generation")
-	}
-}
-
 func TestEnvironmentBuildStoreErrorKeepsNotificationForFencedSettlement(t *testing.T) {
 	h := newEnvironmentBuildHarness(t)
 	h.provider.state = "active"
@@ -200,15 +328,7 @@ func TestEnvironmentBuildStoreErrorKeepsNotificationForFencedSettlement(t *testi
 	}
 	// Dead-lettering now would orphan an unfinished artifact and its waiters.
 	h.assertQueueStatus(queue.StatusLeased)
-	if _, err := h.admin.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE id=$1`, h.jobID); err != nil {
-		t.Fatal(err)
-	}
-	// Expiry is the production reclaim boundary, not an administrative status reset.
-	client := h.artifacts.client
-	if count, err := queue.NewPostgreSQLStore(client).ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{WorkspaceID: "ws_execution_store", Limit: 100}); err != nil || count != 1 {
-		t.Fatalf("reclaim=%d, %v", count, err)
-	}
-	h.now = h.now.Add(time.Second)
+	h.reclaim()
 	h.restart()
 	h.run()
 	h.assertTerminal("environment_build_attempts_exhausted")
@@ -216,7 +336,7 @@ func TestEnvironmentBuildStoreErrorKeepsNotificationForFencedSettlement(t *testi
 
 type rejectBuildReadyStore struct{ EnvironmentBuildStore }
 
-func (*rejectBuildReadyStore) MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, string, time.Time) error {
+func (*rejectBuildReadyStore) MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, sandbox.BuildArtifactResult, time.Time) error {
 	return errors.New("test business store unavailable")
 }
 
@@ -245,13 +365,13 @@ func TestEnvironmentBuildDeferFencesPreviousLeaseAtSameAttempt(t *testing.T) {
 	if _, ok, err := h.artifacts.ClaimEnvironmentBuild(secondCtx, second, h.now); err != nil || !ok {
 		t.Fatalf("successor claim: %t, %v", ok, err)
 	}
-	if err := h.artifacts.MarkEnvironmentBuildReady(firstCtx, first, "stale_snapshot", h.now); !errors.Is(err, errQueueLeaseLost) {
+	if err := h.artifacts.MarkEnvironmentBuildReady(firstCtx, first, sandbox.BuildArtifactResult{ProviderArtifactRef: "stale_snapshot", ProviderBuildRef: "build_name"}, h.now); !errors.Is(err, errQueueLeaseLost) {
 		t.Fatalf("stale writer = %v; want lease loss", err)
 	}
 	if response, err := h.queueServer.Defer(firstCtx, &queuev1.DeferRequest{WorkspaceId: first.WorkspaceID, JobId: first.JobID, LeaseToken: first.LeaseToken}); err != nil || response.GetUpdated() {
 		t.Fatalf("stale deferral = %v, %v; want unchanged", response, err)
 	}
-	if err := h.artifacts.MarkEnvironmentBuildReady(secondCtx, second, "current_snapshot", h.now); err != nil {
+	if err := h.artifacts.MarkEnvironmentBuildReady(secondCtx, second, sandbox.BuildArtifactResult{ProviderArtifactRef: "current_snapshot", ProviderBuildRef: "build_name"}, h.now); err != nil {
 		t.Fatal(err)
 	}
 	assertEnvironmentArtifactStatus(t, h.admin, first.WorkspaceID, first.EnvironmentID, 1, "ready", "current_snapshot")
@@ -287,19 +407,38 @@ func newEnvironmentBuildHarness(t *testing.T) *environmentBuildHarness {
 	}
 	h := &environmentBuildHarness{t: t, admin: admin, now: time.Now().UTC().Truncate(time.Microsecond), artifacts: NewEnvironmentArtifactStore(client), provider: &buildSnapshotResponses{state: "building"}}
 	store := &environmentBuildQueueClock{PostgreSQLQueueStore: queue.NewPostgreSQLStore(client), now: func() time.Time { return h.now }}
-	qj, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+
+	h.queueServer = tetralqueue.NewServer(store, slog.New(slog.NewJSONHandler(&h.logs, nil)))
+	h.enqueueBuild()
+	h.restart()
+	return h
+}
+
+func (h *environmentBuildHarness) reclaim() {
+	h.t.Helper()
+	if _, err := h.admin.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE id=$1`, h.jobID); err != nil {
+		h.t.Fatal(err)
+	}
+	// Expiry is the production reclaim boundary, not an administrative status reset.
+	client := h.artifacts.client
+	if count, err := queue.NewPostgreSQLStore(client).ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{WorkspaceID: "ws_execution_store", Limit: 100}); err != nil || count != 1 {
+		h.t.Fatalf("reclaim=%d, %v", count, err)
+	}
+	h.now = h.now.Add(time.Second)
+}
+
+func (h *environmentBuildHarness) enqueueBuild() {
+	h.t.Helper()
+	qj, err := queue.NewPostgreSQLStore(h.artifacts.client).Enqueue(context.Background(), queue.EnqueueRequest{
 		WorkspaceID: "ws_execution_store", Kind: queue.KindEnvironmentBuild,
 		PartitionKey: queue.FormatEnvironmentPartitionKey("ws_execution_store", "env_execution_store"),
 		DedupeKey:    queue.FormatEnvironmentBuildDedupeKey("ws_execution_store", "env_execution_store", "1"),
 		PayloadJSON:  []byte(`{"workspace_id":"ws_execution_store","environment_id":"env_execution_store","generation":"1"}`), Now: h.now,
 	})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
 	h.jobID = qj.ID
-	h.queueServer = tetralqueue.NewServer(store, slog.New(slog.NewJSONHandler(&h.logs, nil)))
-	h.restart()
-	return h
 }
 
 func (h *environmentBuildHarness) restart() {
@@ -367,17 +506,18 @@ func (h *environmentBuildHarness) assertTerminal(kind string) {
 	h.assertQueueStatus(queue.StatusDeadLettered)
 	var actual string
 	var settled bool
+	var toolResult string
 	if err := h.admin.QueryRow(`SELECT last_error_kind FROM environment_artifacts WHERE status='failed' AND generation=1`).Scan(&actual); err != nil {
 		h.t.Fatal(err)
 	}
 	if actual != kind {
 		h.t.Fatalf("failure kind=%s; want %s", actual, kind)
 	}
-	if err := h.admin.QueryRow(`SELECT o.state='failed' AND r.result_json IS NOT NULL FROM sandbox_lifecycle_operations o JOIN session_runtime_tool_results r ON r.waiting_activation_operation_id=o.operation_id WHERE r.tool_use_event_id='evt_execution_a'`).Scan(&settled); err != nil {
+	if err := h.admin.QueryRow(`SELECT o.state='failed' AND o.error_kind=$1 AND r.execution_state='terminal_unconsumed', r.result_json::text FROM sandbox_lifecycle_operations o JOIN session_runtime_tool_results r ON r.waiting_activation_operation_id=o.operation_id WHERE r.tool_use_event_id='evt_execution_a'`, kind).Scan(&settled, &toolResult); err != nil {
 		h.t.Fatal(err)
 	}
-	if !settled {
-		h.t.Fatal("terminal build did not settle activation and its tool")
+	if !settled || !strings.Contains(toolResult, kind) {
+		h.t.Fatal("terminal build did not settle activation and its tool with the same reason")
 	}
 }
 

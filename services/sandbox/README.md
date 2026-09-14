@@ -88,12 +88,18 @@ and `build_deadline_at`. Previously submitted live builds use their submission
 time. These values never reset on deferral, lease handoff, or configuration
 changes. `TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER` defaults to `10m`;
 `TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT` defaults to `30m` and must exceed the
-warning interval. The first observation at/after the warning threshold persists
+warning interval. Helm exposes these as `sandbox.environmentBuildWarnAfter`
+and `sandbox.environmentBuildTimeout`; canonical manifests read them from
+`sandbox-config`. Deployment changes apply only to builds without saved timing.
+The first observation at/after the warning threshold persists
 `build_warned_at` and logs `waiting_overdue`. The first processing at/after the
 hard deadline settles the artifact and waiting activation/tool calls with
 `environment_build_wait_timeout`, then dead-letters the QUEUEJOB. Individual
 provider calls are bounded by 45 seconds or the remaining build time, whichever
 is shorter; an Active response received at/after the deadline cannot activate.
+The deadline bounds acceptance of an observation, not just dispatch of a query:
+late Ready or Failed responses settle as Engine wait timeout. This keeps the
+same cutoff regardless of whether time expires before or during a provider call.
 Availability is a minimum scheduling time, not a guaranteed execution time.
 
 An Active snapshot with matching identity and a provider ID becomes a ready
@@ -104,6 +110,13 @@ re-enqueues waiting activation operations. Explicit provider `error` or
 Transient query/submission errors persist their safe diagnostic under
 `observe_artifact` and defer observation until recovery or the original deadline.
 Permanent configuration/protocol errors retain their distinct terminal reasons.
+A missing artifact provider is immediately terminal (`provider_configuration_invalid`),
+including on the first lease. Production startup rejects incomplete Daytona
+adapters before starting consumers; retrying a known invalid provider selection
+is not part of the observation policy. The adapter classifies malformed provider
+states. An invalid adapter outcome reaching the runner is a control-plane
+contract violation and retains custody for reclaim rather than settling it as
+a provider build failure.
 Control/store errors leave custody for reclaim and fenced business settlement
 rather than dead-lettering a notification before its dependents can be settled.
 
@@ -115,14 +128,18 @@ terminal records.
 
 Logs distinguish `submitted`, `waiting`, `ready`, `provider_failed`,
 `observation_failed`, `waiting_overdue`, and `timed_out`, including the safe
-provider build reference and original deadline. The reference is the diagnostic
+provider build reference and original deadline. `provider_build_ref` always
+records the adopted snapshot name (also for same-input followers);
+`provider_artifact_ref` records its usable snapshot ID. The name is the diagnostic
 handle; unbounded installation logs are not collected or published.
 
 Tests use real PostgreSQL and the actual Queue server/store, builder, adapter,
 and artifact/activation writers, with deterministic Daytona responses and
 controlled scheduling time. `environment_build_integration_test.go` proves
 waiting beyond the failure budget, deadline persistence, late-response rejection,
-query recovery, same-input reuse, and stale lease rejection. Driver tests prove
+query recovery, first-claim custom timing, pre-V4 live-build handoff, terminal
+redelivery, and stale lease rejection. The artifact-store tests own same-input
+reuse and isolation of changed input. Driver tests prove
 state classification and the single-submission guard. MinIO and live Daytona
 are not dependencies of these focused tests.
 

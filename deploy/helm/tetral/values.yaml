@@ -71,6 +71,9 @@ cilium:
   gitProxyFQDNPolicy: false
 
 sandbox:
+  # Applied on the first build claim; active builds retain their saved policy.
+  environmentBuildWarnAfter: 10m
+  environmentBuildTimeout: 30m
   # Enables Sandbox-only debug lines for queue wait decisions and bounded
   # command summaries. Provider completion timings remain at info level.
   debugLogging: false

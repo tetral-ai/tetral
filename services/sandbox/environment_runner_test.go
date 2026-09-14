@@ -519,11 +519,11 @@ func (s *recordingEnvironmentBuildStore) ClaimEnvironmentBuild(context.Context, 
 	return s.input, s.claimed, nil
 }
 
-func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(ctx context.Context, _ EnvironmentBuildJob, providerArtifactRef string, _ time.Time) error {
+func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(ctx context.Context, _ EnvironmentBuildJob, observed sandbox.BuildArtifactResult, _ time.Time) error {
 	if s.rejectCancelledContext && ctx.Err() != nil {
 		return ctx.Err()
 	}
-	s.calls = append(s.calls, "ready:"+providerArtifactRef)
+	s.calls = append(s.calls, "ready:"+observed.ProviderArtifactRef)
 	return nil
 }
 

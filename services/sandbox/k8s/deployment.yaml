@@ -100,6 +100,16 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_DEBUG_LOGGING
+            - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER
+            - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT
             - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY
               valueFrom:
                 configMapKeyRef:

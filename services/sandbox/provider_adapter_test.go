@@ -210,6 +210,25 @@ func TestDaytonaAdapterKeepsPreSubmissionProviderLookupsRetryable(t *testing.T) 
 	}
 }
 
+func TestDaytonaAdapterRejectsMalformedBuildResults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result sandbox.BuildArtifactResult
+	}{
+		{"missing state", sandbox.BuildArtifactResult{}},
+		{"unknown state with artifact", sandbox.BuildArtifactResult{State: "invalid", ProviderArtifactRef: "untrusted_ref"}},
+		{"ready without artifact", sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := &DaytonaAdapter{Artifacts: &recordingArtifactBuilder{result: tc.result}}
+			outcome, err := adapter.BuildEnvironmentArtifact(context.Background(), sandbox.BuildArtifactRequest{})
+			if err != nil || outcome.Disposition != ProviderTerminal || outcome.ErrorKind != "provider_response_malformed" {
+				t.Fatalf("malformed build result = %+v, %v; want terminal provider classification", outcome, err)
+			}
+		})
+	}
+}
+
 func TestDaytonaAdapterClassifiesEnvironmentArtifactCreateRejection(t *testing.T) {
 	retryable := &sandbox.ProviderError{
 		Provider: sandboxdriver.DaytonaProviderName, Stage: sandbox.StageBuildArtifact,

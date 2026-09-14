@@ -38,7 +38,6 @@ type EnvironmentArtifactFailure struct {
 	Stage            string
 	LastErrorKind    string
 	Reason           string
-	Retryable        bool
 	ProviderBuildRef string
 	ProviderState    string
 }
@@ -207,12 +206,14 @@ func (s *EnvironmentArtifactStore) AuthorizeEnvironmentArtifactCreate(ctx contex
 	return authorized, err
 }
 
-func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context, job EnvironmentBuildJob, providerArtifactRef string, now time.Time) error {
+// MarkEnvironmentBuildReady records the adopted snapshot name for every
+// same-input follower, so diagnostics refer to the artifact actually adopted.
+func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context, job EnvironmentBuildJob, observed sandbox.BuildArtifactResult, now time.Time) error {
 	if s == nil || s.client == nil {
 		return errors.New("environment artifact store is required")
 	}
-	if providerArtifactRef == "" {
-		return errors.New("provider artifact ref is required")
+	if observed.ProviderArtifactRef == "" || observed.ProviderBuildRef == "" {
+		return errors.New("provider artifact and build refs are required")
 	}
 	if now.IsZero() {
 		now = storage.Now()
@@ -250,7 +251,7 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 				`UPDATE environment_artifacts
 				    SET status = 'ready',
 				        provider_artifact_ref = $4,
-				        provider_build_ref = COALESCE(provider_build_ref, $4),
+				        provider_build_ref = $6,
 				        provider_build_state = 'active',
 				        lease_job_id = NULL,
 				        lease_token = NULL,
@@ -265,7 +266,7 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 			    AND artifact_input_hash = $3
 			    AND status IN ('pending', 'building')
 			RETURNING generation`,
-				job.WorkspaceID, job.EnvironmentID, artifactInputHash, providerArtifactRef, now.UTC(),
+				job.WorkspaceID, job.EnvironmentID, artifactInputHash, observed.ProviderArtifactRef, now.UTC(), observed.ProviderBuildRef,
 			)
 			if err != nil {
 				return err
@@ -577,7 +578,7 @@ func (s *EnvironmentArtifactStore) FinalizeReadyEnvironmentFanout(ctx context.Co
 		}
 		return failWaitingArtifactActivationsTx(ctx, tx, job.WorkspaceID, job.EnvironmentID, []int64{job.Generation}, EnvironmentArtifactFailure{
 			Stage: "environment_ready_fanout", LastErrorKind: "environment_ready_fanout_failed",
-			Reason: "sandbox environment could not resume waiting tools", Retryable: false,
+			Reason: "sandbox environment could not resume waiting tools",
 		}, now.UTC())
 	})
 }

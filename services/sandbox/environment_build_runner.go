@@ -26,7 +26,7 @@ const (
 type EnvironmentBuildStore interface {
 	ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error)
 	AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error)
-	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, string, time.Time) error
+	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, sandbox.BuildArtifactResult, time.Time) error
 	MarkEnvironmentBuildWaiting(context.Context, EnvironmentBuildJob, sandbox.BuildArtifactResult, time.Time) error
 	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, bool, time.Time) error
 	MarkEnvironmentBuildTerminalFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
@@ -258,11 +258,12 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	case sandbox.ArtifactBuildReady:
 		// Ready must still cross the live lease fence before waking dependents.
 	default:
-		return r.failEnvironmentBuild(ctx, job, EnvironmentArtifactFailure{
-			Stage: "build_artifact", LastErrorKind: "provider_response_malformed", Reason: "environment build returned an invalid state",
-		})
+		// The adapter owns provider-response classification. An impossible
+		// outcome here is a control-plane contract violation: retain custody
+		// for reclaim rather than treating it as a provider build failure.
+		return errors.New("environment artifact adapter returned an invalid build state")
 	}
-	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value.ProviderArtifactRef, r.now()); err != nil {
+	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value, r.now()); err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
 			return queueAuthorityLostBy("environment_build_mark_ready", err)
 		}
@@ -327,7 +328,7 @@ func decodeEnvironmentBuildTransportIdentity(queueJob *queuev1.QueueJob) (Enviro
 func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, job EnvironmentBuildJob, outcome ProviderOutcome[sandbox.BuildArtifactResult]) error {
 	failure := EnvironmentArtifactFailure{
 		Stage: "observe_artifact", LastErrorKind: valueOrDefault(outcome.ErrorKind, "environment_build_observation_failed"),
-		Reason: valueOrDefault(outcome.SafeMessage, "environment build observation failed"), Retryable: outcome.Disposition == ProviderRetryable,
+		Reason: valueOrDefault(outcome.SafeMessage, "environment build observation failed"),
 	}
 	if outcome.Disposition != ProviderRetryable {
 		return r.failEnvironmentBuild(ctx, job, failure)

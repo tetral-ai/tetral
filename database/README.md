@@ -38,9 +38,19 @@ V3 adds input-owned MCP discovery budgets to `session_runtime_inbox`:
 `mcp_discovery_deadline_at` and `mcp_discovery_diagnostic` are nullable. Two CHECK
 constraints bind attempts to a deadline and constrain safe diagnostic values.
 Existing inputs start with no discovery attempt; existing MCP manifests are not
-refreshed or rewritten by this migration. Fresh databases apply V1, V2, then V3;
-existing databases apply only their pending versions. Each version's DDL and
-history entry commit together. Go and Gateway readiness require all three.
+refreshed or rewritten by this migration.
+
+V4 adds six nullable build-observation columns to `environment_artifacts`:
+`build_started_at`, `build_warn_at`, `build_deadline_at`, `build_warned_at`,
+`provider_build_ref`, and `provider_build_state`. Three CHECK constraints bind
+the timing shape, bound the provider reference, and restrict provider states.
+Existing rows are not rewritten. Sandbox initializes timing when it next claims
+a live pending/building artifact, using its prior submission time when present;
+failed artifacts remain terminal.
+
+Fresh databases apply V1 through V4; existing databases apply only their pending
+versions. Each version's DDL and history entry commit together. Go and Gateway
+readiness require all four.
 
 `internal/schemaidentity` owns the ordered version/checksum metadata without
 database or driver dependencies. Storage binds these identities to its migration
@@ -54,8 +64,8 @@ Do not edit stored checksums to bypass a mismatch: a database created from a
 rewritten V1 is not the deployed Alpha 1 baseline and is rejected as drift.
 
 This is a forward migration, with no automatic downgrade. An older binary
-rejects schema versions beyond its own registry as ahead (including V2-only
-binaries after V3); upgrading the schema therefore also changes the
+rejects schema versions beyond its own registry as ahead (including V3-only
+binaries after V4); upgrading the schema therefore also changes the
 rollback requirements. Preserve a database backup before an upgrade that may
 need to return to an older binary.
 
