@@ -261,7 +261,10 @@ func (a *DaytonaAdapter) BuildEnvironmentArtifact(ctx context.Context, request s
 		}
 		return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary), nil
 	}
-	if strings.TrimSpace(result.ProviderArtifactRef) == "" {
+	if result.State != sandbox.ArtifactBuildWaiting && result.State != sandbox.ArtifactBuildReady && result.State != sandbox.ArtifactBuildFailed {
+		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no build state"), nil
+	}
+	if result.State == sandbox.ArtifactBuildReady && strings.TrimSpace(result.ProviderArtifactRef) == "" {
 		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference"), nil
 	}
 	return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}, nil

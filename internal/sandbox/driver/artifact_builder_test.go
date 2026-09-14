@@ -85,14 +85,13 @@ func TestDaytonaArtifactBuilderWaitsForCreatedSnapshotToBecomeActive(t *testing.
 	}
 	builder := NewDaytonaArtifactBuilderForClient(client, "ghcr.io/tetral-ai/sandbox:0.1.0-alpha")
 
-	_, err := builder.BuildArtifact(context.Background(), sandbox.BuildArtifactRequest{
+	result, err := builder.BuildArtifact(context.Background(), sandbox.BuildArtifactRequest{
 		WorkspaceID: workspace.ID("ws_test"), EnvironmentID: "env_test", Generation: 7,
 		ArtifactInputHash: "1234567890abcdef", NormalizedPackages: sandbox.PackageSetup{"apt": []string{"git"}},
 		AuthorizeProviderCreate: func(context.Context) (bool, error) { return true, nil },
 	})
-	providerErr, ok := err.(*sandbox.ProviderError)
-	if !ok || !providerErr.Retryable {
-		t.Fatalf("BuildArtifact error = %#v; want retryable build observation", err)
+	if err != nil || result.State != sandbox.ArtifactBuildWaiting || !result.Submitted || result.ProviderBuildRef != client.params.Name {
+		t.Fatalf("created build = %+v, %v; want submitted waiting identity", result, err)
 	}
 }
 
@@ -118,8 +117,8 @@ func TestDaytonaArtifactBuilderDoesNotResubmitAmbiguousCreate(t *testing.T) {
 	if _, err := builder.BuildArtifact(context.Background(), request); err == nil {
 		t.Fatal("first ambiguous Create succeeded")
 	}
-	if _, err := builder.BuildArtifact(context.Background(), request); err == nil {
-		t.Fatal("observation after ambiguous Create succeeded before Snapshot became visible")
+	if result, err := builder.BuildArtifact(context.Background(), request); err != nil || result.State != sandbox.ArtifactBuildWaiting || result.ProviderState != "awaiting_visibility" {
+		t.Fatalf("ambiguous submission observation = %+v, %v; want waiting for visibility", result, err)
 	}
 	if client.createCalls != 1 {
 		t.Fatalf("Snapshot Create calls = %d; want exactly 1", client.createCalls)
@@ -191,23 +190,29 @@ func TestDaytonaArtifactBuilderAdoptsExistingSnapshotAfterLostCreateResponse(t *
 	}
 }
 
-func TestDaytonaArtifactBuilderObservesExistingBuildWithoutCreatingAgain(t *testing.T) {
-	request := sandbox.BuildArtifactRequest{
-		WorkspaceID: workspace.ID("ws_test"), EnvironmentID: "env_test", Generation: 7,
-		ArtifactInputHash: "1234567890abcdef", NormalizedPackages: sandbox.PackageSetup{"apt": []string{"git"}},
-	}
-	client := &recordingSnapshotCreator{existing: &types.Snapshot{
-		ID: "building_snapshot_ref", Name: deterministicSnapshotName(request), State: "building",
-	}}
-	builder := NewDaytonaArtifactBuilderForClient(client, "ghcr.io/tetral-ai/sandbox:0.1.0-alpha")
-
-	_, err := builder.BuildArtifact(context.Background(), request)
-	providerErr, ok := err.(*sandbox.ProviderError)
-	if !ok || !providerErr.Retryable {
-		t.Fatalf("BuildArtifact error = %#v; want retryable provider observation", err)
-	}
-	if client.params != nil {
-		t.Fatalf("snapshot Create called while the stable Snapshot is building: %+v", client.params)
+func TestDaytonaArtifactBuilderDistinguishesProgressReadyAndProviderFailure(t *testing.T) {
+	for _, tc := range []struct {
+		providerState string
+		want          sandbox.ArtifactBuildState
+	}{
+		{"pending", sandbox.ArtifactBuildWaiting}, {"building", sandbox.ArtifactBuildWaiting}, {"pulling", sandbox.ArtifactBuildWaiting},
+		{"active", sandbox.ArtifactBuildReady}, {"error", sandbox.ArtifactBuildFailed}, {"build_failed", sandbox.ArtifactBuildFailed},
+	} {
+		t.Run(tc.providerState, func(t *testing.T) {
+			request := sandbox.BuildArtifactRequest{WorkspaceID: "ws_test", EnvironmentID: "env_test", Generation: 7, ArtifactInputHash: "packages"}
+			client := &recordingSnapshotCreator{existing: &types.Snapshot{ID: "snapshot_ref", Name: deterministicSnapshotName(request), State: tc.providerState}}
+			builder := NewDaytonaArtifactBuilderForClient(client, "test-image")
+			result, err := builder.BuildArtifact(context.Background(), request)
+			if err != nil || result.State != tc.want || result.ProviderState != tc.providerState || result.ProviderBuildRef != client.existing.Name {
+				t.Fatalf("observation = %+v, %v; want %s with original provider identity", result, err, tc.want)
+			}
+			if tc.want != sandbox.ArtifactBuildReady && result.ProviderArtifactRef != "" {
+				t.Fatal("non-ready build exposed a usable artifact")
+			}
+			if client.createCalls != 0 {
+				t.Fatal("observation submitted another build")
+			}
+		})
 	}
 }
 

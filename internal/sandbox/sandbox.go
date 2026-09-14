@@ -114,8 +114,23 @@ type BuildArtifactRequest struct {
 	AuthorizeProviderCreate func(context.Context) (bool, error)
 }
 
+type ArtifactBuildState string
+
+const (
+	ArtifactBuildWaiting ArtifactBuildState = "waiting"
+	ArtifactBuildReady   ArtifactBuildState = "ready"
+	ArtifactBuildFailed  ArtifactBuildState = "failed"
+)
+
+// A successful observation may still be waiting. Only Ready proves that the
+// artifact can create a Sandbox. Errors describe failed queries/submissions,
+// whereas Failed means the provider explicitly reported a failed build.
 type BuildArtifactResult struct {
+	State               ArtifactBuildState
 	ProviderArtifactRef string
+	ProviderBuildRef    string
+	ProviderState       string
+	Submitted           bool
 }
 
 type ArtifactBuilder interface {

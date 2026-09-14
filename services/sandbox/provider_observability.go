@@ -65,6 +65,12 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 		level = slog.LevelError
 		result = "error"
 	}
+	if build, ok := any(outcome.Value).(sandbox.BuildArtifactResult); ok && !outcome.Failed() {
+		result = string(build.State)
+		if build.State == sandbox.ArtifactBuildFailed {
+			level = slog.LevelError
+		}
+	}
 	attrs := []slog.Attr{
 		slog.String("operation", operation),
 		slog.String("event", "sandbox_provider_operation_completed"),

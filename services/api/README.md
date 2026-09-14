@@ -511,7 +511,12 @@ the close fence rejects admission without persisting an event or Queue job.
   that generation's ready provider artifact while lazily activating its Sandbox.
   That first tool may therefore include provider inspection and activation
   latency, or return a typed tool failure when the artifact or provider resource
-  cannot be made usable.
+  cannot be made usable. Provider build progress is observed asynchronously
+  without consuming failure retries. Sandbox persists a warning threshold
+  (default 10 minutes) and hard build-wait deadline (default 30 minutes), then
+  settles waiting calls with a distinct Engine timeout if necessary. Restart
+  does not reset those times; old failed artifacts are not automatically
+  recovered. See the Sandbox service's Environment builds contract.
 - **Networking.** Networking accepts exactly the Daytona-backed shape —
   `unrestricted`, `blocked`, or `cidr_allow_list` with a comma-separated CIDR
   `network_allow_list`. Domain-name allow-lists are rejected; the backend never

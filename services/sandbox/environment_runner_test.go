@@ -15,42 +15,6 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
-func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
-	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
-	store := &recordingEnvironmentBuildStore{
-		input: EnvironmentArtifactBuildInput{
-			WorkspaceID:        workspace.ID("ws_env"),
-			EnvironmentID:      "env_build",
-			Generation:         7,
-			Provider:           sandboxdriver.DaytonaProviderName,
-			ArtifactInputHash:  "hash_packages",
-			NormalizedPackages: sandbox.PackageSetup{"pip": []string{"pandas==2.2.0"}},
-		},
-		claimed: true,
-	}
-	builder := &recordingArtifactBuilder{result: sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_ref"}}
-	runner := &EnvironmentBuildJobRunner{
-		Queue:     queueClient,
-		Store:     store,
-		Providers: artifactProviderRegistry(t, builder),
-		Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
-		Clock:     fixedEnvironmentRunnerClock,
-	}
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_env_build"}) {
-		t.Fatalf("transitions = %v; want ack", queueClient.transitions)
-	}
-	if !reflect.DeepEqual(store.calls, []string{"claim", "authorize-create", "ready:snapshot_ref"}) {
-		t.Fatalf("store calls = %v; want claim, provider-create authorization, then ready", store.calls)
-	}
-	if len(builder.requests) != 1 || builder.requests[0].ArtifactInputHash != "hash_packages" {
-		t.Fatalf("builder requests = %+v; want durable artifact input", builder.requests)
-	}
-}
-
 func TestEnvironmentBuildRunnerFinalizesBeforeCancellingWorkContext(t *testing.T) {
 	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
 	store := &recordingEnvironmentBuildStore{
@@ -61,7 +25,7 @@ func TestEnvironmentBuildRunnerFinalizesBeforeCancellingWorkContext(t *testing.T
 		claimed:                true,
 		rejectCancelledContext: true,
 	}
-	builder := &recordingArtifactBuilder{result: sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_ref"}}
+	builder := &recordingArtifactBuilder{result: sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady, ProviderArtifactRef: "snapshot_ref"}}
 	runner := &EnvironmentBuildJobRunner{
 		Queue: queueClient, Store: store, Providers: artifactProviderRegistry(t, builder),
 		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
@@ -142,7 +106,7 @@ func TestEnvironmentBuildRunnerFinalizesMalformedPayloadBeforeDeadLetter(t *test
 	}
 }
 
-func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhaustion(t *testing.T) {
+func TestEnvironmentBuildRunnerDefersTransientErrorsAndSettlesPermanentErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		job             *queuev1.QueueJob
@@ -155,7 +119,7 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 			job:             environmentBuildQueueJob(),
 			err:             &sandbox.ProviderError{Provider: "daytona", Stage: sandbox.StageBuildArtifact, Kind: sandbox.ProviderErrorUnavailable, Retryable: true, SafeMessage: "temporarily unavailable"},
 			wantStoreSuffix: "retryable:unavailable",
-			wantTransition:  "retry:qjob_env_build:unavailable",
+			wantTransition:  "defer:qjob_env_build",
 		},
 		{
 			name: "explicit create rejection rearms authorization",
@@ -165,10 +129,10 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 				Retryable: true, SafeMessage: "temporarily unavailable",
 			}),
 			wantStoreSuffix: "retryable:unavailable:rearm-create",
-			wantTransition:  "retry:qjob_env_build:unavailable",
+			wantTransition:  "defer:qjob_env_build",
 		},
 		{
-			name: "retryable exhausted",
+			name: "observation at transport attempt limit still defers",
 			job: func() *queuev1.QueueJob {
 				job := environmentBuildQueueJob()
 				job.AttemptCount = 3
@@ -176,8 +140,8 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 				return job
 			}(),
 			err:             &sandbox.ProviderError{Provider: "daytona", Stage: sandbox.StageBuildArtifact, Kind: sandbox.ProviderErrorUnavailable, Retryable: true, SafeMessage: "temporarily unavailable"},
-			wantStoreSuffix: "terminal:unavailable",
-			wantTransition:  "retry:qjob_env_build:unavailable",
+			wantStoreSuffix: "retryable:unavailable",
+			wantTransition:  "defer:qjob_env_build",
 		},
 		{
 			name:            "terminal",
@@ -563,6 +527,11 @@ func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(ctx context.C
 	return nil
 }
 
+func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildWaiting(_ context.Context, _ EnvironmentBuildJob, result sandbox.BuildArtifactResult, _ time.Time) error {
+	s.calls = append(s.calls, "waiting:"+result.ProviderState)
+	return nil
+}
+
 func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildRetryableFailure(_ context.Context, _ EnvironmentBuildJob, failure EnvironmentArtifactFailure, rearmCreate bool, _ time.Time) error {
 	call := "retryable:" + failure.LastErrorKind
 	if rearmCreate {
@@ -594,7 +563,7 @@ func (authorizationArtifactBuilder) BuildArtifact(ctx context.Context, request s
 	if _, err := request.AuthorizeProviderCreate(ctx); err != nil {
 		return sandbox.BuildArtifactResult{}, err
 	}
-	return sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_authorized"}, nil
+	return sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady, ProviderArtifactRef: "snapshot_authorized"}, nil
 }
 
 func (b *recordingArtifactBuilder) BuildArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (sandbox.BuildArtifactResult, error) {

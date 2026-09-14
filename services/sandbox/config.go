@@ -28,6 +28,8 @@ const (
 	EnvSandboxProviderCommandTimeout            = "TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT"
 	EnvSandboxLateCommandMargin                 = "TETRAL_SANDBOX_LATE_COMMAND_MARGIN"
 	EnvSandboxJobPollInterval                   = "TETRAL_SANDBOX_JOB_POLL_INTERVAL"
+	EnvSandboxEnvironmentBuildWarnAfter         = "TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER"
+	EnvSandboxEnvironmentBuildTimeout           = "TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT"
 	EnvSandboxEnvironmentBuildConcurrency       = "TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY"
 	EnvSandboxEnvironmentReadyFanoutConcurrency = "TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY"
 	EnvSandboxWorkerConcurrency                 = "TETRAL_SANDBOX_WORKER_CONCURRENCY"
@@ -80,6 +82,8 @@ type Config struct {
 	ProviderCommandTimeout            time.Duration
 	LateCommandMargin                 time.Duration
 	JobPollInterval                   time.Duration
+	EnvironmentBuildWarnAfter         time.Duration
+	EnvironmentBuildTimeout           time.Duration
 	EnvironmentBuildConcurrency       int
 	EnvironmentReadyFanoutConcurrency int
 	WorkerConcurrency                 int
@@ -116,6 +120,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 		ProviderCommandTimeout:            defaultSandboxProviderCommandTimeout,
 		LateCommandMargin:                 defaultSandboxLateCommandMargin,
 		JobPollInterval:                   defaultSandboxJobPollInterval,
+		EnvironmentBuildWarnAfter:         DefaultEnvironmentBuildWarnAfter,
+		EnvironmentBuildTimeout:           DefaultEnvironmentBuildTimeout,
 		EnvironmentBuildConcurrency:       defaultSandboxEnvironmentBuildConcurrency,
 		EnvironmentReadyFanoutConcurrency: defaultSandboxEnvironmentReadyFanout,
 		WorkerConcurrency:                 defaultSandboxWorkerConcurrency,
@@ -198,6 +204,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 	}{
 		{EnvSandboxLeaseHeartbeatInterval, &cfg.LeaseHeartbeatInterval},
 		{EnvSandboxJobPollInterval, &cfg.JobPollInterval},
+		{EnvSandboxEnvironmentBuildWarnAfter, &cfg.EnvironmentBuildWarnAfter},
+		{EnvSandboxEnvironmentBuildTimeout, &cfg.EnvironmentBuildTimeout},
 		{EnvSandboxDaytonaStopTimeout, &cfg.DaytonaStopTimeout},
 		{EnvSandboxAutoStopInterval, &cfg.AutoStopInterval},
 		{EnvSandboxAutoArchiveInterval, &cfg.AutoArchiveInterval},
@@ -214,6 +222,9 @@ func ConfigFromEnv(env Env) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+	}
+	if cfg.EnvironmentBuildTimeout <= cfg.EnvironmentBuildWarnAfter {
+		return Config{}, workload.NewConfigError(EnvSandboxEnvironmentBuildTimeout + " must be greater than " + EnvSandboxEnvironmentBuildWarnAfter)
 	}
 	if cfg.ResourceCredentialTTL <= cfg.ResourceCredentialRefreshMargin {
 		return Config{}, workload.NewConfigError(EnvResourceCredentialTTL + " must be greater than " + EnvResourceCredentialRefreshMargin)

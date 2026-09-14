@@ -33,7 +33,7 @@ key; no consumer takes its serving workspace from configuration.
 `partition_key`, an optional `dedupe_key`, a `payload_json` of durable references,
 a `payload_version` (positive integer; the payload-schema-version guard, rejected
 at admission when negative, while an unset or zero value defaults to 1), lease bookkeeping (`leased_by`, `lease_token`,
-`leased_at`, `leased_until`), `attempt_count` / `max_attempts`, the config-only
+`leased_at`, `leased_until`), `attempt_count` / `max_attempts`, the config/build observation
 `defer_count`, a `priority`, an `available_at`, and a `status`. Runtime-facing
 rows also carry structured scheduling authority: `causal_session_id` preserves
 Session causal order, `delivery_scope` is `thread` or `session`,
@@ -74,7 +74,7 @@ changes nothing.
 | `Heartbeat` | lease-token | any | pushes an unexpired `leased_until` forward and returns the database-written expiry; an expired lease cannot be revived |
 | `Ack` | lease-token | any | → `acknowledged`; legal only after the consumer reconciled durable state and delivered/resolved the command |
 | `Retry` | lease-token | any | carries an error kind/message only, no delay authority. If `attempt_count` reached the effective `max_attempts`, dead-letters instead. Otherwise → `pending` with capped exponential backoff + full jitter |
-| `Defer` | lease-token | the two canonical `runtime_config_update` payload classes | → `pending` with Queue-owned capped backoff while decrementing `attempt_count`; the locked SDK config-generation or MCP manifest-generation row is revalidated from its refs-only payload, increments `defer_count`, and derives backoff from that counter without approaching `max_attempts` |
+| `Defer` | lease-token | canonical `runtime_config_update` and `environment_build` | validates the stored refs-only payload, returns the same row to `pending`, refunds one `attempt_count`, increments `defer_count`, and clears custody without changing partition sequence. Config uses capped backoff from `defer_count`; Environment builds use a fixed 30-second delay, including at the ordinary attempt limit |
 | `DeadLetter` | lease-token | any | → `dead_lettered` straight, carrying the error, for terminal invariant failures |
 | `Cancel` | partition-scoped, **not** lease-fenced | `runtime_input` `input_kind = messages` only | requires `workspace_id`, `session_id`, `session_thread_id`, and a positive `interrupt_fence_sequence`; marks `cancelled` every `pending` matching row in that thread whose `sequence_to` is below the fence; touches no `leased`/terminal row and deletes no `session_events` |
 | `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= PostgreSQL clock time` and returns them to `pending` at a database-written `available_at` with a `lease_expired` error stamp |
@@ -98,7 +98,10 @@ loss of Queue authority rolls back the entire business write before settlement.
 
 Backoff is `delay = rand(0, min(cap, base * 2^(count-1)))`, where `count` is
 `attempt_count` for Retry, and `defer_count` for
-config Defer. The full-jitter distribution is fixed, not a knob. Lease expiry alone never
+config Defer. Environment build Defer instead uses a fixed 30-second delay to
+bound polling frequency independently of failures. Sandbox owns the durable
+build deadline and terminal settlement; Queue does not infer provider failure
+from observation count. The full-jitter distribution is fixed, not a knob. Lease expiry alone never
 dead-letters: the prior owner may have committed business success and only lost
 the acknowledgement, so the next lease holder revalidates the durable row under
 its own token and stale-acks when the work is already done. Attempt exhaustion
@@ -224,8 +227,10 @@ validation error.
 
 **Kind-specific behaviors a replacement must preserve.**
 - `Defer` accepts refs-only SDK config-generation and MCP
-  manifest-generation `runtime_config_update` rows. It validates the
-  locked stored payload before admitting either config arm.
+  manifest-generation `runtime_config_update` rows, plus canonical
+  `environment_build` rows. It validates the locked stored payload, retains
+  causal position, and refunds only the current lease attempt. Artifact
+  observation/restart policy belongs to Sandbox; unrelated kinds remain rejected.
 - `Cancel` touches **only** `runtime_input` `input_kind = messages` rows.
 - Same-Thread interrupt precedence applies **only** among `runtime_input`
   candidates: an `interrupt_control` may overtake earlier pending ordinary

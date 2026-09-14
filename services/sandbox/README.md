@@ -47,8 +47,9 @@ another worker may resume from PostgreSQL without inheriting process state.
 | `sandbox_background_command` | send input to or cancel a provider command |
 | `sandbox_background_reconcile` | observe a detached command and record completion |
 
-Every kind has an explicit positive attempt budget. Queue attempt counts govern
-transport only; lifecycle-operation and execution generations govern business
+Sandbox execution and lifecycle kinds have explicit positive attempt budgets.
+Environment build/fanout notifications use the Queue default when unset.
+Queue attempt counts govern transport only; lifecycle-operation and execution generations govern business
 re-entry. A worker that receives an over-budget job settles the referenced
 business row before dead-lettering the Queue row. The bounded reconciler safely
 logs a candidate that cannot be settled and continues through the rest of the
@@ -63,6 +64,67 @@ retry, or dead-letter work after losing execution authority.
 Environment artifact workers apply the same lease guard before budget checks,
 payload decoding, or business claims; malformed and exhausted work settles the
 addressed artifact generation before its Queue row is dead-lettered.
+
+## Environment builds
+
+`environment_build` submits or observes one deterministic provider snapshot for
+an Environment generation. `pending`, `building`, and `pulling` snapshot states
+are successful progress observations. They do not consume a failure attempt.
+Each worker records progress, releases artifact custody, calls Queue `Defer`,
+and returns. Queue persists a 30-second `available_at`, refunds that lease's
+attempt, and clears its lease. The existing consumer loop picks it up when due;
+there is no per-build cron or worker held open for installation.
+
+Artifact `status=building` means a worker owns the artifact; `status=pending`
+can mean scheduled observation of a build still running at the provider.
+`provider_build_state` and `provider_build_ref` preserve the provider lifecycle
+independently of that custody. The immutable workspace/Environment/generation/
+package-hash identity reconstructs the original snapshot name after restart.
+The persisted create guard permits another submission only after proven provider
+rejection; an ambiguous result is observed until visible or timed out.
+
+On the first claim, the artifact persists `build_started_at`, `build_warn_at`,
+and `build_deadline_at`. Previously submitted live builds use their submission
+time. These values never reset on deferral, lease handoff, or configuration
+changes. `TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER` defaults to `10m`;
+`TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT` defaults to `30m` and must exceed the
+warning interval. The first observation at/after the warning threshold persists
+`build_warned_at` and logs `waiting_overdue`. The first processing at/after the
+hard deadline settles the artifact and waiting activation/tool calls with
+`environment_build_wait_timeout`, then dead-letters the QUEUEJOB. Individual
+provider calls are bounded by 45 seconds or the remaining build time, whichever
+is shorter; an Active response received at/after the deadline cannot activate.
+Availability is a minimum scheduling time, not a guaranteed execution time.
+
+An Active snapshot with matching identity and a provider ID becomes a ready
+artifact. The same transaction enqueues ready fanout for waiting generations
+with identical package input; changed package input is untouched. Fanout
+re-enqueues waiting activation operations. Explicit provider `error` or
+`build_failed` settles dependents with `environment_provider_build_failed`.
+Transient query/submission errors persist their safe diagnostic under
+`observe_artifact` and defer observation until recovery or the original deadline.
+Permanent configuration/protocol errors retain their distinct terminal reasons.
+Control/store errors leave custody for reclaim and fenced business settlement
+rather than dead-lettering a notification before its dependents can be settled.
+
+Timeout stops Engine observation; it does not cancel the provider build. Existing
+failed artifacts and already-settled tool results are not reopened, even if the
+provider later becomes Active. No historical recovery or implicit replay is
+performed. Migration V4 adds nullable observation fields without rewriting old
+terminal records.
+
+Logs distinguish `submitted`, `waiting`, `ready`, `provider_failed`,
+`observation_failed`, `waiting_overdue`, and `timed_out`, including the safe
+provider build reference and original deadline. The reference is the diagnostic
+handle; unbounded installation logs are not collected or published.
+
+Tests use real PostgreSQL and the actual Queue server/store, builder, adapter,
+and artifact/activation writers, with deterministic Daytona responses and
+controlled scheduling time. `environment_build_integration_test.go` proves
+waiting beyond the failure budget, deadline persistence, late-response rejection,
+query recovery, same-input reuse, and stale lease rejection. Driver tests prove
+state classification and the single-submission guard. MinIO and live Daytona
+are not dependencies of these focused tests.
 
 ## Lifecycle
 

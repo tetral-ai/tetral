@@ -116,6 +116,8 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 			steps = postgresqlGitIdentitySteps()
 		case 3:
 			steps = postgresqlMCPDiscoverySteps()
+		case 4:
+			steps = postgresqlEnvironmentBuildSteps()
 		}
 		// An identity without matching DDL fails registry checksum validation.
 		registry[i] = postgresqlMigration{version: identity.Version, checksum: identity.Checksum, steps: steps}

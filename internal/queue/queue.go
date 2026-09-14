@@ -226,6 +226,11 @@ const (
 
 const DefaultMaxAttempts = 10
 
+// Environment builds are asynchronous observations, not failed attempts.
+// Queue owns their fixed polling cadence; unlike retry jitter, this cannot
+// schedule a busy loop. The artifact owner separately enforces its deadline.
+const EnvironmentBuildPollInterval = 30 * time.Second
+
 const (
 	SandboxTerminalRetentionAge  = 24 * time.Hour
 	SandboxMaintenanceBatchLimit = 100

@@ -1730,75 +1730,49 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 		} else if err != nil {
 			return err
 		}
-		if kind != KindRuntimeConfigUpdate {
+		if kind != KindRuntimeConfigUpdate && kind != KindEnvironmentBuild {
 			return &ValidationError{Message: "queue job kind cannot be deferred"}
 		}
 		if attemptCount < 1 {
 			return errors.New("queue: leased job has invalid attempt count")
 		}
 		now := request.Now.UTC()
-		if kind == KindRuntimeConfigUpdate {
-			if err := validateCanonicalQueueShape(EnqueueRequest{
-				ID:             request.JobID,
-				WorkspaceID:    request.WorkspaceID,
-				Kind:           kind,
-				PartitionKey:   partitionKey,
-				DedupeKey:      dedupeKey.String,
-				PayloadVersion: payloadVersion,
-				PayloadJSON:    json.RawMessage(payloadJSON),
-			}); err != nil {
-				return err
-			}
-			var deferCount int
-			if err := tx.QueryRow(ctx,
-				`SELECT defer_count
-				   FROM queue_jobs
-				  WHERE workspace_id = $1
-				    AND id = $2
-				    AND lease_token = $3
-				    AND status = 'leased'
-				    AND leased_until > clock_timestamp()`,
-				string(request.WorkspaceID),
-				request.JobID,
-				request.LeaseToken,
-			).Scan(&deferCount); err != nil {
-				return err
-			}
-			deferDelay := queueRetryDelay(s.retryPolicy, deferCount+1)
-			result, err := tx.Exec(ctx,
-				`UPDATE queue_jobs
-				    SET status = 'pending',
-				        available_at = $4,
-				        attempt_count = attempt_count - 1,
-				        defer_count = defer_count + 1,
-				        lease_token = NULL,
-				        leased_by = NULL,
-				        leased_at = NULL,
-				        leased_until = NULL,
-				        updated_at = $5
-				  WHERE workspace_id = $1
-				    AND id = $2
-				    AND lease_token = $3
-				    AND status = 'leased'
-				    AND leased_until > clock_timestamp()`,
-				string(request.WorkspaceID),
-				request.JobID,
-				request.LeaseToken,
-				now.Add(deferDelay),
-				now,
-			)
-			if err != nil {
-				return err
-			}
-			updated = rowsAffected(result)
-			return nil
+		if err := validateCanonicalQueueShape(EnqueueRequest{
+			ID:             request.JobID,
+			WorkspaceID:    request.WorkspaceID,
+			Kind:           kind,
+			PartitionKey:   partitionKey,
+			DedupeKey:      dedupeKey.String,
+			PayloadVersion: payloadVersion,
+			PayloadJSON:    json.RawMessage(payloadJSON),
+		}); err != nil {
+			return err
 		}
-		deferDelay := queueRetryDelay(s.retryPolicy, attemptCount)
+		var deferCount int
+		if err := tx.QueryRow(ctx,
+			`SELECT defer_count
+			   FROM queue_jobs
+			  WHERE workspace_id = $1
+			    AND id = $2
+			    AND lease_token = $3
+			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()`,
+			string(request.WorkspaceID),
+			request.JobID,
+			request.LeaseToken,
+		).Scan(&deferCount); err != nil {
+			return err
+		}
+		deferDelay := EnvironmentBuildPollInterval
+		if kind == KindRuntimeConfigUpdate {
+			deferDelay = queueRetryDelay(s.retryPolicy, deferCount+1)
+		}
 		result, err := tx.Exec(ctx,
 			`UPDATE queue_jobs
 			    SET status = 'pending',
 			        available_at = $4,
 			        attempt_count = attempt_count - 1,
+			        defer_count = defer_count + 1,
 			        lease_token = NULL,
 			        leased_by = NULL,
 			        leased_at = NULL,

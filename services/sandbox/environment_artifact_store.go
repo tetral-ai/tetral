@@ -27,13 +27,20 @@ type EnvironmentArtifactBuildInput struct {
 	Provider           string
 	ArtifactInputHash  string
 	NormalizedPackages sandbox.PackageSetup
+	StartedAt          time.Time
+	DeadlineAt         time.Time
+	WarningDue         bool
+	ProviderBuildRef   string
+	ProviderState      string
 }
 
 type EnvironmentArtifactFailure struct {
-	Stage         string
-	LastErrorKind string
-	Reason        string
-	Retryable     bool
+	Stage            string
+	LastErrorKind    string
+	Reason           string
+	Retryable        bool
+	ProviderBuildRef string
+	ProviderState    string
 }
 
 func NewEnvironmentArtifactStore(client *dbconnect.Client) *EnvironmentArtifactStore {
@@ -52,24 +59,23 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.claim", func(tx *dbconnect.Tx) (txErr error) {
 		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var (
-			status            string
-			provider          string
-			packagesJSON      string
-			artifactInputHash string
-			leaseJobID        sql.NullString
-			leaseToken        sql.NullString
-			leaseAttemptCount sql.NullInt64
+			status, provider, packagesJSON, artifactInputHash    string
+			leaseJobID, leaseToken                               sql.NullString
+			leaseAttemptCount                                    sql.NullInt64
+			providerBuildRef, providerState                      sql.NullString
+			startedAt, warnAt, deadlineAt, warnedAt, submittedAt sql.NullTime
 		)
 		err := tx.QueryRow(ctx,
 			`SELECT status, provider, packages_json, artifact_input_hash,
-			        lease_job_id, lease_token, lease_attempt_count
+			        lease_job_id, lease_token, lease_attempt_count,
+			        build_started_at, build_warn_at, build_deadline_at, build_warned_at, provider_create_submitted_at, provider_build_ref, provider_build_state
 			   FROM environment_artifacts
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			  FOR UPDATE`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-		).Scan(&status, &provider, &packagesJSON, &artifactInputHash, &leaseJobID, &leaseToken, &leaseAttemptCount)
+		).Scan(&status, &provider, &packagesJSON, &artifactInputHash, &leaseJobID, &leaseToken, &leaseAttemptCount, &startedAt, &warnAt, &deadlineAt, &warnedAt, &submittedAt, &providerBuildRef, &providerState)
 		if dbconnect.IsNoRows(err) {
 			return nil
 		}
@@ -95,6 +101,19 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 		if err != nil {
 			return err
 		}
+		// Persist the first claim's timing policy. Existing live submissions keep
+		// their original start; a handoff or config change cannot extend it.
+		policy := normalizedEnvironmentRunnerConfig(EnvironmentRunnerConfig{BuildWarnAfter: job.BuildWarnAfter, BuildTimeout: job.BuildTimeout})
+		if !startedAt.Valid {
+			start := now.UTC()
+			if submittedAt.Valid {
+				start = submittedAt.Time
+			}
+			startedAt = sql.NullTime{Time: start, Valid: true}
+			warnAt = sql.NullTime{Time: start.Add(policy.BuildWarnAfter), Valid: true}
+			deadlineAt = sql.NullTime{Time: start.Add(policy.BuildTimeout), Valid: true}
+		}
+		warningDue := !warnedAt.Valid && !now.Before(warnAt.Time)
 		result, err := tx.Exec(ctx,
 			`UPDATE environment_artifacts
 			    SET status = 'building',
@@ -102,16 +121,17 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 			        lease_token = $5,
 			        lease_attempt_count = $6,
 			        provider_artifact_ref = NULL,
-			        failure_stage = NULL,
-			        last_error_kind = NULL,
-			        failure_reason = NULL,
-			        retryable = NULL,
+			        build_started_at = $8,
+			        build_warn_at = $9,
+			        build_deadline_at = $10,
+			        build_warned_at = CASE WHEN $11 THEN $7 ELSE build_warned_at END,
 			        updated_at = $7
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			    AND status IN ('pending', 'building')`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation, job.JobID, job.LeaseToken, job.AttemptCount, now.UTC(),
+			startedAt.Time, warnAt.Time, deadlineAt.Time, warningDue,
 		)
 		if err != nil {
 			return err
@@ -126,6 +146,11 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 			Provider:           provider,
 			ArtifactInputHash:  artifactInputHash,
 			NormalizedPackages: packages,
+			StartedAt:          startedAt.Time,
+			DeadlineAt:         deadlineAt.Time,
+			WarningDue:         warningDue,
+			ProviderBuildRef:   providerBuildRef.String,
+			ProviderState:      providerState.String,
 		}
 		claimed = true
 		return nil
@@ -225,6 +250,8 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 				`UPDATE environment_artifacts
 				    SET status = 'ready',
 				        provider_artifact_ref = $4,
+				        provider_build_ref = COALESCE(provider_build_ref, $4),
+				        provider_build_state = 'active',
 				        lease_job_id = NULL,
 				        lease_token = NULL,
 				        lease_attempt_count = NULL,
@@ -271,13 +298,24 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 }
 
 func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure, rearmCreate bool, now time.Time) error {
+	return s.releaseEnvironmentBuild(ctx, job, sandbox.BuildArtifactResult{}, failure, rearmCreate, now)
+}
+
+// Waiting releases worker custody without discarding the provider's lifecycle.
+// Queue.Defer subsequently schedules the same notification. If that transition
+// is interrupted, lease reclamation safely re-observes the persisted identity.
+func (s *EnvironmentArtifactStore) MarkEnvironmentBuildWaiting(ctx context.Context, job EnvironmentBuildJob, result sandbox.BuildArtifactResult, now time.Time) error {
+	return s.releaseEnvironmentBuild(ctx, job, result, EnvironmentArtifactFailure{}, false, now)
+}
+
+func (s *EnvironmentArtifactStore) releaseEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, result sandbox.BuildArtifactResult, failure EnvironmentArtifactFailure, rearmCreate bool, now time.Time) error {
 	if s == nil || s.client == nil {
 		return errors.New("environment artifact store is required")
 	}
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.retryable_failure", func(tx *dbconnect.Tx) (txErr error) {
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.waiting", func(tx *dbconnect.Tx) (txErr error) {
 		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		var leaseJobID, leaseToken sql.NullString
@@ -308,14 +346,16 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx cont
 			        failure_stage = $4,
 			        last_error_kind = $5,
 			        failure_reason = $6,
-			        retryable = TRUE,
+			        retryable = CASE WHEN $5::text IS NULL THEN NULL ELSE TRUE END,
+			        provider_build_ref = COALESCE($9, provider_build_ref),
+			        provider_build_state = COALESCE($10, provider_build_state),
 			        updated_at = $8
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			    AND status = 'building'`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), rearmCreate, now.UTC(),
+			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), rearmCreate, now.UTC(), nullIfEmpty(result.ProviderBuildRef), nullIfEmpty(result.ProviderState),
 		)
 		return err
 	})
@@ -358,6 +398,8 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 			        last_error_kind = $5,
 			        failure_reason = $6,
 			        retryable = FALSE,
+			        provider_build_ref = COALESCE($8, provider_build_ref),
+			        provider_build_state = COALESCE($9, provider_build_state),
 			        updated_at = $7
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
@@ -365,7 +407,7 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 			    AND status IN ('pending', 'building')
 			RETURNING generation`,
 			job.WorkspaceID, job.EnvironmentID, artifactInputHash,
-			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), timestamp,
+			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), timestamp, nullIfEmpty(failure.ProviderBuildRef), nullIfEmpty(failure.ProviderState),
 		)
 		if err != nil {
 			return err
