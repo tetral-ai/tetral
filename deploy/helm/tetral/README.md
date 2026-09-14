@@ -266,6 +266,13 @@ The following remain deliberately fixed for the initial numbered Alpha line:
 - Repository names within the four image families and all other canonical
   security and topology literals.
 
+Sandbox Environment build timing is configurable with
+`sandbox.environmentBuildWarnAfter` (default `10m`) and
+`sandbox.environmentBuildTimeout` (default `30m`). Both must be positive Go
+durations, and timeout must exceed the warning interval; invalid values fail
+Sandbox startup. These values initialize a build's saved policy on its first
+claim, so changing them does not renew deadlines for builds already in progress.
+
 ## Upgrade and rollback
 
 Database preparation is a separate deployment step, not an API startup action

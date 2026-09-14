@@ -69,7 +69,7 @@ func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sand
 		return sandbox.BuildArtifactResult{}, err
 	}
 	if !authorized {
-		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnavailable, true, 0, "daytona snapshot create is awaiting provider visibility", nil)
+		return sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildWaiting, ProviderBuildRef: name, ProviderState: "awaiting_visibility"}, nil
 	}
 	dockerfile := deterministicArtifactDockerfile(b.baseImage, request.NormalizedPackages)
 	snapshot, logs, err := b.snapshots.Create(ctx, &types.CreateSnapshotParams{
@@ -90,7 +90,9 @@ func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sand
 	if snapshot == nil {
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnknown, true, 0, "daytona snapshot create returned no snapshot", nil)
 	}
-	return adoptDaytonaSnapshot(snapshot, name)
+	result, err := adoptDaytonaSnapshot(snapshot, name)
+	result.Submitted = true
+	return result, err
 }
 
 func adoptDaytonaSnapshot(snapshot *types.Snapshot, expectedName string) (sandbox.BuildArtifactResult, error) {
@@ -104,9 +106,9 @@ func adoptDaytonaSnapshot(snapshot *types.Snapshot, expectedName string) (sandbo
 	case apiclient.SNAPSHOTSTATE_ACTIVE:
 		return daytonaSnapshotResult(snapshot)
 	case apiclient.SNAPSHOTSTATE_PENDING, apiclient.SNAPSHOTSTATE_BUILDING, apiclient.SNAPSHOTSTATE_PULLING:
-		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnavailable, true, 0, "daytona snapshot build is still in progress", nil)
+		return sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildWaiting, ProviderBuildRef: expectedName, ProviderState: snapshot.State}, nil
 	case apiclient.SNAPSHOTSTATE_ERROR, apiclient.SNAPSHOTSTATE_BUILD_FAILED:
-		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnknown, false, 0, "daytona snapshot build failed", nil)
+		return sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildFailed, ProviderBuildRef: expectedName, ProviderState: snapshot.State}, nil
 	default:
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona snapshot is not usable", nil)
 	}
@@ -116,9 +118,12 @@ func daytonaSnapshotResult(snapshot *types.Snapshot) (sandbox.BuildArtifactResul
 	if snapshot.ID == "" {
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona snapshot returned no provider id", nil)
 	}
-	return sandbox.BuildArtifactResult{ProviderArtifactRef: snapshot.ID}, nil
+	return sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady, ProviderArtifactRef: snapshot.ID, ProviderBuildRef: snapshot.Name, ProviderState: snapshot.State}, nil
 }
 
+// Worker invocations never follow an installation log stream to completion.
+// The deterministic provider build reference is the durable diagnostic handle;
+// raw installer output may contain credentials and is intentionally discarded.
 func drainAvailableSnapshotLogs(logs <-chan string) {
 	if logs == nil {
 		return

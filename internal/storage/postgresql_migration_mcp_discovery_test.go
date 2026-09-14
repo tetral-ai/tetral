@@ -10,6 +10,7 @@ import (
 
 func TestMCPDiscoveryMigrationPreservesExistingInput(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
+	rewindEnvironmentBuildMigration(t, db)
 	// Recreate the V2 boundary, then place a real old-format input in it.
 	if _, err := db.Exec(`ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic;
 		DELETE FROM tetral_schema_migrations WHERE version=3`); err != nil {

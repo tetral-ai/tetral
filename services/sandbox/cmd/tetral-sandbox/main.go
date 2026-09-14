@@ -113,6 +113,8 @@ func run(ctx context.Context, env envReader) error {
 				Providers: providerRegistry,
 				Logger:    logger,
 				Config: tetralsandbox.EnvironmentRunnerConfig{
+					BuildWarnAfter:    cfg.EnvironmentBuildWarnAfter,
+					BuildTimeout:      cfg.EnvironmentBuildTimeout,
 					WorkspaceID:       workspaceID.String(),
 					LeaseOwner:        tetralsandbox.ServiceName,
 					MaxJobs:           cfg.EnvironmentBuildConcurrency,

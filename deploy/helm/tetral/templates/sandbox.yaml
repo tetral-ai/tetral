@@ -20,6 +20,8 @@ data:
   TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT: 45s
   TETRAL_SANDBOX_LATE_COMMAND_MARGIN: 30s
   TETRAL_SANDBOX_JOB_POLL_INTERVAL: 1s
+  TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER: {{ .Values.sandbox.environmentBuildWarnAfter | quote }}
+  TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT: {{ .Values.sandbox.environmentBuildTimeout | quote }}
   TETRAL_SANDBOX_DEBUG_LOGGING: {{ .Values.sandbox.debugLogging | quote }}
   TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY: "1"
   TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY: "1"
@@ -149,6 +151,16 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_DEBUG_LOGGING
+            - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER
+            - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT
             - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY
               valueFrom:
                 configMapKeyRef:

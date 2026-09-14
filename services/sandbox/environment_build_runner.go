@@ -17,10 +17,17 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
+const (
+	DefaultEnvironmentBuildWarnAfter = 10 * time.Minute
+	DefaultEnvironmentBuildTimeout   = 30 * time.Minute
+	environmentBuildQueryTimeout     = 45 * time.Second
+)
+
 type EnvironmentBuildStore interface {
 	ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error)
 	AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error)
-	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, string, time.Time) error
+	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, sandbox.BuildArtifactResult, time.Time) error
+	MarkEnvironmentBuildWaiting(context.Context, EnvironmentBuildJob, sandbox.BuildArtifactResult, time.Time) error
 	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, bool, time.Time) error
 	MarkEnvironmentBuildTerminalFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
 }
@@ -40,15 +47,19 @@ type EnvironmentRunnerConfig struct {
 	MaxJobs           int
 	LeaseDuration     time.Duration
 	HeartbeatInterval time.Duration
+	BuildWarnAfter    time.Duration
+	BuildTimeout      time.Duration
 }
 
 type EnvironmentBuildJob struct {
-	JobID         string
-	LeaseToken    string
-	AttemptCount  int
-	WorkspaceID   string
-	EnvironmentID string
-	Generation    int64
+	JobID          string
+	LeaseToken     string
+	AttemptCount   int
+	WorkspaceID    string
+	EnvironmentID  string
+	Generation     int64
+	BuildWarnAfter time.Duration
+	BuildTimeout   time.Duration
 }
 
 func (r *EnvironmentBuildJobRunner) RunOnce(ctx context.Context) error {
@@ -151,16 +162,17 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	}
 	jobIdentity.JobID = job.JobID
 	jobIdentity.WorkspaceID = job.WorkspaceID
+	job.BuildWarnAfter, job.BuildTimeout = cfg.BuildWarnAfter, cfg.BuildTimeout
 	now := r.now()
 	input, claimed, err := r.Store.ClaimEnvironmentBuild(ctx, job, now)
 	if err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
 			return queueAuthorityLostBy("environment_build_claim", err)
 		}
-		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
-			return heartbeatErr
-		}
-		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build store claim failed")
+		// Retain the notification until business state can be reconciled. A
+		// Retry at the last attempt could dead-letter while leaving waiters
+		// pending forever; reclaim re-enters the fenced exhaustion finalizer.
+		return err
 	}
 	if !claimed {
 		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
@@ -172,14 +184,28 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 			LeaseToken:  job.LeaseToken,
 		}))
 	}
+	if input.WarningDue {
+		r.logEnvironmentBuild(job, input, "waiting_overdue", sandbox.BuildArtifactResult{})
+	}
+	if !input.DeadlineAt.IsZero() && !r.now().Before(input.DeadlineAt) {
+		return r.timeoutEnvironmentBuild(ctx, job, input)
+	}
 	builder, ok := r.Providers.ResolveEnvironmentArtifacts(input.Provider)
 	if !ok {
-		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
-			return heartbeatErr
-		}
-		return r.retryEnvironmentBuild(ctx, job, cfg, "provider_configuration_invalid", "environment artifact provider is unavailable")
+		return r.failEnvironmentBuild(ctx, job, EnvironmentArtifactFailure{
+			Stage: "build_artifact", LastErrorKind: "provider_configuration_invalid", Reason: "environment artifact provider is unavailable",
+		})
 	}
-	outcome, controlErr := builder.BuildEnvironmentArtifact(ctx, sandbox.BuildArtifactRequest{
+	// Bound one external call, not the asynchronous installation. The original
+	// artifact deadline also bounds in-flight calls; settlement uses the still
+	// live parent Queue lease after this child context is canceled.
+	queryTimeout := environmentBuildQueryTimeout
+	if !input.DeadlineAt.IsZero() && input.DeadlineAt.Sub(r.now()) < queryTimeout {
+		queryTimeout = input.DeadlineAt.Sub(r.now())
+	}
+	queryCtx, cancelQuery := context.WithTimeout(ctx, queryTimeout)
+	defer cancelQuery()
+	outcome, controlErr := builder.BuildEnvironmentArtifact(queryCtx, sandbox.BuildArtifactRequest{
 		WorkspaceID:        input.WorkspaceID,
 		EnvironmentID:      input.EnvironmentID,
 		Generation:         input.Generation,
@@ -202,15 +228,48 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	if controlErr != nil {
 		return controlErr
 	}
-	if outcome.Failed() {
-		return r.handleBuildFailure(ctx, queueJob, job, cfg, outcome)
+	if !input.DeadlineAt.IsZero() && !r.now().Before(input.DeadlineAt) {
+		return r.timeoutEnvironmentBuild(ctx, job, input)
 	}
-	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value.ProviderArtifactRef, r.now()); err != nil {
+	if outcome.Failed() {
+		r.logEnvironmentBuild(job, input, "observation_failed", sandbox.BuildArtifactResult{})
+		return r.handleBuildFailure(ctx, job, outcome)
+	}
+	switch outcome.Value.State {
+	case sandbox.ArtifactBuildWaiting:
+		if err := r.Store.MarkEnvironmentBuildWaiting(ctx, job, outcome.Value, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("environment_build_waiting", err)
+			}
+			return err
+		}
+		phase := "waiting"
+		if outcome.Value.Submitted {
+			phase = "submitted"
+		}
+		r.logEnvironmentBuild(job, input, phase, outcome.Value)
+		return r.deferEnvironmentBuild(ctx, job)
+	case sandbox.ArtifactBuildFailed:
+		r.logEnvironmentBuild(job, input, "provider_failed", outcome.Value)
+		return r.failEnvironmentBuild(ctx, job, EnvironmentArtifactFailure{
+			Stage: "build_artifact", LastErrorKind: "environment_provider_build_failed", Reason: "daytona snapshot build failed",
+			ProviderBuildRef: outcome.Value.ProviderBuildRef, ProviderState: outcome.Value.ProviderState,
+		})
+	case sandbox.ArtifactBuildReady:
+		// Ready must still cross the live lease fence before waking dependents.
+	default:
+		// The adapter owns provider-response classification. An impossible
+		// outcome here is a control-plane contract violation: retain custody
+		// for reclaim rather than treating it as a provider build failure.
+		return errors.New("environment artifact adapter returned an invalid build state")
+	}
+	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value, r.now()); err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
 			return queueAuthorityLostBy("environment_build_mark_ready", err)
 		}
-		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build ready commit failed")
+		return err
 	}
+	r.logEnvironmentBuild(job, input, "ready", outcome.Value)
 	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
 		return heartbeatErr
 	}
@@ -266,62 +325,73 @@ func decodeEnvironmentBuildTransportIdentity(queueJob *queuev1.QueueJob) (Enviro
 	}, nil
 }
 
-func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, queueJob *queuev1.QueueJob, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, outcome ProviderOutcome[sandbox.BuildArtifactResult]) error {
+func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, job EnvironmentBuildJob, outcome ProviderOutcome[sandbox.BuildArtifactResult]) error {
 	failure := EnvironmentArtifactFailure{
-		Stage: "build_artifact", LastErrorKind: valueOrDefault(outcome.ErrorKind, "environment_build_error"),
-		Reason: valueOrDefault(outcome.SafeMessage, "environment build failed"), Retryable: outcome.Disposition == ProviderRetryable,
+		Stage: "observe_artifact", LastErrorKind: valueOrDefault(outcome.ErrorKind, "environment_build_observation_failed"),
+		Reason: valueOrDefault(outcome.SafeMessage, "environment build observation failed"),
 	}
 	if outcome.Disposition != ProviderRetryable {
-		failure.Retryable = false
-		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
-			if errors.Is(err, errQueueLeaseLost) {
-				return queueAuthorityLostBy("environment_build_terminal_failure", err)
-			}
-			return err
-		}
-		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
-			return heartbeatErr
-		}
-		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
-			WorkspaceId:  job.WorkspaceID,
-			JobId:        job.JobID,
-			LeaseToken:   job.LeaseToken,
-			ErrorKind:    valueOrDefault(failure.LastErrorKind, "environment_build_error"),
-			ErrorMessage: "environment build failed",
-		}))
+		return r.failEnvironmentBuild(ctx, job, failure)
 	}
-	if environmentRetryWillExhaust(queueJob) {
-		failure.Retryable = false
-		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
-			if errors.Is(err, errQueueLeaseLost) {
-				return queueAuthorityLostBy("environment_build_terminal_failure", err)
-			}
-			return err
+	// A transient observation/submission error cannot prove installation failed.
+	// Its safe diagnostic persists; the artifact deadline, not poll count,
+	// bounds observation. Only proven rejection rearms provider submission.
+	if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, outcome.EffectBoundary == ProviderProvedNotStarted, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("environment_build_retryable_failure", err)
 		}
-	} else {
-		failure.Retryable = true
-		rearmCreate := outcome.EffectBoundary == ProviderProvedNotStarted
-		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, rearmCreate, r.now()); err != nil {
-			if errors.Is(err, errQueueLeaseLost) {
-				return queueAuthorityLostBy("environment_build_retryable_failure", err)
-			}
-			return err
-		}
+		return err
 	}
-	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
-		return heartbeatErr
-	}
-	return r.retryEnvironmentBuild(ctx, job, cfg, valueOrDefault(failure.LastErrorKind, "environment_build_error"), "environment build failed")
+	return r.deferEnvironmentBuild(ctx, job)
 }
 
-func (r *EnvironmentBuildJobRunner) retryEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, errorKind string, errorMessage string) error {
-	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
-		WorkspaceId:  job.WorkspaceID,
-		JobId:        job.JobID,
-		LeaseToken:   job.LeaseToken,
-		ErrorKind:    errorKind,
-		ErrorMessage: errorMessage,
+func (r *EnvironmentBuildJobRunner) deferEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob) error {
+	if err := stopQueueLeaseGuard(ctx); err != nil {
+		return err
+	}
+	return transitionUpdated(r.Queue.Defer(ctx, &queuev1.DeferRequest{
+		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 	}))
+}
+
+func (r *EnvironmentBuildJobRunner) timeoutEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, input EnvironmentArtifactBuildInput) error {
+	r.logEnvironmentBuild(job, input, "timed_out", sandbox.BuildArtifactResult{})
+	return r.failEnvironmentBuild(ctx, job, EnvironmentArtifactFailure{
+		Stage: "observe_artifact", LastErrorKind: "environment_build_wait_timeout",
+		Reason: "engine timed out waiting for the environment build",
+	})
+}
+
+func (r *EnvironmentBuildJobRunner) failEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure) error {
+	if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("environment_build_terminal_failure", err)
+		}
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
+		return err
+	}
+	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+		ErrorKind: failure.LastErrorKind, ErrorMessage: failure.Reason,
+	}))
+}
+
+func (r *EnvironmentBuildJobRunner) logEnvironmentBuild(job EnvironmentBuildJob, input EnvironmentArtifactBuildInput, phase string, result sandbox.BuildArtifactResult) {
+	if r.Logger == nil {
+		return
+	}
+	level := slog.LevelInfo
+	if phase == "waiting_overdue" || phase == "observation_failed" || phase == "provider_failed" || phase == "timed_out" {
+		level = slog.LevelWarn
+	}
+	r.Logger.Log(context.Background(), level, "sandbox.environment_build.observed",
+		slog.String("operation", "sandbox.environment_build"), slog.String("outcome", phase),
+		slog.String("queue.job.id", job.JobID), slog.String("workspace.id", job.WorkspaceID),
+		slog.String("environment.id", job.EnvironmentID), slog.Int64("environment.generation", job.Generation),
+		slog.String("provider.build.ref", valueOrDefault(result.ProviderBuildRef, input.ProviderBuildRef)), slog.String("provider.build.state", valueOrDefault(result.ProviderState, input.ProviderState)),
+		slog.Time("build.started_at", input.StartedAt), slog.Time("build.deadline_at", input.DeadlineAt))
 }
 
 func DecodeEnvironmentBuildJob(queueJob *queuev1.QueueJob) (EnvironmentBuildJob, error) {
@@ -377,6 +447,12 @@ func (r *EnvironmentBuildJobRunner) now() time.Time {
 }
 
 func normalizedEnvironmentRunnerConfig(cfg EnvironmentRunnerConfig) EnvironmentRunnerConfig {
+	if cfg.BuildWarnAfter <= 0 {
+		cfg.BuildWarnAfter = DefaultEnvironmentBuildWarnAfter
+	}
+	if cfg.BuildTimeout <= 0 {
+		cfg.BuildTimeout = DefaultEnvironmentBuildTimeout
+	}
 	if cfg.LeaseOwner == "" {
 		cfg.LeaseOwner = ServiceName
 	}
@@ -390,8 +466,4 @@ func normalizedEnvironmentRunnerConfig(cfg EnvironmentRunnerConfig) EnvironmentR
 		cfg.HeartbeatInterval = cfg.LeaseDuration / 3
 	}
 	return cfg
-}
-
-func environmentRetryWillExhaust(queueJob *queuev1.QueueJob) bool {
-	return queueJob != nil && queueJob.GetMaxAttempts() > 0 && queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts()
 }

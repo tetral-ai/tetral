@@ -84,6 +84,45 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	}
 }
 
+func TestHelmChartEnvironmentBuildTimingReachesContainer(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	for _, tc := range []struct {
+		name, warning, timeout string
+		values                 []string
+	}{
+		{"defaults", "10m", "30m", nil},
+		{"configured", "2m", "7m", []string{"sandbox.environmentBuildWarnAfter=2m", "sandbox.environmentBuildTimeout=7m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := uniqueObjects(t, renderChart(t, helm, chart, tc.values...))
+			config := objects["v1|ConfigMap|tetral-system|sandbox-config"]
+			deployment := objects["apps/v1|Deployment|tetral-system|sandbox"]
+			containers := requireManifestList(t, deployment, "spec", "template", "spec", "containers")
+			requireManifestPathString(t, containers[0], "sandbox", "name")
+			envs := requireManifestList(t, containers[0], "env")
+			for key, value := range map[string]string{
+				"TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER": tc.warning,
+				"TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT":    tc.timeout,
+			} {
+				requireManifestPathString(t, config, value, "data", key)
+				found := false
+				for _, env := range envs {
+					if env.(map[string]any)["name"] != key {
+						continue
+					}
+					found = true
+					requireManifestPathString(t, env, "sandbox-config", "valueFrom", "configMapKeyRef", "name")
+					requireManifestPathString(t, env, key, "valueFrom", "configMapKeyRef", "key")
+				}
+				if !found {
+					t.Fatalf("Sandbox container does not consume configured %s", key)
+				}
+			}
+		})
+	}
+}
+
 func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")

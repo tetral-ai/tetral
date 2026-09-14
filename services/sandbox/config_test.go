@@ -11,6 +11,37 @@ import (
 
 type configTestEnv map[string]string
 
+func TestEnvironmentBuildTimingConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, warning, timeout string
+		wantError              bool
+	}{
+		{"defaults", "", "", false}, {"configured", "2m", "20m", false},
+		{"zero warning", "0s", "30m", true}, {"invalid timeout", "10m", "never", true},
+		{"deadline before warning", "30m", "10m", true}, {"equal thresholds", "10m", "10m", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validSandboxConfigEnv()
+			env[EnvSandboxEnvironmentBuildWarnAfter], env[EnvSandboxEnvironmentBuildTimeout] = tc.warning, tc.timeout
+			cfg, err := ConfigFromEnv(env)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("configuration error=%v; want error=%t", err, tc.wantError)
+			}
+			if tc.wantError {
+				return
+			}
+			wantWarning, wantTimeout := 10*time.Minute, 30*time.Minute
+			if tc.warning != "" {
+				wantWarning, _ = time.ParseDuration(tc.warning)
+				wantTimeout, _ = time.ParseDuration(tc.timeout)
+			}
+			if cfg.EnvironmentBuildWarnAfter != wantWarning || cfg.EnvironmentBuildTimeout != wantTimeout {
+				t.Fatal("build timing did not reach the service config")
+			}
+		})
+	}
+}
+
 func (e configTestEnv) Getenv(key string) string {
 	return e[key]
 }

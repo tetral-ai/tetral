@@ -2203,6 +2203,51 @@ func TestPostgreSQLStoreDeferRejectsOtherJobKinds(t *testing.T) {
 	})
 }
 
+func TestPostgreSQLStoreEnvironmentBuildDeferPreservesPriorFailuresAndPosition(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_build_defer")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	job := mustEnqueue(t, store, EnqueueRequest{
+		WorkspaceID: ws, Kind: KindEnvironmentBuild, MaxAttempts: 3,
+		PartitionKey: FormatEnvironmentPartitionKey(ws, "env_build"),
+		DedupeKey:    FormatEnvironmentBuildDedupeKey(ws, "env_build", "1"),
+		PayloadJSON:  []byte(`{"workspace_id":"ws_build_defer","environment_id":"env_build","generation":"1"}`), Now: now,
+	})
+	if _, err := admin.Exec(`UPDATE queue_jobs SET attempt_count=2 WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	leased := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindEnvironmentBuild}, LeaseOwner: "sandbox", MaxJobs: 1, LeaseDuration: time.Minute, Now: now})
+	if leased.AttemptCount != 3 {
+		t.Fatal("fixture must reach the ordinary failure limit")
+	}
+	if ok, err := store.Defer(ctx, DeferRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken, Now: now}); err != nil || !ok {
+		t.Fatalf("defer=%t, %v", ok, err)
+	}
+	var attempts, defers int
+	var position int64
+	var available time.Time
+	if err := admin.QueryRow(`SELECT attempt_count,defer_count,queue_partition_sequence,available_at FROM queue_jobs WHERE id=$1`, job.ID).Scan(&attempts, &defers, &position, &available); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || defers != 1 || position != job.QueuePartitionSequence || !available.Equal(now.Add(EnvironmentBuildPollInterval)) {
+		t.Fatalf("defer lost prior failure count or position: attempts=%d defers=%d position=%d available=%s", attempts, defers, position, available)
+	}
+	// Invalid stored references must not gain access to the new transition.
+	current := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindEnvironmentBuild}, LeaseOwner: "successor", MaxJobs: 1, LeaseDuration: time.Minute, Now: available})
+	if _, err := admin.Exec(`UPDATE queue_jobs SET payload_json='{"workspace_id":"ws_build_defer","environment_id":"wrong_environment","generation":"1"}' WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := store.Defer(ctx, DeferRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: current.LeaseToken, Now: available})
+	var validation *ValidationError
+	if ok || !errors.As(err, &validation) {
+		t.Fatalf("malformed build deferral=%t, %v; want rejected", ok, err)
+	}
+	if queueJobStatus(t, admin, ws, job.ID) != StatusLeased {
+		t.Fatal("rejected deferral changed custody")
+	}
+}
+
 func TestPostgreSQLStoreDeferCanonicalRuntimeConfigUsesScopedCounter(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -261,8 +261,14 @@ func (a *DaytonaAdapter) BuildEnvironmentArtifact(ctx context.Context, request s
 		}
 		return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary), nil
 	}
-	if strings.TrimSpace(result.ProviderArtifactRef) == "" {
-		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference"), nil
+	if result.State != sandbox.ArtifactBuildWaiting && result.State != sandbox.ArtifactBuildReady && result.State != sandbox.ArtifactBuildFailed {
+		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no build state"), nil
+	}
+	// Ready is only usable with both provider identities: the snapshot ID that
+	// creates Sandboxes and the deterministic name that diagnostics and the
+	// artifact row record. Classification lives here, not in the store.
+	if result.State == sandbox.ArtifactBuildReady && (strings.TrimSpace(result.ProviderArtifactRef) == "" || strings.TrimSpace(result.ProviderBuildRef) == "") {
+		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned an incomplete ready result"), nil
 	}
 	return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}, nil
 }
