@@ -54,6 +54,22 @@ state. A listener connection or reconnect also triggers a catch-up poll, and
 the bounded polling loop remains the fallback if a notification is coalesced or
 lost.
 
+Sandbox execution results have their own channel. Every production write that
+transitions an execution to `terminal_unconsumed` — Sandbox Service settlement
+and Session-deletion waiter settlement — emits a refs-only
+`tetral_sandbox_execution_result` notification in the same transaction, so
+commit publishes the result and its hint together and rollback publishes
+neither. The `bridge-api` container owns one reconnecting `LISTEN` connection
+for that channel and routes each hint to the local `AwaitSandboxExecution`
+waiters whose workspace-qualified durable identity it names; LISTEN readiness
+and every reconnect broadcast a catch-up wake to all local waiters. A waiter
+registers and takes its wake snapshot before its first verification read, so a
+commit landing during the read or between the read and blocking forces an
+immediate re-read instead of a missed wake. A hint is never a result: every
+wake leads through the durable verification read, a one-second fallback timer
+bounds the recheck interval while no hint arrives, and the existing 30-second
+internal deadline (or an earlier caller deadline) still ends the wait.
+
 ### Session infrastructure and Thread execution
 
 One Session binding hosts a collection of independently executing Threads.
@@ -461,6 +477,12 @@ and active lifecycle facts directly from durable rows.
   and output-capture work. It never imports a provider SDK or calls a helper.
   Sandbox Service resolves the provider adapter and persists normalized
   outcomes for Bridge to consume.
+- **Result wait.** `AwaitSandboxExecution` blocks on wake hints from the
+  `tetral_sandbox_execution_result` channel (see States & lifecycle) with a
+  one-second fallback; the stored row — its identity match, terminal state,
+  and result JSON validity — remains the only acceptance authority. The
+  background-command result wait and the memory-projection wait are separate
+  poll-based paths and deliberately unchanged.
 - **Lifecycle.** `FinishIdle` creates or joins a capture generation and waits
   outside a transaction. Sandbox Service stages deterministic Blob children
   before the parent result. Bridge's final transaction either adopts that
@@ -471,7 +493,8 @@ and active lifecycle facts directly from durable rows.
   FinishIdle write id; failed generations remain immutable; Blob custody moves
   only in the final adoption transaction; a stale Runtime scope cannot adopt
   or write a second idle event.
-- **Conformance.** `bridge_api_settlement_test.go` and
+- **Conformance.** `bridge_api_settlement_test.go`,
+  `execution_result_notification_test.go` (wake-path acceptance), and
   `services/sandbox/output_capture_runner_test.go` plus
   `services/sandbox/output_capture_store_test.go`.
 

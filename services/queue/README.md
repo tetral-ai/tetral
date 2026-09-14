@@ -172,6 +172,16 @@ disconnects log only fixed authentication, permission, endpoint/transport,
 timeout, or unknown categories. Raw database errors, DSNs, queries, and
 credentials are never included, and polling remains the reconnect fallback.
 
+`internal/queue` owns the shared single-connection LISTEN machinery
+(`wakeup.go`): `RunListener` reconnects one channel with backoff, fires a
+readiness callback after the initial LISTEN and every reconnect, and passes
+raw payloads to the caller, while `RunNotificationListener` layers the Queue
+wakeup protocol (channel, consumer-class filter, `WakeSignal` broadcast) on
+top. Other PostgreSQL notification protocols — currently the Sandbox
+execution-result hints consumed by Bridge — reuse `RunListener` and the safe
+disconnect classification with their own channel and payload handling; Queue
+payload semantics are unchanged.
+
 ## Seams
 
 ### Seam 1 — Job kind registry

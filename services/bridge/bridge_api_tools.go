@@ -31,8 +31,14 @@ import (
 
 const (
 	sandboxToolExecuteMaxAttempts = 5
-	runtimeToolResultPollInterval = 25 * time.Millisecond
-	sandboxExecutionWaitTimeout   = 30 * time.Second
+	// sandboxExecutionResultFallbackInterval bounds the recheck interval of an
+	// idle AwaitSandboxExecution wait. Notification hints are the primary wake;
+	// this timer guarantees a missed, coalesced, or never-received hint (for
+	// example during listener downtime) cannot strand a durable result. It
+	// bounds the scheduled recheck interval, not wall-clock completion under
+	// arbitrary database stalls.
+	sandboxExecutionResultFallbackInterval = 1 * time.Second
+	sandboxExecutionWaitTimeout            = 30 * time.Second
 )
 
 // AcceptSandboxExecution durably transfers one already-authored Tool Use to
@@ -409,12 +415,21 @@ func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool durableToo
 		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == tool.ModelToolCallID
 }
 
+// waitForSandboxExecutionResult blocks on the durable execution row. The
+// waiter registers on the process-local result hub and acquires its wake
+// snapshot before the first verification read, so a terminal transition that
+// commits during a read — or between the read and blocking — always advances
+// the generation and forces an immediate re-read. PostgreSQL is the only
+// result authority; hints and the fallback timer only schedule re-reads.
 func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (runtimeToolResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, sandboxExecutionWaitTimeout)
 	defer cancel()
-	ticker := time.NewTicker(runtimeToolResultPollInterval)
-	defer ticker.Stop()
+	resultHub := s.executionResultWake()
+	resultKey := sandboxExecutionResultKey(request.GetScope(), request.GetToolUseEventId())
+	wake := resultHub.register(resultKey)
+	defer resultHub.unregister(resultKey)
 	for {
+		snapshot := wake.Snapshot()
 		var stored runtimeToolResult
 		var tool durableToolExecution
 		var found bool
@@ -445,10 +460,8 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 		if stored.ExecutionState.Valid && stored.ExecutionState.String == "consumed" {
 			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
 		}
-		select {
-		case <-waitCtx.Done():
+		if err := wake.Wait(waitCtx, sandboxExecutionResultFallbackInterval, snapshot); err != nil {
 			return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
-		case <-ticker.C:
 		}
 	}
 }

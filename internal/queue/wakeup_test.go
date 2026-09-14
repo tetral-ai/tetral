@@ -197,3 +197,72 @@ func (l *scriptedNotificationListener) notify(payload string) {
 		onNotify(payload)
 	}
 }
+
+func TestRunListenerReconnectsWithReadinessAndRawPayloads(t *testing.T) {
+	listener := &scriptedNotificationListener{calls: make(chan int, 2), allowDisconnect: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("RunListener: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("listener did not stop")
+		}
+	})
+	var mu sync.Mutex
+	var readyCalls, disconnects int
+	var payloads []string
+	go func() {
+		done <- RunListener(ctx, listener, "tetral_sandbox_execution_result",
+			func() {
+				mu.Lock()
+				readyCalls++
+				mu.Unlock()
+			},
+			func(payload string) {
+				mu.Lock()
+				payloads = append(payloads, payload)
+				mu.Unlock()
+			},
+			func(error) {
+				mu.Lock()
+				disconnects++
+				mu.Unlock()
+			},
+		)
+	}()
+
+	select {
+	case call := <-listener.calls:
+		if call != 1 {
+			t.Fatalf("first listen call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not connect")
+	}
+	listener.notify(`{"workspace_id":"ws_1"}`)
+	close(listener.allowDisconnect)
+	select {
+	case call := <-listener.calls:
+		if call != 2 {
+			t.Fatalf("second listen call = %d", call)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not reconnect")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if readyCalls != 2 {
+		t.Fatalf("readiness calls = %d; want one per (re)connection", readyCalls)
+	}
+	if disconnects != 1 {
+		t.Fatalf("disconnect callbacks = %d; want 1", disconnects)
+	}
+	if len(payloads) != 1 || payloads[0] != `{"workspace_id":"ws_1"}` {
+		t.Fatalf("payloads = %v; want the raw payload passed through unfiltered", payloads)
+	}
+}

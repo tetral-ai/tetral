@@ -119,36 +119,44 @@ type NotificationListener interface {
 
 type PostgreSQLNotificationListener struct {
 	Client *dbconnect.Client
+	// Operation labels the LISTEN for diagnostics; empty means "queue.listen".
+	Operation string
 }
 
 func (l PostgreSQLNotificationListener) Listen(ctx context.Context, channel string, onReady func(), onNotification func(string)) error {
 	if l.Client == nil {
 		return errors.New("queue notification database client is required")
 	}
-	return l.Client.Listen(ctx, "queue.listen", channel, onReady, onNotification)
+	operation := l.Operation
+	if operation == "" {
+		operation = "queue.listen"
+	}
+	return l.Client.Listen(ctx, operation, channel, onReady, onNotification)
 }
 
-// RunNotificationListener reconnects one service-owned LISTEN connection.
-// Initial connection and every reconnect broadcast a catch-up poll.
-func RunNotificationListener(ctx context.Context, listener NotificationListener, consumerClass string, wake *WakeSignal, logger *slog.Logger) error {
-	if listener == nil || wake == nil {
-		return errors.New("queue notification listener and wake signal are required")
+// RunListener reconnects one service-owned LISTEN connection on channel until
+// ctx is cancelled. onReady fires after the initial LISTEN and every reconnect
+// so the consumer can catch up on notifications missed while disconnected;
+// onPayload receives raw payloads. onDisconnect observes each dropped
+// connection for diagnostics. This is the shared mechanism behind the Queue
+// wakeup protocol; other PostgreSQL notification protocols (for example the
+// Sandbox execution-result hints consumed by Bridge) reuse it with their own
+// channel, payload handling, and disconnect logging.
+func RunListener(ctx context.Context, listener NotificationListener, channel string, onReady func(), onPayload func(string), onDisconnect func(error)) error {
+	if listener == nil {
+		return errors.New("queue notification listener is required")
 	}
-	if consumerClass != ConsumerClassBridge && consumerClass != ConsumerClassSandbox {
-		return errors.New("queue notification consumer class is invalid")
+	if onPayload == nil {
+		onPayload = func(string) {}
 	}
 	backoff := pollbackoff.New(listenerReconnectBase, listenerReconnectMaximum)
 	for {
-		err := listener.Listen(ctx, NotificationChannel, wake.Broadcast, func(payload string) {
-			if payload == consumerClass {
-				wake.Broadcast()
-			}
-		})
+		err := listener.Listen(ctx, channel, onReady, onPayload)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if logger != nil {
-			logNotificationListenerFailure(logger, consumerClass, err)
+		if onDisconnect != nil {
+			onDisconnect(err)
 		}
 		delay := backoff.Next(false)
 		if err == nil {
@@ -161,6 +169,26 @@ func RunNotificationListener(ctx context.Context, listener NotificationListener,
 			return waitErr
 		}
 	}
+}
+
+// RunNotificationListener reconnects one service-owned LISTEN connection.
+// Initial connection and every reconnect broadcast a catch-up poll.
+func RunNotificationListener(ctx context.Context, listener NotificationListener, consumerClass string, wake *WakeSignal, logger *slog.Logger) error {
+	if listener == nil || wake == nil {
+		return errors.New("queue notification listener and wake signal are required")
+	}
+	if consumerClass != ConsumerClassBridge && consumerClass != ConsumerClassSandbox {
+		return errors.New("queue notification consumer class is invalid")
+	}
+	var onDisconnect func(error)
+	if logger != nil {
+		onDisconnect = func(err error) { logNotificationListenerFailure(logger, consumerClass, err) }
+	}
+	return RunListener(ctx, listener, NotificationChannel, wake.Broadcast, func(payload string) {
+		if payload == consumerClass {
+			wake.Broadcast()
+		}
+	}, onDisconnect)
 }
 
 type notificationListenerFailure struct {
@@ -180,6 +208,20 @@ func logNotificationListenerFailure(logger *slog.Logger, consumerClass string, e
 		slog.Bool("retryable", failure.retryable),
 		slog.Bool("terminal", false),
 	)
+}
+
+// NotificationListenerFailure is the safe disconnect classification shared by
+// every service running a PostgreSQL notification listener.
+type NotificationListenerFailure struct {
+	Category  string
+	Retryable bool
+}
+
+// ClassifyNotificationListenerFailure normalizes a dropped LISTEN connection
+// into a log-safe category; raw causes never cross this boundary.
+func ClassifyNotificationListenerFailure(err error) NotificationListenerFailure {
+	failure := classifyNotificationListenerFailure(err)
+	return NotificationListenerFailure{Category: failure.category, Retryable: failure.retryable}
 }
 
 func classifyNotificationListenerFailure(err error) notificationListenerFailure {

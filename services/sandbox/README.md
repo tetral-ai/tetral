@@ -377,6 +377,19 @@ local polling loops; they still call Queue `Lease`, which remains the sole
 assignment authority. A disconnected listener reconnects and triggers a
 catch-up poll, while the existing timer polling remains the fallback.
 
+Execution results have a dedicated wake channel,
+`tetral_sandbox_execution_result`. Both production writers that transition an
+execution to `terminal_unconsumed` emit a refs-only hint — workspace, Session,
+Thread, and Tool Use event IDs, never a result body — inside the settling
+transaction: ordinary settlement in `execution_store.go`
+(`settleSandboxExecutionTx`, reached by every settlement path including
+failure, cancellation, and unknown outcomes) and Session-deletion waiter
+settlement in `internal/sandbox/release` (`settleWaitersTx`). A stale
+generation or replayed settlement affects no row and emits nothing; rollback
+publishes neither the result nor the hint. Bridge API waiters treat the hint
+only as a wake signal and re-verify the durable row; a one-second fallback in
+the wait covers missed or coalesced hints and listener downtime.
+
 Three retention/maintenance loops are deliberately poll-only because their
 latency is not user-facing: over-limit Queue reconciliation, the expired
 output-capture sweep, and resource-prefix garbage collection. All business
