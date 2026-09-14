@@ -217,7 +217,8 @@ func TestDaytonaAdapterRejectsMalformedBuildResults(t *testing.T) {
 	}{
 		{"missing state", sandbox.BuildArtifactResult{}},
 		{"unknown state with artifact", sandbox.BuildArtifactResult{State: "invalid", ProviderArtifactRef: "untrusted_ref"}},
-		{"ready without artifact", sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady}},
+		{"ready without artifact", sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady, ProviderBuildRef: "build_name"}},
+		{"ready without build name", sandbox.BuildArtifactResult{State: sandbox.ArtifactBuildReady, ProviderArtifactRef: "snapshot_ref"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			adapter := &DaytonaAdapter{Artifacts: &recordingArtifactBuilder{result: tc.result}}

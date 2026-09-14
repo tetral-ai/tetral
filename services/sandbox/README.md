@@ -114,7 +114,8 @@ A missing artifact provider is immediately terminal (`provider_configuration_inv
 including on the first lease. Production startup rejects incomplete Daytona
 adapters before starting consumers; retrying a known invalid provider selection
 is not part of the observation policy. The adapter classifies malformed provider
-states. An invalid adapter outcome reaching the runner is a control-plane
+states and Ready results missing either the snapshot ID or snapshot name as
+`provider_response_malformed`. An invalid adapter outcome reaching the runner is a control-plane
 contract violation and retains custody for reclaim rather than settling it as
 a provider build failure.
 Control/store errors leave custody for reclaim and fenced business settlement
