@@ -225,7 +225,7 @@ func TestRunListenerReconnectsWithReadinessAndRawPayloads(t *testing.T) {
 	var readyCalls, disconnects int
 	var payloads []string
 	go func() {
-		done <- RunListener(ctx, listener, "tetral_sandbox_execution_result",
+		done <- RunListener(ctx, listener, "queue_listener_test",
 			func() {
 				mu.Lock()
 				readyCalls++

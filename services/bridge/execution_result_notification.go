@@ -93,17 +93,6 @@ func (h *sandboxExecutionResultWakeHub) broadcastAll() {
 	}
 }
 
-// waiterCount reports the live registration count for lifecycle assertions.
-func (h *sandboxExecutionResultWakeHub) waiterCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	count := 0
-	for _, set := range h.waiters {
-		count += set.count
-	}
-	return count
-}
-
 func sandboxExecutionResultKey(scope *bridgev1.RuntimeScope, toolUseEventID string) sandboxmodel.ExecutionResultHint {
 	return sandboxmodel.ExecutionResultHint{
 		WorkspaceID:     scope.GetWorkspaceId(),

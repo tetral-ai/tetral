@@ -258,6 +258,21 @@ func startAwaitSandboxExecution(ctx context.Context, store *PostgreSQLBridgeAPIS
 	return done
 }
 
+// Count both registrations and retained keys: zero counts alone would miss
+// a leak of per-execution signals after the last waiter leaves.
+func requireExecutionResultWaiters(t *testing.T, hub *sandboxExecutionResultWakeHub, wantWaiters, wantKeys int) {
+	t.Helper()
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	waiters := 0
+	for _, set := range hub.waiters {
+		waiters += set.count
+	}
+	if waiters != wantWaiters || len(hub.waiters) != wantKeys {
+		t.Fatalf("execution result hub registrations/keys = %d/%d; want %d/%d", waiters, len(hub.waiters), wantWaiters, wantKeys)
+	}
+}
+
 func requireAwaitCompleted(t *testing.T, done chan awaitExecutionOutcome, resultJSON string) awaitExecutionOutcome {
 	t.Helper()
 	select {
@@ -429,9 +444,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	if validations := tracer.countSQL(awaitTraceEntryValidation); validations != 1 {
 		t.Fatalf("entry validation transactions = %d; want 1", validations)
 	}
-	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("live waiters after completion = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReadsPreCommittedResult(t *testing.T) {
@@ -473,12 +486,24 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t 
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "duringread")
 	startAwaitExecutionResultListener(t, store, tracer)
 
+	// Observe the same signal as the real waiter. Wait for the listener's
+	// broadcast before releasing the SQL barrier, forcing the lost-wake race.
+	hub := store.executionResultWake()
+	key := sandboxExecutionResultKey(scope, toolUseEventID)
+	probe := hub.register(key)
+	defer hub.unregister(key)
+	snapshot := probe.Snapshot()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	tracer.reset()
 	// Park the waiter at the completion of the first verification read's
 	// result statement: the statement observed the pending row, and the
 	// settlement commits while the read transaction is still open.
 	fired, release := tracer.armBarrier("", awaitTraceVerificationRead, 1)
-	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
 	select {
 	case <-fired:
 	case <-time.After(10 * time.Second):
@@ -486,7 +511,10 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t 
 	}
 	committed := time.Now()
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
-	close(release)
+	if err := probe.WaitForWake(ctx, snapshot); err != nil {
+		t.Fatalf("result hint did not reach the hub while the read was parked: %v", err)
+	}
+	unblock()
 
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
 	if latency := time.Since(committed); latency >= 800*time.Millisecond {
@@ -504,13 +532,25 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "betweenread")
 	startAwaitExecutionResultListener(t, store, tracer)
 
+	// Observe the same signal as the real waiter. Wait for the listener's
+	// broadcast before releasing the SQL barrier, forcing the lost-wake race.
+	hub := store.executionResultWake()
+	key := sandboxExecutionResultKey(scope, toolUseEventID)
+	probe := hub.register(key)
+	defer hub.unregister(key)
+	snapshot := probe.Snapshot()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	tracer.reset()
 	// Park the waiter at the COMMIT closing the first verification read: the
 	// pending read is durable, and the settlement commits before the waiter
 	// can block. The wake snapshot taken before the read must make the wait
 	// return immediately instead of blocking for another notification.
 	fired, release := tracer.armBarrier(awaitTraceVerificationRead, "commit", 1)
-	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
 	select {
 	case <-fired:
 	case <-time.After(10 * time.Second):
@@ -518,7 +558,10 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 	}
 	committed := time.Now()
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
-	close(release)
+	if err := probe.WaitForWake(ctx, snapshot); err != nil {
+		t.Fatalf("result hint did not reach the hub while the read was parked: %v", err)
+	}
+	unblock()
 
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
 	if latency := time.Since(committed); latency >= 800*time.Millisecond {
@@ -627,9 +670,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionMissedNotificationRecovers
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
 		t.Fatalf("verification reads before rejoin = %d; want 1", reads)
 	}
-	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("live waiters after deadline = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 
 	// Rejoin the same accepted execution: the first read returns its durable
 	// result without another acceptance or provider execution. Runtime's
@@ -638,9 +679,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionMissedNotificationRecovers
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
 		t.Fatalf("verification reads across both waits = %d; want 2", reads)
 	}
-	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("live waiters after rejoin = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t *testing.T) {
@@ -724,9 +763,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 3 {
 		t.Fatalf("verification reads = %d; want 3 (initial + 2 catch-ups, second terminal)", reads)
 	}
-	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("live waiters after completion = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing.T) {
@@ -761,12 +798,13 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 	if validations != 1 {
 		t.Fatalf("entry validation transactions = %d; want 1", validations)
 	}
+	if setConfigs != reads+validations {
+		t.Fatalf("workspace scope setup commands = %d; want one per verification/validation (%d)", setConfigs, reads+validations)
+	}
 	if begins != reads+validations || commits != reads+validations {
 		t.Fatalf("transaction commands = %d/%d; want one BEGIN+COMMIT per verification/validation (%d)", begins, commits, reads+validations)
 	}
-	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("live waiters after deadline = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridgeInstances(t *testing.T) {
@@ -822,9 +860,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelled same-key waiter did not return")
 	}
-	if waiters := storeOne.executionResultWake().waiterCount(); waiters != 3 {
-		t.Fatalf("local waiters after same-key cancellation = %d; want 3", waiters)
-	}
+	requireExecutionResultWaiters(t, storeOne.executionResultWake(), 3, 2)
 
 	// A hint naming the sibling execution wakes only its waiters, on only the
 	// instance that hosts them.
@@ -871,12 +907,8 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelled sibling await did not return")
 	}
-	if waiters := storeOne.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("instance-one live waiters = %d; want 0", waiters)
-	}
-	if waiters := storeTwo.executionResultWake().waiterCount(); waiters != 0 {
-		t.Fatalf("instance-two live waiters = %d; want 0", waiters)
-	}
+	requireExecutionResultWaiters(t, storeOne.executionResultWake(), 0, 0)
+	requireExecutionResultWaiters(t, storeTwo.executionResultWake(), 0, 0)
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionRejectsInvalidResultDespiteHint(t *testing.T) {

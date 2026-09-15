@@ -741,8 +741,9 @@ func settleWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, 
 		if err != nil {
 			return err
 		}
-		// Only a row this transaction actually terminalized earns a wake hint:
-		// the generation/state fence keeps stale or replayed settlement silent.
+		// The FOR UPDATE selection above locks eligible nonterminal rows and
+		// excludes replayed settlements. Keep this affected-row check as a
+		// defensive guard: only an actual terminal transition earns a wake hint.
 		if affected == 1 {
 			if err := sandbox.NotifyExecutionResultTx(ctx, tx, sandbox.ExecutionResultHint{
 				WorkspaceID:     workspaceID,

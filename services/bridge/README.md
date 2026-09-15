@@ -71,8 +71,10 @@ query within a wait. The existing 30-second internal deadline (or an earlier
 caller deadline) still ends the RPC. Runtime rejoins the same accepted execution
 after its existing 300 ms retry delay; the new wait begins with a durable read.
 A result missed during a listener outage is therefore observed on reconnect
-catch-up or rejoin. If the listener remains unavailable, discovery can take the
-remaining RPC deadline plus retry and database latency; there is no one-second
+catch-up or rejoin. Detecting a half-open listener connection depends on TCP
+keepalive and network settings; reconnect has no fixed detection bound.
+If the listener remains unavailable, discovery can take the remaining RPC
+deadline plus retry and database latency; there is no one-second
 delivery guarantee. A healthy idle 30-second wait performs one result
 verification transaction plus the separate entry scope-validation transaction.
 

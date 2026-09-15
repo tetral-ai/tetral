@@ -19,6 +19,7 @@
 // waiters as wake signals only — never as result authority.
 //
 // UPDATE-WITH: services/sandbox/provider_adapter.go,
-// services/sandbox/lifecycle_store.go, services/sandbox/execution_store.go, and
-// internal/session/materialization_snapshot.go.
+// services/sandbox/lifecycle_store.go, services/sandbox/execution_store.go,
+// internal/session/materialization_snapshot.go, internal/sandbox/release/release.go,
+// and services/bridge/execution_result_notification.go.
 package sandbox
