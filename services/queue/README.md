@@ -180,7 +180,9 @@ wakeup protocol (channel, consumer-class filter, `WakeSignal` broadcast) on
 top. Other PostgreSQL notification protocols — currently the Sandbox
 execution-result hints consumed by Bridge — reuse `RunListener` and the safe
 disconnect classification with their own channel and payload handling; Queue
-payload semantics are unchanged.
+payload semantics are unchanged. `WakeSignal.Wait` retains its timer for Queue
+consumers; `WaitForWake` shares the same snapshot/broadcast semantics but waits
+only for a hint or context completion, as used by Bridge execution-result waits.
 
 ## Seams
 

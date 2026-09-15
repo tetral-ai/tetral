@@ -77,27 +77,37 @@ func (s *WakeSignal) Broadcast() {
 }
 
 func (s *WakeSignal) Wait(ctx context.Context, delay time.Duration, snapshot WakeSnapshot) error {
-	if s == nil {
-		return waitForWakeTimer(ctx, delay)
-	}
-	s.mu.Lock()
-	if snapshot.generation != s.generation {
-		s.mu.Unlock()
-		return nil
-	}
-	ready := snapshot.ready
-	s.mu.Unlock()
-	if ready == nil {
-		ready = s.Snapshot().ready
-	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
+	return s.wait(ctx, timer.C, snapshot)
+}
+
+// WaitForWake waits only for a broadcast or context cancellation/deadline.
+// Like Wait, it preserves broadcasts occurring after the caller's snapshot.
+func (s *WakeSignal) WaitForWake(ctx context.Context, snapshot WakeSnapshot) error {
+	return s.wait(ctx, nil, snapshot)
+}
+
+func (s *WakeSignal) wait(ctx context.Context, timer <-chan time.Time, snapshot WakeSnapshot) error {
+	var ready <-chan struct{}
+	if s != nil {
+		s.mu.Lock()
+		if snapshot.generation != s.generation {
+			s.mu.Unlock()
+			return nil
+		}
+		ready = snapshot.ready
+		s.mu.Unlock()
+		if ready == nil {
+			ready = s.Snapshot().ready
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-ready:
 		return nil
-	case <-timer.C:
+	case <-timer:
 		return nil
 	}
 }

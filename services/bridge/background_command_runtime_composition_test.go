@@ -63,6 +63,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := NewPostgreSQLBridgeAPIStore(client)
+	startAwaitExecutionResultListener(t, store, nil)
 	store.RuntimeBindingTokenHMACKey = []byte("background-abort-composition-key")
 	bridge := &backgroundAbortBridgeServer{store: store, replayDelay: replayDelay}
 	_, bridgeAddress := startSandboxProductionBoundaryBridgeClient(t, bridge, podUID)

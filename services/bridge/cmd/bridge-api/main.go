@@ -87,7 +87,7 @@ func run(ctx context.Context, env envReader) error {
 		Path: bridgeConfig.GatewayTokenPath,
 	})
 	// One process-local LISTEN connection feeds AwaitSandboxExecution waiters
-	// their wake hints; the 1 s fallback in the wait covers any gap.
+	// their wake hints; initial readiness and reconnect trigger catch-up reads.
 	executionResultListenerCtx, cancelExecutionResultListener := context.WithCancel(ctx)
 	defer cancelExecutionResultListener()
 	go func() {

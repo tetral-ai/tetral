@@ -21,8 +21,9 @@ var errExecutionResultListenerUnavailable = errors.New("bridge execution result 
 // terminal writers and broadcasts each hint to exactly the local waiters it
 // names; LISTEN readiness and every reconnect broadcast a catch-up to all
 // local waiters. A hint is never a result: every wake leads through the
-// durable verification read, and the one-second fallback bounds the recheck
-// interval when a hint is coalesced, missed, or the listener is down.
+// durable verification read. There is no periodic result query within a wait;
+// listener recovery broadcasts catch-up, and Runtime rejoins after the existing
+// RPC deadline if a result remains unobserved while the listener is unavailable.
 
 // sandboxExecutionResultWakeHub routes execution-result hints to the local
 // AwaitSandboxExecution waiters for one Bridge API store.

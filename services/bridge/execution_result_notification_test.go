@@ -285,12 +285,21 @@ func requireAwaitBlocked(t *testing.T, done chan awaitExecutionOutcome, window t
 }
 
 // startAwaitExecutionResultListener runs the production listener for store and
-// waits until its LISTEN is visible on the traced pool.
+// waits for its initial readiness broadcast after LISTEN succeeds.
 func startAwaitExecutionResultListener(t *testing.T, store *PostgreSQLBridgeAPIStore, tracer *bridgeExecutionQueryTracer) {
+	startAwaitExecutionResultListenerRun(t, store, tracer, store.RunExecutionResultListener)
+}
+
+func startAwaitExecutionResultListenerRun(t *testing.T, store *PostgreSQLBridgeAPIStore, tracer *bridgeExecutionQueryTracer, run func(context.Context) error) {
 	t.Helper()
+	hub := store.executionResultWake()
+	readyKey := sandboxmodel.ExecutionResultHint{}
+	ready := hub.register(readyKey)
+	defer hub.unregister(readyKey)
+	snapshot := ready.Snapshot()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- store.RunExecutionResultListener(ctx) }()
+	go func() { done <- run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -302,7 +311,36 @@ func startAwaitExecutionResultListener(t *testing.T, store *PostgreSQLBridgeAPIS
 			t.Error("execution result listener did not stop")
 		}
 	})
-	tracer.waitForSQLCount(t, awaitTraceListen, 1)
+	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer readyCancel()
+	if err := ready.WaitForWake(readyCtx, snapshot); err != nil {
+		t.Fatalf("execution result listener readiness: %v", err)
+	}
+	if tracer != nil {
+		tracer.waitForSQLCount(t, awaitTraceListen, 1)
+	}
+}
+
+// gatedExecutionResultReconnect holds the second reconnect before LISTEN so
+// a test can commit a result while the actual PostgreSQL listener is absent.
+type gatedExecutionResultReconnect struct {
+	delegate queue.NotificationListener
+	reached  chan struct{}
+	resume   chan struct{}
+	calls    int
+}
+
+func (l *gatedExecutionResultReconnect) Listen(ctx context.Context, channel string, onReady func(), onPayload func(string)) error {
+	l.calls++
+	if l.calls == 3 {
+		close(l.reached)
+		select {
+		case <-l.resume:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return l.delegate.Listen(ctx, channel, onReady, onPayload)
 }
 
 func newAwaitNotificationTracedStore(t *testing.T, runtime *sql.DB, tracer *bridgeExecutionQueryTracer) *PostgreSQLBridgeAPIStore {
@@ -375,7 +413,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	close(provider.release)
 	requireAwaitCompleted(t, done, `{"status":"success","result":{"text":"done"}}`)
 	if latency := time.Since(released); latency >= 800*time.Millisecond {
-		t.Fatalf("notification wake latency = %s; want well below the 1s fallback", latency)
+		t.Fatalf("notification wake latency = %s; want prompt notification delivery", latency)
 	}
 	select {
 	case <-runnerDone:
@@ -452,7 +490,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t 
 
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
 	if latency := time.Since(committed); latency >= 800*time.Millisecond {
-		t.Fatalf("in-window commit wake latency = %s; want notification path, not fallback", latency)
+		t.Fatalf("in-window commit wake latency = %s; want prompt notification delivery", latency)
 	}
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
 		t.Fatalf("verification reads = %d; want 2 (stale pending read + post-wake terminal)", reads)
@@ -470,7 +508,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 	// Park the waiter at the COMMIT closing the first verification read: the
 	// pending read is durable, and the settlement commits before the waiter
 	// can block. The wake snapshot taken before the read must make the wait
-	// return immediately instead of sleeping into the fallback.
+	// return immediately instead of blocking for another notification.
 	fired, release := tracer.armBarrier(awaitTraceVerificationRead, "commit", 1)
 	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	select {
@@ -484,7 +522,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
 	if latency := time.Since(committed); latency >= 800*time.Millisecond {
-		t.Fatalf("post-read commit wake latency = %s; want notification path, not fallback", latency)
+		t.Fatalf("post-read commit wake latency = %s; want prompt notification delivery", latency)
 	}
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
 		t.Fatalf("verification reads = %d; want 2 (pending read + immediate woken read)", reads)
@@ -550,8 +588,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionIgnoresUnrelatedAndMalform
 	}
 	emitRawExecutionResultPayload(t, admin, otherPayload)
 
-	// The window stays well under the 1 s fallback so any extra read can only
-	// come from a misrouted hint.
+	// With no periodic verification, any extra read comes from a misrouted hint.
 	requireAwaitBlocked(t, done, 300*time.Millisecond)
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
 		t.Fatalf("verification reads after unrelated hints = %d; want 1", reads)
@@ -564,24 +601,45 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionIgnoresUnrelatedAndMalform
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFallbackCoversMissedNotification(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionMissedNotificationRecoversOnRejoin(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
-	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "fallback")
+	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "rejoin")
 
-	// No listener runs: the settlement is invisible to the wake path and only
-	// the one-second fallback can observe it.
+	// No listener runs. The result notification has no receiver, so this RPC
+	// expires without another read. Use an earlier caller deadline here; the
+	// idle-load test separately proves the unchanged 30-second internal limit.
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
 	tracer.reset()
-	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
+	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
-	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, false)
-	outcome := requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
-	if outcome.elapsed < 800*time.Millisecond || outcome.elapsed > 4*time.Second {
-		t.Fatalf("fallback wake elapsed = %s; want about one fallback interval", outcome.elapsed)
+	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
+	select {
+	case outcome := <-done:
+		if status.Code(outcome.err) != codes.DeadlineExceeded {
+			t.Fatalf("wait without notification = %v; want DeadlineExceeded", outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not honor caller deadline")
 	}
+	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
+		t.Fatalf("verification reads before rejoin = %d; want 1", reads)
+	}
+	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
+		t.Fatalf("live waiters after deadline = %d; want 0", waiters)
+	}
+
+	// Rejoin the same accepted execution: the first read returns its durable
+	// result without another acceptance or provider execution. Runtime's
+	// DEADLINE_EXCEEDED rejoin and identity are covered in tool-runner.test.ts.
+	requireAwaitCompleted(t, startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID), awaitNotificationTerminalResult)
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
-		t.Fatalf("verification reads = %d; want 2 (initial + fallback)", reads)
+		t.Fatalf("verification reads across both waits = %d; want 2", reads)
+	}
+	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
+		t.Fatalf("live waiters after rejoin = %d; want 0", waiters)
 	}
 }
 
@@ -590,7 +648,13 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "reconnect")
-	startAwaitExecutionResultListener(t, store, tracer)
+	listener := &gatedExecutionResultReconnect{
+		delegate: queue.PostgreSQLNotificationListener{Client: store.Client, Operation: "agentruntimebridge.listen_sandbox_execution_result"},
+		reached:  make(chan struct{}), resume: make(chan struct{}),
+	}
+	startAwaitExecutionResultListenerRun(t, store, tracer, func(ctx context.Context) error {
+		return store.runExecutionResultListener(ctx, listener)
+	})
 
 	tracer.reset()
 	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
@@ -618,10 +682,23 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 		}
 	}
 
-	// Two disconnects: each reconnect re-LISTENs and its readiness catch-up
-	// wakes the waiter without waiting for a notification or the fallback.
+	// Two disconnects: each reconnect re-LISTENs and wakes the waiter. The
+	// second catches a result committed while no listener could receive its hint.
 	for kill := 1; kill <= 2; kill++ {
 		terminateListener()
+		if kill == 2 {
+			select {
+			case <-listener.reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("listener did not reach the gated reconnect")
+			}
+			commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
+			requireAwaitBlocked(t, done, 1200*time.Millisecond)
+			if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
+				t.Fatalf("verification reads while disconnected = %d; want initial + first catch-up", reads)
+			}
+			close(listener.resume)
+		}
 		// The tracer was reset after the initial LISTEN, so the first
 		// reconnect is the first post-reset LISTEN entry.
 		tracer.waitForSQLCount(t, awaitTraceListen, kill)
@@ -643,14 +720,9 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 		t.Fatalf("listener backends after repeated reconnects = %d; want exactly 1 (no leak)", listenBackends)
 	}
 
-	committed := time.Now()
-	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
-	if latency := time.Since(committed); latency >= 800*time.Millisecond {
-		t.Fatalf("post-reconnect notification latency = %s; want notification path", latency)
-	}
-	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 4 {
-		t.Fatalf("verification reads = %d; want 4 (initial + 2 catch-ups + terminal)", reads)
+	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 3 {
+		t.Fatalf("verification reads = %d; want 3 (initial + 2 catch-ups, second terminal)", reads)
 	}
 	if waiters := store.executionResultWake().waiterCount(); waiters != 0 {
 		t.Fatalf("live waiters after completion = %d; want 0", waiters)
@@ -663,6 +735,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "idleload")
 
+	startAwaitExecutionResultListener(t, store, tracer)
 	tracer.reset()
 	started := time.Now()
 	_, err := store.AwaitSandboxExecution(context.Background(), &bridgev1.AwaitSandboxExecutionRequest{
@@ -682,11 +755,8 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 	setConfigs := tracer.countSQL("set_config")
 	t.Logf("idle wait accounting: verification reads=%d entry validations=%d BEGIN=%d COMMIT=%d set_config=%d elapsed=%s",
 		reads, validations, begins, commits, setConfigs, elapsed)
-	if reads > 31 {
-		t.Fatalf("verification transactions over a 30s idle wait = %d; want at most 31 with the 1s fallback", reads)
-	}
-	if reads < 28 {
-		t.Fatalf("verification transactions over a 30s idle wait = %d; want the 1s fallback cadence", reads)
+	if reads != 1 {
+		t.Fatalf("verification transactions over a 30s idle wait = %d; want exactly 1 without periodic verification", reads)
 	}
 	if validations != 1 {
 		t.Fatalf("entry validation transactions = %d; want 1", validations)

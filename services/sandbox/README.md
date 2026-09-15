@@ -387,8 +387,12 @@ failure, cancellation, and unknown outcomes) and Session-deletion waiter
 settlement in `internal/sandbox/release` (`settleWaitersTx`). A stale
 generation or replayed settlement affects no row and emits nothing; rollback
 publishes neither the result nor the hint. Bridge API waiters treat the hint
-only as a wake signal and re-verify the durable row; a one-second fallback in
-the wait covers missed or coalesced hints and listener downtime.
+only as a wake signal and re-verify the durable row, without periodic result
+queries during a wait. Listener readiness and reconnect trigger catch-up reads.
+If notification delivery remains unavailable, Runtime rejoins after the existing
+30-second wait deadline and 300 ms retry delay; the next initial read can discover
+the committed result. This preserves durable delivery for an active retrying
+Runtime, while allowing longer discovery latency during a listener outage.
 
 Three retention/maintenance loops are deliberately poll-only because their
 latency is not user-facing: over-limit Queue reconciliation, the expired

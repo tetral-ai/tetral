@@ -78,15 +78,23 @@ func TestNotificationListenerFailureLogsSafePermanentAndTransientCategories(t *t
 }
 
 func TestWakeSignalDoesNotLoseBroadcastBetweenPollAndWait(t *testing.T) {
-	wake := NewWakeSignal()
-	snapshot := wake.Snapshot()
-	wake.Broadcast()
-	started := time.Now()
-	if err := wake.Wait(context.Background(), time.Hour, snapshot); err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("wake elapsed = %s; want less than one second", elapsed)
+	for _, mode := range []string{"timed", "notification-only"} {
+		t.Run(mode, func(t *testing.T) {
+			wake := NewWakeSignal()
+			snapshot := wake.Snapshot()
+			wake.Broadcast()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			var err error
+			if mode == "timed" {
+				err = wake.Wait(ctx, time.Hour, snapshot)
+			} else {
+				err = wake.WaitForWake(ctx, snapshot)
+			}
+			if err != nil {
+				t.Fatalf("wait lost the preceding broadcast: %v", err)
+			}
+		})
 	}
 }
 

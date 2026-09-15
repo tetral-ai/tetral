@@ -66,9 +66,15 @@ and every reconnect broadcast a catch-up wake to all local waiters. A waiter
 registers and takes its wake snapshot before its first verification read, so a
 commit landing during the read or between the read and blocking forces an
 immediate re-read instead of a missed wake. A hint is never a result: every
-wake leads through the durable verification read, a one-second fallback timer
-bounds the recheck interval while no hint arrives, and the existing 30-second
-internal deadline (or an earlier caller deadline) still ends the wait.
+wake leads through the durable verification read. There is no periodic result
+query within a wait. The existing 30-second internal deadline (or an earlier
+caller deadline) still ends the RPC. Runtime rejoins the same accepted execution
+after its existing 300 ms retry delay; the new wait begins with a durable read.
+A result missed during a listener outage is therefore observed on reconnect
+catch-up or rejoin. If the listener remains unavailable, discovery can take the
+remaining RPC deadline plus retry and database latency; there is no one-second
+delivery guarantee. A healthy idle 30-second wait performs one result
+verification transaction plus the separate entry scope-validation transaction.
 
 ### Database connection pool configuration
 
@@ -491,8 +497,9 @@ and active lifecycle facts directly from durable rows.
   Sandbox Service resolves the provider adapter and persists normalized
   outcomes for Bridge to consume.
 - **Result wait.** `AwaitSandboxExecution` blocks on wake hints from the
-  `tetral_sandbox_execution_result` channel (see States & lifecycle) with a
-  one-second fallback; the stored row — its identity match, terminal state,
+  `tetral_sandbox_execution_result` channel (see States & lifecycle), with
+  reconnect catch-up and deadline/rejoin recovery instead of periodic queries.
+  The stored row — its identity match, terminal state,
   and result JSON validity — remains the only acceptance authority. The
   background-command result wait and the memory-projection wait are separate
   poll-based paths and deliberately unchanged.
