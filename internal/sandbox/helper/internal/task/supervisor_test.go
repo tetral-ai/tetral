@@ -316,14 +316,23 @@ func TestDetachedExecPollReturnsWhenOutputArrivesBeforeWaitDeadline(t *testing.T
 	fs := newExecFixture(t)
 	withTestSupervisor(t)
 	taskID := "task_poll_output_wait"
+	// The exec path clamps wait_ms=0 to minExecWaitMS (250 ms) and drains
+	// pending output while it waits. A bare `sleep 0.35; echo ready` races
+	// that window: under a slow (race) scheduler the exec response can consume
+	// the output, leaving this test's poll with nothing. Gate the output on a
+	// trigger the test creates only after RunExec has fully returned, so the
+	// output provably lands inside the poll's own wait.
 	response := RunExec(fs.payload(map[string]any{
-		"cmd":            "sleep 0.35; /bin/echo ready; sleep 10",
+		"cmd":            "while [ ! -f trigger_ready ]; do sleep 0.02; done; /bin/echo ready; sleep 10",
 		"on_wait_expiry": "detach",
 		"task_id":        taskID,
 		"wait_ms":        0,
 	}))
 	if response.Status != protocol.ToolStatusRunning {
 		t.Fatalf("detach response = %+v; want running", response)
+	}
+	if err := os.WriteFile(filepath.Join(fs.workspace, "trigger_ready"), []byte("go"), 0o600); err != nil {
+		t.Fatalf("write output trigger: %v", err)
 	}
 
 	started := time.Now()
@@ -359,8 +368,12 @@ func TestDetachedExecTerminalReturnsOnlyUndrainedOutputAfterRunningDrain(t *test
 	fs := newExecFixture(t)
 	withTestSupervisor(t)
 	taskID := "task_terminal_fact"
+	// The 250 ms exec wait must expire while the child is still alive. Gating
+	// "second" on a trigger the test writes after RunExec returns removes the
+	// old `sleep 0.3` race, where a slow scheduler let the child exit inside
+	// the exec wait window (a terminal response instead of running).
 	response := RunExec(fs.payload(map[string]any{
-		"cmd":            "printf 'first\\n'; sleep 0.3; printf 'second\\n'",
+		"cmd":            "printf 'first\\n'; while [ ! -f trigger_second ]; do sleep 0.02; done; printf 'second\\n'",
 		"on_wait_expiry": "detach",
 		"task_id":        taskID,
 		"wait_ms":        250,
@@ -370,6 +383,9 @@ func TestDetachedExecTerminalReturnsOnlyUndrainedOutputAfterRunningDrain(t *test
 	}
 	if !strings.Contains(response.Result.Stdout.Text, "first") {
 		t.Fatalf("initial running stdout = %q; want first output", response.Result.Stdout.Text)
+	}
+	if err := os.WriteFile(filepath.Join(fs.workspace, "trigger_second"), []byte("go"), 0o600); err != nil {
+		t.Fatalf("write second-output trigger: %v", err)
 	}
 	waitForExitRecord(t, taskID)
 	terminal := RunPoll(fs.payloadWithTool("poll", map[string]any{"task_id": taskID, "wait_ms": 0}))
