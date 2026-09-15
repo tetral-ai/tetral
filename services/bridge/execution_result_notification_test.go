@@ -14,9 +14,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 // This file owns the AwaitSandboxExecution notification acceptance evidence:
@@ -316,17 +320,70 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "wake")
+	seedReadySandboxForSharedToolExecution(t, admin, scope.GetWorkspaceId(), scope.GetSessionId())
 	startAwaitExecutionResultListener(t, store, tracer)
 
+	// Drive the accepted Queue job through the real runner and terminal writer.
+	// Only provider execution is simulated; the gate keeps the result pending
+	// until Bridge has registered and completed its first verification read.
+	producerClient := dbconnect.NewClientForTesting(runtime)
+	queueConnection := startBackgroundNotificationQueueServer(t, queue.NewPostgreSQLStore(producerClient))
+	provider := newGatedBridgeToolProvider()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: provider,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &tetralsandbox.SandboxToolExecutionJobRunner{
+		Queue:       tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+		Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(producerClient, 30*time.Minute),
+		Providers:   registry,
+		Media:       backgroundNotificationMedia{},
+		Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
+			WorkspaceID: scope.GetWorkspaceId(), LeaseOwner: "notification-composition", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	runnerDone := make(chan struct{})
+	var runnerActive bool
+	var runnerErr error
+	go func() {
+		defer close(runnerDone)
+		runnerActive, runnerErr = runner.RunOnceWithActivity(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runnerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("Sandbox execution runner did not stop")
+		}
+	})
+	select {
+	case <-provider.started:
+	case <-ctx.Done():
+		t.Fatal("Sandbox execution did not reach provider")
+	}
+
 	tracer.reset()
-	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
+	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
-	committed := time.Now()
-	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
-	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
-	if latency := time.Since(committed); latency >= 800*time.Millisecond {
+	released := time.Now()
+	close(provider.release)
+	requireAwaitCompleted(t, done, `{"status":"success","result":{"text":"done"}}`)
+	if latency := time.Since(released); latency >= 800*time.Millisecond {
 		t.Fatalf("notification wake latency = %s; want well below the 1s fallback", latency)
+	}
+	select {
+	case <-runnerDone:
+		if runnerErr != nil || !runnerActive {
+			t.Fatalf("Sandbox runner = active %v, error %v; want true,nil", runnerActive, runnerErr)
+		}
+	case <-ctx.Done():
+		t.Fatal("Sandbox execution runner did not finish")
 	}
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 2 {
 		t.Fatalf("verification reads = %d; want exactly 2 (initial + terminal)", reads)
@@ -642,7 +699,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossBridgeInstances(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridgeInstances(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracerOne := &bridgeExecutionQueryTracer{}
 	tracerTwo := &bridgeExecutionQueryTracer{}
@@ -674,11 +731,30 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossBridgeInstance
 	tracerOne.reset()
 	tracerTwo.reset()
 	targetOne := startAwaitSandboxExecution(context.Background(), storeOne, scope, toolUseEventID)
+	targetOneDuplicate := startAwaitSandboxExecution(context.Background(), storeOne, scope, toolUseEventID)
+	cancelledCtx, cancelTarget := context.WithCancel(context.Background())
+	defer cancelTarget()
+	cancelledTarget := startAwaitSandboxExecution(cancelledCtx, storeOne, scope, toolUseEventID)
 	targetTwo := startAwaitSandboxExecution(context.Background(), storeTwo, scope, toolUseEventID)
 	otherCtx, cancelOther := context.WithCancel(context.Background())
 	other := startAwaitSandboxExecution(otherCtx, storeOne, scope, otherToolUseEventID)
-	tracerOne.waitForSQLCount(t, awaitTraceVerificationRead, 2)
+	tracerOne.waitForSQLCount(t, awaitTraceVerificationRead, 4)
 	tracerTwo.waitForSQLCount(t, awaitTraceVerificationRead, 1)
+
+	// Cancelling one of three local waiters for the same execution must keep
+	// the other two registered and routable, alongside the unrelated waiter.
+	cancelTarget()
+	select {
+	case outcome := <-cancelledTarget:
+		if outcome.err == nil {
+			t.Fatal("cancelled same-key waiter returned a result")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled same-key waiter did not return")
+	}
+	if waiters := storeOne.executionResultWake().waiterCount(); waiters != 3 {
+		t.Fatalf("local waiters after same-key cancellation = %d; want 3", waiters)
+	}
 
 	// A hint naming the sibling execution wakes only its waiters, on only the
 	// instance that hosts them.
@@ -691,15 +767,16 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossBridgeInstance
 		t.Fatalf("marshal sibling hint: %v", err)
 	}
 	emitRawExecutionResultPayload(t, admin, otherPayload)
-	tracerOne.waitForSQLCount(t, awaitTraceVerificationRead, 3)
+	tracerOne.waitForSQLCount(t, awaitTraceVerificationRead, 5)
 	time.Sleep(300 * time.Millisecond)
 	if reads := tracerTwo.countSQL(awaitTraceVerificationRead); reads != 1 {
 		t.Fatalf("instance-two reads after sibling hint = %d; want 1 (unaffected)", reads)
 	}
-	if reads := tracerOne.countSQL(awaitTraceVerificationRead); reads != 3 {
-		t.Fatalf("instance-one reads after sibling hint = %d; want 3 (only the sibling re-read)", reads)
+	if reads := tracerOne.countSQL(awaitTraceVerificationRead); reads != 5 {
+		t.Fatalf("instance-one reads after sibling hint = %d; want 5 (only the sibling re-read)", reads)
 	}
 	requireAwaitBlocked(t, targetOne, 0)
+	requireAwaitBlocked(t, targetOneDuplicate, 0)
 	requireAwaitBlocked(t, targetTwo, 0)
 	requireAwaitBlocked(t, other, 0)
 
@@ -708,6 +785,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossBridgeInstance
 	committed := time.Now()
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
 	requireAwaitCompleted(t, targetOne, awaitNotificationTerminalResult)
+	requireAwaitCompleted(t, targetOneDuplicate, awaitNotificationTerminalResult)
 	requireAwaitCompleted(t, targetTwo, awaitNotificationTerminalResult)
 	if latency := time.Since(committed); latency >= 800*time.Millisecond {
 		t.Fatalf("fan-out wake latency = %s; want notification path on both instances", latency)

@@ -507,7 +507,10 @@ and active lifecycle facts directly from durable rows.
   only in the final adoption transaction; a stale Runtime scope cannot adopt
   or write a second idle event.
 - **Conformance.** `bridge_api_settlement_test.go`,
-  `execution_result_notification_test.go` (wake-path acceptance), and
+  `execution_result_notification_test.go` (wake-path acceptance, including
+  a real Queue/runner/terminal-writer-to-Bridge notification round trip with
+  a gated provider double, plus local same-execution waiter cancellation and
+  cross-instance fan-out), and
   `services/sandbox/output_capture_runner_test.go` plus
   `services/sandbox/output_capture_store_test.go`.
 

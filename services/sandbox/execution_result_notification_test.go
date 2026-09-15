@@ -236,25 +236,58 @@ func TestSessionDeleteSettlementEmitsResultNotificationPerSettledWaiter(t *testi
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	capture := startExecutionResultNotificationCapture(t, client)
 
-	sqlTx, err := runtimeDB.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("begin release transaction: %v", err)
+	beginRelease := func() *sql.Tx {
+		t.Helper()
+		sqlTx, err := runtimeDB.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("begin release transaction: %v", err)
+		}
+		t.Cleanup(func() { _ = sqlTx.Rollback() })
+		if _, err := sqlTx.ExecContext(context.Background(),
+			`SELECT set_config('tetral.workspace_id', 'ws_execution_store', true)`); err != nil {
+			t.Fatalf("scope release transaction: %v", err)
+		}
+		releaseTx := dbconnect.NewTxForTesting(sqlTx, client, "sandbox.test.release")
+		if _, _, err := EnsureSandboxReleaseTx(
+			context.Background(), releaseTx, "ws_execution_store", "sesn_execution_store",
+			SandboxReleaseSessionDelete, "provider_execution_store", now,
+		); err != nil {
+			t.Fatalf("EnsureSandboxReleaseTx: %v", err)
+		}
+		return sqlTx
 	}
-	if _, err := sqlTx.ExecContext(context.Background(),
-		`SELECT set_config('tetral.workspace_id', 'ws_execution_store', true)`); err != nil {
-		t.Fatalf("scope release transaction: %v", err)
+
+	// Exercise the deletion writer's rollback through its owning release
+	// boundary. This is not a claim that the public API can delete a running
+	// Session; that API has separate running/rescheduling guards.
+	rollbackTx := beginRelease()
+	var terminalRows int
+	if err := rollbackTx.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+		 WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		   AND execution_state='terminal_unconsumed' AND result_json IS NOT NULL`,
+	).Scan(&terminalRows); err != nil || terminalRows != 2 {
+		t.Fatalf("deletion results inside transaction = %d/%v; want 2", terminalRows, err)
 	}
-	releaseTx := dbconnect.NewTxForTesting(sqlTx, client, "sandbox.test.release")
-	if _, _, err := EnsureSandboxReleaseTx(
-		context.Background(), releaseTx, "ws_execution_store", "sesn_execution_store",
-		SandboxReleaseSessionDelete, "provider_execution_store", now,
-	); err != nil {
-		t.Fatalf("EnsureSandboxReleaseTx: %v", err)
-	}
-	// Two waiters are settled inside the open transaction; nothing is
-	// observable before commit.
 	capture.requireQuiet(t, 0, 300*time.Millisecond)
-	if err := sqlTx.Commit(); err != nil {
+	if err := rollbackTx.Rollback(); err != nil {
+		t.Fatalf("rollback session-delete release: %v", err)
+	}
+	capture.requireQuiet(t, 0, 300*time.Millisecond)
+	var pendingRows int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+		 WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		   AND execution_state='pending' AND result_json IS NULL`,
+	).Scan(&pendingRows); err != nil || pendingRows != 2 {
+		t.Fatalf("deletion results after rollback = %d pending/%v; want 2 with no result", pendingRows, err)
+	}
+
+	// The same release can now commit: both results and both notifications
+	// become visible, proving that the rolled-back attempt left no terminal rows.
+	committedTx := beginRelease()
+	capture.requireQuiet(t, 0, 300*time.Millisecond)
+	if err := committedTx.Commit(); err != nil {
 		t.Fatalf("commit session-delete release: %v", err)
 	}
 	payloads := capture.waitForCount(t, 2)
@@ -263,22 +296,8 @@ func TestSessionDeleteSettlementEmitsResultNotificationPerSettledWaiter(t *testi
 
 	// Replaying the release settles nothing: the waiters are already terminal,
 	// so the state fence keeps the repeat silent.
-	sqlTx, err = runtimeDB.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("begin release replay transaction: %v", err)
-	}
-	if _, err := sqlTx.ExecContext(context.Background(),
-		`SELECT set_config('tetral.workspace_id', 'ws_execution_store', true)`); err != nil {
-		t.Fatalf("scope release replay transaction: %v", err)
-	}
-	releaseTx = dbconnect.NewTxForTesting(sqlTx, client, "sandbox.test.release")
-	if _, _, err := EnsureSandboxReleaseTx(
-		context.Background(), releaseTx, "ws_execution_store", "sesn_execution_store",
-		SandboxReleaseSessionDelete, "provider_execution_store", now,
-	); err != nil {
-		t.Fatalf("EnsureSandboxReleaseTx replay: %v", err)
-	}
-	if err := sqlTx.Commit(); err != nil {
+	replayTx := beginRelease()
+	if err := replayTx.Commit(); err != nil {
 		t.Fatalf("commit session-delete release replay: %v", err)
 	}
 	capture.requireQuiet(t, 2, 300*time.Millisecond)

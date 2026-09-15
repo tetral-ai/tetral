@@ -438,6 +438,13 @@ execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
 
+`execution_result_notification_test.go` checks both terminal writers against
+real PostgreSQL. The Session-deletion release test verifies pending rows and
+empty results after rollback, notification silence before commit and after
+rollback, and notifications on commit with silence on replay. It exercises
+the release boundary directly; public Session deletion still rejects running
+or rescheduling Sessions.
+
 `TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources` starts with
 persisted resources and drives activation and materialization through real
 Queue RPCs, PostgreSQL stores and `RunOnce`. It checks declared and omitted
