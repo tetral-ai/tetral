@@ -80,6 +80,37 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 	}
 }
 
+func TestBridgeAPIConfigRequiresTwoDatabaseConnections(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		maxOpen string
+		wantErr string
+	}{
+		{name: "unchanged default"},
+		{name: "minimum", maxOpen: "2"},
+		{name: "listener would consume only connection", maxOpen: "1", wantErr: dbconnect.EnvDBMaxOpenConns + " must be at least 2"},
+		{name: "invalid pool config", maxOpen: "invalid", wantErr: "database pool config invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env := configTestEnv{
+				EnvBridgeMCPConnectorGRPCAddr: "gateway.tetral-system.svc.cluster.local:9091",
+				EnvBridgeGatewayTokenPath:     "/var/run/secrets/tetral-internal-grpc/gateway/token",
+				dbconnect.EnvDBMaxOpenConns:   test.maxOpen,
+			}
+			_, err := BridgeAPIConfigFromEnv(env)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("BridgeAPIConfigFromEnv max open %q error = %v; want %q", test.maxOpen, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BridgeAPIConfigFromEnv max open %q: %v", test.maxOpen, err)
+			}
+		})
+	}
+}
+
 func TestJobRunnerConfigRequiresDeliveryDependencies(t *testing.T) {
 	for _, missing := range []string{
 		EnvQueueGRPCAddress,

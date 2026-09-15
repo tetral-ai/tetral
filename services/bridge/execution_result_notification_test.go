@@ -354,6 +354,23 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReadsPreCommittedResult(t 
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWithMinimumConnectionPool(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	tracer := &bridgeExecutionQueryTracer{}
+	traced := storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer)
+	traced.SetMaxOpenConns(2)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(traced))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
+	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "minimum_pool")
+	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
+	startAwaitExecutionResultListener(t, store, tracer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
+	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
+}
+
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracer := &bridgeExecutionQueryTracer{}
@@ -757,12 +774,14 @@ func (l *scriptedExecutionResultListener) Listen(ctx context.Context, _ string, 
 	l.count++
 	call := l.count
 	l.mu.Unlock()
+	onReady()
+	// Report the connection only after its readiness callback has completed,
+	// so the test observes a wake that happened before it calls Wait.
 	select {
 	case l.calls <- call:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	onReady()
 	if call == 1 {
 		select {
 		case <-l.allowDisconnect:
@@ -798,11 +817,11 @@ func TestExecutionResultListenerCatchUpWakesCurrentWaitersWithoutDatabase(t *tes
 			t.Error("listener did not stop")
 		}
 	})
-	go func() { done <- store.runExecutionResultListener(ctx, listener) }()
-
 	// Initial LISTEN readiness is itself a catch-up for already-registered
-	// waiters.
+	// waiters. Snapshot before starting the producer so its first broadcast
+	// cannot become part of the baseline we are waiting to advance.
 	beforeReady := wake.Snapshot()
+	go func() { done <- store.runExecutionResultListener(ctx, listener) }()
 	select {
 	case call := <-listener.calls:
 		if call != 1 {

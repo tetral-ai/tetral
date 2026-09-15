@@ -74,6 +74,15 @@ func BridgeAPIConfigFromEnv(env Env) (BridgeAPIConfig, error) {
 	if cfg.GatewayTokenPath == "" {
 		return BridgeAPIConfig{}, workload.NewConfigError(EnvBridgeGatewayTokenPath + " is required")
 	}
+	poolConfig, poolErr := dbconnect.PoolConfigFromEnv(env.Getenv)
+	if poolErr != nil {
+		return BridgeAPIConfig{}, workload.NewConfigError("database pool config invalid: " + poolErr.Error())
+	}
+	// The result listener holds one connection for its lifetime; RPCs must
+	// still be able to borrow a connection to read and settle durable results.
+	if poolConfig.MaxOpenConns < 2 {
+		return BridgeAPIConfig{}, workload.NewConfigError(dbconnect.EnvDBMaxOpenConns + " must be at least 2 for the bridge API (one connection is reserved for result notifications)")
+	}
 	var err error
 	if cfg.ProviderRescheduleBudget, err = parseBoundedRescheduleBudget(env.Getenv(EnvProviderRescheduleBudget), EnvProviderRescheduleBudget, defaultProviderRescheduleBudget); err != nil {
 		return BridgeAPIConfig{}, err

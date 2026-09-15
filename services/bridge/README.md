@@ -70,6 +70,19 @@ wake leads through the durable verification read, a one-second fallback timer
 bounds the recheck interval while no hint arrives, and the existing 30-second
 internal deadline (or an earlier caller deadline) still ends the wait.
 
+### Database connection pool configuration
+
+`TETRAL_DB_MAX_OPEN_CONNS` defaults to **20 per process**. Both `bridge-api`
+and `job-runner` require at least **2** and reject smaller values during startup.
+Each process's listener holds one connection from its own database pool:
+`bridge-api` listens for Sandbox execution results, while `job-runner` listens
+for Queue work. At least one additional connection must remain available for
+business transactions; a one-connection pool would leave those transactions
+waiting for the listener to release its connection. A result waiter borrows a
+connection only while querying and returns it before waiting for a wake hint.
+Size each process's pool for its concurrent database work in addition to the
+listener; the minimum is not a throughput recommendation.
+
 ### Session infrastructure and Thread execution
 
 One Session binding hosts a collection of independently executing Threads.
