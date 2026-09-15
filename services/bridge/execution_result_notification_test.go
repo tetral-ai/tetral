@@ -447,21 +447,6 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	requireExecutionResultWaiters(t, store.executionResultWake(), 0, 0)
 }
 
-func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReadsPreCommittedResult(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	tracer := &bridgeExecutionQueryTracer{}
-	store := newAwaitNotificationTracedStore(t, runtime, tracer)
-	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "precommit")
-
-	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
-	tracer.reset()
-	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
-	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
-	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
-		t.Fatalf("verification reads = %d; want 1 (committed result returns on the initial read)", reads)
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWithMinimumConnectionPool(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracer := &bridgeExecutionQueryTracer{}
@@ -471,12 +456,24 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWithMinimumConnectionPool(
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "minimum_pool")
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
-	startAwaitExecutionResultListener(t, store, tracer)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
-	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
+	// Both paths must return the existing result on their first read. The
+	// listenerless case proves notification delivery is not a prerequisite;
+	// the listening case leaves only one pooled connection for the RPC.
+	for _, name := range []string{"without_listener", "with_listener"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "with_listener" {
+				startAwaitExecutionResultListener(t, store, tracer)
+			}
+			tracer.reset()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := startAwaitSandboxExecution(ctx, store, scope, toolUseEventID)
+			requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
+			if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
+				t.Fatalf("verification reads = %d; want 1 (committed result returns on the initial read)", reads)
+			}
+		})
+	}
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t *testing.T) {
@@ -767,6 +764,9 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 }
 
 func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires the full 30-second idle wait; run without -short")
+	}
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)

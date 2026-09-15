@@ -77,6 +77,8 @@ If the listener remains unavailable, discovery can take the remaining RPC
 deadline plus retry and database latency; there is no one-second
 delivery guarantee. A healthy idle 30-second wait performs one result
 verification transaction plus the separate entry scope-validation transaction.
+Connection failures are logged before retry; an unexpected listener error return
+is logged as `bridge.execution_result_listener.stopped`. Normal shutdown is quiet.
 
 ### Database connection pool configuration
 
@@ -516,7 +518,8 @@ and active lifecycle facts directly from durable rows.
   only in the final adoption transaction; a stale Runtime scope cannot adopt
   or write a second idle event.
 - **Conformance.** `bridge_api_settlement_test.go`,
-  `execution_result_notification_test.go` (wake-path acceptance, including
+  `execution_result_notification_test.go` (the 30-second idle check is skipped
+  with `go test -short` and runs in full in CI; wake-path acceptance includes
   a real Queue/runner/terminal-writer-to-Bridge notification round trip with
   a gated provider double, plus local same-execution waiter cancellation and
   cross-instance fan-out), and
