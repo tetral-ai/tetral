@@ -242,7 +242,7 @@ type awaitExecutionOutcome struct {
 	elapsed  time.Duration
 }
 
-func startAwaitSandboxExecution(store *PostgreSQLBridgeAPIStore, ctx context.Context, scope *bridgev1.RuntimeScope, toolUseEventID string) chan awaitExecutionOutcome {
+func startAwaitSandboxExecution(ctx context.Context, store *PostgreSQLBridgeAPIStore, scope *bridgev1.RuntimeScope, toolUseEventID string) chan awaitExecutionOutcome {
 	done := make(chan awaitExecutionOutcome, 1)
 	go func() {
 		started := time.Now()
@@ -319,7 +319,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
 	committed := time.Now()
@@ -347,7 +347,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReadsPreCommittedResult(t 
 
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, true)
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
 	if reads := tracer.countSQL(awaitTraceVerificationRead); reads != 1 {
 		t.Fatalf("verification reads = %d; want 1 (committed result returns on the initial read)", reads)
@@ -366,7 +366,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t 
 	// result statement: the statement observed the pending row, and the
 	// settlement commits while the read transaction is still open.
 	fired, release := tracer.armBarrier("", awaitTraceVerificationRead, 1)
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	select {
 	case <-fired:
 	case <-time.After(10 * time.Second):
@@ -398,7 +398,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 	// can block. The wake snapshot taken before the read must make the wait
 	// return immediately instead of sleeping into the fallback.
 	fired, release := tracer.armBarrier(awaitTraceVerificationRead, "commit", 1)
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	select {
 	case <-fired:
 	case <-time.After(10 * time.Second):
@@ -425,7 +425,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionRepeatedCyclesVerifyDurabl
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
 	// A hint without a durable transition wakes a verification read that
@@ -459,7 +459,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionIgnoresUnrelatedAndMalform
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
 	emitRawExecutionResultPayload(t, admin, "not-json")
@@ -499,7 +499,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFallbackCoversMissedNotifi
 	// No listener runs: the settlement is invisible to the wake path and only
 	// the one-second fallback can observe it.
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, awaitNotificationTerminalResult, false)
 	outcome := requireAwaitCompleted(t, done, awaitNotificationTerminalResult)
@@ -519,7 +519,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
 	terminateListener := func() {
@@ -656,10 +656,10 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossBridgeInstance
 
 	tracerOne.reset()
 	tracerTwo.reset()
-	targetOne := startAwaitSandboxExecution(storeOne, context.Background(), scope, toolUseEventID)
-	targetTwo := startAwaitSandboxExecution(storeTwo, context.Background(), scope, toolUseEventID)
+	targetOne := startAwaitSandboxExecution(context.Background(), storeOne, scope, toolUseEventID)
+	targetTwo := startAwaitSandboxExecution(context.Background(), storeTwo, scope, toolUseEventID)
 	otherCtx, cancelOther := context.WithCancel(context.Background())
-	other := startAwaitSandboxExecution(storeOne, otherCtx, scope, otherToolUseEventID)
+	other := startAwaitSandboxExecution(otherCtx, storeOne, scope, otherToolUseEventID)
 	tracerOne.waitForSQLCount(t, awaitTraceVerificationRead, 2)
 	tracerTwo.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
@@ -722,7 +722,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionRejectsInvalidResultDespit
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	tracer.reset()
-	done := startAwaitSandboxExecution(store, context.Background(), scope, toolUseEventID)
+	done := startAwaitSandboxExecution(context.Background(), store, scope, toolUseEventID)
 	tracer.waitForSQLCount(t, awaitTraceVerificationRead, 1)
 
 	// The hint only schedules a re-read: an invalid stored result is rejected
