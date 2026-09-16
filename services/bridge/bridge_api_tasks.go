@@ -25,6 +25,10 @@ import (
 
 // This file owns the Bridge tasks protocol-family boundary.
 
+// backgroundCommandResultPollInterval is the polling cadence of the
+// background-command result wait, which remains poll-based by design.
+const backgroundCommandResultPollInterval = 25 * time.Millisecond
+
 // CommitTaskNotificationResult authors the conversation projection for a
 // terminal background task. Sandbox Service owns terminal task settlement and
 // the task-notification inbox birth; Bridge verifies the Runtime declaration
@@ -786,7 +790,9 @@ func backgroundCommandReceiptID(requestID string) string {
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (commandOperationResult, error) {
-	ticker := time.NewTicker(runtimeToolResultPollInterval)
+	// This background-command result wait keeps its own 25 ms poll; it is
+	// outside the Sandbox execution-result notification scope.
+	ticker := time.NewTicker(backgroundCommandResultPollInterval)
 	defer ticker.Stop()
 	for {
 		var result commandOperationResult

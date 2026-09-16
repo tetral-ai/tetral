@@ -1004,6 +1004,18 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 	if !transitionRowsAffected(result) {
 		return nil
 	}
+	// Wake Bridge result waiters in the same transaction that terminalized the
+	// execution: commit publishes the result and its hint together, rollback
+	// publishes neither, and the generation/state fence above guarantees a
+	// stale or replayed settlement never reaches this line.
+	if err := sandboxruntime.NotifyExecutionResultTx(ctx, tx, sandboxruntime.ExecutionResultHint{
+		WorkspaceID:     ref.WorkspaceID,
+		SessionID:       ref.SessionID,
+		SessionThreadID: ref.SessionThreadID,
+		ToolUseEventID:  ref.ToolUseEventID,
+	}); err != nil {
+		return err
+	}
 	var requests []queue.EnqueueRequest
 	if settlement.BackgroundTask != nil {
 		request, err := insertBackgroundTaskAndReconcileTx(ctx, tx, ref, settlement, now)

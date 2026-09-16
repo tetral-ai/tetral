@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandbox "github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -722,7 +723,7 @@ func settleWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, 
 	resultJSON := `{"error":{"kind":"session_deleted","message":"sandbox execution is no longer available"},"status":"error"}`
 	digest := sha256.Sum256([]byte(resultJSON))
 	for _, item := range waiters {
-		if _, err := tx.Exec(ctx,
+		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_tool_results
 			    SET execution_state='terminal_unconsumed', result_json=$6, result_digest=$7,
 			        provider_command_reference_json=NULL, background_task_started=FALSE,
@@ -732,8 +733,26 @@ func settleWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, 
 			    AND execution_state IN ('pending','waiting_activation','waiting_materialization')`,
 			workspaceID, sessionID, item.threadID, item.toolUseEventID, item.generation,
 			resultJSON, hex.EncodeToString(digest[:]), now.UTC(),
-		); err != nil {
+		)
+		if err != nil {
 			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		// The FOR UPDATE selection above locks eligible nonterminal rows and
+		// excludes replayed settlements. Keep this affected-row check as a
+		// defensive guard: only an actual terminal transition earns a wake hint.
+		if affected == 1 {
+			if err := sandbox.NotifyExecutionResultTx(ctx, tx, sandbox.ExecutionResultHint{
+				WorkspaceID:     workspaceID,
+				SessionID:       sessionID,
+				SessionThreadID: item.threadID,
+				ToolUseEventID:  item.toolUseEventID,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

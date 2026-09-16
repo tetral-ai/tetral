@@ -96,6 +96,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	startAwaitExecutionResultListener(t, store, nil)
 	store.RuntimeBindingTokenHMACKey = []byte("sandbox-production-boundary-key")
 	bridge := &sandboxProductionBoundaryBridgeServer{store: store}
 	client, bridgeAddress := startSandboxProductionBoundaryBridgeClient(t, bridge, podUID)

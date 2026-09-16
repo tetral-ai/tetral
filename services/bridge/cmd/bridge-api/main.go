@@ -86,6 +86,20 @@ func run(ctx context.Context, env envReader) error {
 	store.MCPManifestLister = agentruntimebridge.NewGatewayMCPManifestLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})
+	// One process-local LISTEN connection feeds AwaitSandboxExecution waiters
+	// their wake hints; initial readiness and reconnect trigger catch-up reads.
+	executionResultListenerCtx, cancelExecutionResultListener := context.WithCancel(ctx)
+	defer cancelExecutionResultListener()
+	go func() {
+		if err := store.RunExecutionResultListener(executionResultListenerCtx); err != nil && executionResultListenerCtx.Err() == nil {
+			logger.Error("bridge.execution_result_listener.stopped",
+				"operation", "agentruntimebridge.listen_sandbox_execution_result",
+				"error.class", "bridge_execution_result_listener_error",
+				"error.message_safe", "sandbox execution result listener stopped",
+				"terminal", true,
+			)
+		}
+	}()
 	agentruntimebridge.StartTransientAttachmentGC(ctx, store, logger, time.Minute, 100)
 	return internalgrpc.RunGRPCWorkload(ctx, env, internalgrpc.GRPCWorkloadParams{
 		ServiceName:       agentruntimebridge.ServiceNameBridgeAPI,

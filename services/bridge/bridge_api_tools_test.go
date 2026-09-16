@@ -114,6 +114,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	}
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	startAwaitExecutionResultListener(t, store, nil)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	request := &bridgev1.AcceptSandboxExecutionRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool"), ToolUseEventId: toolUseID,
@@ -165,15 +166,8 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	}
 
 	const terminalResult = `{"status":"success","result":{"exit_code":0,"stdout":"ok"}}`
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_runtime_tool_results
-		    SET execution_state = 'terminal_unconsumed', result_json = $5,
-		        result_digest = $6, updated_at = '2026-01-01T00:00:31Z'
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND tool_use_event_id = $4`,
-		workspaceID, sessionID, threadID, toolUseID, terminalResult, sha256Hex(terminalResult),
-	); err != nil {
-		t.Fatalf("settle durable sandbox execution: %v", err)
-	}
+	commitAwaitExecutionSettlement(t, admin, request.GetScope(), toolUseID, terminalResult, true)
+
 	select {
 	case completed := <-waitResult:
 		if completed.err != nil {
@@ -1976,6 +1970,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptAndAwaitSandboxExecutionByDurableTarget(t
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	startAwaitExecutionResultListener(t, store, nil)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableOrdinaryToolUseForTest(
@@ -2027,13 +2022,8 @@ func TestPostgreSQLBridgeAPIStoreAcceptAndAwaitSandboxExecutionByDurableTarget(t
 	}
 
 	const terminalJSON = `{"status":"success","result":{"exit_code":0,"stdout":"ok"}}`
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
-		SET execution_state='terminal_unconsumed', result_json=$5, result_digest=$6, updated_at=now()
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
-		workspaceID, sessionID, threadID, toolUseEventID, terminalJSON, sha256Hex(terminalJSON),
-	); err != nil {
-		t.Fatalf("settle sandbox execution: %v", err)
-	}
+	commitAwaitExecutionSettlement(t, admin, scope, toolUseEventID, terminalJSON, true)
+
 	select {
 	case result := <-done:
 		if result.err != nil || result.response.GetCompleted().GetResultJson() != terminalJSON {

@@ -377,6 +377,23 @@ local polling loops; they still call Queue `Lease`, which remains the sole
 assignment authority. A disconnected listener reconnects and triggers a
 catch-up poll, while the existing timer polling remains the fallback.
 
+Execution results have a dedicated wake channel,
+`tetral_sandbox_execution_result`. Both production writers that transition an
+execution to `terminal_unconsumed` emit a refs-only hint — workspace, Session,
+Thread, and Tool Use event IDs, never a result body — inside the settling
+transaction: ordinary settlement in `execution_store.go`
+(`settleSandboxExecutionTx`, reached by every settlement path including
+failure, cancellation, and unknown outcomes) and Session-deletion waiter
+settlement in `internal/sandbox/release` (`settleWaitersTx`). A stale
+generation or replayed settlement affects no row and emits nothing; rollback
+publishes neither the result nor the hint. Bridge API waiters treat the hint
+only as a wake signal and re-verify the durable row, without periodic result
+queries during a wait. Listener readiness and reconnect trigger catch-up reads.
+If notification delivery remains unavailable, Runtime rejoins after the existing
+30-second wait deadline and 300 ms retry delay; the next initial read can discover
+the committed result. This preserves durable delivery for an active retrying
+Runtime, while allowing longer discovery latency during a listener outage.
+
 Three retention/maintenance loops are deliberately poll-only because their
 latency is not user-facing: over-limit Queue reconciliation, the expired
 output-capture sweep, and resource-prefix garbage collection. All business
@@ -424,6 +441,13 @@ Focused tests live in `services/sandbox`, `internal/sandbox`, and
 execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
 packages verify that the canonical, service-local, and rendered deployment
 surfaces stay aligned.
+
+`execution_result_notification_test.go` checks both terminal writers against
+real PostgreSQL. The Session-deletion release test verifies pending rows and
+empty results after rollback, notification silence before commit and after
+rollback, and notifications on commit with silence on replay. It exercises
+the release boundary directly; public Session deletion still rejects running
+or rescheduling Sessions.
 
 `TestSandboxLifecycleRunnersDeliverGitIdentityFromDurableResources` starts with
 persisted resources and drives activation and materialization through real

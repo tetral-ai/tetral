@@ -54,6 +54,45 @@ state. A listener connection or reconnect also triggers a catch-up poll, and
 the bounded polling loop remains the fallback if a notification is coalesced or
 lost.
 
+Sandbox execution results have their own channel. Every production write that
+transitions an execution to `terminal_unconsumed` — Sandbox Service settlement
+and Session-deletion waiter settlement — emits a refs-only
+`tetral_sandbox_execution_result` notification in the same transaction, so
+commit publishes the result and its hint together and rollback publishes
+neither. The `bridge-api` container owns one reconnecting `LISTEN` connection
+for that channel and routes each hint to the local `AwaitSandboxExecution`
+waiters whose workspace-qualified durable identity it names; LISTEN readiness
+and every reconnect broadcast a catch-up wake to all local waiters. A waiter
+registers and takes its wake snapshot before its first verification read, so a
+commit landing during the read or between the read and blocking forces an
+immediate re-read instead of a missed wake. A hint is never a result: every
+wake leads through the durable verification read. There is no periodic result
+query within a wait. The existing 30-second internal deadline (or an earlier
+caller deadline) still ends the RPC. Runtime rejoins the same accepted execution
+after its existing 300 ms retry delay; the new wait begins with a durable read.
+A result missed during a listener outage is therefore observed on reconnect
+catch-up or rejoin. Detecting a half-open listener connection depends on TCP
+keepalive and network settings; reconnect has no fixed detection bound.
+If the listener remains unavailable, discovery can take the remaining RPC
+deadline plus retry and database latency; there is no one-second
+delivery guarantee. A healthy idle 30-second wait performs one result
+verification transaction plus the separate entry scope-validation transaction.
+Connection failures are logged before retry; an unexpected listener error return
+is logged as `bridge.execution_result_listener.stopped`. Normal shutdown is quiet.
+
+### Database connection pool configuration
+
+`TETRAL_DB_MAX_OPEN_CONNS` defaults to **20 per process**. Both `bridge-api`
+and `job-runner` require at least **2** and reject smaller values during startup.
+Each process's listener holds one connection from its own database pool:
+`bridge-api` listens for Sandbox execution results, while `job-runner` listens
+for Queue work. At least one additional connection must remain available for
+business transactions; a one-connection pool would leave those transactions
+waiting for the listener to release its connection. A result waiter borrows a
+connection only while querying and returns it before waiting for a wake hint.
+Size each process's pool for its concurrent database work in addition to the
+listener; the minimum is not a throughput recommendation.
+
 ### Session infrastructure and Thread execution
 
 One Session binding hosts a collection of independently executing Threads.
@@ -461,6 +500,13 @@ and active lifecycle facts directly from durable rows.
   and output-capture work. It never imports a provider SDK or calls a helper.
   Sandbox Service resolves the provider adapter and persists normalized
   outcomes for Bridge to consume.
+- **Result wait.** `AwaitSandboxExecution` blocks on wake hints from the
+  `tetral_sandbox_execution_result` channel (see States & lifecycle), with
+  reconnect catch-up and deadline/rejoin recovery instead of periodic queries.
+  The stored row — its identity match, terminal state,
+  and result JSON validity — remains the only acceptance authority. The
+  background-command result wait and the memory-projection wait are separate
+  poll-based paths and deliberately unchanged.
 - **Lifecycle.** `FinishIdle` creates or joins a capture generation and waits
   outside a transaction. Sandbox Service stages deterministic Blob children
   before the parent result. Bridge's final transaction either adopts that
@@ -471,7 +517,12 @@ and active lifecycle facts directly from durable rows.
   FinishIdle write id; failed generations remain immutable; Blob custody moves
   only in the final adoption transaction; a stale Runtime scope cannot adopt
   or write a second idle event.
-- **Conformance.** `bridge_api_settlement_test.go` and
+- **Conformance.** `bridge_api_settlement_test.go`,
+  `execution_result_notification_test.go` (the 30-second idle check is skipped
+  with `go test -short` and runs in full in CI; wake-path acceptance includes
+  a real Queue/runner/terminal-writer-to-Bridge notification round trip with
+  a gated provider double, plus local same-execution waiter cancellation and
+  cross-instance fan-out), and
   `services/sandbox/output_capture_runner_test.go` plus
   `services/sandbox/output_capture_store_test.go`.
 

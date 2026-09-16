@@ -421,31 +421,34 @@ describe("RuntimePodToolRunner", () => {
 		expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
 	});
 
-	test("retries only the result wait after durable sandbox acceptance", async () => {
-		const bridge = new RecordingBridgeClient();
-		bridge.awaitSandboxExecutionErrors.push(
-			Object.assign(new Error("connection reset"), {
-				code: GrpcStatus.UNAVAILABLE,
-			}),
-		);
-		const sleep = new ControlledSleep();
-		const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
-			toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
-		);
-		await Bun.sleep(0);
+	test.each([GrpcStatus.UNAVAILABLE, GrpcStatus.DEADLINE_EXCEEDED])(
+		"retries only the result wait after durable sandbox acceptance (%s)",
+		async (code) => {
+			const bridge = new RecordingBridgeClient();
+			bridge.awaitSandboxExecutionErrors.push(
+				Object.assign(new Error("result wait interrupted"), {
+					code,
+				}),
+			);
+			const sleep = new ControlledSleep();
+			const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+				toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+			);
+			await Bun.sleep(0);
 
-		expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
-		expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
-		expect(sleep.calls).toHaveLength(1);
-		sleep.releaseNext();
+			expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+			expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+			expect(sleep.calls).toHaveLength(1);
+			sleep.releaseNext();
 
-		expect((await pending).type).toBe("completed");
-		expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
-		expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
-		expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(
-			bridge.awaitSandboxExecutionRequests[0],
-		);
-	});
+			expect((await pending).type).toBe("completed");
+			expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+			expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
+			expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(
+				bridge.awaitSandboxExecutionRequests[0],
+			);
+		},
+	);
 
 	test("returns stale custody when Bridge permanently rejects the result wait", async () => {
 		const bridge = new RecordingBridgeClient();

@@ -1079,6 +1079,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+	startAwaitExecutionResultListener(t, store, nil)
 	store.RuntimeBindingTokenHMACKey = []byte("provider-reschedule-recovery-signing-key")
 	acceptedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }

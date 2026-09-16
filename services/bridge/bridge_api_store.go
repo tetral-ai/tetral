@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -158,6 +159,9 @@ type PostgreSQLBridgeAPIStore struct {
 	RuntimeBindingTokenTTL     time.Duration
 	ProviderRescheduleBudget   int64
 	CompactionRescheduleBudget int64
+
+	executionResultHubOnce sync.Once
+	executionResultHub     *sandboxExecutionResultWakeHub
 }
 
 type TransientAttachmentGCResult struct {
