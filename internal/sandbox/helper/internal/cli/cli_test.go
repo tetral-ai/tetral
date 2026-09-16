@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -380,14 +381,7 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("detached helper authorization requires the production root helper identity")
 	}
-	runtimeRoot := filepath.Dir(payloadRoot)
-	if _, err := os.Lstat(runtimeRoot); !os.IsNotExist(err) {
-		t.Fatalf("root helper proof requires an unused runtime root, stat error = %v", err)
-	}
-	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeRoot) })
+	runtimeRoot := withCLIRuntime(t)
 	const runtimeUID, runtimeGID = 65534, 65534
 	if err := os.Chown(runtimeRoot, runtimeUID, runtimeGID); err != nil {
 		t.Fatal(err)
@@ -402,8 +396,8 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskID := "task_cli_real_detach"
-	_ = os.RemoveAll(filepath.Join("/tmp/tetral-runtime/tasks", taskID))
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/tmp/tetral-runtime/tasks", taskID)) })
+	taskPath := filepath.Join(runtimeRoot, "tasks", taskID)
+	t.Cleanup(func() { _ = os.RemoveAll(taskPath) })
 	payloadPath := writeCLIPayload(t, protocol.Payload{
 		SchemaVersion:  protocol.SchemaVersion,
 		Tool:           "exec",
@@ -463,8 +457,7 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 func TestBuiltHelperRejectsForgedSupervisorPipeWithoutStartingTask(t *testing.T) {
 	bin := buildSandboxHelper(t)
 	taskID := "task_forged_supervisor_pipe"
-	taskPath := filepath.Join("/tmp/tetral-runtime/tasks", taskID)
-	_ = os.RemoveAll(taskPath)
+	taskPath := filepath.Join(filepath.Dir(payloadRoot), "tasks", taskID)
 	t.Cleanup(func() { _ = os.RemoveAll(taskPath) })
 	readFile, writeFile, err := os.Pipe()
 	if err != nil {
@@ -1330,6 +1323,7 @@ func writeCLIPayload(t *testing.T, payload protocol.Payload) string {
 
 func buildSandboxHelper(t *testing.T) string {
 	t.Helper()
+	runtimeRoot := withCLIRuntime(t)
 	directory, err := os.MkdirTemp("/tmp", "tetral-cli-helper-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1339,7 +1333,11 @@ func buildSandboxHelper(t *testing.T) string {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(directory, "sandbox")
-	build := exec.Command("go", "build", "-o", bin, "../../cmd/sandbox")
+	linkerValues := fmt.Sprintf(
+		"-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/task.runtimeRoot=%s -X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/cli.payloadRoot=%s",
+		runtimeRoot, payloadRoot,
+	)
+	build := exec.Command("go", "build", "-ldflags", linkerValues, "-o", bin, "../../cmd/sandbox")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build helper: %v\n%s", err, string(output))
 	}
@@ -1348,6 +1346,7 @@ func buildSandboxHelper(t *testing.T) string {
 
 func cliPayloadPath(t *testing.T, toolUseEventID string) string {
 	t.Helper()
+	withCLIRuntime(t)
 	if !helperIDPattern.MatchString(toolUseEventID) {
 		t.Fatalf("test payload id %q does not match helper id shape", toolUseEventID)
 	}
@@ -1357,6 +1356,31 @@ func cliPayloadPath(t *testing.T, toolUseEventID string) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "payload.json")
+}
+
+// CLI tests share process-wide identity hooks and run serially. Reuse one
+// fixture root for the test's payloads and its helper subprocesses, then restore
+// the default without touching an already-running helper's protected state.
+func withCLIRuntime(t *testing.T) string {
+	t.Helper()
+	if payloadRoot != defaultPayloadRoot {
+		return filepath.Dir(payloadRoot)
+	}
+	// Keep control.sock paths short and the parent traversable after a root
+	// helper drops to the test workspace's runtime identity.
+	runtimeRoot, err := os.MkdirTemp("/tmp", "tcli-*")
+	if err != nil {
+		t.Fatalf("mkdir test runtime root: %v", err)
+	}
+	originalRoot := payloadRoot
+	payloadRoot = filepath.Join(runtimeRoot, "tool-payloads")
+	t.Cleanup(func() {
+		payloadRoot = originalRoot
+		if err := os.RemoveAll(runtimeRoot); err != nil {
+			t.Errorf("remove test runtime root: %v", err)
+		}
+	})
+	return runtimeRoot
 }
 
 func decodeSingleEnvelope(t *testing.T, output []byte) protocol.Envelope {

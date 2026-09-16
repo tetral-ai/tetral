@@ -436,6 +436,11 @@ unchanged.
 
 ## Testing
 
+Helper CLI tests create a private runtime directory for their request payloads
+and detached-task state. Helpers built by those tests use the same private
+paths, so the tests can run inside an active Sandbox without writing to its
+root-owned payload directory or cleaning up its task records.
+
 Focused tests live in `services/sandbox`, `internal/sandbox`, and
 `services/sandbox/internal/resourceprojection`. Database-backed lifecycle and
 execution tests require `TETRAL_TEST_DATABASE_URL`. The Kubernetes and Helm
