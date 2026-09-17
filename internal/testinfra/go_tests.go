@@ -31,6 +31,7 @@ type listedPackage struct {
 
 type testFunction struct {
 	name           string
+	testMain       bool
 	calls          []string
 	infrastructure bool
 	capability     string
@@ -187,7 +188,7 @@ func allGoRunnables(pkg listedPackage) ([]string, error) {
 		}
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if ok && function.Recv == nil && isGoRunnable(function.Name.Name) {
+			if ok && function.Recv == nil && isGoRunnable(function.Name.Name) && !isGoTestMain(function) {
 				set[function.Name.Name] = true
 			}
 		}
@@ -253,7 +254,7 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 			if !ok || function.Body == nil {
 				continue
 			}
-			item := &testFunction{name: function.Name.Name}
+			item := &testFunction{name: function.Name.Name, testMain: isGoTestMain(function)}
 			if dependencies, ok := declared[item.name]; ok && function.Recv == nil {
 				for _, dependency := range dependencies {
 					item.requireCapability(dependency, "declared in the Go test inventory")
@@ -328,7 +329,7 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 	var tests []string
 	var excluded []Exclusion
 	for name, function := range functions {
-		if !isGoRunnable(name) {
+		if !isGoRunnable(name) || function.testMain {
 			continue
 		}
 		if function.infrastructure {
@@ -396,6 +397,26 @@ func markInfrastructureCapability(function *testFunction, value string) {
 
 func isGoRunnable(name string) bool {
 	return strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Example") || strings.HasPrefix(name, "Fuzz")
+}
+
+// TestMain(*testing.M) wraps the test executable and emits no test event.
+// TestMain(*testing.T), however, is an ordinary runnable in Go's test loader.
+func isGoTestMain(function *ast.FuncDecl) bool {
+	if function.Name.Name != "TestMain" || function.Type.Params == nil || len(function.Type.Params.List) != 1 {
+		return false
+	}
+	pointer, ok := function.Type.Params.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	switch value := pointer.X.(type) {
+	case *ast.SelectorExpr:
+		return value.Sel.Name == "M"
+	case *ast.Ident:
+		return value.Name == "M"
+	default:
+		return false
+	}
 }
 
 func defaultCapability(value string) string {

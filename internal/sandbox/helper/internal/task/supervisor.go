@@ -28,11 +28,6 @@ import (
 const taskReservationMaxAge = 2 * time.Minute
 const stdinWriteDeadline = 250 * time.Millisecond
 
-var (
-	runtimeRoot   = "/tmp/tetral-runtime"
-	runtimeRootMu sync.RWMutex
-)
-
 var helperIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // controlRequest / controlResponse are the control.sock wire protocol between

@@ -38,7 +38,6 @@ RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
       -run '^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$' \
       -count=1 -v
 RUN test -n "${TETRAL_HELPER_PRIVILEGE_TEST_NONCE}" \
-    && rm -rf /tmp/tetral-runtime \
     && go test ./internal/sandbox/helper/internal/cli \
       -run '^TestBuiltHelperDetachedExecReturnsPromptly$' \
       -count=1 -v

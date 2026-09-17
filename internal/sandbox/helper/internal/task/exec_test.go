@@ -140,12 +140,23 @@ func TestExecEnvReservesRuntimeIdentityAndRemovesSudoIdentity(t *testing.T) {
 	}
 }
 
-func TestForegroundShellWrapperUsesTetralRuntimeRoot(t *testing.T) {
-	if strings.Contains(foregroundShellWrapper, "TMPDIR") || strings.Contains(foregroundShellWrapper, "/tmp/tetral-helper-foreground") {
-		t.Fatalf("foreground shell wrapper uses host/tmp-derived state path:\n%s", foregroundShellWrapper)
+func TestForegroundExecUsesPrivateRuntimeDirectory(t *testing.T) {
+	original := currentRuntimeRoot()
+	root := filepath.Join(t.TempDir(), "runtime with spaces 'quotes' $literal")
+	setRuntimeRoot(root)
+	t.Cleanup(func() { setRuntimeRoot(original) })
+	fs := newExecFixture(t)
+	response := RunExec(fs.payload(map[string]any{
+		"cmd":     `test -d "$EXPECTED_FOREGROUND" && printf isolated`,
+		"env":     map[string]any{"EXPECTED_FOREGROUND": filepath.Join(root, "foreground")},
+		"wait_ms": 5000,
+	}))
+	if response.Status != protocol.ToolStatusSuccess || response.Result.ExitCode == nil || *response.Result.ExitCode != 0 || response.Result.Stdout.Text != "isolated" {
+		t.Fatalf("foreground response = %+v; want execution using the private runtime directory", response)
 	}
-	if !strings.Contains(foregroundShellWrapper, `tetral_runtime_root="/tmp/tetral-runtime/foreground"`) {
-		t.Fatalf("foreground shell wrapper does not pin state under /tmp/tetral-runtime:\n%s", foregroundShellWrapper)
+	entries, err := os.ReadDir(filepath.Join(root, "foreground"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("foreground cleanup entries/error = %v/%v; want empty private directory", entries, err)
 	}
 }
 

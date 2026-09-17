@@ -22,6 +22,7 @@ import (
 	helpermedia "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/media"
 	helperpatch "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/patch"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/pathsafe"
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 	helpersearch "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/search"
 	helpertask "github.com/tetral-ai/tetral/internal/sandbox/helper/internal/task"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
@@ -35,7 +36,6 @@ const Version = "0.1.0"
 // the payload, this cap transitively bounds the largest patch the helper will
 // accept.
 const maxPayloadBytes = 4 * 1024 * 1024
-const defaultPayloadRoot = "/tmp/tetral-runtime/tool-payloads"
 
 // helperIDPattern constrains tool_use_event_id and task_id to
 // ^[A-Za-z0-9_-]{1,64}$. The shape matters for safety, not just tidiness: these
@@ -55,7 +55,6 @@ var (
 	setRuntimeUID       = syscall.Setuid
 	clearRuntimeGroups  = func() error { return syscall.Setgroups([]int{}) }
 	normalizeRuntimeEnv = runtimeidentity.NormalizeProcessEnvironment
-	payloadRoot         = defaultPayloadRoot
 )
 
 func Main(ctx context.Context, args []string, stdout io.Writer) int {
@@ -470,7 +469,7 @@ func loadPayload(payloadPath string, subcommand string) (protocol.Payload, *prot
 }
 
 func openProtectedPayload(cleanPayloadPath string, pathID string) (*os.File, *os.File, string, error) {
-	root := filepath.Clean(payloadRoot)
+	root := filepath.Join(runtimepath.Root(), "tool-payloads")
 	rootDir, err := os.Open(root) //nolint:gosec // the fixed helper-private root is verified before relative open.
 	if err != nil {
 		return nil, nil, "", err
@@ -518,7 +517,7 @@ func validatePayloadPath(payloadPath string) (string, string, *protocol.ToolErro
 	if !filepath.IsAbs(cleanPayloadPath) {
 		return "", "", &protocol.ToolError{Kind: "invalid_input", Message: "payload path must be absolute"}
 	}
-	root := filepath.Clean(payloadRoot)
+	root := filepath.Join(runtimepath.Root(), "tool-payloads")
 	rel, err := filepath.Rel(root, cleanPayloadPath)
 	if err != nil || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." || filepath.IsAbs(rel) {
 		return "", "", &protocol.ToolError{Kind: "invalid_input", Message: "payload path is outside helper payload root"}
@@ -620,7 +619,7 @@ func validatePayloadCommon(payload protocol.Payload) *protocol.ToolError {
 }
 
 func redirectStderr() {
-	logPath := filepath.Join(health.RuntimeRoot, "logs", "helper.log")
+	logPath := filepath.Join(runtimepath.Root(), "logs", "helper.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		redirectStderrToDevNull()
 		return

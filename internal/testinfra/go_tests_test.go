@@ -364,3 +364,42 @@ func repositoryRootForTest(t *testing.T) string {
 		root = parent
 	}
 }
+
+func TestGoInventoryDistinguishesSuiteMainFromRunnableTest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		imports   string
+		mainArg   string
+		localType string
+		want      []string
+	}{
+		{"suite_main", `import "testing"`, "m *testing.M", "*testing.T", []string{"TestLocal"}},
+		{"aliased_suite_main", `import check "testing"`, "m *check.M", "*check.T", []string{"TestLocal"}},
+		{"dot_import_suite_main", `import . "testing"`, "m *M", "*T", []string{"TestLocal"}},
+		{"ordinary_test_named_main", `import "testing"`, "t *testing.T", "*testing.T", []string{"TestLocal", "TestMain"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mainBody := ""
+			if strings.HasPrefix(tc.mainArg, "m ") {
+				mainBody = "m.Run()"
+			}
+			body := "package fixture\n" + tc.imports + "\nfunc TestMain(" + tc.mainArg + ") {" + mainBody + "}\nfunc TestLocal(t " + tc.localType + ") {}\n"
+			if err := os.WriteFile(filepath.Join(root, "fixture_test.go"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pkg := listedPackage{ImportPath: "fixture", Dir: root, TestGoFiles: []string{"fixture_test.go"}}
+			all, err := allGoRunnables(pkg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fast, excluded, err := classifyGoTests(pkg, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(all, tc.want) || !slices.Equal(fast, tc.want) || len(excluded) != 0 {
+				t.Fatalf("inventory all/fast/excluded = %v/%v/%v; want runnable tests %v", all, fast, excluded, tc.want)
+			}
+		})
+	}
+}
