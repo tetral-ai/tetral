@@ -19,8 +19,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 )
 
-var privilegeTestRuntimeRoot = fmt.Sprintf("/tmp/tetral-runtime-privilege-%d", os.Getpid())
-
 type privilegeTestEnvelope struct {
 	Status string `json:"status"`
 	Error  *struct {
@@ -48,6 +46,7 @@ func TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop(t *testing.T
 		t.Skip("the required supervisor privilege proof runs on the Linux/root CI lane")
 	}
 
+	privilegeTestRuntimeRoot := runtimepath.Root()
 	helperDir, err := os.MkdirTemp("/tmp", "tetral-helper-bin-*")
 	if err != nil {
 		t.Fatalf("mkdir helper binary dir: %v", err)
@@ -69,8 +68,6 @@ func TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop(t *testing.T
 
 	runtimeUID, runtimeGID := 65534, 65534
 	wrongUID, wrongGID := 65533, 65533
-	_, runtimeRootErr := os.Lstat(privilegeTestRuntimeRoot)
-	runtimeRootCreated := os.IsNotExist(runtimeRootErr)
 	workspace, err := os.MkdirTemp("/tmp", "tetral-runtime-workspace-*")
 	if err != nil {
 		t.Fatalf("mkdir runtime workspace: %v", err)
@@ -106,12 +103,7 @@ func TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop(t *testing.T
 	if err := os.Chmod(privilegeTestRuntimeRoot, 0o700); err != nil {
 		t.Fatalf("chmod runtime root: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(tasksRoot)
-		if runtimeRootCreated {
-			_ = os.RemoveAll(privilegeTestRuntimeRoot)
-		}
-	})
+	t.Cleanup(func() { _ = os.RemoveAll(tasksRoot) })
 
 	payloadRoot := filepath.Join(privilegeTestRuntimeRoot, "tool-payloads")
 	_, payloadRootErr := os.Lstat(payloadRoot)
@@ -125,7 +117,7 @@ func TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop(t *testing.T
 	if err := os.Chmod(payloadRoot, 0o700); err != nil {
 		t.Fatalf("chmod payload root: %v", err)
 	}
-	if payloadRootCreated && !runtimeRootCreated {
+	if payloadRootCreated {
 		t.Cleanup(func() { _ = os.RemoveAll(payloadRoot) })
 	}
 
@@ -207,7 +199,7 @@ func runPrivilegeHelper(t *testing.T, helper string, payloadRoot string, tool st
 	t.Helper()
 	envelope, exitCode := runPrivilegeHelperResult(t, helper, payloadRoot, tool, eventID, workspace, input)
 	if exitCode != 0 {
-		entries, _ := os.ReadDir(filepath.Join(privilegeTestRuntimeRoot, "tasks"))
+		entries, _ := os.ReadDir(filepath.Join(runtimepath.Root(), "tasks"))
 		names := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			names = append(names, entry.Name())

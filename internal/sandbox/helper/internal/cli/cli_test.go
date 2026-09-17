@@ -806,6 +806,19 @@ func TestBuiltHelperSubcommandsEmitSingleJSONEnvelope(t *testing.T) {
 		if envelope.Tool != "health" || envelope.Status == "" {
 			t.Fatalf("health envelope = %+v; want health envelope", envelope)
 		}
+		var result health.Result
+		if err := json.Unmarshal(envelope.Result, &result); err != nil {
+			t.Fatalf("decode health result: %v", err)
+		}
+		for _, check := range result.Checks {
+			if check.Name == "runtime_root" {
+				if !check.OK || check.Detail != runtimepath.Root() {
+					t.Fatalf("runtime root check = %+v; want successful check of private root %q", check, runtimepath.Root())
+				}
+				return
+			}
+		}
+		t.Fatal("health result omitted runtime_root check")
 	})
 }
 

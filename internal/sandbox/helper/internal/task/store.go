@@ -186,10 +186,6 @@ func currentRuntimeRoot() string {
 	return runtimepath.Root()
 }
 
-func setRuntimeRoot(root string) {
-	runtimepath.SetForTesting(root)
-}
-
 func taskLockPath() string {
 	return filepath.Join(tasksRoot(), ".task-limit.lock")
 }
