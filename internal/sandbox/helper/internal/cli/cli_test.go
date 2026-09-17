@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/health"
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/testfixture"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -31,6 +33,7 @@ func TestMainKeepsStderrDiagnosticsOutOfStdout(t *testing.T) {
 		}
 		os.Exit(0)
 	}
+	runtimeRoot := withCLIRuntime(t)
 	cmd := exec.Command(os.Args[0], "-test.run=TestMainKeepsStderrDiagnosticsOutOfStdout")
 	cmd.Env = append(os.Environ(), "TETRAL_HELPER_STDERR_PURITY=1")
 	var stdout bytes.Buffer
@@ -42,6 +45,10 @@ func TestMainKeepsStderrDiagnosticsOutOfStdout(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("helper stdout = %q; want no stderr diagnostics on stdout", stdout.String())
+	}
+	log, err := os.ReadFile(filepath.Join(runtimeRoot, "logs", "helper.log"))
+	if err != nil || string(log) != "diagnostic that must not reach stdout\n" {
+		t.Fatalf("private helper log = %q, %v; want redirected diagnostic", log, err)
 	}
 }
 
@@ -396,8 +403,6 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskID := "task_cli_real_detach"
-	taskPath := filepath.Join(runtimeRoot, "tasks", taskID)
-	t.Cleanup(func() { _ = os.RemoveAll(taskPath) })
 	payloadPath := writeCLIPayload(t, protocol.Payload{
 		SchemaVersion:  protocol.SchemaVersion,
 		Tool:           "exec",
@@ -455,9 +460,10 @@ func TestBuiltHelperDetachedExecReturnsPromptly(t *testing.T) {
 }
 
 func TestBuiltHelperRejectsForgedSupervisorPipeWithoutStartingTask(t *testing.T) {
+	runtimeRoot := withCLIRuntime(t)
 	bin := buildSandboxHelper(t)
 	taskID := "task_forged_supervisor_pipe"
-	taskPath := filepath.Join(filepath.Dir(payloadRoot), "tasks", taskID)
+	taskPath := filepath.Join(runtimeRoot, "tasks", taskID)
 	t.Cleanup(func() { _ = os.RemoveAll(taskPath) })
 	readFile, writeFile, err := os.Pipe()
 	if err != nil {
@@ -483,6 +489,82 @@ func TestBuiltHelperRejectsForgedSupervisorPipeWithoutStartingTask(t *testing.T)
 	}
 	if _, err := os.Stat(taskPath); !os.IsNotExist(err) {
 		t.Fatalf("forged supervisor created task state: %v", err)
+	}
+}
+
+// A missing task cannot distinguish the private store from the production
+// store. A terminal record present only in the fixture proves both paths read
+// the isolated state, including when running as an ordinary user.
+func TestPollReadsPrivateTaskState(t *testing.T) {
+	runtimeRoot := withCLIRuntime(t)
+	taskID := "task_private_terminal"
+	taskDir := filepath.Join(runtimeRoot, "tasks", taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := []byte(`{"exit_code":17,"duration_ms":23,"stdout":{"text":"private-result","total_bytes":14,"total_lines":1},"stderr":{"text":""}}`)
+	if err := os.WriteFile(filepath.Join(taskDir, "exit.json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A follow-up also sweeps expired records. Prove that sweep runs within
+	// the same private store, not against another Sandbox's task records.
+	expiredDir := filepath.Join(runtimeRoot, "tasks", "task_private_expired")
+	if err := os.MkdirAll(expiredDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expiredPath := filepath.Join(expiredDir, "exit.json")
+	if err := os.WriteFile(expiredPath, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(expiredPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildSandboxHelper(t)
+	for _, mode := range []string{"in_process", "built_helper"} {
+		t.Run(mode, func(t *testing.T) {
+			workspace := t.TempDir()
+			path := writeCLIPayload(t, protocol.Payload{
+				SchemaVersion: protocol.SchemaVersion, Tool: "poll", ToolUseEventID: "evt_private_" + mode,
+				WorkspaceRoot: workspace, Roots: []protocol.Root{{Path: workspace, Mode: protocol.RootModeReadWrite}},
+				Limits: protocol.Limits{VisibleBytes: 50 * 1024, VisibleLines: 2000},
+				Input:  json.RawMessage(`{"task_id":"` + taskID + `","wait_ms":0}`),
+			})
+			var output []byte
+			if mode == "built_helper" {
+				var err error
+				output, err = exec.Command(bin, "poll", "--payload", path).Output()
+				if err != nil {
+					t.Fatalf("private poll helper: %v\n%s", err, output)
+				}
+			} else {
+				var stdout bytes.Buffer
+				if code := runPoll(&stdout, path); code != 0 {
+					t.Fatalf("private poll exit = %d", code)
+				}
+				output = stdout.Bytes()
+			}
+			envelope := decodeSingleEnvelope(t, output)
+			var result struct {
+				TaskID   string `json:"task_id"`
+				ExitCode *int   `json:"exit_code"`
+				Stdout   struct {
+					Text string `json:"text"`
+				} `json:"stdout"`
+			}
+			if err := json.Unmarshal(envelope.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Status != protocol.ToolStatusSuccess || result.TaskID != taskID || result.ExitCode == nil || *result.ExitCode != 17 || result.Stdout.Text != "private-result" {
+				t.Fatalf("poll envelope = %s; want private terminal result", output)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("payload stat = %v; want removed", err)
+			}
+		})
+	}
+	if _, err := os.Stat(expiredDir); !os.IsNotExist(err) {
+		t.Fatalf("expired private task stat = %v; want swept", err)
 	}
 }
 
@@ -1103,10 +1185,10 @@ func TestOpenProtectedPayloadRejectsWritableRoot(t *testing.T) {
 	if err := os.WriteFile(payloadPath, []byte(`{}`), 0o600); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
-	if err := os.Chmod(payloadRoot, 0o770); err != nil {
+	if err := os.Chmod(filepath.Join(runtimepath.Root(), "tool-payloads"), 0o770); err != nil {
 		t.Fatalf("make payload root group-writable: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(payloadRoot, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(runtimepath.Root(), "tool-payloads"), 0o700) })
 
 	if _, _, _, err := openProtectedPayload(payloadPath, "evt_writable_root"); err == nil || !strings.Contains(err.Error(), "payload root is not protected") {
 		t.Fatalf("openProtectedPayload error = %v; want protected-root rejection", err)
@@ -1334,8 +1416,8 @@ func buildSandboxHelper(t *testing.T) string {
 	}
 	bin := filepath.Join(directory, "sandbox")
 	linkerValues := fmt.Sprintf(
-		"-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/task.runtimeRoot=%s -X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/cli.payloadRoot=%s",
-		runtimeRoot, payloadRoot,
+		"-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath.root=%s",
+		runtimeRoot,
 	)
 	build := exec.Command("go", "build", "-ldflags", linkerValues, "-o", bin, "../../cmd/sandbox")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -1350,7 +1432,7 @@ func cliPayloadPath(t *testing.T, toolUseEventID string) string {
 	if !helperIDPattern.MatchString(toolUseEventID) {
 		t.Fatalf("test payload id %q does not match helper id shape", toolUseEventID)
 	}
-	dir := filepath.Join(payloadRoot, toolUseEventID)
+	dir := filepath.Join(runtimepath.Root(), "tool-payloads", toolUseEventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("create payload dir: %v", err)
 	}
@@ -1360,11 +1442,11 @@ func cliPayloadPath(t *testing.T, toolUseEventID string) string {
 
 // CLI tests share process-wide identity hooks and run serially. Reuse one
 // fixture root for the test's payloads and its helper subprocesses, then restore
-// the default without touching an already-running helper's protected state.
+// the suite root without touching an already-running helper's protected state.
 func withCLIRuntime(t *testing.T) string {
 	t.Helper()
-	if payloadRoot != defaultPayloadRoot {
-		return filepath.Dir(payloadRoot)
+	if runtimepath.Root() != cliSuiteRuntimeRoot {
+		return runtimepath.Root()
 	}
 	// Keep control.sock paths short and the parent traversable after a root
 	// helper drops to the test workspace's runtime identity.
@@ -1372,10 +1454,11 @@ func withCLIRuntime(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("mkdir test runtime root: %v", err)
 	}
-	originalRoot := payloadRoot
-	payloadRoot = filepath.Join(runtimeRoot, "tool-payloads")
+	originalRoot := runtimepath.Root()
+	runtimepath.SetForTesting(runtimeRoot)
+	t.Setenv(testfixture.RuntimeRootEnv, runtimeRoot)
 	t.Cleanup(func() {
-		payloadRoot = originalRoot
+		runtimepath.SetForTesting(originalRoot)
 		if err := os.RemoveAll(runtimeRoot); err != nil {
 			t.Errorf("remove test runtime root: %v", err)
 		}

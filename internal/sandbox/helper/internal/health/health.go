@@ -16,12 +16,12 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/patch"
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
 const (
 	HelperFailureKind = protocol.ErrorKindHelperFailure
-	RuntimeRoot       = "/tmp/tetral-runtime"
 	FuseConfPath      = "/etc/fuse.conf"
 
 	healthCommandDeadline = 5 * time.Second
@@ -58,7 +58,7 @@ type Checker struct {
 func NewChecker(version string) Checker {
 	return Checker{
 		Version:         version,
-		RuntimeRoot:     RuntimeRoot,
+		RuntimeRoot:     runtimepath.Root(),
 		FuseConfPath:    FuseConfPath,
 		LookPath:        exec.LookPath,
 		RunCommand:      runCommand,
@@ -98,7 +98,7 @@ func (c Checker) withDefaults() Checker {
 		c.Version = "dev"
 	}
 	if c.RuntimeRoot == "" {
-		c.RuntimeRoot = RuntimeRoot
+		c.RuntimeRoot = runtimepath.Root()
 	}
 	if c.FuseConfPath == "" {
 		c.FuseConfPath = FuseConfPath

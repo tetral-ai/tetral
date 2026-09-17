@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 )
 
 var privilegeTestRuntimeRoot = fmt.Sprintf("/tmp/tetral-runtime-privilege-%d", os.Getpid())
@@ -56,9 +58,8 @@ func TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop(t *testing.T
 	t.Cleanup(func() { _ = os.RemoveAll(helperDir) })
 	helper := filepath.Join(helperDir, "sandbox")
 	linkerValues := fmt.Sprintf(
-		"-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/task.runtimeRoot=%s -X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/cli.payloadRoot=%s",
+		"-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath.root=%s",
 		privilegeTestRuntimeRoot,
-		filepath.Join(privilegeTestRuntimeRoot, "tool-payloads"),
 	)
 	build := exec.Command("go", "build", "-ldflags", linkerValues, "-o", helper, "./cmd/sandbox")
 	build.Dir = helperRoot(t)
@@ -305,7 +306,8 @@ func TestSupervisorHiddenEntrypointsRejectMissingMalformedAndUserForgedCapabilit
 		return
 	}
 	helper := filepath.Join(t.TempDir(), "sandbox")
-	build := exec.Command("go", "build", "-o", helper, "./cmd/sandbox")
+	linkerValues := "-X github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath.root=" + runtimepath.Root()
+	build := exec.Command("go", "build", "-ldflags", linkerValues, "-o", helper, "./cmd/sandbox")
 	build.Dir = helperRoot(t)
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build real helper: %v\n%s", err, output)

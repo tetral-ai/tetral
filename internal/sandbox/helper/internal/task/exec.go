@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +60,7 @@ const (
 
 const foregroundShellWrapper = `
 tetral_shell_pid=$$
-tetral_runtime_root="/tmp/tetral-runtime/foreground"
+tetral_runtime_root="$3"
 mkdir -p "$tetral_runtime_root"
 tetral_done="${tetral_runtime_root}/${tetral_shell_pid}.done"
 rm -f "$tetral_done"
@@ -276,7 +277,7 @@ func runForeground(cmdText string, cwd string, env []string, wait time.Duration,
 	if _, err := os.Stat(shell); err != nil {
 		shell = "/bin/sh"
 	}
-	cmd := exec.Command(shell, "-c", foregroundShellWrapper, "tetral-helper-exec", shell, cmdText) //nolint:gosec // The exec tool intentionally runs caller-supplied commands inside the sandbox helper boundary.
+	cmd := exec.Command(shell, "-c", foregroundShellWrapper, "tetral-helper-exec", shell, cmdText, filepath.Join(currentRuntimeRoot(), "foreground")) //nolint:gosec // The exec tool intentionally runs caller-supplied commands inside the sandbox helper boundary.
 	cmd.Dir = cwd
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}

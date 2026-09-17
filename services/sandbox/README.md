@@ -436,10 +436,14 @@ unchanged.
 
 ## Testing
 
-Helper CLI tests create a private runtime directory for their request payloads
-and detached-task state. Helpers built by those tests use the same private
-paths, so the tests can run inside an active Sandbox without writing to its
-root-owned payload directory or cleaning up its task records.
+Helper tests that access runtime state use a private temporary root for
+payloads, task records and sweeping, foreground-command state, diagnostics,
+and health checks. Test executables set this root before running helper code;
+reexecuted tests inherit it, and helpers built by tests receive it through a
+single linker override. Path-safety fixtures also live under the private root,
+which retains the same forbidden-path protection. Cleanup removes only owned
+test directories. The production helper still uses `/tmp/tetral-runtime` and
+has no environment-variable or CLI override for its runtime root.
 
 Focused tests live in `services/sandbox`, `internal/sandbox`, and
 `services/sandbox/internal/resourceprojection`. Database-backed lifecycle and

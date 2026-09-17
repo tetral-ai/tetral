@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -349,7 +350,7 @@ func TestResolveExecCWDAllowsOutsideWorkspaceButRejectsForbiddenAndFiles(t *test
 
 func makeForbiddenFixture(t *testing.T) string {
 	t.Helper()
-	root := "/tmp/tetral-runtime"
+	root := runtimepath.Root()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("mkdir forbidden root: %v", err)
 	}

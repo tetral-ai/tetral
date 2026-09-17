@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -18,7 +19,7 @@ const (
 )
 
 var forbiddenRoots = []string{
-	"/tmp/tetral-runtime",
+	runtimepath.DefaultRoot,
 	"/dev/shm/tetral-runtime",
 }
 
@@ -276,6 +277,9 @@ func underOrEqual(pathValue string, root string) bool {
 }
 
 func isForbidden(pathValue string) bool {
+	if underOrEqual(filepath.Clean(pathValue), runtimepath.Root()) {
+		return true
+	}
 	cleaned := filepath.Clean(pathValue)
 	for _, root := range forbiddenRoots {
 		if underOrEqual(cleaned, root) {

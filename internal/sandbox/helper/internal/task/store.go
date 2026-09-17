@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/bound"
+	"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/runtimepath"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -182,15 +183,11 @@ func tasksRoot() string {
 }
 
 func currentRuntimeRoot() string {
-	runtimeRootMu.RLock()
-	defer runtimeRootMu.RUnlock()
-	return runtimeRoot
+	return runtimepath.Root()
 }
 
 func setRuntimeRoot(root string) {
-	runtimeRootMu.Lock()
-	defer runtimeRootMu.Unlock()
-	runtimeRoot = root
+	runtimepath.SetForTesting(root)
 }
 
 func taskLockPath() string {
