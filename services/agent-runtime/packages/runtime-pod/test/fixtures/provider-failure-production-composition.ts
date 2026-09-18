@@ -218,11 +218,15 @@ const providerClientRegistry = new ProviderClientRegistry({
 		sql: credentialSQL,
 		masterKeyHex: credentialMasterKeyHex,
 		fetch: Object.assign(
-			async () =>
-				new Response('{"error":"invalid_grant"}', {
+			async () => {
+				// Credential rejection must survive refresh latency beyond the short
+				// watchdog used only by the semantic-timeout scenarios below.
+				await new Promise((resolve) => setTimeout(resolve, 80));
+				return new Response('{"error":"invalid_grant"}', {
 					status: 400,
 					headers: { "content-type": "application/json" },
-				}),
+				});
+			},
 			{ preconnect: () => {} },
 		),
 	}),
@@ -458,11 +462,17 @@ const gatewayService = new ProviderGatewayServiceShell({
 		error: (record) => gatewayLogs.push(record),
 	},
 	credentialResolver,
-	providerStreamTimeouts: {
-		firstByteTimeoutMs: 500,
-		interChunkTimeoutMs: 100,
-		semanticProgressTimeoutMs: 40,
-	},
+	// Only timeout scenarios intentionally race provider progress against a
+	// short watchdog. Credential and billing scenarios use the normal limits,
+	// bounded by the request budget, without racing refresh I/O against 40 ms.
+	providerStreamTimeouts:
+		scenario === "semantic_timeout" || scenario === "semantic_tool_route"
+			? {
+					firstByteTimeoutMs: 500,
+					interChunkTimeoutMs: 100,
+					semanticProgressTimeoutMs: 40,
+				}
+			: undefined,
 	providerStreamer:
 		scenario === "semantic_timeout" || scenario === "semantic_tool_route"
 			? semanticTimeoutStreamer
