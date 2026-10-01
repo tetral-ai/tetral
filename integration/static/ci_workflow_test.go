@@ -133,6 +133,7 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 		t.Error("the symbol-level scan step must run under set -euo pipefail so a failing slice fails the job")
 	}
 	expectedSlices := []string{
+		"./cmd/...",
 		"./database/...",
 		"./deploy/...",
 		"./integration/...",
@@ -166,6 +167,39 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 	// the slice list, so the split cannot silently under-cover new code.
 	if !strings.Contains(job, "go list ./...") || !strings.Contains(job, "exit 1") {
 		t.Error("the govulncheck job must sweep go list ./... and exit non-zero on trees missing from the slice list")
+	}
+	coverageStep, found := workflowStepNamed(job, "Slice coverage guard")
+	if !found {
+		t.Fatal("the govulncheck job must contain a slice coverage guard")
+	}
+	coveragePatterns := regexp.MustCompile(`grep -vE '([^']+)'`).FindAllStringSubmatch(coverageStep, -1)
+	if len(coveragePatterns) != 1 {
+		t.Fatalf("coverage guard must declare one package-tree pattern; got %d", len(coveragePatterns))
+	}
+	coveragePattern, err := regexp.Compile(coveragePatterns[0][1])
+	if err != nil {
+		t.Fatalf("compile coverage guard package-tree pattern: %v", err)
+	}
+	// Every scanned tree must also pass the coverage guard. Unknown trees
+	// must still fail, including names that merely share a covered prefix.
+	for _, slice := range append(expectedSlices, "./services/sandbox/...") {
+		tree := "github.com/tetral-ai/tetral/" + strings.TrimSuffix(strings.TrimPrefix(slice, "./"), "/...")
+		for _, pkg := range []string{tree, tree + "/nested"} {
+			if !coveragePattern.MatchString(pkg) {
+				t.Errorf("coverage guard rejects scanned package tree %q", pkg)
+			}
+		}
+	}
+	for _, pkg := range []string{
+		"github.com/tetral-ai/tetral/future",
+		"github.com/tetral-ai/tetral/cmdish",
+		"github.com/tetral-ai/tetral/services/future",
+		"github.com/tetral-ai/tetral/services/sandboxish",
+		"example.com/tetral/cmd",
+	} {
+		if coveragePattern.MatchString(pkg) {
+			t.Errorf("coverage guard silently accepts unscanned package tree %q", pkg)
+		}
 	}
 
 	// (d) the module-level step covers the sandbox closure from a directory
