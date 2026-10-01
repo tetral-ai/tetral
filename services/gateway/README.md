@@ -279,9 +279,14 @@ it preserves the stated invariants and passes the named suites.
   points — a raw-wire mutation elsewhere is a boundary violation. Provider
   fetches may target only catalog base URLs plus the OAuth issuer/subscription
   endpoints (the app-layer allowlist, fully separate from the web tool's
-  SSRF classification, which lives in the `web-connector` service). AI SDK versions are pinned. Abort must deterministically error
-  the stream so `streamText` cannot hang.
+  SSRF classification, which lives in the `web-connector` service). AI SDK
+  versions are pinned; workspace overrides keep the patched provider utilities
+  and their matching provider types consistent across the pinned adapters. Abort
+  must deterministically error the stream so `streamText` cannot hang.
 - **Conformance.** `packages/provider-gateway/test/unit/clients.test.ts`,
+  `packages/provider-gateway/test/unit/provider-response-bounds.test.ts`
+  (buffered SDK responses reject an advertised size above the upstream cap and
+  cancel the body; adapter error paths preserve safe retryable failures),
   the golden wire suite
   (`packages/provider-gateway/test/golden/*` — captured outbound request bytes
   and headers, plus recorded SSE replay per provider including cache-hit usage

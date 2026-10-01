@@ -8,8 +8,8 @@ const serviceRoot = new URL("../../", providerRoot);
 
 const aiSdkDirectDependencyPins: Record<string, string> = {
   ai: "6.0.168",
-  "@ai-sdk/provider": "3.0.8",
-  "@ai-sdk/provider-utils": "4.0.23",
+  "@ai-sdk/provider": "3.0.12",
+  "@ai-sdk/provider-utils": "4.0.33",
   "@ai-sdk/anthropic": "3.0.82",
   "@ai-sdk/openai": "3.0.53",
   "@ai-sdk/openai-compatible": "2.0.41",

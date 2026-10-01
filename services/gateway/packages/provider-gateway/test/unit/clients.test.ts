@@ -1398,6 +1398,62 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(events[0]?.finish?.metadataJson).toBe(JSON.stringify({ credential_source: "session" }));
   });
 
+  for (const { name, request, credential } of [
+    { name: "Anthropic", request: anthropicRequest(), credential: sessionAnthropicCredential() },
+    { name: "OpenAI", request: openAIRequest(), credential: sessionOpenAICredential() },
+    { name: "OpenAI-compatible", request: deepSeekRequest(), credential: sessionDeepSeekCredential() },
+  ]) {
+    test(`${name} adapter cancels oversized error bodies and raises one safe retryable failure`, async () => {
+      let calls = 0;
+      let reads = 0;
+      let cancellations = 0;
+      const registry = new ProviderClientRegistry({
+        fetch: Object.assign(async () => {
+          calls += 1;
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(controller) {
+              reads += 1;
+              if (reads === 1) {
+                controller.enqueue(new TextEncoder().encode('{"error":{"message":"private-body-canary"}}'));
+              } else {
+                controller.close();
+              }
+            },
+            cancel() { cancellations += 1; },
+          }, { highWaterMark: 0 }), {
+            status: 500,
+            headers: {
+              "content-type": "application/json",
+              "content-length": String(2 * 1024 * 1024 * 1024 + 1),
+            },
+          });
+        }, { preconnect: () => {} }),
+      });
+
+      const events: ProviderStreamEvent[] = [];
+      const error = await caughtError((async () => {
+        for await (const event of registry.stream({ request, credential })) {
+          events.push(event);
+        }
+      })());
+      expect(error).toBeInstanceOf(ProviderKeyFailureError);
+      expect(calls).toBe(1);
+      expect(cancellations).toBe(1);
+      // The gateway transport wrapper may prefetch one chunk; the SDK must
+      // cancel rather than consume an advertised oversized response.
+      expect(reads).toBeLessThanOrEqual(1);
+      expect(events).toHaveLength(0);
+      expect((error as ProviderKeyFailureError).classification.providerError).toEqual({
+        code: "provider_stream_error",
+        message: "Provider returned a retryable server error.",
+        retryable: true,
+        fatal: false,
+        statusCode: 500,
+        retryAfterMs: 0,
+      });
+    });
+  }
+
   test("classifies Anthropic body errors so service can switch platform keys before first byte", async () => {
     const request = anthropicRequest({ attachments: [] });
     const registry = new ProviderClientRegistry({
