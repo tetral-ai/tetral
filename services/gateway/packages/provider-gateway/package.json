@@ -14,7 +14,7 @@
     "@ai-sdk/openai-compatible": "2.0.41",
     "@ai-sdk/provider": "3.0.12",
     "@ai-sdk/provider-utils": "4.0.33",
-    "@grpc/grpc-js": "1.14.4",
+    "@grpc/grpc-js": "1.14.5",
     "@bufbuild/protobuf": "2.12.0",
     "@tetral/gateway-lowering": "workspace:*",
     "@tetral/gateway-protocol": "workspace:*",

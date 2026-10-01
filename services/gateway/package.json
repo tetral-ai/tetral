@@ -46,7 +46,7 @@
     "@ai-sdk/provider": "3.0.12",
     "@ai-sdk/provider-utils": "4.0.33",
     "@bufbuild/protobuf": "2.12.0",
-    "@grpc/grpc-js": "1.14.4",
+    "@grpc/grpc-js": "1.14.5",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tetral/gateway-lowering": "workspace:*",
     "@tetral/mcp-connector": "workspace:*",
@@ -58,10 +58,10 @@
   "overrides": {
     "protobufjs": "7.6.5",
     "zod": "4.4.3",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.8",
     "qs": "6.16.0",
-    "ip-address": "10.4.0",
-    "hono": "4.12.34",
+    "ip-address": "10.7.1",
+    "hono": "4.13.7",
     "@hono/node-server": "2.0.10",
     "@ai-sdk/provider": "3.0.12",
     "@ai-sdk/provider-utils": "4.0.33"

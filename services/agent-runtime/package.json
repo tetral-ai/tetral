@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.12.0",
-    "@grpc/grpc-js": "1.14.4",
+    "@grpc/grpc-js": "1.14.5",
     "@tetral/gateway-protocol": "file:../gateway/packages/protocol",
     "effect": "4.0.0-beta.66",
     "zod": "4.4.3"
