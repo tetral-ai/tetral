@@ -37,6 +37,15 @@ installation can update ignored files such as `node_modules` even while Git
 reports a clean working tree. These installed files remain after verification;
 the runner removes only temporary checkouts it created itself.
 
+SDK pin changes also require the SDK's standalone source compatibility profile;
+the repository's protocol checks validate types and proof registration but do
+not execute that profile. From a clean SDK checkout at the runner's pinned
+commit, install frozen dependencies with lifecycle scripts disabled, run
+`bash ./scripts/build`, then run
+`TETRAL_ENGINE_ROOT=/absolute/path/to/engine bun run test:compatibility:static`.
+These source proofs complement the local SDK integration suite; they do not
+establish runtime or database interoperability by themselves.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.
