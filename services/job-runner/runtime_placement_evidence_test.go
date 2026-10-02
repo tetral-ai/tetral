@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,9 +172,10 @@ func TestPostgreSQLRuntimePlacementVectorsAndFiniteDraws(t *testing.T) {
 	}
 }
 
-// Actual ActivateRuntimeRecovery uses a real Queue capability and production
-// placement assembly to feed the process sink and metric collector. Parse the process sink rather than raw slog
-// records so stripped fields, unsafe strings and exhausted summaries are caught.
+// Actual recovery activation and mail/task preparation use real Queue
+// capabilities and production placement assembly. Parse the process sink rather
+// than raw slog records so stripped identities, unsafe strings and incorrectly
+// classified committed/reused outcomes are caught.
 func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	client := dbconnect.NewClientForTesting(runtime)
@@ -309,5 +311,141 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				t.Fatalf("distinguishing finite metric reason=%v want%d", reasons, wantCount)
 			}
 		})
+	}
+	for _, inputKind := range []string{"agent_mail", "task_notification"} {
+		for _, bindingState := range []string{"fresh_sample", "existing_reuse"} {
+			t.Run(inputKind+"/"+bindingState, func(t *testing.T) {
+				ctx := context.Background()
+				kindLabel, stateLabel := "mail", "fresh"
+				if inputKind == "task_notification" {
+					kindLabel = "task"
+				}
+				if bindingState == "existing_reuse" {
+					stateLabel = "reuse"
+				}
+				sessionID := "sesn_diag_" + kindLabel + "_" + stateLabel
+				threadID := "thread-" + sessionID
+				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				candidate := candidates[0]
+				if bindingState == "existing_reuse" {
+					seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "binding-"+sessionID, 1, candidate.PodUID)
+					candidate.PodName, candidate.PodIP = "runtime-pod-0", "10.0.0.10"
+				}
+				q := queue.NewPostgreSQLStore(client)
+				if inputKind == "agent_mail" {
+					childID := "child-" + sessionID
+					seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
+					deliveryID := "delivery-" + sessionID
+					messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "PRIVATE_SENTINEL"))
+					seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "sent-"+sessionID, 1, "agent.thread_message_sent",
+						bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "source-"+sessionID, messageJSON))
+					seedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Now())
+				} else {
+					taskID := "task-" + sessionID
+					seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, "", taskID, "source-"+sessionID)
+					settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"status":"completed","stdout":{"text":"PRIVATE_SENTINEL","truncated":false},"stderr":{"text":"","truncated":false}}`)
+					if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_inbox (
+						workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
+					) VALUES ('default',$1,$2,$3,'task_notification','[]','queued',clock_timestamp(),clock_timestamp())`, sessionID, threadID, "task_notification:"+taskID); err != nil {
+						t.Fatal(err)
+					}
+					enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest("default", sessionID, threadID, taskID, time.Now())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := q.Enqueue(ctx, enqueue); err != nil {
+						t.Fatal(err)
+					}
+				}
+				leased, err := q.Lease(ctx, queue.LeaseRequest{WorkspaceID: "default", Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "input-diagnostic-runner", MaxJobs: 1, LeaseDuration: time.Minute})
+				if err != nil || len(leased) != 1 {
+					t.Fatalf("actual input Queue capability=%v/%v", leased, err)
+				}
+				job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+				if err != nil || job.InputKind != inputKind || job.SessionID != sessionID {
+					t.Fatalf("actual leased input=%+v/%v", job, err)
+				}
+				var probes atomic.Int32
+				httpClient := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					probes.Add(1)
+					_, _ = io.WriteString(w, placementVectorBody(0, 100))
+				}))
+				var sink bytes.Buffer
+				owner := workload.NewProcessLogger(&sink, "job-runner", "test", "unit", workload.DefaultDiagnosticConfig())
+				defer owner.CloseWithBudget()
+				store := NewPostgreSQLRuntimeDeliveryStore(client, 19090)
+				store.Logger = owner.Logger
+				store.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+					return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{candidate})
+				}}
+				plan, err := store.PrepareRuntimeCommand(ctx, job)
+				if err != nil || !plan.hasCommand() {
+					t.Fatalf("actual %s preparation=%+v/%v", inputKind, plan, err)
+				}
+				var persisted runtimecontrol.Binding
+				if err := admin.QueryRowContext(ctx, `SELECT binding_id,binding_generation,agent_runtime_namespace,
+					agent_runtime_pod_name,agent_runtime_pod_uid,agent_runtime_pod_ip,runtime_process_id
+					FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(
+					&persisted.BindingID, &persisted.BindingGeneration, &persisted.Namespace, &persisted.PodName, &persisted.PodUID, &persisted.PodIP, &persisted.RuntimeProcessID); err != nil {
+					t.Fatal(err)
+				}
+				wantProcessID := "process_" + candidate.PodUID
+				if persisted.RuntimeProcessID != wantProcessID || persisted.PodUID != candidate.PodUID {
+					t.Fatalf("persisted binding=%+v; want actual accepting candidate", persisted)
+				}
+				wantTarget := RuntimePodTarget{Namespace: persisted.Namespace, PodName: persisted.PodName, PodUID: persisted.PodUID, PodIP: persisted.PodIP, RuntimeProcessID: persisted.RuntimeProcessID, Port: 19090}
+				wantAttempt := RuntimeAttemptedBinding{BindingID: persisted.BindingID, Generation: persisted.BindingGeneration, TargetPodUID: persisted.PodUID, RuntimeProcessID: persisted.RuntimeProcessID}
+				if plan.Target != wantTarget || plan.AttemptedBinding != wantAttempt {
+					t.Errorf("prepared target/attempt=%+v/%+v; want persisted tuple %+v/%+v", plan.Target, plan.AttemptedBinding, wantTarget, wantAttempt)
+				}
+				var rpcBindingID, rpcPodUID, rpcProcessID string
+				var rpcGeneration int64
+				if inputKind == "agent_mail" {
+					if plan.AcceptAgentMail == nil || plan.AcceptTask != nil {
+						t.Fatalf("wrong actual mail command=%+v", plan)
+					}
+					rpcBindingID, rpcGeneration, rpcPodUID, rpcProcessID = plan.AcceptAgentMail.GetBindingId(), plan.AcceptAgentMail.GetBindingGeneration(), plan.AcceptAgentMail.GetTargetPodUid(), plan.AcceptAgentMail.GetRuntimeProcessId()
+				} else {
+					if plan.AcceptTask == nil || plan.AcceptAgentMail != nil {
+						t.Fatalf("wrong actual task command=%+v", plan)
+					}
+					rpcBindingID, rpcGeneration, rpcPodUID, rpcProcessID = plan.AcceptTask.GetBindingId(), plan.AcceptTask.GetBindingGeneration(), plan.AcceptTask.GetTargetPodUid(), plan.AcceptTask.GetRuntimeProcessId()
+				}
+				if rpcBindingID != persisted.BindingID || rpcGeneration != persisted.BindingGeneration || rpcPodUID != persisted.PodUID || rpcProcessID != persisted.RuntimeProcessID {
+					t.Errorf("actual RPC identity=%s/%d/%s/%s; want persisted %+v", rpcBindingID, rpcGeneration, rpcPodUID, rpcProcessID, persisted)
+				}
+				owner.CloseWithBudget()
+				output := sink.String()
+				decoder := json.NewDecoder(strings.NewReader(output))
+				var record map[string]any
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatal(err)
+				}
+				var extra map[string]any
+				if err := decoder.Decode(&extra); err != io.EOF {
+					t.Fatalf("expected one actual placement record: extra=%v/%v", extra, err)
+				}
+				for key, want := range map[string]any{"event": "runtime_placement", "workspace.id": "default", "session.id": sessionID, "job.id": job.JobID, "kubernetes.uid": persisted.PodUID, "runtime.process.id": persisted.RuntimeProcessID} {
+					if record[key] != want {
+						t.Errorf("actual safe sink %s=%v; want %v: %v", key, record[key], want, record)
+					}
+				}
+				if strings.Contains(output, "PRIVATE_SENTINEL") {
+					t.Fatal("placement sink leaked input payload")
+				}
+				if bindingState == "existing_reuse" {
+					if probes.Load() != 0 || plan.placement != nil || record["outcome"] != "reused" || record["runtime.placement.sampled_pod_uid"] != nil || persisted.BindingID != "binding-"+sessionID || persisted.BindingGeneration != 1 {
+						t.Errorf("bound input must reuse original identity without sampling: probes=%d plan=%+v record=%v", probes.Load(), plan, record)
+					}
+				} else {
+					if probes.Load() != 1 || plan.placement == nil {
+						t.Fatalf("fresh input must sample actual candidate once: probes=%d plan=%+v", probes.Load(), plan)
+					}
+					if plan.placement.ProcessID != persisted.RuntimeProcessID || plan.placement.Candidate.PodUID != persisted.PodUID || record["outcome"] != "committed" || record["runtime.placement.sampled_pod_uid"] != persisted.PodUID || record["runtime.placement.candidate.1.runtime.process.id"] != persisted.RuntimeProcessID || record["runtime.placement.candidate.1.reason"] != "eligible" {
+						t.Errorf("fresh input must report sampled=committed winner: choice=%+v record=%v", plan.placement, record)
+					}
+				}
+			})
+		}
 	}
 }

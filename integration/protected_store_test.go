@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,6 +112,9 @@ func TestPostgreSQLProtectedStoreConnections(t *testing.T) {
 	if max := owned.RawDatabaseForExcludedStores.Stats().MaxOpenConnections; max != 20 {
 		t.Fatalf("native trust retirement changed operator pool bound: %d", max)
 	}
+	t.Run("NativeNotificationLifecycle", func(t *testing.T) {
+		testProtectedNotificationLifecycle(ctx, t, p, sql, root2)
+	})
 	seed := `CREATE TABLE session_provider_auth (workspace_id text, session_id text, provider_id text,vault_id text,credential_id text,access_mode text,deleted_at text,updated_at text);
  CREATE TABLE sessions (workspace_id text,id text,vault_ids_json text);
  CREATE TABLE credentials (workspace_id text,vault_id text,id text,auth_type text,provider_id text,access_mode text,encrypted_auth bytea,archived_at text,revoked_at text,auth_public_json text,updated_at text,expires_at text,mcp_server_url text);
@@ -309,6 +314,127 @@ func TestPostgreSQLProtectedStoreConnections(t *testing.T) {
 	if exit, err := child.Wait(ctx); err != nil || exit != 0 {
 		t.Fatalf("locked Bun fixture exit %d %v", exit, err)
 	}
+}
+
+func testProtectedNotificationLifecycle(ctx context.Context, t *testing.T, p *transporttest.PostgreSQL, admin *sql.DB, replacement *transporttest.Authority) {
+	t.Helper()
+	trust := filepath.Join(t.TempDir(), "notification-trust")
+	p.Trust(t, trust, "initial", p.Authority.PEM)
+	const application = "protected_notification_fixture"
+	const channel = "protected_notification_fixture"
+	opened := transporttest.Must(dbconnect.OpenProtectedDSN(ctx, p.URL+"&application_name="+application, filepath.Join(trust, "ca.pem"), "postgres.transport.test"))
+	t.Cleanup(func() {
+		if err := opened.Client.Close(); err != nil {
+			t.Errorf("notification owner cleanup: %v", err)
+		}
+	})
+	type listener struct {
+		cancel   context.CancelFunc
+		ready    chan struct{}
+		payloads chan string
+		done     chan struct{}
+		err      error
+	}
+	start := func() *listener {
+		listenCtx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		l := &listener{cancel: cancel, ready: make(chan struct{}), payloads: make(chan string, 2), done: make(chan struct{})}
+		go func() {
+			defer close(l.done)
+			l.err = opened.Client.Listen(listenCtx, "transport.listen", channel, func() { close(l.ready) }, func(payload string) { l.payloads <- payload })
+		}()
+		t.Cleanup(func() {
+			l.cancel()
+			select {
+			case <-l.done:
+			case <-time.After(2 * time.Second):
+				t.Error("notification listener cleanup did not join")
+			}
+		})
+		select {
+		case <-l.ready:
+		case <-l.done:
+			t.Fatalf("protected listener failed before readiness: %v", l.err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("protected listener did not become ready")
+		}
+		return l
+	}
+	notify := func(l *listener, payload string) {
+		if _, err := admin.ExecContext(ctx, "SELECT pg_notify($1,$2)", channel, payload); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case actual := <-l.payloads:
+			if actual != payload {
+				t.Fatalf("notification payload=%q want%q", actual, payload)
+			}
+		case <-l.done:
+			t.Fatalf("protected listener ended without delivering payload: %v", l.err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("protected listener did not deliver committed notification")
+		}
+	}
+	stop := func(l *listener) {
+		l.cancel()
+		select {
+		case <-l.done:
+			if !errors.Is(l.err, context.Canceled) {
+				t.Fatalf("listener cancellation changed classification: %v", l.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("notification listener cancellation did not join")
+		}
+	}
+	exists := func(pid int) bool {
+		var count int
+		if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid=$1", pid).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count != 0
+	}
+	listenerPID := func() int {
+		var pid int
+		var secure bool
+		if err := admin.QueryRowContext(ctx, "SELECT activity.pid, transport.ssl FROM pg_stat_activity activity JOIN pg_stat_ssl transport USING(pid) WHERE application_name=$1", application).Scan(&pid, &secure); err != nil || !secure {
+			t.Fatalf("listener connection is not independently observed TLS: ssl=%t err=%v", secure, err)
+		}
+		if opened.Client.Stats().InUse != 1 {
+			t.Fatal("listener did not hold exactly one counted pool lease")
+		}
+		return pid
+	}
+	first := start()
+	oldPID := listenerPID()
+	notify(first, "before-trust-update")
+	var idlePID int
+	if err := opened.RawDatabaseForExcludedStores.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&idlePID); err != nil || idlePID == oldPID {
+		t.Fatalf("fixture did not create a separate idle pool connection: pid=%d err=%v", idlePID, err)
+	}
+	p.Trust(t, trust, "overlap", append(append([]byte{}, p.Authority.PEM...), replacement.PEM...))
+	// Idle socket retirement independently establishes activation. No sleep or
+	// readiness callback substitutes for the active listener's actual payload.
+	awaitStore(t, 5*time.Second, func() bool { return !exists(idlePID) })
+	if !exists(oldPID) || opened.Client.Stats().InUse != 1 {
+		t.Fatal("valid trust activation terminated the admitted listener")
+	}
+	notify(first, "after-trust-update")
+	stop(first)
+	awaitStore(t, 3*time.Second, func() bool { return !exists(oldPID) })
+	if opened.Client.Stats().InUse != 0 {
+		t.Fatal("cancelled listener retained its pool lease")
+	}
+	second := start()
+	newPID := listenerPID()
+	if newPID == oldPID || newPID == idlePID {
+		t.Fatal("fresh listener reborrowed a retired trust-generation connection")
+	}
+	notify(second, "fresh-trust-listener")
+	stop(second)
+	if stats := opened.Client.Stats(); stats.InUse != 0 || stats.MaxOpenConnections != 20 {
+		t.Fatalf("listener cleanup changed pool ownership or bound: %+v", stats)
+	}
+	t.Logf("protected notification TLS PIDs old=%d idle=%d fresh=%d; activation retained listener, cancellation joined and retired it", oldPID, idlePID, newPID)
 }
 func fixtureHTTP(ctx context.Context, base, path string, input any, output any) error {
 	body := []byte("{}")

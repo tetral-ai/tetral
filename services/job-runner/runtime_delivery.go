@@ -3493,11 +3493,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{
-			Namespace: binding.Namespace,
-			PodName:   binding.PodName,
-			PodUID:    binding.PodUID,
-			PodIP:     binding.PodIP,
-			Port:      port,
+			Namespace:        binding.Namespace,
+			PodName:          binding.PodName,
+			PodUID:           binding.PodUID,
+			RuntimeProcessID: binding.RuntimeProcessID,
+			PodIP:            binding.PodIP,
+			Port:             port,
 		},
 		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
 		AcceptAgentMail: &agentruntimev1.AcceptAgentMailRequest{
@@ -3580,11 +3581,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 			ResultJSON:           payloadJSON,
 		}, RuntimeCommandPlan{
 			Target: RuntimePodTarget{
-				Namespace: binding.Namespace,
-				PodName:   binding.PodName,
-				PodUID:    binding.PodUID,
-				PodIP:     binding.PodIP,
-				Port:      port,
+				Namespace:        binding.Namespace,
+				PodName:          binding.PodName,
+				PodUID:           binding.PodUID,
+				RuntimeProcessID: binding.RuntimeProcessID,
+				PodIP:            binding.PodIP,
+				Port:             port,
 			},
 			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
 			AcceptTask: &agentruntimev1.AcceptTaskNotificationRequest{

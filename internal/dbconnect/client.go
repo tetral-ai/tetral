@@ -186,8 +186,9 @@ func (c *Client) QueryRow(ctx context.Context, operation string, query string, a
 }
 
 // Listen holds one dedicated PostgreSQL connection until ctx is cancelled or
-// the connection fails. Notifications are hints only; callers must re-read
-// their durable source after onReady and onNotification.
+// the connection fails, including when protected trust changes during the wait.
+// Readiness follows driver validation and successful LISTEN. Notifications are
+// hints only; callers must re-read their durable source after each callback.
 func (c *Client) Listen(ctx context.Context, operation string, channel string, onReady func(), onNotification func(string)) error {
 	if err := c.validateOperation(operation); err != nil {
 		return err
@@ -200,6 +201,15 @@ func (c *Client) Listen(ctx context.Context, operation string, channel string, o
 		return c.classifyRuntimeError(operation, err)
 	}
 	defer func() { _ = conn.Close() }()
+	// Validate the two owned pgx compositions before announcing readiness. Keep
+	// the stdlib statement path and the same database/sql lease; unwrapping does
+	// not replace the protected driver's return-time generation validator.
+	if err := conn.Raw(func(raw any) error {
+		_, err := notificationDriverConnection(raw)
+		return err
+	}); err != nil {
+		return c.classifyRuntimeError(operation, err)
+	}
 	if _, err := conn.ExecContext(ctx, "LISTEN "+channel); err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
@@ -207,9 +217,9 @@ func (c *Client) Listen(ctx context.Context, operation string, channel string, o
 		onReady()
 	}
 	err = conn.Raw(func(raw any) error {
-		stdlibConn, ok := raw.(*stdlib.Conn)
-		if !ok {
-			return errors.New("dbconnect: notification listener requires the pgx stdlib driver")
+		stdlibConn, err := notificationDriverConnection(raw)
+		if err != nil {
+			return err
 		}
 		for {
 			notification, waitErr := stdlibConn.Conn().WaitForNotification(ctx)
@@ -225,6 +235,23 @@ func (c *Client) Listen(ctx context.Context, operation string, channel string, o
 		return err
 	}
 	return c.classifyRuntimeError(operation, err)
+}
+
+// The native connection is used only inside sql.Conn.Raw. Supporting our
+// wrapper preserves the pool lease and its validator instead of opening an
+// uncounted connection or accepting an unrelated driver's escape hatch.
+func notificationDriverConnection(raw any) (*stdlib.Conn, error) {
+	switch conn := raw.(type) {
+	case *stdlib.Conn:
+		if conn != nil {
+			return conn, nil
+		}
+	case *protectedConnection:
+		if conn != nil && conn.Conn != nil {
+			return conn.Conn, nil
+		}
+	}
+	return nil, errors.New("dbconnect: notification listener requires the pgx stdlib driver")
 }
 
 func (c *Client) WithTx(ctx context.Context, operation string, opts *sql.TxOptions, fn func(*Tx) error) error {
