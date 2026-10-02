@@ -10,9 +10,11 @@ import {
 import { runMcpConnectorCommand } from "../../src/command.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import type { McpConnectorServiceShell } from "../../src/service.js";
+import type { McpCredentialSQL } from "../../src/credential.js";
 import { commandEnv, commandFixture } from "./command-process.js";
 const [sink = "normal", trigger = "SIGTERM", mode = "held"] =
   process.argv.slice(2);
+const credentialMode = mode.startsWith("credential-");
 const directory =
   process.argv[5] ?? (await mkdtemp(join(tmpdir(), "mcp-shutdown-")));
 await writeFile(join(directory, "token"), "synthetic-reviewer");
@@ -35,8 +37,9 @@ const review = Bun.serve({
 Object.assign(process.env, commandEnv(), {
   TETRAL_MCP_CONNECTOR_GRPC_ADDR: "127.0.0.1:0",
   TETRAL_MCP_CONNECTOR_HTTP_ADDR: "127.0.0.1:0",
-  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: "2000",
-  TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: "3000",
+  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: credentialMode ? "200" : "2000",
+  TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: credentialMode ? "1000" : "3000",
+  ...(credentialMode ? { TETRAL_MCP_CREDENTIAL_TIMEOUT_MS: "10" } : {}),
   KUBERNETES_API_SERVER_URL: review.url.toString(),
   KUBERNETES_API_CA_CERT_PATH: join(directory, "ca"),
   KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH: join(directory, "token"),
@@ -55,7 +58,23 @@ const admission = new Promise<void>((resolve) => {
   entered = resolve;
 });
 let service: McpConnectorServiceShell;
-const sql = commandFixture("none").options.sql!;
+// The credential variant omits the injected SDK stub: command assembly creates
+// its production client and SQL resolver, whose transaction ignores caller abort.
+const credentialSQL: McpCredentialSQL = async <T = unknown>(
+  strings: TemplateStringsArray,
+): Promise<T> => {
+  if (strings.join("").includes("WITH session_vaults")) {
+    emit("credential.held");
+    entered();
+    await held;
+    emit("credential.joined");
+  }
+  return [] as T;
+};
+credentialSQL.begin = async (operation) => await operation(credentialSQL);
+const sql = credentialMode
+  ? credentialSQL
+  : commandFixture("none").options.sql!;
 Object.assign(sql, {
   close: async () => {
     emit("database.close");
@@ -71,18 +90,22 @@ await runProcessEntry((processBoundary) =>
     manifestChangeNotifier: {
       notify: async () => ({ ok: true, duplicate: false }),
     },
-    client: {
-      listTools: async () => {
-        emit("worker.held");
-        entered();
-        await held;
-        emit("worker.joined");
-        return [];
-      },
-      callTool: async () => {
-        throw new Error("unexpected dispatch");
-      },
-    },
+    ...(credentialMode
+      ? {}
+      : {
+          client: {
+            listTools: async () => {
+              emit("worker.held");
+              entered();
+              await held;
+              emit("worker.joined");
+              return [];
+            },
+            callTool: async () => {
+              throw new Error("unexpected dispatch");
+            },
+          },
+        }),
     serverFactory: (owned) => {
       service = owned;
       return createMcpConnectorGrpcServer(owned);
@@ -90,7 +113,8 @@ await runProcessEntry((processBoundary) =>
     registerSignalHandlers: (shutdown) =>
       registerProcessSignalHandlers(() => {
         emit("shutdown.begin");
-        if (mode === "cooperative") setTimeout(release, 100);
+        if (mode === "cooperative" || mode === "credential-cooperative")
+          setTimeout(release, 100);
         return shutdown();
       }),
     waitForever: async () => {
@@ -104,7 +128,7 @@ await runProcessEntry((processBoundary) =>
         },
         metadata,
       );
-      void worker.catch(() => undefined);
+      void worker.catch(() => emit("worker.returned"));
       await Promise.race([
         admission,
         worker.then(() => {

@@ -311,6 +311,9 @@ export class McpSDKClient implements McpClient {
         ]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
+        // A deadline rejects the public close only after owned operations join.
+        // Until then reusable commands must retain their required resources.
+        await joined;
       }
     })();
     return this.#closed;

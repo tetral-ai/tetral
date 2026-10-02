@@ -154,9 +154,12 @@ Provider request timeout starts at ingress and covers authentication,
 credential preparation, every attachment metadata/chunk RPC, provider headers,
 and response consumption. Each downstream call receives the remaining absolute
 budget and real cancellation. Shutdown joins actual unary callbacks before
-closing their channel. MCP similarly retains pending SDK connects, notifications,
-and calls after their public timeout or cache eviction until they settle or the
-shared shutdown bound expires; each SDK client closes once.
+closing their channel. MCP similarly retains pending credential transactions,
+SDK connects, notifications, and calls after their public timeout or cache
+eviction until they actually join; each SDK client closes once. A reusable MCP
+client close that exceeds its deadline reports the original timeout only after
+those joins, so command cleanup cannot advance to SQL closure early. The
+executable enforces its shared absolute deadline if work cannot join.
 
 MCP's typed Bridge policies mirror the Runtime descriptor: manifest notification
 five seconds and claim/commit/relinquish ten seconds. SDK defaults remain
