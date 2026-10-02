@@ -3,15 +3,14 @@ package agentruntimebridge
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/binary"
 	"encoding/json"
-	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -19,9 +18,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/id"
-	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 // This file owns the Bridge mcp protocol-family boundary.
@@ -41,9 +37,9 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 		return response, err
 	}
 	if s.MCPManifestLister == nil {
-		return nil, errMCPManifestListerUnavailable()
+		return nil, mcpmanifest.ListerUnavailableError()
 	}
-	manifest, err := s.MCPManifestLister.ListMCPTools(ctx, MCPManifestListRequest{
+	manifest, err := s.MCPManifestLister.ListMCPTools(ctx, mcpmanifest.ListRequest{
 		WorkspaceID:   workspaceID,
 		SessionID:     sessionID,
 		MCPServerName: mcpServerName,
@@ -55,18 +51,18 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 	if manifest.ManifestETag != manifestETag {
 		return nil, status.Error(codes.FailedPrecondition, "mcp manifest etag changed during delivery")
 	}
-	var acceptance mcpManifestAcceptance
+	var acceptance mcpmanifest.Acceptance
 	err = s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.mcp_manifest_changed", func(tx *dbconnect.Tx) error {
 		var err error
-		acceptance, err = captureMCPManifestAcceptanceTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, manifest.Tools, s.now())
+		acceptance, err = mcpmanifest.CaptureAcceptanceTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, manifest.Tools, s.now())
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance, false)
+	mcpmanifest.LogTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance, false)
 	if !acceptance.Duplicate {
-		logMCPManifestOmissions(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance.BuiltinFamily, acceptance.Omissions)
+		mcpmanifest.LogOmissions(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance.BuiltinFamily, acceptance.Omissions)
 	}
 	if acceptance.Duplicate {
 		return &bridgev1.McpManifestChangedResponse{Outcome: &bridgev1.McpManifestChangedResponse_Duplicate{Duplicate: &bridgev1.McpManifestDuplicate{}}}, nil
@@ -81,7 +77,7 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 	now := s.now()
 	var response *bridgev1.ClaimMcpToolResultResponse
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.claim_mcp_tool_result", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -95,7 +91,7 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
 			return err
 		}
@@ -114,7 +110,7 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)
 		return err
 	}); err != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Stale{Stale: &bridgev1.McpToolClaimStale{}}}, nil
 		}
 		return nil, err
@@ -136,7 +132,7 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 	}
 	var response *bridgev1.RelinquishMcpToolResultResponse
 	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.relinquish_mcp_tool_result", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -163,7 +159,7 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 			response = duplicateMCPRelinquishResponse()
 			return nil
 		}
-		tool, err := loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
 			return err
 		}
@@ -198,7 +194,7 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 		if err != nil {
 			return err
 		}
-		if !rowsAffected(result) {
+		if !runtimecontrol.RowsAffected(result) {
 			response = staleMCPRelinquishResponse()
 			return nil
 		}
@@ -219,7 +215,7 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 		return nil
 	})
 	if err != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return staleMCPRelinquishResponse(), nil
 		}
 		return nil, err
@@ -240,9 +236,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		return nil, err
 	}
 	var response *bridgev1.CommitMcpToolResultResponse
-	var tool durableToolExecution
+	var tool runtimecontrol.DurableToolExecution
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_mcp_tool_result_preflight", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -261,7 +257,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		tool, err = loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		tool, err = runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
 			return err
 		}
@@ -285,7 +281,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		}
 		return status.Error(codes.FailedPrecondition, "mcp tool claim is missing")
 	}); err != nil || response != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return staleMCPCommitResponse(), nil
 		}
 		return response, err
@@ -320,7 +316,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 	refsOnlyResultJSON, err := completeMCPAttachmentRefs(request.GetResultJson(), request.GetInlineMedia(), attachment)
 	if err != nil {
 		cleanupBlob()
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return staleMCPCommitResponse(), nil
 		}
 		return nil, err
@@ -329,7 +325,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 	commitOutcomeUnknown := false
 	cleanupReplayedBlob := false
 	err = s.withScopeTxAndCleanup(ctx, request.GetScope(), "agentruntimebridge.commit_mcp_tool_result", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(
 			ctx,
 			tx,
 			request.GetScope().GetWorkspaceId(),
@@ -356,7 +352,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		tool, err = loadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
+		tool, err = runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
 		if err != nil {
 			return err
 		}
@@ -394,7 +390,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if attachment != nil {
 			attachmentRef = attachment.GetAttachmentRef()
 		}
-		commitResultJSON, err := marshalBridgeJSON(mcpToolCommitResult{AttachmentRef: &attachmentRef})
+		commitResultJSON, err := runtimecontrol.MarshalJSON(mcpToolCommitResult{AttachmentRef: &attachmentRef})
 		if err != nil {
 			return err
 		}
@@ -511,7 +507,7 @@ func storedMCPAttachmentMetadata(resultJSON string) ([]storedMCPAttachment, bool
 	return attachments, true
 }
 
-func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
 	existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 	if err != nil {
 		return nil, err
@@ -536,7 +532,7 @@ func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridge
 	return claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
 }
 
-func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
 	if !sameMCPToolResult(existing, tool) {
 		return nil, status.Error(codes.AlreadyExists, "mcp tool use id conflicts with existing result")
 	}
@@ -575,7 +571,7 @@ func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request
 	}
 }
 
-func acquiredMCPClaimResponse(tool durableToolExecution) *bridgev1.ClaimMcpToolResultResponse {
+func acquiredMCPClaimResponse(tool runtimecontrol.DurableToolExecution) *bridgev1.ClaimMcpToolResultResponse {
 	return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_Acquired{Acquired: &bridgev1.McpToolClaimAcquired{
 		McpServerName: tool.MCPServerName,
 		ToolName:      tool.ToolName,
@@ -583,7 +579,7 @@ func acquiredMCPClaimResponse(tool durableToolExecution) *bridgev1.ClaimMcpToolR
 	}}}
 }
 
-func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool durableToolExecution, now time.Time) (bool, error) {
+func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, now time.Time) (bool, error) {
 	result, err := tx.Exec(ctx,
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
@@ -606,7 +602,7 @@ func insertMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, request *
 	if err != nil {
 		return false, err
 	}
-	return rowsAffected(result), nil
+	return runtimecontrol.RowsAffected(result), nil
 }
 
 func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, claimID string, now time.Time) error {
@@ -632,7 +628,7 @@ func renewMCPToolResultClaimTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "mcp tool claim renewal failed")
 	}
 	return nil
@@ -664,7 +660,7 @@ func storeMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "mcp tool result commit failed")
 	}
 	return nil
@@ -691,7 +687,7 @@ func validateMCPClaimTarget(scope *bridgev1.RuntimeScope, toolUseEventID string,
 	return nil
 }
 
-func sameMCPToolResult(existing runtimeToolResult, tool durableToolExecution) bool {
+func sameMCPToolResult(existing runtimeToolResult, tool runtimecontrol.DurableToolExecution) bool {
 	return existing.ToolKind == bridgeToolKindMCP &&
 		existing.NormalizedInputHash == tool.NormalizedInputHash &&
 		existing.ToolName == mcpRuntimeToolName(tool.MCPServerName, tool.ToolName) &&
@@ -716,35 +712,35 @@ func mcpRuntimeToolName(mcpServerName string, toolName string) string {
 
 func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Context, workspaceID string, sessionID string, mcpServerName string, manifestETag string) (*bridgev1.McpManifestChangedResponse, bool, error) {
 	var response *bridgev1.McpManifestChangedResponse
-	var restored mcpManifestAcceptance
+	var restored mcpmanifest.Acceptance
 	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.mcp_manifest_changed_replay", func(tx *dbconnect.Tx) error {
-		if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, workspaceID, sessionID, mcpServerName); err != nil {
+		if err := mcpmanifest.AcquireAcceptanceLockTx(ctx, tx, workspaceID, sessionID, mcpServerName); err != nil {
 			return err
 		}
-		if _, err := loadMainSessionThreadIDTx(ctx, tx, workspaceID, sessionID); err != nil {
+		if _, err := runtimecontrol.LockMainThreadIDTx(ctx, tx, workspaceID, sessionID); err != nil {
 			return err
 		}
-		row, found, err := loadMCPManifestRowForUpdateTx(ctx, tx, workspaceID, sessionID, mcpServerName)
+		row, found, err := mcpmanifest.LoadRowForUpdateTx(ctx, tx, workspaceID, sessionID, mcpServerName)
 		if err != nil {
 			return err
 		}
 		if !found || !row.ManifestETag.Valid || row.ManifestETag.String != manifestETag {
 			return nil
 		}
-		if row.Readiness == mcpManifestReadinessUnready {
+		if row.Readiness == mcpmanifest.ReadinessUnready {
 			if !row.ToolsJSON.Valid {
 				return nil
 			}
-			toolset, err := mcpManifestToolsetConfigTx(ctx, tx, workspaceID, sessionID, mcpServerName)
+			toolset, err := mcpmanifest.ToolsetConfigTx(ctx, tx, workspaceID, sessionID, mcpServerName)
 			if err != nil {
 				return err
 			}
-			acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, row.ToolsJSON.String, row.Generation+1, toolset, s.now())
+			acceptance, err := mcpmanifest.CommitReadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, row.ToolsJSON.String, row.Generation+1, toolset, s.now())
 			if err != nil {
 				return err
 			}
 			acceptance.PreviousGeneration = row.Generation
-			acceptance.Readiness = mcpManifestReadinessReady
+			acceptance.Readiness = mcpmanifest.ReadinessReady
 			acceptance.QueueCustody = "created"
 			acceptance.Transitioned = true
 			restored = acceptance
@@ -757,7 +753,7 @@ func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Contex
 	if err != nil {
 		return nil, false, err
 	}
-	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, restored, false)
+	mcpmanifest.LogTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, restored, false)
 	return response, response != nil, nil
 }
 
@@ -790,7 +786,7 @@ func validateMCPCommitPayload(request *bridgev1.CommitMcpToolResultRequest) erro
 	return err
 }
 
-func mcpTransientAttachmentCreate(request *bridgev1.CommitMcpToolResultRequest, tool durableToolExecution, media *bridgev1.McpInlineMedia) transientAttachmentCreate {
+func mcpTransientAttachmentCreate(request *bridgev1.CommitMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, media *bridgev1.McpInlineMedia) transientAttachmentCreate {
 	return transientAttachmentCreate{
 		Scope:                request.GetScope(),
 		SourceToolUseEventID: request.GetToolUseEventId(),
@@ -848,425 +844,4 @@ func completeMCPAttachmentRefs(resultJSON string, media []*bridgev1.McpInlineMed
 		return "", status.Error(codes.Internal, "mcp refs-only result encoding failed")
 	}
 	return string(completed), nil
-}
-
-func loadMainSessionThreadIDTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (string, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT id
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND role = 'main'
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-	)
-	var sessionThreadID string
-	if err := row.Scan(&sessionThreadID); dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.FailedPrecondition, "session main thread is unavailable")
-	} else if err != nil {
-		return "", err
-	}
-	return sessionThreadID, nil
-}
-
-func bridgeSessionScope(workspaceID string, sessionID string, sessionThreadID string) *bridgev1.RuntimeScope {
-	return &bridgev1.RuntimeScope{
-		WorkspaceId:     workspaceID,
-		SessionId:       sessionID,
-		SessionThreadId: sessionThreadID,
-	}
-}
-
-// runtimeMCPManifestUpdatePayload builds the manifest patch that rides a
-// runtime_config_update job. That job kind is shared, but the MCP manifest path
-// must NOT reuse config_generation: config_generation is owned exclusively by
-// api session admission, and a GitHub-driven manifest change never passes
-// through api. The payload therefore carries manifest_generation only, and
-// Runtime applies the patch independently of config_generation, gated solely on
-// manifest_generation monotonicity. Incrementing config_generation on this path
-// would collapse the two-generation separation.
-func runtimeMCPManifestUpdatePayload(workspaceID string, sessionID string, mcpServerName string, manifestGeneration int64) (string, error) {
-	payload, err := json.Marshal(map[string]any{
-		"workspace_id":        workspaceID,
-		"session_id":          sessionID,
-		"mcp_server_name":     mcpServerName,
-		"manifest_generation": manifestGeneration,
-	})
-	if err != nil {
-		return "", err
-	}
-	return string(payload), nil
-}
-
-func runtimeMCPManifestCommandPayload(workspaceID string, sessionID string, mcpServerName string, row mcpManifestRow) (string, error) {
-	manifest := map[string]any{
-		"mcp_server_name":     mcpServerName,
-		"manifest_generation": row.Generation,
-		"readiness":           row.Readiness,
-		"diagnostic":          nil,
-	}
-	if row.Readiness == mcpManifestReadinessReady {
-		if !row.ToolsJSON.Valid || !row.ManifestETag.Valid || !json.Valid([]byte(row.ToolsJSON.String)) {
-			return "", status.Error(codes.Internal, "mcp manifest ready content is invalid")
-		}
-		manifest["manifest_etag"] = row.ManifestETag.String
-		manifest["tools"] = json.RawMessage(row.ToolsJSON.String)
-	} else {
-		if !row.Diagnostic.Valid || row.Diagnostic.String == "" {
-			return "", status.Error(codes.Internal, "mcp manifest unready diagnostic is invalid")
-		}
-		manifest["diagnostic"] = row.Diagnostic.String
-	}
-	payload, err := marshalBridgeDataJSON(map[string]any{
-		"workspace_id": workspaceID,
-		"session_id":   sessionID,
-		"mcp_manifest": manifest,
-	})
-	if err != nil {
-		return "", err
-	}
-	return payload, nil
-}
-
-type mcpManifestAcceptance struct {
-	RuntimeInputID     string
-	PreviousGeneration int64
-	Generation         int64
-	Readiness          string
-	Diagnostic         string
-	QueueCustody       string
-	BuiltinFamily      string
-	Omissions          []mcpManifestOmission
-	Duplicate          bool
-	Transitioned       bool
-}
-
-// session_mcp_manifests carries readiness and diagnostic ORTHOGONALLY to the
-// accepted content (tools_json, manifest_etag):
-//
-//	readiness   meaning                                writer
-//	ready       tools_json/manifest_etag are the       commitMCPManifestReadyTx
-//	            latest accepted, within-cap manifest
-//	unready     server's toolset is closed; diagnostic transitionMCPManifestUnreadyTx
-//	            (manifest_too_large | delivery_exhausted)  (content columns untouched)
-//
-// Rules the transition helpers enforce:
-//   - manifest_generation increments on EVERY accepted content change AND every
-//     readiness transition; a repeated same-class failure report is an
-//     increment-free no-op.
-//   - Supersession keys SOLELY on generation monotonicity, never on etag (a
-//     flapping A->B->A etag must not clobber newer state).
-//   - An over-cap or delivery-exhausted report flips to unready WITHOUT touching
-//     the accepted content columns.
-//   - A re-notify matching the STORED etag while the row is unready RESTORES ready
-//     (generation+1, diagnostic cleared) rather than short-circuiting as a
-//     duplicate no-op — otherwise a server reverting to its last-accepted manifest
-//     would stay unready forever.
-const (
-	mcpManifestReadinessReady              = "ready"
-	mcpManifestReadinessUnready            = "unready"
-	mcpManifestDiagnosticTooLarge          = "manifest_too_large"
-	mcpManifestDiagnosticDeliveryExhausted = "delivery_exhausted"
-	//nolint:gosec // This is a public readiness diagnostic token, not credential material.
-	mcpManifestDiagnosticCredentialUnavailable = "credential_unavailable"
-	mcpManifestDiagnosticDiscoveryUnavailable  = "discovery_unavailable"
-	mcpManifestDiagnosticInvalid               = "manifest_invalid"
-	runtimeMCPManifestDeliveryMaxAttempts      = 5
-)
-
-type mcpManifestRow struct {
-	ToolsJSON    sql.NullString
-	ManifestETag sql.NullString
-	Generation   int64
-	Readiness    string
-	Diagnostic   sql.NullString
-}
-
-func loadMCPManifestRowForUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string) (mcpManifestRow, bool, error) {
-	var row mcpManifestRow
-	err := tx.QueryRow(ctx, `SELECT tools_json, manifest_etag, manifest_generation, readiness, diagnostic
-		FROM session_mcp_manifests
-		WHERE workspace_id = $1 AND session_id = $2 AND mcp_server_name = $3
-		FOR UPDATE`, workspaceID, sessionID, mcpServerName).Scan(
-		&row.ToolsJSON, &row.ManifestETag, &row.Generation, &row.Readiness, &row.Diagnostic,
-	)
-	if dbconnect.IsNoRows(err) {
-		return mcpManifestRow{}, false, nil
-	}
-	return row, err == nil, err
-}
-
-func captureMCPManifestAcceptanceTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	mcpServerName string,
-	manifestETag string,
-	tools []MCPManifestTool,
-	now time.Time,
-) (mcpManifestAcceptance, error) {
-	if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, workspaceID, sessionID, mcpServerName); err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	if _, err := loadMainSessionThreadIDTx(ctx, tx, workspaceID, sessionID); err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	toolsetConfig, err := mcpManifestToolsetConfigTx(ctx, tx, workspaceID, sessionID, mcpServerName)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	filteredTools, omissions := filterMCPManifestCollisions(toolsetConfig.BuiltinFamily, tools)
-	toolsJSON, err := canonicalMCPManifestToolsJSON(filteredTools)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	current, rowExists, err := loadMCPManifestRowForUpdateTx(ctx, tx, workspaceID, sessionID, mcpServerName)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	if len([]byte(toolsJSON)) > MaxMcpManifestBytes {
-		transitioned := !rowExists || current.Readiness != mcpManifestReadinessUnready || !current.Diagnostic.Valid || current.Diagnostic.String != mcpManifestDiagnosticTooLarge
-		generation, err := transitionMCPManifestUnreadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, current, rowExists, mcpManifestDiagnosticTooLarge, toolsetConfig, now)
-		return mcpManifestAcceptance{
-			PreviousGeneration: current.Generation,
-			Generation:         generation,
-			Readiness:          mcpManifestReadinessUnready,
-			Diagnostic:         mcpManifestDiagnosticTooLarge,
-			QueueCustody:       "created",
-			BuiltinFamily:      toolsetConfig.BuiltinFamily,
-			Duplicate:          !transitioned,
-			Transitioned:       transitioned,
-		}, err
-	}
-	if rowExists && current.ManifestETag.Valid && current.ManifestETag.String == manifestETag && current.Readiness == mcpManifestReadinessReady {
-		return mcpManifestAcceptance{
-			RuntimeInputID: runtimeMCPManifestInputID(sessionID, mcpServerName, current.Generation),
-			Generation:     current.Generation, BuiltinFamily: toolsetConfig.BuiltinFamily, Duplicate: true,
-		}, nil
-	}
-	generation := int64(1)
-	if rowExists {
-		generation = current.Generation + 1
-	}
-	acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, toolsJSON, generation, toolsetConfig, now)
-	acceptance.PreviousGeneration = current.Generation
-	acceptance.Readiness = mcpManifestReadinessReady
-	acceptance.QueueCustody = "created"
-	acceptance.Transitioned = true
-	acceptance.BuiltinFamily = toolsetConfig.BuiltinFamily
-	acceptance.Omissions = omissions
-	return acceptance, err
-}
-
-func commitMCPManifestReadyTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string, manifestETag string, toolsJSON string, generation int64, toolsetConfig MCPManifestToolsetConfig, now time.Time) (mcpManifestAcceptance, error) {
-	sessionThreadID, err := loadMainSessionThreadIDTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	payloadJSON, err := runtimeMCPManifestUpdatePayload(workspaceID, sessionID, mcpServerName, generation)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	formattedNow := now
-	_, err = tx.Exec(ctx, `INSERT INTO session_mcp_manifests (
-		workspace_id, session_id, mcp_server_name, tools_json, manifest_etag,
-		manifest_generation, readiness, diagnostic, created_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, 'ready', NULL, $7, $7)
-	ON CONFLICT (workspace_id, session_id, mcp_server_name) DO UPDATE SET
-		tools_json = EXCLUDED.tools_json, manifest_etag = EXCLUDED.manifest_etag,
-		manifest_generation = EXCLUDED.manifest_generation, readiness = 'ready',
-		diagnostic = NULL, updated_at = EXCLUDED.updated_at`,
-		workspaceID, sessionID, mcpServerName, toolsJSON, manifestETag, generation, formattedNow)
-	if err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	if err := enqueueRuntimeMCPManifestUpdateTx(ctx, tx, workspaceID, sessionID, mcpServerName, generation, payloadJSON, now); err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	runtimeInputID := runtimeMCPManifestInputID(sessionID, mcpServerName, generation)
-	if err := insertBridgeOperationTx(ctx, tx, bridgeSessionScope(workspaceID, sessionID, sessionThreadID), bridgeOperationInsert{
-		Operation:      bridgeOpMcpManifestChanged,
-		IdempotencyKey: mcpServerName + ":" + strconv.FormatInt(generation, 10),
-		RequestHash:    bridgeRequestHash(bridgeOpMcpManifestChanged, workspaceID, sessionID, mcpServerName, manifestETag, strconv.FormatInt(generation, 10)),
-		AckStatus:      bridgeAckCommitted,
-		RuntimeInputID: sql.NullString{String: runtimeInputID, Valid: true},
-		Now:            now,
-	}); err != nil {
-		return mcpManifestAcceptance{}, err
-	}
-	return mcpManifestAcceptance{
-		RuntimeInputID: runtimeInputID, Generation: generation,
-	}, nil
-}
-
-func transitionMCPManifestUnreadyTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string, current mcpManifestRow, rowExists bool, diagnostic string, toolsetConfig MCPManifestToolsetConfig, now time.Time) (int64, error) {
-	return transitionMCPManifestUnreadyWithDeliveryTx(
-		ctx, tx, workspaceID, sessionID, mcpServerName, current, rowExists, diagnostic, toolsetConfig, now, true,
-	)
-}
-
-func transitionMCPManifestDeliveryExhaustedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string, current mcpManifestRow, toolsetConfig MCPManifestToolsetConfig, now time.Time) (int64, error) {
-	// The leased job that exhausted delivery remains the queue barrier and
-	// carries the new unready generation. A replacement job would move the
-	// barrier behind later Session input.
-	return transitionMCPManifestUnreadyWithDeliveryTx(
-		ctx, tx, workspaceID, sessionID, mcpServerName, current, true, mcpManifestDiagnosticDeliveryExhausted, toolsetConfig, now, false,
-	)
-}
-
-func transitionMCPManifestUnreadyWithDeliveryTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string, current mcpManifestRow, rowExists bool, diagnostic string, toolsetConfig MCPManifestToolsetConfig, now time.Time, enqueueDelivery bool) (int64, error) {
-	if rowExists && current.Readiness == mcpManifestReadinessUnready && current.Diagnostic.Valid && current.Diagnostic.String == diagnostic {
-		return current.Generation, nil
-	}
-	generation := int64(1)
-	if rowExists {
-		generation = current.Generation + 1
-	}
-	row := current
-	row.Generation = generation
-	row.Readiness = mcpManifestReadinessUnready
-	row.Diagnostic = sql.NullString{String: diagnostic, Valid: true}
-	formattedNow := now
-	if !rowExists {
-		_, err := tx.Exec(ctx, `INSERT INTO session_mcp_manifests
-			(workspace_id, session_id, mcp_server_name, tools_json, manifest_etag, manifest_generation, readiness, diagnostic, created_at, updated_at)
-			VALUES ($1, $2, $3, NULL, NULL, $4, 'unready', $5, $6, $6)`, workspaceID, sessionID, mcpServerName, generation, diagnostic, formattedNow)
-		if err != nil {
-			return 0, err
-		}
-	} else {
-		_, err := tx.Exec(ctx, `UPDATE session_mcp_manifests
-			SET manifest_generation = $4, readiness = 'unready', diagnostic = $5, updated_at = $6
-			WHERE workspace_id = $1 AND session_id = $2 AND mcp_server_name = $3`, workspaceID, sessionID, mcpServerName, generation, diagnostic, formattedNow)
-		if err != nil {
-			return 0, err
-		}
-	}
-	if enqueueDelivery {
-		payloadJSON, err := runtimeMCPManifestUpdatePayload(workspaceID, sessionID, mcpServerName, generation)
-		if err != nil {
-			return 0, err
-		}
-		if err := enqueueRuntimeMCPManifestUpdateTx(ctx, tx, workspaceID, sessionID, mcpServerName, generation, payloadJSON, now); err != nil {
-			return 0, err
-		}
-	}
-	return generation, nil
-}
-
-func acquireMCPManifestAcceptanceLockTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string) error {
-	if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
-		return err
-	}
-	var sessionStatus string
-	if err := tx.QueryRow(ctx,
-		`SELECT status FROM sessions WHERE workspace_id=$1 AND id=$2`,
-		workspaceID,
-		sessionID,
-	).Scan(&sessionStatus); err != nil {
-		return err
-	}
-	if sessionStatus == "terminated" {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
-	}
-	sum := sha256.Sum256([]byte(workspaceID + "\x00" + sessionID + "\x00" + mcpServerName))
-	resource := int32(binary.BigEndian.Uint32(sum[:4]))
-	_, err := tx.Exec(ctx,
-		"SELECT pg_advisory_xact_lock($1, $2)",
-		mcpManifestAcceptanceLockCategory,
-		resource,
-	)
-	return err
-}
-
-type mcpManifestOmission struct {
-	ToolName string
-}
-
-func filterMCPManifestCollisions(family string, tools []MCPManifestTool) ([]MCPManifestTool, []mcpManifestOmission) {
-	blocked := make(map[string]struct{}, 6)
-	switch family {
-	case "claude":
-		for _, name := range []string{"Bash", "Read", "Write", "Edit", "Glob", "Grep"} {
-			blocked[name] = struct{}{}
-		}
-	case "gpt":
-		for _, name := range []string{"exec_command", "write_stdin", "view_image", "apply_patch"} {
-			blocked[name] = struct{}{}
-		}
-	}
-	filtered := make([]MCPManifestTool, 0, len(tools))
-	omissions := make([]mcpManifestOmission, 0)
-	for _, tool := range tools {
-		if _, collision := blocked[tool.Name]; collision {
-			omissions = append(omissions, mcpManifestOmission{ToolName: tool.Name})
-			continue
-		}
-		filtered = append(filtered, tool)
-	}
-	return filtered, omissions
-}
-
-func logMCPManifestOmissions(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, family string, omissions []mcpManifestOmission) {
-	if logger == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	for _, omission := range omissions {
-		logger.Warn("bridge.mcp_manifest.tool_omitted",
-			slog.String("operation", "mcp_manifest.filter"),
-			slog.String("event.kind", "mcp_manifest.tool_omitted"),
-			slog.String("component", component),
-			slog.String("workspace.id", workspaceID),
-			slog.String("session.id", sessionID),
-			slog.String("mcp.server.name", mcpServerName),
-			slog.String("mcp.tool.name", omission.ToolName),
-			slog.String("mcp.tool.family", family),
-			slog.String("mcp.omission.reason", "builtin_name_collision"),
-		)
-	}
-}
-
-// The transaction result is the sole source of this event. Keeping the logger
-// at the post-commit boundary prevents telemetry from becoming manifest state
-// or Queue custody evidence.
-func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, acceptance mcpManifestAcceptance, inputContinued bool) {
-	if logger == nil || !acceptance.Transitioned {
-		return
-	}
-	defer func() {
-		_ = recover()
-	}()
-	logger.Info("bridge.mcp_manifest.transition_committed",
-		slog.String("operation", "mcp_manifest.transition"),
-		slog.String("event.kind", "mcp_manifest_transition_committed"),
-		slog.String("component", component),
-		slog.String("workspace.id", workspaceID),
-		slog.String("session.id", sessionID),
-		slog.String("mcp.server.name", mcpServerName),
-		slog.Int64("mcp.manifest.previous_generation", acceptance.PreviousGeneration),
-		slog.Int64("mcp.manifest.generation", acceptance.Generation),
-		slog.String("mcp.manifest.readiness", acceptance.Readiness),
-		slog.String("mcp.manifest.diagnostic", acceptance.Diagnostic),
-		slog.String("queue.custody", acceptance.QueueCustody),
-		slog.Bool("runtime.input.continued", inputContinued),
-	)
-}
-
-func enqueueRuntimeMCPManifestUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, mcpServerName string, manifestGeneration int64, payloadJSON string, now time.Time) error {
-	ws := workspace.ID(workspaceID)
-	_, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		ID:             id.New("qjob_"),
-		WorkspaceID:    ws,
-		Kind:           queue.KindRuntimeConfigUpdate,
-		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
-		DedupeKey:      queue.FormatRuntimeMCPManifestUpdateDedupeKey(ws, sessionID, mcpServerName, strconv.FormatInt(manifestGeneration, 10)),
-		PayloadVersion: 2,
-		PayloadJSON:    []byte(payloadJSON),
-		MaxAttempts:    runtimeMCPManifestDeliveryMaxAttempts,
-		Now:            now,
-	})
-	return err
 }

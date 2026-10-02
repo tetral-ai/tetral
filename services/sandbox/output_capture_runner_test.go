@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -248,13 +250,15 @@ func (a *recordingOutputCaptureAdapter) CaptureOutputs(context.Context, sandboxd
 }
 
 type recordingOutputCaptureStore struct {
-	current           bool
-	work              SandboxOutputCaptureWork
-	calls             []string
-	manifest          []SandboxOutputCaptureManifestEntry
-	loadErr           error
-	finalizeStarted   chan struct{}
-	heartbeatObserved <-chan struct{}
+	scanFailureKind    string
+	scanFailureMessage string
+	current            bool
+	work               SandboxOutputCaptureWork
+	calls              []string
+	manifest           []SandboxOutputCaptureManifestEntry
+	loadErr            error
+	finalizeStarted    chan struct{}
+	heartbeatObserved  <-chan struct{}
 }
 
 func (s *recordingOutputCaptureStore) LoadCapture(context.Context, SandboxOutputCaptureJob, time.Time) (SandboxOutputCaptureWork, bool, error) {
@@ -270,7 +274,8 @@ func (s *recordingOutputCaptureStore) MarkBlobUploaded(context.Context, SandboxO
 	s.calls = append(s.calls, "uploaded")
 	return nil
 }
-func (s *recordingOutputCaptureStore) StageCapture(_ context.Context, _ SandboxOutputCaptureWork, manifest []SandboxOutputCaptureManifestEntry, _ []SandboxOutputCaptureSkippedFile, _ []SandboxOutputCaptureScanRecord, _ bool, _ string, _ string, _ time.Time) error {
+func (s *recordingOutputCaptureStore) StageCapture(_ context.Context, _ SandboxOutputCaptureWork, manifest []SandboxOutputCaptureManifestEntry, _ []SandboxOutputCaptureSkippedFile, _ []SandboxOutputCaptureScanRecord, _ bool, errorKind string, safeMessage string, _ time.Time) error {
+	s.scanFailureKind, s.scanFailureMessage = errorKind, safeMessage
 	s.calls = append(s.calls, "stage")
 	s.manifest = manifest
 	return nil
@@ -314,3 +319,28 @@ func (s *recordingOutputCaptureCleanupStore) FinalizeCaptureCleanupExhaustion(co
 }
 
 var _ OutputCaptureAdapter = (*recordingOutputCaptureAdapter)(nil)
+
+func TestSandboxOutputCaptureScanFailureRetainsSharedDiagnosticTuple(t *testing.T) {
+	store := &recordingOutputCaptureStore{current: true, work: SandboxOutputCaptureWork{SandboxOutputCaptureJob: SandboxOutputCaptureJob{WorkspaceID: "ws_scan", SessionID: "ses_scan"}, Provider: sandboxdriver.DaytonaProviderName, ProviderResourceID: "provider_scan", ProviderAvailable: true}}
+	failure := terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_changed", "sandbox output changed during capture")
+	adapter := &recordingOutputCaptureAdapter{outcome: &failure}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	runner := &SandboxOutputCaptureJobRunner{Store: store, Providers: registry, BlobStore: blob.NewFakeBlobStore(), Logger: workload.NewLogger(&logs, "sandbox", "test", "unit")}
+	if err := runner.capture(context.Background(), store.work.SandboxOutputCaptureJob); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"load", "stage"}) || store.scanFailureKind != "output_capture_scan_changed" || store.scanFailureMessage != "sandbox output changed during capture" {
+		t.Fatalf("capture disposition changed: %#v", store)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["error.class"] != "output_capture_scan_error" || record["error.code"] != "output_capture_scan_changed" || record["error.message_safe"] != "sandbox output changed during capture" || record["error.capture_detail"] != "sandbox output changed during capture" {
+		t.Fatalf("scan failure classification = %#v", record)
+	}
+}

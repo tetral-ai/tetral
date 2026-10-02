@@ -866,8 +866,8 @@ func TestPostgreSQLQueueNotificationPublishesOnlyCommittedNewWork(t *testing.T) 
 	mustEnqueue(t, store, committed)
 	select {
 	case payload := <-payloads:
-		if payload != ConsumerClassBridge {
-			t.Fatalf("notification payload = %q; want %q", payload, ConsumerClassBridge)
+		if payload != ConsumerClassJobRunner {
+			t.Fatalf("notification payload = %q; want %q", payload, ConsumerClassJobRunner)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("committed enqueue did not publish a notification")

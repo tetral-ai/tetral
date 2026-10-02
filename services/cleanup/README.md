@@ -7,7 +7,7 @@ is the TTL scheduler for idle sessions. It runs as a Kubernetes CronJob:
 each tick enumerates every workspace, finds sessions that have sat idle
 past their cleanup deadline, and enqueues one `cleanup_session` queue job
 per due session. It **produces** cleanup work and never **executes** it —
-releasing hot Runtime Pod state belongs to Bridge (`services/bridge`,
+releasing hot Runtime Pod state belongs to Job Runner (`services/job-runner`,
 `runtime_session_cleanup.go`). TTL cleanup does not stop, archive, or delete a
 Sandbox. Provider-native auto-stop, auto-archive, and auto-delete continue on
 their own lifecycle; a later Sandbox tool inspects and normalizes the provider
@@ -24,19 +24,19 @@ write is scoped by `workspace_id` (a signed principal binding, with
 The service owns no tables; the schema lives in `internal/storage`
 (`postgresql_schema.go`). Cleanup state is four columns on
 `session_runtime_status` plus the two binding columns; ownership of each
-transition is split between Bridge (arm/finalize/reschedule) and this
+transition is split between Bridge (arm) and Job Runner (finalize/reschedule) and this
 scheduler (claim/enqueue).
 
 | Column | Set by | Cleared / advanced by |
 |--------|--------|-----------------------|
-| `cleanup_after` | Bridge ordinary idle write, a fixed 30-minute delay past idle | Bridge finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
-| `cleanup_job_id` | this scheduler, when it claims a due row | Bridge finalize and busy reschedule set it `NULL` |
-| `cleanup_enqueued_at` | this scheduler, at claim | Bridge finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
-| `cleanup_claimed_at` | Bridge Job Runner, at execution claim time | Bridge finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
-| `binding_id` / `binding_generation` | binding creation | Bridge finalize sets both `NULL` |
+| `cleanup_after` | Bridge ordinary idle write, a fixed 30-minute delay past idle | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
+| `cleanup_job_id` | this scheduler, when it claims a due row | Job Runner finalize and busy reschedule set it `NULL` |
+| `cleanup_enqueued_at` | this scheduler, at claim | Job Runner finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
+| `cleanup_claimed_at` | Job Runner, at execution claim time | Job Runner finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
+| `binding_id` / `binding_generation` | binding creation | Job Runner finalize sets both `NULL` |
 
-The 30-minute delay is a fixed Bridge-side constant
-(`defaultIdleCleanupDelay`); no configuration surface wires it. The same constant
+The 30-minute delay is owned by shared Runtime control
+(`internal/runtimecontrol.IdleCleanupDelay`); no configuration surface wires it. The same constant
 serves both the initial idle re-arm and the busy reschedule, so the two delays
 cannot drift apart. Its length is the window a bound-but-idle, non-terminal
 session stays hot before a due cleanup releases its Runtime Pod binding. A
@@ -59,7 +59,7 @@ AND cleanup_job_id IS NULL
 AND binding_id IS NOT NULL
 ```
 
-Each predicate term is load-bearing. Bridge finalize nulls **both**
+Each predicate term is load-bearing. Job Runner finalize nulls **both**
 `binding_id` and `cleanup_after`: either alone unmatches the row, and
 together they guarantee an already-cleaned session never re-matches and
 never re-enqueues a no-op job on every tick. The `binding_id IS NOT NULL`
@@ -81,7 +81,7 @@ in lockstep or the scan loses coverage.
 | 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
 | 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
 | 4 | scheduler `queue.EnqueueTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
-| 5 | Bridge Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
+| 5 | Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
 
 An error in one workspace aborts the rest of that tick; the next tick
 retries. Batch bound is per workspace, so a tick's total work scales with
@@ -218,3 +218,14 @@ move the `idx_session_runtime_status_cleanup_due` partial index in
 `internal/storage` in lockstep so the scan stays covered. If it changes the tree fence,
 reschedule, or finalize order, it updates the execution-boundary seam and
 its conformance list.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe startup and final-failure records retain their
+error tuple; healthy high-frequency polling uses Debug. Repeated degradation
+records emit bounded suppression summaries. Existing metrics report diagnostic
+drops and sink failures independently of stderr. Listener and business-resource
+cleanup completes before the bounded diagnostic close.

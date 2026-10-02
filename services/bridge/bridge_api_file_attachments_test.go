@@ -14,6 +14,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -263,7 +264,7 @@ func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_scope_cross",
 		ModelRequestId: "mreq_bridge_attachment_scope_cross", EventType: "span.model_request_start",
 		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
-		RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
+		RequestKind: runtimecontrol.RequestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	})
 	if status.Code(err) != codes.InvalidArgument || started != nil {
 		t.Fatalf("cross-Session Request Start = %#v/%v; want InvalidArgument", started, err)
@@ -637,7 +638,7 @@ func TestPostgreSQLBridgeAPIStoreRejectsConsumptionWhenFileRowIsMissing(t *testi
 		RuntimeWriteId: "rwrite_bridge_file_missing_consumption",
 		ModelRequestId: "mreq_bridge_file_missing_consumption",
 		EventType:      "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: eventID, FileId: "file_missing_consumption"}},
 	})
 	if status.Code(err) != codes.InvalidArgument || response != nil {

@@ -1,14 +1,17 @@
 # gateway
 
-The Gateway Pod: the only place in the platform where provider SDKs, provider
-credentials, and provider wire formats exist. It runs three containers behind
-one cluster-internal headless `Service` — one gRPC port per container plus HTTP
-health/metrics listeners. This folder owns two of them, both TypeScript/Bun
-under `packages/`: `provider-gateway` (this document's subject) and
-`mcp-connector` (the MCP tool relay, detailed in its own section below). The
-third container, `web-connector`, lives in its own service folder with its own
-README. The shared support packages — `protocol`, `lowering`, and `schema` —
-sit beside the container packages.
+This workspace owns the Provider Gateway and MCP Connector Bun processes in
+`packages/provider-gateway` and `packages/mcp-connector`. Each runs in its own
+Deployment with its own ServiceAccount, credentials, probes, metrics Service and
+replica setting. Package-owned manifests live under `k8s/provider-gateway/` and
+`k8s/mcp-connector/`. The Go Web Connector runs independently under
+`services/web-connector`; its implementation and manifests belong there.
+Shared protocol, lowering and schema packages remain in this workspace.
+
+The Provider Gateway Service remains headless and Runtime retains its current
+DNS and client round-robin behavior. MCP and Web each use a separate ordinary
+ClusterIP Service. Provider autoscaling targets only `provider-gateway`, with
+its existing minimum of two, maximum of ten and CPU target of 70 percent.
 
 ## Responsibilities
 
@@ -344,7 +347,7 @@ it preserves the stated invariants and passes the named suites.
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |
 
-Run from `services/gateway`. The whole workspace suite (both containers
+Run from `services/gateway`. The whole workspace suite (both workload packages
 plus the shared packages) is `bun run test` — the `test` script in
 `package.json`, the same set the `gateway-ts` CI job runs. For a single suite,
 `bun test` filters by path substring per package (e.g. `bun test
@@ -356,7 +359,7 @@ explicit reviewed action, never a side effect of a failing run.
 
 ### Responsibilities
 
-`mcp-connector` is the second TypeScript/Bun container of the Gateway Pod. It
+`mcp-connector` is an independent TypeScript/Bun workload in this workspace. It
 terminates tool calls of `kind = mcp` on its own gRPC port (`McpConnectorService`,
 defined beside the provider service in
 `proto/tetral/provider_gateway/v1/provider_gateway.proto`), holds the MCP client
@@ -521,7 +524,7 @@ no longer resolvable renders an omission line `[MCP attachment unavailable:
 #### Discovery and manifest delivery
 
 The connector alone can reach the server, so it **produces** the manifest; Bridge
-**delivers** it (Bridge can reach the Gateway Pod; the connector cannot reach
+**delivers** it (Bridge and Job Runner can reach the MCP Connector; the connector cannot reach
 Runtime). `ListMcpTools` returns each tool's `{name, description, input_schema}`
 verbatim, plus a `manifest_etag` (content hash via `manifestEtag`) and
 `omitted_tools` (platform-tool name collisions the connector filtered via
@@ -672,7 +675,7 @@ it preserves the stated invariants and passes the named suites.
   cross-call protocol state. Ops plane is a bare Bun HTTP server on a separate
   port (`http-server.ts`).
 - **Invariants.** `RunMcpTool` is caller-authenticated as the Runtime pod plus a
-  binding-token check; `ListMcpTools` is caller-authenticated as Bridge; identity
+  binding-token check; `ListMcpTools` is caller-authenticated as Bridge or Job Runner for discovery only; identity
   failures are gRPC status errors, never tool results. Exactly one terminal
   `run_mcp_tool` record per call. `RunMcpToolResponse.attachments[]` carry refs
   only — raw/base64 media bytes never appear.
@@ -750,7 +753,7 @@ it preserves the stated invariants and passes the named suites.
 | Suite | Proves |
 | --- | --- |
 | `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
-| `auth.test.ts` | TokenReview admission of the Runtime pod and Bridge identities; every other caller rejected |
+| `auth.test.ts` | TokenReview admission of the Runtime tool execution and Bridge/Job Runner discovery identities; wrong methods and every other caller rejected |
 | `bounds.test.ts` | Request/response envelope validation |
 | `catalog.test.ts` | Closed catalog, URL normalization, connection refusal to any non-catalog URL |
 | `client.test.ts` | Connection cache keying, idle close, reconnect backoff, auth-retry, terminal-exhaustion settlement and cache eviction |
@@ -768,13 +771,13 @@ conformance suites.
 
 ## Boundaries
 
-No Gateway Pod container writes `session_events`, `session_messages`, or
+Neither Gateway process writes `session_events`, `session_messages`, or
 `sessions.usage`; usage rides the `finish` event and Bridge commits it. The
 gateway never chooses or replaces a model. `provider-gateway` contains no MCP
 branch; `mcp-connector` contains no lowering; neither touches sandboxes. The
 `provider-gateway` gRPC service also carries the shared
 `ProviderGatewayService.RunWeb` method but rejects it with `UNIMPLEMENTED`,
-because web execution is served on the `web-connector` container's own port and
+because web execution is served by the independent `web-connector` Service and
 the Runtime Pod dials that port directly. A call arriving on the provider port
 is a misrouted client, not a deferred feature.
 
@@ -891,3 +894,49 @@ bun scripts/platform-key.ts disable \
 If a PR changes the credential resolution table, a lowering rule family, the
 stream event set, the error taxonomy, the key pool, the model catalog, or the
 attachment resolution in this folder, it updates the matching section here.
+
+## Workload identity configuration
+
+`TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS` retains its existing name
+and accepts an explicit comma-separated list of `namespace/serviceaccount`
+identities, bounded to 16 entries and 4096 bytes. The deployed discovery callers are `tetral-system/bridge` and
+`tetral-system/job-runner`. Empty, duplicate, malformed and wildcard entries
+fail startup; namespace overrides remain supported. Discovery admission never
+grants `RunMcpTool`: that method admits only the configured Runtime identity
+and verifies its signed Session binding and reviewed Pod UID. Provider model
+execution likewise admits only Runtime. Provider Gateway has only the Bridge
+attachment methods; MCP has only the Bridge manifest and result methods.
+Configuration changes require a process restart.
+
+## Process diagnostics and database pools
+
+Provider Gateway and MCP Connector use the shared
+[TypeScript diagnostic contract](../../internal/ts-observability/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe builders retain fixed classifications and bounded
+identities; repeated degradation emits bounded summaries. Existing metrics expose
+drops and asynchronous stderr failures. Startup and shutdown finally blocks
+release diagnostic timers/listeners without waiting for stream flush.
+
+Each command attempts every acquired resource once after startup, listener,
+wait or shutdown failure. Provider closes its app before SQL; MCP closes HTTP,
+gRPC, its owned SDK clients and SQL. A rejected earlier close does not skip
+later resources. Programmatic callers retain the original run failure, or the
+first cleanup failure after a successful run. Executable and signal boundaries
+emit fixed safe phase/class records and exit nonzero on failure, without raw
+exception messages or stacks. Diagnostic faults add no stderr-flush wait;
+business shutdown keeps its existing drain behavior.
+
+Provider request validation, caller denial and cancellation summaries use Info
+while retaining the safe failure tuple. Provider transport, configuration and
+final failure summaries use Error. Existing stream/timeout/discovery/review
+classifications remain admitted by the shared scalar vocabulary.
+
+The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
+max10 connections, idle30 seconds, lifetime1800 seconds, connection30 seconds,
+and statement30000 milliseconds. All five controls accept canonical positive
+safe integers. Missing values use defaults; Provider Gateway also treats explicit
+empty values as defaults, while MCP Connector rejects explicit empties. These
+values configure the SQL constructor once at boot; Go's independently owned pool
+policy remains distinct.

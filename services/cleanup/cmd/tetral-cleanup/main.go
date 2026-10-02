@@ -33,7 +33,14 @@ func main() {
 }
 
 func run(ctx context.Context, env tetralcleanup.Env) error {
-	logger := workload.NewLogger(os.Stderr, "cleanup", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, "cleanup", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "cleanup", diagnosticErr)
+	}
 	cfg, err := tetralcleanup.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
@@ -76,6 +83,8 @@ func exportCleanupMetrics(
 	defer cancel()
 	samples, err := metrics.Collector()(exportCtx)
 	if err == nil {
+		diagnostics, _ := workload.DiagnosticMetrics(logger)(exportCtx)
+		samples = append(samples, diagnostics...)
 		err = exporter.Export(exportCtx, samples)
 	}
 	if err == nil || logger == nil {

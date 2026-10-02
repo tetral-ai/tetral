@@ -5,13 +5,13 @@
  * service identity and configuration-failure record shape. The process command
  * creates the logger here and uses the helper for rejected configuration;
  * connector components emit records through the returned interface. Other
- * uncaught startup failures remain owned by the process entry point and may
- * bypass this structured helper. Encoding and output delegate to the shared
+ * command and cleanup failures use fixed phase classifications at the process
+ * entry and signal boundaries. Encoding and output delegate to the shared
  * TypeScript observability package.
  */
 
 import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
-import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
+import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
 import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
 
 /** Defines the structured record shape accepted by the connector logger. */
@@ -22,12 +22,16 @@ export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord>;
 
 /** Creates a structured logger whose service identity is always `mcp-connector`. */
 export function createJsonLogger(options: {
-  readonly write: (line: string) => void;
+  readonly write: (line: string) => unknown;
+  readonly sinkFailures?: (() => number) | undefined;
+  readonly diagnostics?: DiagnosticConfig;
   readonly deploymentEnvironment?: string | undefined;
   readonly serviceVersion?: string | undefined;
-}): McpConnectorLogger {
+}): TetralDiagnosticLogger<McpConnectorLogRecord> {
   return createTetralJsonLogger<McpConnectorLogRecord>({
     write: options.write,
+    sinkFailures: options.sinkFailures,
+    diagnostics: options.diagnostics,
     serviceName: "mcp-connector",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,

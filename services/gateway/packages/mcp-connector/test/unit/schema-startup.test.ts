@@ -146,6 +146,9 @@ describe("mcp-connector schema startup", () => {
       "log:workload.started",
       "signals.register",
       "wait",
+      "http.stop",
+      "grpc.shutdown",
+      "sql.close",
     ]);
     expect(logs).toEqual([
       expect.objectContaining({

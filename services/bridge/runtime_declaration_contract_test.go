@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -58,25 +59,25 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 		delta     func(string) *bridgev1.RuntimeContextDelta
 	}{
 		{
-			name: "provider metadata", maxBytes: runtimeProviderMetadataMaxBytes, emptyJSON: `{"x":""}`,
+			name: "provider metadata", maxBytes: runtimecontrol.RuntimeProviderMetadataMaxBytes, emptyJSON: `{"x":""}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
 				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: "why", ProviderMetadataJson: &raw}}}}}
 			},
 		},
 		{
-			name: "Tool input", maxBytes: runtimeToolInputJSONMaxBytes, emptyJSON: `{"x":""}`,
+			name: "Tool input", maxBytes: runtimecontrol.RuntimeToolInputJSONMaxBytes, emptyJSON: `{"x":""}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
 				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "read", ProviderInputJson: raw}}}}}
 			},
 		},
 		{
-			name: "Tool output", maxBytes: runtimeToolOutputJSONMaxBytes, emptyJSON: `{"text":""}`,
+			name: "Tool output", maxBytes: runtimecontrol.RuntimeToolOutputJSONMaxBytes, emptyJSON: `{"text":""}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
 				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: raw}}}}}}}
 			},
 		},
 		{
-			name: "Tool error", maxBytes: runtimeToolOutputJSONMaxBytes, emptyJSON: `{"error":{"type":"tool_failure","message":"","retryable":false}}`,
+			name: "Tool error", maxBytes: runtimecontrol.RuntimeToolOutputJSONMaxBytes, emptyJSON: `{"error":{"type":"tool_failure","message":"","retryable":false}}`,
 			delta: func(raw string) *bridgev1.RuntimeContextDelta {
 				errorJSON := strings.TrimPrefix(strings.TrimSuffix(raw, "}"), `{"error":`)
 				return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolResult{ToolResult: &bridgev1.RuntimeContextToolResult{ModelToolCallId: "call", Outcome: &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: errorJSON}}}}}}}
@@ -101,14 +102,14 @@ func TestRuntimeContextDeltaEnforcesExactJSONByteBounds(t *testing.T) {
 }
 
 func TestRuntimeToolProjectionEnforcesCanonicalExecutionInputBound(t *testing.T) {
-	exact := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)) + `"}`
-	if len(exact) != runtimeToolInputJSONMaxBytes {
+	exact := `{"patch":"` + strings.Repeat("x", runtimecontrol.RuntimeToolInputJSONMaxBytes-len(`{"patch":""}`)) + `"}`
+	if len(exact) != runtimecontrol.RuntimeToolInputJSONMaxBytes {
 		t.Fatalf("exact canonical execution input bytes = %d", len(exact))
 	}
 	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", exact, "allow", "sandbox_execute")); err != nil {
 		t.Fatalf("exact canonical execution input rejected: %v", err)
 	}
-	over := `{"patch":"` + strings.Repeat("x", runtimeToolInputJSONMaxBytes-len(`{"patch":""}`)+1) + `"}`
+	over := `{"patch":"` + strings.Repeat("x", runtimecontrol.RuntimeToolInputJSONMaxBytes-len(`{"patch":""}`)+1) + `"}`
 	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", over, "allow", "sandbox_execute")); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("oversized canonical execution input error = %v; want InvalidArgument", err)
 	}
@@ -133,9 +134,9 @@ func TestRuntimeContextTextAndIdentifiersMatchGatewayByteBounds(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			exact := strings.Repeat("x", runtimeContextTextJSONMaxBytes-2)
-			if runtimeJSONBytes(exact) != runtimeContextTextJSONMaxBytes {
-				t.Fatalf("exact JSON-string bytes = %d", runtimeJSONBytes(exact))
+			exact := strings.Repeat("x", runtimecontrol.RuntimeContextTextJSONMaxBytes-2)
+			if runtimecontrol.RuntimeJSONBytes(exact) != runtimecontrol.RuntimeContextTextJSONMaxBytes {
+				t.Fatalf("exact JSON-string bytes = %d", runtimecontrol.RuntimeJSONBytes(exact))
 			}
 			if _, err := canonicalRuntimeContextParts(test.delta(exact)); err != nil {
 				t.Fatalf("exact text bound rejected: %v", err)
@@ -146,23 +147,23 @@ func TestRuntimeContextTextAndIdentifiersMatchGatewayByteBounds(t *testing.T) {
 		})
 	}
 
-	for _, size := range []int{runtimeContextIdentifierMaxBytes, runtimeContextIdentifierMaxBytes + 1} {
+	for _, size := range []int{runtimecontrol.RuntimeContextIdentifierMaxBytes, runtimecontrol.RuntimeContextIdentifierMaxBytes + 1} {
 		identifier := strings.Repeat("i", size)
 		delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{
 			ModelToolCallId: identifier, ToolName: "Read", ProviderInputJson: `{}`,
 		}}}}}
 		_, err := canonicalRuntimeContextParts(delta)
-		if size == runtimeContextIdentifierMaxBytes && err != nil {
+		if size == runtimecontrol.RuntimeContextIdentifierMaxBytes && err != nil {
 			t.Fatalf("exact identifier bound rejected: %v", err)
 		}
-		if size > runtimeContextIdentifierMaxBytes && status.Code(err) != codes.InvalidArgument {
+		if size > runtimecontrol.RuntimeContextIdentifierMaxBytes && status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("oversized identifier error = %v; want InvalidArgument", err)
 		}
 	}
 }
 
 func TestStoredRuntimeContextAcceptsProviderIdentifiersWithoutSensitiveTextClassification(t *testing.T) {
-	parts, err := decodeStoredRuntimeContextParts(`{"parts":[{"type":"tool_call","modelToolCallId":"dummy-call-1","toolName":"Read","canonicalInput":{}},{"type":"tool_result","modelToolCallId":"dummy-call-1","result":{"type":"completed","output":{"text":"ok"}}}]}`)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(`{"parts":[{"type":"tool_call","modelToolCallId":"dummy-call-1","toolName":"Read","canonicalInput":{}},{"type":"tool_result","modelToolCallId":"dummy-call-1","result":{"type":"completed","output":{"text":"ok"}}}]}`)
 	if err != nil {
 		t.Fatalf("decode durable provider identifiers: %v", err)
 	}

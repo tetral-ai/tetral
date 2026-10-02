@@ -5,12 +5,7 @@
     "github.com/tetral-ai/tetral/services/bridge": {
       "default_ms": 350,
       "tests_ms": {
-        "TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues": 20520,
         "TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand": 6780,
-        "TestSubagentRetainedAssistantAndTerminalToolResultColdResume": 5660,
-        "TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody": 4690,
-        "TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition": 4590,
-        "TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority": 4030,
         "TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas": 3410,
         "TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors": 3210,
         "TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation": 3140,
@@ -31,6 +26,20 @@
         "TestFileErrorsMapThroughCentralEnvelope": 2610,
         "TestSkillHandlerMalformedMultipartAndRouteCapErrors": 2580
       }
+    },
+    "github.com/tetral-ai/tetral/integration": {
+      "default_ms": 350,
+      "tests_ms": {
+        "TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues": 20520,
+        "TestSubagentRetainedAssistantAndTerminalToolResultColdResume": 5660,
+        "TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody": 4690,
+        "TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition": 4590,
+        "TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority": 4030
+      }
+    },
+    "github.com/tetral-ai/tetral/services/job-runner": {
+      "default_ms": 350,
+      "tests_ms": {}
     }
   }
 }

@@ -20,6 +20,7 @@
     "@tetral/gateway-protocol": "workspace:*",
     "@tetral/ts-observability": "file:../../../../internal/ts-observability",
     "ai": "6.0.168",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@tetral/ts-dbconnect": "file:../../../../internal/ts-dbconnect"
   }
 }

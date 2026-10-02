@@ -6,6 +6,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
+
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -36,7 +38,7 @@ type Server struct {
 
 func NewServer(store Store, logger *slog.Logger) *Server {
 	if logger == nil {
-		logger = slog.Default()
+		logger = workload.ComponentLogger("queue")
 	}
 	return &Server{store: store, now: time.Now, logger: logger}
 }
@@ -87,7 +89,7 @@ func (s *Server) logLease(job *queue.Job, leaseNow, leaseStarted, leaseCompleted
 	if readyWait < 0 {
 		readyWait = 0
 	}
-	s.logger.Info("queue.job.leased",
+	s.logger.Debug("queue.job.leased",
 		slog.String("operation", "queue.lease"),
 		slog.String("event.kind", "queue_job_leased"),
 		slog.String("workspace.id", job.WorkspaceID.String()),

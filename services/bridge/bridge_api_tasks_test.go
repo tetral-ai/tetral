@@ -18,13 +18,11 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
-
-// This file owns the Bridge tasks protocol-family boundary.
 
 func settleBridgeAPIBackgroundTask(t *testing.T, admin *sql.DB, sessionID string, taskID string, terminalStatus string, resultJSON string) {
 	t.Helper()
@@ -33,7 +31,7 @@ func settleBridgeAPIBackgroundTask(t *testing.T, admin *sql.DB, sessionID string
 		    terminal_at='2026-01-01T00:00:30Z', next_poll_at=NULL,
 		    reconcile_generation=reconcile_generation+1, updated_at='2026-01-01T00:00:30Z'
 		WHERE workspace_id='default' AND session_id=$1 AND task_id=$2 AND status='running'`,
-		sessionID, taskID, terminalStatus, resultJSON, bridgeRequestHash(resultJSON)); err != nil {
+		sessionID, taskID, terminalStatus, resultJSON, runtimecontrol.RequestHash(resultJSON)); err != nil {
 		t.Fatalf("settle background task: %v", err)
 	}
 }
@@ -134,7 +132,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
 	requestID := "cmdop_bridge_poll_consumed"
-	inputJSON, err := marshalBridgeJSON(map[string]any{"session_id": taskID, "chars": ""})
+	inputJSON, err := runtimecontrol.MarshalJSON(map[string]any{"session_id": taskID, "chars": ""})
 	if err != nil {
 		t.Fatalf("marshal poll input: %v", err)
 	}
@@ -151,7 +149,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	) VALUES ($1,$2,$3,$4,'sandbox_background',$5,'write_stdin',$6,'committed',$7,$8,
 		'conversation_tool_result','poll','terminal',$9,$10,0,now(),now())`,
 		workspaceID, sessionID, threadID, toolUseEventID, inputHash, canonicalInput,
-		bridgeRequestHash(terminalJSON), terminalEventID, requestID, taskID); err != nil {
+		runtimecontrol.RequestHash(terminalJSON), terminalEventID, requestID, taskID); err != nil {
 		t.Fatalf("seed consumed terminal poll receipt: %v", err)
 	}
 
@@ -223,7 +221,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 		SET status='completed', terminal_result_json=$4, terminal_result_digest=$5,
 		    terminal_at=now(), next_poll_at=NULL, updated_at=now()
 		WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3`,
-		workspaceID, sessionID, taskID, terminalJSON, bridgeRequestHash(terminalJSON)); err != nil {
+		workspaceID, sessionID, taskID, terminalJSON, runtimecontrol.RequestHash(terminalJSON)); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("settle background task: %v", err)
 	}
@@ -238,7 +236,7 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 		SET background_operation_state='terminal', result_json=NULL, result_digest=$4,
 		    consumed_by_terminal_event_id=$5, consumption_reason='conversation_tool_result', updated_at=now()
 		WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3`,
-		workspaceID, sessionID, toolUseEventID, bridgeRequestHash(terminalJSON), terminalEventID); err != nil {
+		workspaceID, sessionID, toolUseEventID, runtimecontrol.RequestHash(terminalJSON), terminalEventID); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("consume terminal poll receipt: %v", err)
 	}
@@ -437,7 +435,7 @@ func TestPostgreSQLBridgeAPIStoreBackgroundCommandsRejectUnrelatedSameThreadAuth
 }
 
 func TestCanonicalTaskNotificationPayloadRejectsNullRequiredStreamFields(t *testing.T) {
-	_, err := canonicalTaskNotificationPayloadJSON(
+	_, err := runtimecontrol.CanonicalTaskNotificationPayloadJSON(
 		"task_bridge_null",
 		"sevt_tool_null",
 		"completed",
@@ -453,31 +451,9 @@ func TestCanonicalTaskNotificationPayloadRequiresBothStreams(t *testing.T) {
 		`{"status":"completed","stderr":{"text":"","truncated":false}}`,
 		`{"status":"completed","stdout":{"text":"","truncated":false}}`,
 	} {
-		if _, err := canonicalTaskNotificationPayloadJSON("task_bridge_stream", "sevt_tool_stream", "completed", resultJSON); err == nil {
+		if _, err := runtimecontrol.CanonicalTaskNotificationPayloadJSON("task_bridge_stream", "sevt_tool_stream", "completed", resultJSON); err == nil {
 			t.Fatalf("canonical task notification payload accepted missing required stream: %s", resultJSON)
 		}
-	}
-}
-
-func TestRuntimeTaskNotificationPayloadAcceptsSandboxFailureEnvelope(t *testing.T) {
-	payload, err := runtimeTaskNotificationPayloadJSON(&RuntimeTaskNotificationPlan{
-		TaskID: "task_failed_delivery", SourceToolUseEventID: "evt_failed_delivery",
-	}, "failed", `{"status":"failed","error":{"kind":"sandbox_provider_unavailable","message":"provider unavailable"},"result":{"stdout":{"text":"","truncated":false},"stderr":{"text":"provider unavailable","truncated":false}}}`)
-	if err != nil {
-		t.Fatalf("runtimeTaskNotificationPayloadJSON: %v", err)
-	}
-	var decoded struct {
-		Status string `json:"status"`
-		Stderr struct {
-			Text      string `json:"text"`
-			Truncated bool   `json:"truncated"`
-		} `json:"stderr"`
-	}
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		t.Fatalf("decode task failure payload: %v", err)
-	}
-	if decoded.Status != "failed" || decoded.Stderr.Text != "provider unavailable" || decoded.Stderr.Truncated {
-		t.Fatalf("task failure payload = %s", payload)
 	}
 }
 
@@ -488,12 +464,12 @@ func TestCanonicalTaskNotificationPayloadFitsRuntimeRail(t *testing.T) {
 		strings.Repeat("err-\u754c", 10240),
 	)
 
-	payloadJSON, err := canonicalTaskNotificationPayloadJSON("task_bridge_large", "sevt_tool_large", "completed", resultJSON)
+	payloadJSON, err := runtimecontrol.CanonicalTaskNotificationPayloadJSON("task_bridge_large", "sevt_tool_large", "completed", resultJSON)
 	if err != nil {
 		t.Fatalf("canonicalTaskNotificationPayloadJSON: %v", err)
 	}
-	if len([]byte(payloadJSON)) > runtimeTaskNotificationPayloadMaxBytes {
-		t.Fatalf("canonical payload bytes = %d; want <= %d", len([]byte(payloadJSON)), runtimeTaskNotificationPayloadMaxBytes)
+	if len([]byte(payloadJSON)) > runtimecontrol.RuntimeTaskNotificationPayloadMaxBytes {
+		t.Fatalf("canonical payload bytes = %d; want <= %d", len([]byte(payloadJSON)), runtimecontrol.RuntimeTaskNotificationPayloadMaxBytes)
 	}
 	var payload struct {
 		Stdout struct {
@@ -635,7 +611,7 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_bridge_task_notify' AND operation=$1),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id='sesn_bridge_task_notify' AND kind='runtime_notification')`,
-		bridgeOpCommitTaskNotificationResult).Scan(&replayOperations, &replayMessages); err != nil {
+		runtimecontrol.OperationCommitTaskNotificationResult).Scan(&replayOperations, &replayMessages); err != nil {
 		t.Fatalf("read stale-scope task-notification effects: %v", err)
 	}
 	if replayOperations != 1 || replayMessages != 1 {
@@ -683,7 +659,7 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationStaleSettlementHasStableEvidenc
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$2
 		  AND operation=$3 AND ack_status='rejected' AND runtime_input_id=$1),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$2 AND kind='runtime_notification')`,
-		inputID, sessionID, bridgeOpCommitTaskNotificationResult,
+		inputID, sessionID, runtimecontrol.OperationCommitTaskNotificationResult,
 	).Scan(&inboxStatus, &operations, &notificationMessages); err != nil {
 		t.Fatalf("read stale settlement evidence: %v", err)
 	}
@@ -730,193 +706,12 @@ func TestPostgreSQLBridgeAPIStoreRejectsInvalidTaskNotificationSourceEventPerInp
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$2 AND operation=$3),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND type='runtime_notification'),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$2 AND kind='runtime_notification')`,
-		inputID, sessionID, bridgeOpCommitTaskNotificationResult,
+		inputID, sessionID, runtimecontrol.OperationCommitTaskNotificationResult,
 	).Scan(&inboxStatus, &operations, &events, &messages); err != nil {
 		t.Fatalf("read invalid-source settlement: %v", err)
 	}
 	if inboxStatus != "dead_lettered" || operations != 1 || events != 0 || messages != 0 {
 		t.Fatalf("invalid-source settlement = Inbox:%s operations:%d events:%d messages:%d", inboxStatus, operations, events, messages)
-	}
-}
-
-func TestPostgreSQLRuntimeDeliveryReplayKeepsGenuineTaskNotificationExhaustionTerminal(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_task_exhaustion", "thr_task_exhaustion")
-	job := RuntimeJob{
-		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: "sesn_task_exhaustion",
-		SessionThreadID: "thr_task_exhaustion", RuntimeInputID: "task_notification:task_exhaustion", InputKind: "task_notification",
-	}
-	seedRuntimeInboxBirthForJob(t, admin, job)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox SET status='dead_lettered'
-		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, job.SessionID, job.RuntimeInputID); err != nil {
-		t.Fatalf("terminalize task notification Inbox: %v", err)
-	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-
-	replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), job)
-	if err != nil || !found || replayed.Status != RuntimeDeliveryRejected || replayed.Retryable || replayed.ErrorKind != "runtime_delivery_exhausted" {
-		t.Fatalf("genuine task notification exhaustion replay = %#v/%t/%v", replayed, found, err)
-	}
-}
-
-type taskNotificationReplayOnlyDeliverer struct {
-	store      *PostgreSQLRuntimeDeliveryStore
-	deliveries int
-}
-
-func (d *taskNotificationReplayOnlyDeliverer) DeliverRuntimeJob(context.Context, RuntimeJob) (RuntimeDeliveryResult, error) {
-	d.deliveries++
-	return RuntimeDeliveryResult{}, errors.New("Runtime must not be contacted after durable rejection")
-}
-
-func (d *taskNotificationReplayOnlyDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
-	return d.store.ReplayRuntimeDeliveryFinalization(ctx, job)
-}
-
-func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntime(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_task_rejection_reclaim"
-		threadID  = "thr_task_rejection_reclaim"
-		bindingID = "bind_task_rejection_reclaim"
-		podUID    = "pod_task_rejection_reclaim"
-		taskID    = "task_rejection_reclaim"
-		inputID   = "task_notification:task_rejection_reclaim"
-	)
-	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_reclaim")
-	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
-	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_reclaim'`, sessionID); err != nil {
-		t.Fatalf("corrupt durable task source: %v", err)
-	}
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
-	if err != nil {
-		t.Fatalf("build task notification Queue job: %v", err)
-	}
-	queued, err := queueStore.Enqueue(context.Background(), enqueue)
-	if err != nil {
-		t.Fatalf("enqueue task notification Queue job: %v", err)
-	}
-	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "rejection-before-crash",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
-	})
-	if err != nil || len(leased) != 1 || leased[0].ID != queued.ID {
-		t.Fatalf("lease task notification Queue job = %#v/%v", leased, err)
-	}
-	request := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-	}
-	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	response, err := bridgeStore.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
-		t.Fatalf("commit durable task notification rejection = %#v/%v", response, err)
-	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
-		WHERE workspace_id='default' AND id=$1 AND status='leased'`, queued.ID); err != nil {
-		t.Fatalf("expire rejected task notification lease: %v", err)
-	}
-	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
-		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
-	}); err != nil || reclaimed != 1 {
-		t.Fatalf("reclaim rejected task notification lease = %d/%v; want one", reclaimed, err)
-	}
-	deliverer := &taskNotificationReplayOnlyDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
-	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
-		Config: JobRunnerConfig{LeaseOwner: "rejection-after-crash", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-	}
-	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
-		t.Fatalf("replay rejected task notification after reclaim = active:%t err:%v", active, err)
-	}
-	var queueStatus, inboxStatus string
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
-		(SELECT status FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$2)`,
-		queued.ID, inputID,
-	).Scan(&queueStatus, &inboxStatus); err != nil {
-		t.Fatalf("read reclaimed rejection custody: %v", err)
-	}
-	if queueStatus != queue.StatusAcknowledged || inboxStatus != "dead_lettered" || deliverer.deliveries != 0 {
-		t.Fatalf("reclaimed rejection = Queue:%s Inbox:%s Runtime calls:%d", queueStatus, inboxStatus, deliverer.deliveries)
-	}
-}
-
-func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwnedQueueLease(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_task_rejection_acceptance"
-		threadID  = "thr_task_rejection_acceptance"
-		bindingID = "bind_task_rejection_acceptance"
-		podUID    = "pod_task_rejection_acceptance"
-		taskID    = "task_rejection_acceptance"
-		inputID   = "task_notification:task_rejection_acceptance"
-	)
-	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_acceptance")
-	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
-	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", storedResult)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET type='agent.message'
-		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_acceptance'`, sessionID); err != nil {
-		t.Fatalf("corrupt durable task source: %v", err)
-	}
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
-	if err != nil {
-		t.Fatalf("build task notification Queue job: %v", err)
-	}
-	queued, err := queueStore.Enqueue(context.Background(), enqueue)
-	if err != nil {
-		t.Fatalf("enqueue task notification Queue job: %v", err)
-	}
-	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
-		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "task-rejection-acceptance",
-		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
-	})
-	if err != nil || len(leased) != 1 || leased[0].ID != queued.ID {
-		t.Fatalf("lease task notification Queue job = %#v/%v", leased, err)
-	}
-	job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
-	if err != nil {
-		t.Fatalf("decode task notification Queue job: %v", err)
-	}
-	request := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-	}
-	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	response, err := apiStore.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
-		t.Fatalf("commit terminal notification rejection = %#v/%v", response, err)
-	}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	attemptedBinding := RuntimeAttemptedBinding{
-		BindingID: bindingID, Generation: 1, TargetPodUID: podUID,
-	}
-	if settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, attemptedBinding); err != nil || settled {
-		t.Fatalf("MarkRuntimeInputAccepted after rejection = settled:%t err:%v; want replayed terminal Inbox", settled, err)
-	}
-	if acked, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: workspace.DefaultID, JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, Now: now.Add(2 * time.Second),
-	}); err != nil || !acked {
-		t.Fatalf("ACK rejection Queue lease = %t/%v", acked, err)
-	}
-	var inboxStatus, queueStatus string
-	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status,job.status
-		FROM session_runtime_inbox inbox JOIN queue_jobs job ON job.workspace_id=inbox.workspace_id AND job.id=$2
-		WHERE inbox.workspace_id='default' AND inbox.runtime_input_id=$1`, inputID, queued.ID).Scan(&inboxStatus, &queueStatus); err != nil {
-		t.Fatalf("read converged rejected custody: %v", err)
-	}
-	if inboxStatus != "dead_lettered" || queueStatus != queue.StatusAcknowledged {
-		t.Fatalf("rejected custody = Inbox:%s Queue:%s", inboxStatus, queueStatus)
 	}
 }
 
@@ -959,7 +754,7 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='runtime_notification'),
 			(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='runtime_notification'),
 			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation=$2)`,
-			sessionID, bridgeOpCommitTaskNotificationResult).Scan(&notificationEvents, &notificationMessages, &operations); err != nil {
+			sessionID, runtimecontrol.OperationCommitTaskNotificationResult).Scan(&notificationEvents, &notificationMessages, &operations); err != nil {
 			t.Fatalf("read durable effects after identity mismatch: %v", err)
 		}
 		if inboxStatus != "accepted" || terminalEventID.Valid || notificationEvents != 0 || notificationMessages != 0 || operations != 0 {
@@ -1051,7 +846,7 @@ func TestPostgreSQLBridgeAPIStoreTaskNotificationRejectsEveryRuntimeScopeMismatc
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='runtime_notification'),
 				(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='runtime_notification'),
 				(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation=$4)`,
-				sessionID, inputID, taskID, bridgeOpCommitTaskNotificationResult,
+				sessionID, inputID, taskID, runtimecontrol.OperationCommitTaskNotificationResult,
 			).Scan(&inboxStatus, &terminalEventID, &notificationEvents, &notificationMessages, &operations); err != nil {
 				t.Fatalf("read durable facts after scope rejection: %v", err)
 			}
@@ -1120,5 +915,13 @@ func TestPostgreSQLCommitTaskNotificationParkedReceiptLeavesQueueCustodyToJobRun
 	}
 	if inboxStatus != "parked" || queueStatus != queue.StatusPending {
 		t.Fatalf("deferred custody = Inbox %q / Queue %q; want parked / pending", inboxStatus, queueStatus)
+	}
+}
+
+func TestBridgeBackgroundTaskProcessTerminalStatusFactsRemainDistinct(t *testing.T) {
+	for _, status := range []string{"cancelled_by_cleanup", "stale", "unknown"} {
+		if _, err := terminalStatusFromResultJSON(`{"status":"` + status + `"}`); err == nil {
+			t.Fatalf("terminalStatusFromResultJSON accepted process status %q", status)
+		}
 	}
 }

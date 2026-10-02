@@ -51,11 +51,11 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 			uid: fixture.acceptInput.targetPodUid,
 			ip: "127.0.0.1",
 		},
-		allowedBridge: { namespace: "engine", name: "bridge" },
+		allowedJobRunner: { namespace: "engine", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true as const,
-				serviceAccount: { namespace: "engine", name: "bridge" },
+				serviceAccount: { namespace: "engine", name: "job-runner" },
 			}),
 		} satisfies RuntimeAuthenticator,
 		runHost: {

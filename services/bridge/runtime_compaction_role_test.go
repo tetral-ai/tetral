@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -41,7 +42,7 @@ func TestPostgreSQLBridgeCompactionRoleCommitsCheckpointAndConsumesPrefix(t *tes
 					t.Fatal(err)
 				}
 			}
-			seedBridgeAPIRequestStart(t, store, scope, "rw_start", "mreq_compaction_role", requestKindCompactionSummary, 0)
+			seedBridgeAPIRequestStart(t, store, scope, "rw_start", "mreq_compaction_role", runtimecontrol.RequestKindCompactionSummary, 0)
 			boundary := int64(0)
 			request := &bridgev1.WriteRequestEndRequest{
 				Scope: scope, RuntimeWriteId: "rw_end", ModelRequestId: "mreq_compaction_role", FinishReason: "end_turn", UsageJson: `{}`,

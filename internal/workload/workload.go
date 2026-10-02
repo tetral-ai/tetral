@@ -22,33 +22,19 @@ import (
 	"time"
 )
 
-// NewLogger builds the production *slog.Logger every workload command shares.
-// Service identity is attached once here via logger.With so every line carries
-// service.name/deployment.environment/service.version without per-call repetition.
-// A nil writer falls back to os.Stderr; empty identity fields take the same
-// defaults the command config layer applies.
-func NewLogger(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string) *slog.Logger {
+// NewLogger is a synchronous adapter for prompt-return writers and embedded tests.
+// Production process commands own NewProcessLogger and its bounded shutdown.
+func NewLogger(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string) *slog.Logger {
 	return NewLoggerWithLevel(writer, serviceName, deploymentEnvironment, serviceVersion, slog.LevelInfo)
 }
-
-func NewLoggerWithLevel(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string, level slog.Level) *slog.Logger {
+func NewLoggerWithLevel(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string, level slog.Level) *slog.Logger {
 	if writer == nil {
 		writer = os.Stderr
 	}
-	if serviceName == "" {
-		serviceName = "unknown"
-	}
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
-	return slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: level})).With(
-		slog.String("service.name", serviceName),
-		slog.String("deployment.environment", deploymentEnvironment),
-		slog.String("service.version", serviceVersion),
-	)
+	cfg := DefaultDiagnosticConfig()
+	cfg.Level = level
+	state := newDiagnosticState(cfg)
+	return newDiagnosticLogger(promptDiagnosticWriter{writer, &state.counts}, serviceName, deploymentEnvironment, serviceVersion, state)
 }
 
 // Readiness tracks whether a workload can receive traffic.
@@ -515,10 +501,10 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ReadHeaderTimeout = 10 * time.Second
 	}
 	if cfg.DeploymentEnvironment == "" {
-		cfg.DeploymentEnvironment = "local"
+		cfg.DeploymentEnvironment = DefaultDeploymentEnvironment
 	}
 	if cfg.ServiceVersion == "" {
-		cfg.ServiceVersion = "unknown"
+		cfg.ServiceVersion = DefaultServiceVersion
 	}
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = ":8080"
@@ -527,7 +513,9 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ListenConfigKey = "listen.address"
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = NewLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion)
+		owner := NewProcessLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		cfg.Logger = owner.Logger
 	}
 	if cfg.Readiness == nil {
 		cfg.Readiness = NewReadiness()

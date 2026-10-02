@@ -11,7 +11,7 @@
  */
 
 import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
-import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
+import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
 
 /** Extends shared structured records with provider-gateway event classification fields. */
 export type GatewayLogRecord = TetralLogRecord & {
@@ -26,17 +26,21 @@ export type GatewayStartupCauseCategory = "configuration" | "schema" | "listener
 /** Defines the shared JSON logger specialized for provider-gateway records. */
 export type GatewayLogger = TetralJsonLogger<GatewayLogRecord>;
 
-/** Creates a structured logger whose default service identity is `gateway`. */
+/** Creates a structured logger whose default service identity is `provider-gateway`. */
 export function createJsonLogger(options: {
-  readonly write: (line: string) => void;
+  readonly write: (line: string) => unknown;
+  readonly sinkFailures?: (() => number) | undefined;
+  readonly diagnostics?: DiagnosticConfig;
   readonly serviceName?: string;
   readonly deploymentEnvironment?: string;
   readonly serviceVersion?: string;
   readonly clock?: (() => Date) | undefined;
-}): GatewayLogger {
+}): TetralDiagnosticLogger<GatewayLogRecord> {
   return createTetralJsonLogger<GatewayLogRecord>({
     write: options.write,
-    serviceName: options.serviceName ?? "gateway",
+    sinkFailures: options.sinkFailures,
+    diagnostics: options.diagnostics,
+    serviceName: options.serviceName ?? "provider-gateway",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
     clock: options.clock,

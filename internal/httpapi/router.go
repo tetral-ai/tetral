@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -160,7 +159,7 @@ func WithRequestMetrics(metrics RequestMetricsRecorder) RouterOption {
 
 func applyRouterOptionDefaults(opts *routerOptions) {
 	if opts.logger == nil {
-		opts.logger = defaultRouterLogger(os.Stderr)
+		opts.logger = workload.ComponentLogger("api")
 	}
 	if opts.slowRequestThreshold == 0 {
 		opts.slowRequestThreshold = DefaultSlowRequestThreshold

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,11 +18,10 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-// This file owns the Bridge attachments protocol-family boundary.
 
 func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReadsActiveBlobWithScope(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -211,7 +211,7 @@ func seedBridgeTransientAttachmentSourceToolForTest(t *testing.T, admin *sql.DB,
 		) VALUES ($1, $2, $3, $4, 'sandbox_tool', $5, 'view_image', '{}', 'committed',
 			$6, $7, 'terminal_unconsumed', 1, $8, now(), now())`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-		"input_hash_"+toolUseEventID, resultJSON, "call_"+toolUseEventID, sha256Hex(resultJSON),
+		"input_hash_"+toolUseEventID, resultJSON, "call_"+toolUseEventID, runtimecontrol.Sha256Hex(resultJSON),
 	); err != nil {
 		t.Fatalf("seed transient attachment source Tool: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndC
 			$4, 'terminal_unconsumed', 1,
 			$5, '2026-01-01T12:00:00Z', '2026-01-01T12:00:00Z'
 		)`, protected.sourceEventID, "input_hash_gc_protected_"+strconv.Itoa(index),
-			"call_gc_protected_"+strconv.Itoa(index), protectedResult, sha256Hex(protectedResult),
+			"call_gc_protected_"+strconv.Itoa(index), protectedResult, runtimecontrol.Sha256Hex(protectedResult),
 		); err != nil {
 			t.Fatalf("seed unconsumed Sandbox execution for protected attachment: %v", err)
 		}
@@ -437,5 +437,79 @@ func TestTransientAttachmentGCTelemetryIsSafeAndReportsFailures(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "secret blob pointer") || strings.Contains(output.String(), "raw attachment bytes") {
 		t.Fatalf("GC logs leaked raw error: %q", output.String())
+	}
+}
+
+type joiningGCBlobStore struct {
+	blob.BlobStore
+	entered  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+}
+
+func (b *joiningGCBlobStore) Delete(ctx context.Context, _ string) error {
+	close(b.entered)
+	<-ctx.Done()
+	close(b.canceled)
+	<-b.release
+	return ctx.Err()
+}
+func TestPostgreSQLTransientAttachmentGCStopJoinsBeforePoolClose(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_gc_join", "thr_gc_join")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_gc_join", "bind_gc_join", 1, "pod_gc_join")
+	client := dbconnect.NewClientForTesting(runtime)
+	store := NewPostgreSQLBridgeAPIStore(client)
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
+	blocking := &joiningGCBlobStore{BlobStore: blob.NewFakeBlobStore(), entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{})}
+	store.AttachmentBlobStore = blocking
+	created := createBridgeTransientAttachmentForTest(t, store, bridgeAPIScope("sesn_gc_join", "thr_gc_join", "bind_gc_join", 1, "pod_gc_join"), "gc_join", "evt_gc_join", []byte("expired"))
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments SET expires_at='2026-01-01T11:00:00Z' WHERE workspace_id='default' AND attachment_ref=$1`, created.GetAttachmentRef()); err != nil {
+		t.Fatalf("expire GC fixture: %v", err)
+	}
+	var diagnostics bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	stop := func() {}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	t.Cleanup(func() { release(); stop() })
+	stop = StartTransientAttachmentGC(context.Background(), store, logger, time.Millisecond, 10)
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GC did not enter Blob deletion")
+	}
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-blocking.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not cancel GC operation")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stop returned before Blob operation owner exited")
+	default:
+	}
+	release()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not join GC worker")
+	}
+	// The owner can still use its pool after the worker has joined; closure is
+	// the next process-resource step, never cancellation's first step.
+	if err := runtime.PingContext(context.Background()); err != nil {
+		t.Fatalf("pool closed before owner could finish joined cleanup: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close joined process pool: %v", err)
+	}
+	if err := runtime.PingContext(context.Background()); err == nil {
+		t.Fatal("explicit process pool close did not close pool")
+	}
+	stop() // repeat stop after pool closure must not restart or query.
+	if output := diagnostics.String(); strings.Contains(output, "gc_failed") || strings.Contains(output, "gc_partial") {
+		t.Fatalf("planned cancellation emitted logical failure: %s", output)
 	}
 }

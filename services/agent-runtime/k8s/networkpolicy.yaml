@@ -30,7 +30,7 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
           port: 9090
@@ -51,12 +51,28 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: provider-gateway
       ports:
         - protocol: TCP
           port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
+      ports:
         - protocol: TCP
           port: 9091
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web-connector
+      ports:
         - protocol: TCP
           port: 9092
     - to:
@@ -95,7 +111,7 @@ spec:
         - kube-apiserver
       toPorts:
         - ports:
-            - port: "443"
+            - port: '443'
               protocol: TCP
-            - port: "6443"
+            - port: '6443'
               protocol: TCP

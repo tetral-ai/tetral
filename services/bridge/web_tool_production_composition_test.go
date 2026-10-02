@@ -13,15 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 	webconnector "github.com/tetral-ai/tetral/services/web-connector"
-
-	"google.golang.org/grpc"
 )
 
 func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
@@ -48,7 +49,7 @@ func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("web-effect-authority-signing-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_web_effect_start", requestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_web_effect_start", requestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	writeWebTool := func(writeID, callID, query string) string {
 		t.Helper()

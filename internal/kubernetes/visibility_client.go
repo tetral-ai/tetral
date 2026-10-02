@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -57,18 +58,34 @@ type WatchHandles struct {
 	Pods           watch.Interface
 	EndpointSlices watch.Interface
 	cancel         context.CancelFunc
+	completion     *watchCompletion
+}
+
+// Shared completion survives copies of WatchHandles. Stop cancels and joins
+// both owners, including replacement watches and in-flight context-bound lists.
+type watchCompletion struct {
+	stop    sync.Once
+	workers sync.WaitGroup
 }
 
 func (h WatchHandles) Stop() {
-	if h.cancel != nil {
-		h.cancel()
+	stop := func() {
+		if h.cancel != nil {
+			h.cancel()
+		}
+		if h.Pods != nil {
+			h.Pods.Stop()
+		}
+		if h.EndpointSlices != nil {
+			h.EndpointSlices.Stop()
+		}
 	}
-	if h.Pods != nil {
-		h.Pods.Stop()
+	if h.completion == nil {
+		stop()
+		return
 	}
-	if h.EndpointSlices != nil {
-		h.EndpointSlices.Stop()
-	}
+	h.completion.stop.Do(stop)
+	h.completion.workers.Wait()
 }
 
 type SyncOptions struct {
@@ -124,9 +141,17 @@ func SyncAndWatchWithOptions(ctx context.Context, client VisibilityClient, cfg C
 	}
 	cache.ReplacePods(pods.Items)
 	cache.ReplaceEndpointSlices(endpointSlices.Items)
-	go runPodWatch(watchCtx, client, cfg, podOptions, cache, podWatch, syncOptions)
-	go runEndpointSliceWatch(watchCtx, client, cfg, endpointOptions, cache, endpointWatch, syncOptions)
-	return WatchHandles{Pods: podWatch, EndpointSlices: endpointWatch, cancel: cancel}, nil
+	completion := &watchCompletion{}
+	completion.workers.Add(2)
+	go func() {
+		defer completion.workers.Done()
+		runPodWatch(watchCtx, client, cfg, podOptions, cache, podWatch, syncOptions)
+	}()
+	go func() {
+		defer completion.workers.Done()
+		runEndpointSliceWatch(watchCtx, client, cfg, endpointOptions, cache, endpointWatch, syncOptions)
+	}()
+	return WatchHandles{Pods: podWatch, EndpointSlices: endpointWatch, cancel: cancel, completion: completion}, nil
 }
 
 func runPodWatch(ctx context.Context, client VisibilityClient, cfg Config, options metav1.ListOptions, cache *WatcherCache, current watch.Interface, syncOptions SyncOptions) {

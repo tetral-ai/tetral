@@ -34,7 +34,7 @@ export interface McpCallerAuthInput {
   readonly method: string;
   readonly tokenReviewClient: McpTokenReviewClient;
   readonly allowedRuntimePod: Pick<ServiceAccountIdentity, "namespace" | "name">;
-  readonly allowedBridge: Pick<ServiceAccountIdentity, "namespace" | "name">;
+  readonly allowedDiscoveryCallers: readonly Pick<ServiceAccountIdentity, "namespace" | "name">[];
 }
 
 /** Abstracts Kubernetes TokenReview for fail-closed caller authentication. */
@@ -113,11 +113,9 @@ export async function authenticateMcpCaller(input: McpCallerAuthInput): Promise<
   if (serviceAccount === undefined) {
     return unauthenticated();
   }
-  const allowedCaller = allowedCallerForMethod(input);
+  const allowedCallers = allowedCallersForMethod(input);
   if (
-    allowedCaller === undefined ||
-    allowedCaller.namespace !== serviceAccount.namespace ||
-    allowedCaller.name !== serviceAccount.name
+    !allowedCallers.some((caller) => caller.namespace === serviceAccount.namespace && caller.name === serviceAccount.name)
   ) {
     return { ok: false, code: "PermissionDenied", message: "permission denied" };
   }
@@ -127,17 +125,17 @@ export async function authenticateMcpCaller(input: McpCallerAuthInput): Promise<
   return { ok: true, serviceAccount: { ...serviceAccount, podUid: response.podUid } };
 }
 
-function allowedCallerForMethod(input: McpCallerAuthInput): Pick<ServiceAccountIdentity, "namespace" | "name"> | undefined {
+function allowedCallersForMethod(input: McpCallerAuthInput): readonly Pick<ServiceAccountIdentity, "namespace" | "name">[] {
   if (!McpMethods.has(input.method)) {
-    return undefined;
+    return [];
   }
   if (input.method === "/tetral.provider_gateway.v1.McpConnectorService/RunMcpTool") {
-    return input.allowedRuntimePod;
+    return [input.allowedRuntimePod];
   }
   if (input.method === "/tetral.provider_gateway.v1.McpConnectorService/ListMcpTools") {
-    return input.allowedBridge;
+    return input.allowedDiscoveryCallers;
   }
-  return undefined;
+  return [];
 }
 
 /** Calls the Kubernetes TokenReview API with projected reviewer credentials and pinned CA material. */

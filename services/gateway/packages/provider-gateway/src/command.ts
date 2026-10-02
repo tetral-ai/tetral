@@ -1,3 +1,4 @@
+import { createDiagnosticStreamSink, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -29,7 +30,8 @@ import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
 import type { ProviderGatewayConfig } from "./config.js";
-import type { GatewayLogger } from "./logger.js";
+import type { ProcessFailurePhase } from "@tetral/ts-observability";
+import type { GatewayLogRecord, GatewayLogger } from "./logger.js";
 import type { GatewayCredentialSQL } from "./providers/credentials.js";
 import type { SchemaSQL } from "../../schema/src/verify.js";
 
@@ -68,40 +70,85 @@ export interface ProviderGatewayDependencyBuilderOptions {
  * records and surface only generic process errors.
  */
 export async function runProviderGatewayCommand(options: ProviderGatewayCommandOptions = {}): Promise<void> {
-  const startupLogger = options.logger ?? createJsonLogger({ write: (line) => process.stderr.write(line) });
-  const config = loadProviderGatewayConfigFromProcessEnv();
-  if (!config.ok) {
-    startupLogger.error(startupFailureLogRecord(config.error));
-    throw new Error("gateway service config error");
-  }
-  const logger =
-    options.logger ??
-    createJsonLogger({
-      write: (line) => process.stderr.write(line),
-      deploymentEnvironment: config.config.deploymentEnvironment,
-      serviceVersion: config.config.serviceVersion,
-    });
-  let dependencies: ProviderGatewayCommandDependencies;
-  try {
-    dependencies = await (options.dependencyBuilder ?? buildProviderGatewayCommandDependencies)({
-      config: config.config,
-      logger,
-    });
-  } catch (error) {
-    logger.error(startupFailureLogRecord({
-      kind: "startup_error",
-      message: "gateway service startup failed",
-      causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness",
-    }));
-    throw new Error("gateway service startup error");
-  }
-  const shutdown = async (): Promise<void> => {
-    await dependencies.app.shutdown();
-    await dependencies.close?.();
+  const diagnosticSink = options.logger === undefined ? createDiagnosticStreamSink(process.stderr) : undefined;
+  const diagnosticOwners: object[] = [];
+  const diagnosticReleases: (() => void)[] = [];
+  const registerDiagnosticCleanup = (owner: object): void => {
+    if (diagnosticOwners.includes(owner)) return;
+    diagnosticOwners.push(owner);
+    try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
   };
-  (options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
-  await dependencies.app.start();
-  await (options.waitForever ?? waitForever)();
+  let logger: GatewayLogger | undefined;
+  const report = (record: GatewayLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
+  const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
+  let stopping: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    if (stopping !== undefined) return stopping;
+    let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
+    stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
+    void (async () => {
+      let failed = false;
+      let firstFailure: unknown;
+      try {
+        for (const step of closes.slice().reverse()) {
+          try {
+            await step.close();
+          } catch (error) {
+            if (!failed) firstFailure = error;
+            failed = true;
+            report(processFailureLogRecord(step.phase, true));
+          }
+        }
+      } finally {
+        for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
+        diagnosticSink?.close();
+      }
+      if (failed) throw firstFailure;
+    })().then(resolveShutdown, rejectShutdown);
+    return stopping;
+  };
+  let phase: ProcessFailurePhase = "configuration", failureReported = false, failed = false;
+  let releaseSignals: (() => void) | void = undefined;
+  try {
+    logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0 });
+    registerDiagnosticCleanup(logger);
+    const config = loadProviderGatewayConfigFromProcessEnv();
+    if (!config.ok) {
+      failureReported = true; report(startupFailureLogRecord(config.error));
+      throw new Error("gateway service config error");
+    }
+    logger = options.logger ?? createJsonLogger({
+      write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0,
+      deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion,
+    });
+    registerDiagnosticCleanup(logger);
+    phase = "dependency";
+    let dependencies: ProviderGatewayCommandDependencies;
+    try { dependencies = await (options.dependencyBuilder ?? buildProviderGatewayCommandDependencies)({ config: config.config, logger }); }
+    catch (error) {
+      failureReported = true;
+      report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
+      throw new Error("gateway service startup error");
+    }
+    closes.push({ phase: "database", close: () => dependencies.close?.() });
+    closes.push({ phase: "app", close: () => dependencies.app.shutdown() });
+    releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
+    phase = "listener";
+    await dependencies.app.start();
+    phase = "wait";
+    await (options.waitForever ?? waitForever)();
+  } catch (error) {
+    failed = true;
+    if (!failureReported) report(processFailureLogRecord(phase));
+    throw error;
+  } finally {
+    releaseSignals?.();
+    try {
+      await shutdown();
+    } catch (error) {
+      if (!failed) throw error;
+    }
+  }
 }
 
 /**
@@ -221,15 +268,6 @@ async function waitForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
 }
 
-function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
-  process.once("SIGTERM", () => {
-    void shutdown().then(() => process.exit(0));
-  });
-  process.once("SIGINT", () => {
-    void shutdown().then(() => process.exit(0));
-  });
-}
-
 if (import.meta.main) {
-  await runProviderGatewayCommand();
+  await runProcessEntry(() => runProviderGatewayCommand());
 }

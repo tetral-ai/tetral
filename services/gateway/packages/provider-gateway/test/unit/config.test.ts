@@ -59,13 +59,23 @@ describe("Gateway config", () => {
       "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
       "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
     ] as const) {
-      for (const value of ["0", "-1"]) {
+      for (const value of ["0", "-1", "1.5", " 1", "01", "9007199254740992"]) {
         expect(loadProviderGatewayConfigFromEnv({
           ...validEnv(),
           [key]: value,
         }).ok).toBe(false);
       }
     }
+  });
+
+  test("explicit empty pool values retain Gateway defaults", () => {
+    const result = loadProviderGatewayConfigFromEnv({ ...validEnv(),
+      TETRAL_DATABASE_POOL_MAX: "", TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: "",
+      TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS: "", TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS: "",
+      TETRAL_DATABASE_STATEMENT_TIMEOUT_MS: "",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.databasePool).toEqual({ max: 10, idleTimeout: 30, maxLifetime: 1800, connectionTimeout: 30, statementTimeoutMs: 30000 });
   });
 
   test("accepts bounded concurrent-turn admission cap and rejects invalid values", () => {

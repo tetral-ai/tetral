@@ -372,7 +372,7 @@ only on `TETRAL_SANDBOX_HTTP_ADDR` for health and metrics.
 ## Queue and provider diagnostics
 
 A committed Queue insert emits a PostgreSQL notification containing only the
-consumer class. Each Bridge or Sandbox process broadcasts that hint to its
+consumer class. Each Job Runner or Sandbox process broadcasts that hint to its
 local polling loops; they still call Queue `Lease`, which remains the sole
 assignment authority. A disconnected listener reconnects and triggers a
 catch-up poll, while the existing timer polling remains the fallback.
@@ -431,8 +431,10 @@ Credentials, headers, request bodies,
 tool JSON, commands, mount URLs, tokens, and raw stacks are omitted. Startup
 failure categories distinguish configuration, schema, listener, dependency
 readiness, and unknown failures. `TETRAL_SANDBOX_DEBUG_LOGGING=true` enables
-Sandbox-only debug diagnostics; info-level defaults and completion logs are
-unchanged.
+Sandbox debug diagnostics through the shared process logger. The common
+`TETRAL_LOG_LEVEL` controls the other process levels; the legacy Sandbox flag
+continues to enable debug when true. Successful Lease and heartbeat polling is
+quiet at the default Info level.
 
 ## Testing
 
@@ -489,3 +491,14 @@ candidate image and Chart digests before promotion.
 - Runtime and Bridge do not contain provider lifecycle or helper execution.
 - Queue does not own Sandbox business state.
 - The alpha provider registry contains only `daytona`.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe startup and final-failure records retain their
+error tuple; healthy high-frequency polling uses Debug. Repeated degradation
+records emit bounded suppression summaries. Existing metrics report diagnostic
+drops and sink failures independently of stderr. Listener and business-resource
+cleanup completes before the bounded diagnostic close.

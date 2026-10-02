@@ -31,78 +31,66 @@ func (s *childInterruptTransportStore) AwaitChildInterrupt(context.Context, *bri
 	return &bridgev1.AwaitChildInterruptResponse{Outcome: &bridgev1.AwaitChildInterruptResponse_Completed{Completed: &bridgev1.AwaitChildInterruptCompleted{}}}, nil
 }
 
-func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
-	gateway := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "gateway"}}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName); err != nil {
-		t.Fatalf("gateway McpManifestChanged authorization error = %v; want nil", err)
+func TestBridgeAPIMethodAuthorizerSeparatesConnectorPrivileges(t *testing.T) {
+	provider := []string{
+		bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName,
 	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName); err != nil {
-		t.Fatalf("gateway ResolveTransientAttachment authorization error = %v; want nil", err)
+	mcp := []string{
+		bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName,
 	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName); err != nil {
-		t.Fatalf("gateway ResolveFileAttachmentMetadata authorization error = %v; want nil", err)
+	for _, sa := range []string{"provider-gateway", "mcp-connector", "bridge", "job-runner", "gateway", "unknown"} {
+		for _, method := range append(append(append([]string{}, provider...), mcp...), bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName, bridgev1.AgentRuntimeBridgeService_WriteEvent_FullMethodName, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName, bridgev1.AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName, bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName, "/unknown") {
+			want := sa == "provider-gateway" && containsAuthMethod(provider, method) || sa == "mcp-connector" && containsAuthMethod(mcp, method)
+			for _, ns := range []string{"tetral-system", "wrong-system"} {
+				err := BridgeAPIMethodAuthorizer(auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: ns, Name: sa}}, method)
+				if want && ns == "tetral-system" {
+					if err != nil {
+						t.Fatalf("%s/%s %s: %v", ns, sa, method, err)
+					}
+				} else if status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("%s/%s %s status=%v; want permission denied", ns, sa, method, err)
+				}
+			}
+		}
 	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName); err != nil {
-		t.Fatalf("gateway ReadFileAttachmentChunk authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName); err != nil {
-		t.Fatalf("gateway ClaimMcpToolResult authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName); err != nil {
-		t.Fatalf("gateway CommitMcpToolResult authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName); err != nil {
-		t.Fatalf("gateway RelinquishMcpToolResult authorization error = %v; want nil", err)
-	}
-	err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName)
-	if status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("gateway AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
-	}
+}
 
-	runtimePod := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); err != nil {
-		t.Fatalf("runtime pod AcceptSandboxExecution authorization error = %v; want nil", err)
+func TestBridgeAPIMethodAuthorizerPreservesRuntimePrivileges(t *testing.T) {
+	caller := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}}
+	for _, method := range []string{
+		bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_SettleToolResult_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_RefreshRuntimeBindingToken_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName,
+	} {
+		if err := BridgeAPIMethodAuthorizer(caller, method); err != nil {
+			t.Fatalf("Runtime %s: %v", method, err)
+		}
 	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName); err != nil {
-		t.Fatalf("runtime pod AwaitSandboxExecution authorization error = %v; want nil", err)
+	for _, method := range []string{bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName, bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName, "/unknown"} {
+		if err := BridgeAPIMethodAuthorizer(caller, method); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("Runtime %s: %v; want denied", method, err)
+		}
 	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName); err != nil {
-		t.Fatalf("runtime pod CommitInternalToolRepair authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_SettleToolResult_FullMethodName); err != nil {
-		t.Fatalf("runtime pod SettleToolResult authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_RefreshRuntimeBindingToken_FullMethodName); err != nil {
-		t.Fatalf("runtime pod RefreshRuntimeBindingToken authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName); err != nil {
-		t.Fatalf("runtime pod AdmitChildInterrupt authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName); err != nil {
-		t.Fatalf("runtime pod AwaitChildInterrupt authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName); err != nil {
-		t.Fatalf("runtime pod AuthorizeWebToolExecution authorization error = %v; want nil", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("runtime pod McpManifestChanged authorization error = %v; want PermissionDenied", err)
-	}
-	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("gateway CommitInternalToolRepair authorization error = %v; want PermissionDenied", err)
-	}
+}
 
-	bridge := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "bridge"}}
-	if err := BridgeAPIMethodAuthorizer(bridge, bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName); err != nil {
-		t.Fatalf("bridge ReadCommandResult authorization error = %v; want nil", err)
+func containsAuthMethod(methods []string, method string) bool {
+	for _, m := range methods {
+		if m == method {
+			return true
+		}
 	}
-	if err := BridgeAPIMethodAuthorizer(bridge, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("bridge AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
-	}
-
-	unknown := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "unknown"}}
-	if err := BridgeAPIMethodAuthorizer(unknown, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("unknown AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
-	}
+	return false
 }
 
 func TestRuntimePodChildInterruptRPCsCrossAuthorizedGRPCSurface(t *testing.T) {

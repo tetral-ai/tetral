@@ -16,15 +16,15 @@ import (
 	"testing"
 	"time"
 
-	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -34,8 +34,6 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
-
-// This file owns the Bridge tools protocol-family boundary.
 
 type bridgeMemoryProjectionProvider struct {
 	requests []sandboxdriver.MemoryProjectionRefresh
@@ -328,7 +326,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 		t.Fatalf("admitted apply_patch route = %#v; want durable allow execution identity", beforeAcceptance.PendingToolUses)
 	}
 
-	canonicalInput, _, err := canonicalRunToolInput(string(executionInputJSON))
+	canonicalInput, _, err := runtimecontrol.CanonicalRunToolInput(string(executionInputJSON))
 	if err != nil {
 		t.Fatalf("canonical patch input: %v", err)
 	}
@@ -521,8 +519,6 @@ func (p *gatedBridgeToolProvider) ExecuteTool(ctx context.Context, _ tetralsandb
 	}
 }
 
-var _ tetralsandbox.ProviderAdapter = (*gatedBridgeToolProvider)(nil)
-
 func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -537,7 +533,7 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("memory-roundtrip-test-signing-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_memory_input_roundtrip_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_memory_input_roundtrip_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	inputs := []map[string]any{
 		{"action": "create", "path": "notes/large.md", "content": "CREATE_HEAD" + strings.Repeat("\x01", 9_000) + "CREATE_TAIL"},
 		{"action": "replace", "path": "notes/large.md", "old_text": "old", "new_text": "new"},
@@ -547,7 +543,7 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		if err != nil {
 			t.Fatalf("marshal input: %v", err)
 		}
-		canonicalInput, _, err := canonicalRunToolInput(string(encoded))
+		canonicalInput, _, err := runtimecontrol.CanonicalRunToolInput(string(encoded))
 		if err != nil {
 			t.Fatalf("canonical input: %v", err)
 		}
@@ -582,6 +578,7 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 		}
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission(t *testing.T) {
 	for _, testCase := range []struct {
 		name                string
@@ -824,7 +821,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	).Scan(&dataJSON); err != nil {
 		t.Fatalf("read repair context: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || len(parts) != 2 {
 		t.Fatalf("repair context parts = %s err=%v", dataJSON, err)
 	}
@@ -872,13 +869,14 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 		t.Fatalf("stale-scope internal repair effects = operations:%d events:%d; want 1/1", repairOperations, repairEvents)
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_collision", "sthr_collision")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_collision", "bind_collision", 1, "pod_collision")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_collision", "sthr_collision", "bind_collision", 1, "pod_collision")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_collision_start", "mreq_collision", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_collision_start", "mreq_collision", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	public, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_collision_tool", ModelRequestId: "mreq_collision",
 		ToolDeclaration: bridgeToolDeclarationForTest("call_collision", "unknown_tool", `{}`, "allow", "sandbox_execute"),
@@ -896,6 +894,7 @@ func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision
 		t.Fatalf("repair collision error = %v; want AlreadyExists", err)
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraft(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_mixed_draft", "sthr_mixed_draft")
@@ -903,7 +902,7 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("mixed-draft-test-signing-key")
 	scope := bridgeAPIScope("sesn_mixed_draft", "sthr_mixed_draft", "bind_mixed_draft", 1, "pod_mixed_draft")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start", "mreq_mixed", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mixed_start", "mreq_mixed", runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mixed_text", ModelRequestId: "mreq_mixed",
@@ -934,7 +933,7 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	).Scan(&rowCount, &dataJSON); err != nil {
 		t.Fatalf("read mixed Assistant draft: %v", err)
 	}
-	parts, err := decodeStoredRuntimeContextParts(dataJSON)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(dataJSON)
 	if err != nil || rowCount != 1 || len(parts) != 3 {
 		t.Fatalf("mixed Assistant draft rows/parts = %d/%d data=%s err=%v; want 1/3", rowCount, len(parts), dataJSON, err)
 	}
@@ -966,6 +965,7 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 		t.Fatalf("mixed Assistant repair fact = %#v", payload.TurnFacts.InternalRepairs[0])
 	}
 }
+
 func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -977,7 +977,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_repair_after_end", 1, "pod_repair_after_end")
 	scope := bridgeAPIScope(sessionID, threadID, "bind_repair_after_end", 1, "pod_repair_after_end")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_repair_after_end_start", modelRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_repair_after_end_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_close", ModelRequestId: modelRequestID,
 		FinishReason: "tool_calls", UsageJson: `{}`,
@@ -1770,21 +1770,21 @@ func TestCanonicalRunToolInputMatchesJavaScriptStringifyEscaping(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			canonical, hash, err := canonicalRunToolInput(test.raw)
+			canonical, hash, err := runtimecontrol.CanonicalRunToolInput(test.raw)
 			if err != nil {
 				t.Fatalf("canonicalRunToolInput: %v", err)
 			}
-			if canonical != test.want || hash != sha256Hex(test.want) {
-				t.Fatalf("canonical/hash = %q/%q; want JavaScript bytes %q/%q", canonical, hash, test.want, sha256Hex(test.want))
+			if canonical != test.want || hash != runtimecontrol.Sha256Hex(test.want) {
+				t.Fatalf("canonical/hash = %q/%q; want JavaScript bytes %q/%q", canonical, hash, test.want, runtimecontrol.Sha256Hex(test.want))
 			}
 		})
 	}
 
-	first, firstHash, err := canonicalRunToolInput(`{"workdir":"/workspace","cmd":"printf <ok>"}`)
+	first, firstHash, err := runtimecontrol.CanonicalRunToolInput(`{"workdir":"/workspace","cmd":"printf <ok>"}`)
 	if err != nil {
 		t.Fatalf("canonical first: %v", err)
 	}
-	second, secondHash, err := canonicalRunToolInput("{ \"cmd\" : \"printf <ok>\", \"workdir\" : \"/workspace\" }")
+	second, secondHash, err := runtimecontrol.CanonicalRunToolInput("{ \"cmd\" : \"printf <ok>\", \"workdir\" : \"/workspace\" }")
 	if err != nil {
 		t.Fatalf("canonical reordered: %v", err)
 	}
@@ -1809,20 +1809,20 @@ func TestCanonicalRunToolInputSharedCrossLanguageVectors(t *testing.T) {
 	for _, vector := range vectors {
 		t.Run(vector.Name, func(t *testing.T) {
 			for _, input := range vector.Inputs {
-				canonical, hash, err := canonicalRunToolInput(input)
+				canonical, hash, err := runtimecontrol.CanonicalRunToolInput(input)
 				if err != nil {
 					t.Fatalf("canonicalRunToolInput(%q): %v", input, err)
 				}
-				if canonical != vector.Canonical || hash != sha256Hex(vector.Canonical) {
-					t.Fatalf("canonical/hash = %q/%q; want shared vector %q/%q", canonical, hash, vector.Canonical, sha256Hex(vector.Canonical))
+				if canonical != vector.Canonical || hash != runtimecontrol.Sha256Hex(vector.Canonical) {
+					t.Fatalf("canonical/hash = %q/%q; want shared vector %q/%q", canonical, hash, vector.Canonical, runtimecontrol.Sha256Hex(vector.Canonical))
 				}
 			}
 		})
 	}
-	if _, _, err := canonicalRunToolInput(strings.Repeat("[", 257) + "0" + strings.Repeat("]", 257)); err == nil || !strings.Contains(err.Error(), "nesting exceeds") {
+	if _, _, err := runtimecontrol.CanonicalRunToolInput(strings.Repeat("[", 257) + "0" + strings.Repeat("]", 257)); err == nil || !strings.Contains(err.Error(), "nesting exceeds") {
 		t.Fatalf("over-depth canonical error = %v; want shared closed nesting bound", err)
 	}
-	if _, _, err := canonicalRunToolInput(`{"unterminated":`); err == nil {
+	if _, _, err := runtimecontrol.CanonicalRunToolInput(`{"unterminated":`); err == nil {
 		t.Fatal("malformed canonical input accepted")
 	}
 }

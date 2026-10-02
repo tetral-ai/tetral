@@ -264,6 +264,7 @@ function schemaSQL(
 function providerConfig(): ProviderGatewayConfig {
 	return {
 		deploymentEnvironment: "test",
+    diagnostics: { level: "info", maxRecordBytes: 16384, summaryIntervalMs: 30000, burst: 1 },
 		serviceVersion: "unit",
 		grpcBindAddress: "127.0.0.1:9090",
 		httpBindAddress: "127.0.0.1:8080",

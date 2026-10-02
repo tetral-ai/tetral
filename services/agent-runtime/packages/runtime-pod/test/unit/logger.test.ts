@@ -314,6 +314,8 @@ describe("Runtime Pod JSON logger", () => {
 
 		const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
 		expect(record).toEqual({
+			"process.pid": process.pid,
+			"service.instance.id": expect.stringMatching(/^[0-9a-f-]{36}$/),
 			time: "2026-08-25T12:34:56.789Z",
 			level: "error",
 			"service.name": "agent-runtime",

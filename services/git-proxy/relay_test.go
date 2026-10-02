@@ -1315,6 +1315,9 @@ func assertExactAccessLogFields(t *testing.T, record map[string]any) {
 		"time":                   {},
 		"level":                  {},
 		"msg":                    {},
+		"event":                  {},
+		"process.pid":            {},
+		"service.instance.id":    {},
 		"service.name":           {},
 		"service.version":        {},
 		"deployment.environment": {},
@@ -1345,6 +1348,17 @@ func assertExactAccessLogFields(t *testing.T, record map[string]any) {
 			t.Fatalf("access log has extra field %q: %#v", key, record)
 		}
 	}
+	assertLogString(t, record, "event", AccessLogEventKind)
+	assertLogString(t, record, "component", ServiceName)
+	if pid, ok := record["process.pid"].(float64); !ok || pid != float64(os.Getpid()) {
+		t.Fatalf("process.pid = %#v; want current process %d", record["process.pid"], os.Getpid())
+	}
+	instance, ok := record["service.instance.id"].(string)
+	validInstance := len(instance) == 32 && strings.Trim(instance, "0123456789abcdef") == "" || instance == strconv.Itoa(os.Getpid())
+	if !ok || !validInstance {
+		t.Fatalf("service.instance.id = %#v; want bounded shared process identity", record["service.instance.id"])
+	}
+
 }
 
 func assertLogString(t *testing.T, record map[string]any, key string, want string) {

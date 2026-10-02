@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
@@ -67,10 +69,13 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	var ready atomic.Bool
 	grpcErr := make(chan error, 1)
 	go func() {
-		grpcErr <- internalgrpc.Run(serverCtx, internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, OnServing: func() { ready.Store(true) }, ShutdownTimeout: 10 * time.Second, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute})}})
+		grpcErr <- internalgrpc.Run(serverCtx, internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, OnServing: func() { ready.Store(true) }, ShutdownTimeout: DefaultListenerShutdownTimeout, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute})}})
 	}()
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		metrics.Handler().ServeHTTP(w, r)
+		_, _ = w.Write([]byte(workload.DiagnosticMetricsText(runtime.Logger)))
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -83,7 +88,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
-	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: DefaultOpsReadHeaderTimeout}
 	httpErr := make(chan error, 1)
 	go func() {
 		serveErr := httpServer.Serve(metricsListener)
@@ -101,7 +106,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	}
 	ready.Store(false)
 	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), DefaultListenerShutdownTimeout)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	return runErr

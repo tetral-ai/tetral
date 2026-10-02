@@ -317,7 +317,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}, nil
 	case "deployment":
 		return []commandSpec{
-			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes"}},
+			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes", "./deploy/helm"}},
 			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
 		}, nil
 	case "security":

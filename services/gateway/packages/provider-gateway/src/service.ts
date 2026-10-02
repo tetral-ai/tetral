@@ -256,7 +256,10 @@ export class ProviderGatewayServiceShell {
         if (requestOutcome === "ok") {
           this.options.logger.info(record);
         } else {
-          this.options.logger.error({
+          // Ordinary denial/cancellation is expected control flow; failure meaning is retained.
+          const emit = errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))
+            ? this.options.logger.info : this.options.logger.error;
+          emit.call(this.options.logger, {
               ...record,
               ...semanticErrorFields({
                 errorClass,

@@ -29,7 +29,14 @@ func main() {
 }
 
 func run(ctx context.Context, env gitproxy.Env) error {
-	logger := workload.NewLogger(os.Stderr, gitproxy.ServiceName, env.Getenv(gitproxy.EnvDeploymentEnvironment), env.Getenv(gitproxy.EnvServiceVersion))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, gitproxy.ServiceName, env.Getenv(gitproxy.EnvDeploymentEnvironment), env.Getenv(gitproxy.EnvServiceVersion), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, gitproxy.ServiceName, diagnosticErr)
+	}
 	cfg, err := gitproxy.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)

@@ -13,18 +13,19 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand(t *testing.T) {
@@ -85,7 +86,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 
 	const startRequestID = "mreq_background_start_composition"
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_start_request", startRequestID, requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_start_request", startRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	startInputPath := filepath.Join(t.TempDir(), "background-start.json")
 	startInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
@@ -191,7 +192,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	}
 
 	const controlRequestID = "mreq_background_abort_control"
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_control_start", controlRequestID, requestKindAgentProviderRequest, startMessageSequence)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_control_start", controlRequestID, runtimecontrol.RequestKindAgentProviderRequest, startMessageSequence)
 	runtimeBindingToken, err := store.runtimeBindingToken(scope)
 	if err != nil {
 		t.Fatalf("mint background composition binding token: %v", err)

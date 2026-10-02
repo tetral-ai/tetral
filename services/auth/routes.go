@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -53,7 +52,7 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	r := chi.NewRouter()
 	logger := cfg.Logger
 	if logger == nil {
-		logger = defaultRouterLogger(os.Stderr)
+		logger = workload.ComponentLogger("auth")
 	}
 	r.Use(httpapi.RequestIDMiddleware)
 	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))

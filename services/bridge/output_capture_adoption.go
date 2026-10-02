@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/id"
@@ -60,7 +62,7 @@ type adoptedOutputCapture struct {
 func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Context, request *bridgev1.FinishIdleRequest, sourceKind string, key string, declarationDigest string, now time.Time) (finishIdleCapture, error) {
 	var capture finishIdleCapture
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.ensure_output_capture", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -77,20 +79,20 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 			}
 			return nil
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
-		switch threadScope.status {
+		switch threadScope.Status {
 		case "terminated", "failed", "archived", "closed_for_runtime":
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime thread is already terminal"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime thread is already terminal"))
 		}
-		openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		openTurn, err := runtimecontrol.LoadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
 		}
 		if openTurn == nil || *openTurn != key {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
 		}
 
 		var latestGeneration int64
@@ -128,7 +130,7 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		); err != nil {
 			return err
 		}
-		payload, err := marshalBridgeJSON(map[string]any{
+		payload, err := runtimecontrol.MarshalJSON(map[string]any{
 			"workspace_id": request.GetScope().GetWorkspaceId(), "session_id": request.GetScope().GetSessionId(),
 			"finish_idle_write_id": key, "capture_generation": generation,
 		})
@@ -148,86 +150,6 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		return nil
 	})
 	return capture, err
-}
-
-func ensureSessionOutputCaptureCleanupTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, now time.Time) (bool, error) {
-	transportOpen, err := hasOpenSessionSandboxQueueJobsTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return false, err
-	}
-	if transportOpen {
-		return true, nil
-	}
-	type capture struct {
-		writeID           string
-		captureGeneration int64
-		state             string
-		cleanupGeneration int64
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT finish_idle_write_id, capture_generation, state, cleanup_generation
-		   FROM sandbox_output_capture_operations
-		  WHERE workspace_id=$1 AND session_id=$2
-		  ORDER BY finish_idle_write_id, capture_generation
-		  FOR UPDATE`,
-		workspaceID, sessionID,
-	)
-	if err != nil {
-		return false, err
-	}
-	var captures []capture
-	for rows.Next() {
-		var item capture
-		if err := rows.Scan(&item.writeID, &item.captureGeneration, &item.state, &item.cleanupGeneration); err != nil {
-			_ = rows.Close()
-			return false, err
-		}
-		captures = append(captures, item)
-	}
-	if err := rows.Close(); err != nil {
-		return false, err
-	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	pending := false
-	for _, item := range captures {
-		switch item.state {
-		case "adopted", "cleaned":
-			continue
-		case "pending", "running", "cleanup_pending":
-			pending = true
-		case "staged", "skipped_unavailable", "failed":
-			nextGeneration := item.cleanupGeneration + 1
-			result, err := tx.Exec(ctx,
-				`UPDATE sandbox_output_capture_operations
-				    SET state='cleanup_pending', cleanup_generation=$5, updated_at=$6
-				  WHERE workspace_id=$1 AND session_id=$2 AND finish_idle_write_id=$3 AND capture_generation=$4
-				    AND state IN ('staged','skipped_unavailable','failed')`,
-				workspaceID, sessionID, item.writeID, item.captureGeneration, nextGeneration, now,
-			)
-			if err != nil {
-				return false, err
-			}
-			if !rowsAffected(result) {
-				return false, errors.New("output capture cleanup lost its state fence")
-			}
-			if err := queue.EnqueueSandboxOutputCaptureCleanupTx(ctx, tx, workspace.ID(workspaceID), sessionID, item.writeID, item.captureGeneration, nextGeneration, now); err != nil {
-				return false, err
-			}
-			pending = true
-		default:
-			return false, errors.New("output capture cleanup found an invalid state")
-		}
-	}
-	if pending {
-		return true, nil
-	}
-	_, err = tx.Exec(ctx,
-		`DELETE FROM sandbox_output_capture_operations WHERE workspace_id=$1 AND session_id=$2`,
-		workspaceID, sessionID,
-	)
-	return false, err
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForFinishIdleOutputCapture(ctx context.Context, scope *bridgev1.RuntimeScope, key string, capture finishIdleCapture) (finishIdleCapture, error) {
@@ -381,7 +303,7 @@ func adoptFinishIdleOutputCaptureTx(ctx context.Context, tx *dbconnect.Tx, scope
 		if err != nil {
 			return adoptedOutputCapture{}, err
 		}
-		if !rowsAffected(updated) {
+		if !runtimecontrol.RowsAffected(updated) {
 			return adoptedOutputCapture{}, errors.New("output capture blob custody transfer lost its state fence")
 		}
 	}
@@ -393,7 +315,7 @@ func adoptFinishIdleOutputCaptureTx(ctx context.Context, tx *dbconnect.Tx, scope
 	if err != nil {
 		return adoptedOutputCapture{}, err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return adoptedOutputCapture{}, errors.New("output capture adoption lost its state fence")
 	}
 	return adopted, nil

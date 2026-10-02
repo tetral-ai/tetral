@@ -9,7 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -42,7 +43,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		return nil, status.Error(codes.InvalidArgument, "invalid task notification target")
 	}
 	key := taskID + ":" + request.GetRuntimeInputId()
-	sourceID := stableRuntimeID("task_notification", request.GetRuntimeInputId(), taskID)
+	sourceID := runtimecontrol.StableRuntimeID("task_notification", request.GetRuntimeInputId(), taskID)
 	declarationDigest, err := taskNotificationDeclarationDigest(request)
 	if err != nil {
 		return nil, err
@@ -55,23 +56,23 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitTaskNotificationResult, key); err != nil {
+		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationCommitTaskNotificationResult, key); err != nil {
 			return err
 		} else if ok {
 			if existing.RequestHash != declarationDigest {
 				return status.Error(codes.AlreadyExists, "task notification idempotency conflict")
 			}
-			if existing.AckStatus == bridgeAckRejected && existing.ErrorCode == "task_notification_stale" {
+			if existing.AckStatus == runtimecontrol.AckRejected && existing.ErrorCode == "task_notification_stale" {
 				outcome = "stale"
 				return nil
 			}
-			if existing.AckStatus == bridgeAckRejected && taskNotificationRejectionCode(existing.ErrorCode) {
+			if existing.AckStatus == runtimecontrol.AckRejected && runtimecontrol.TaskNotificationRejectionCode(existing.ErrorCode) {
 				outcome = "rejected"
 				return nil
 			}
@@ -81,7 +82,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			ctx,
 			tx,
 			request.GetScope(),
-			bridgeOpCommitTaskNotificationResult,
+			runtimecontrol.OperationCommitTaskNotificationResult,
 			"task_notification",
 			sourceID,
 		); err != nil {
@@ -97,7 +98,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			duplicate = true
 			return nil
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		facts, err := lockTaskNotificationSettlementFactsTx(ctx, tx, request, taskID)
@@ -147,7 +148,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			if err != nil {
 				return err
 			}
-			if !rowsAffected(result) {
+			if !runtimecontrol.RowsAffected(result) {
 				return status.Error(codes.Aborted, "task notification Inbox authority changed during stale settlement")
 			}
 			if err := insertTaskNotificationStaleOperationTx(ctx, tx, request, key, declarationDigest, now); err != nil {
@@ -159,7 +160,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		if facts.InboxStatus != "delivering" && facts.InboxStatus != "accepted" {
 			return status.Error(codes.FailedPrecondition, "task notification input is not deliverable")
 		}
-		if !validBackgroundTaskTerminalStatus(facts.TaskStatus) || facts.StoredResultJSON == "" {
+		if !runtimecontrol.ValidBackgroundTaskTerminalStatus(facts.TaskStatus) || facts.StoredResultJSON == "" {
 			if err := rejectTaskNotificationDeclarationTx(ctx, tx, request, key, declarationDigest,
 				"task_notification.durable_result", "task_notification_result_invalid", now); err != nil {
 				return err
@@ -167,7 +168,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			outcome = "rejected"
 			return nil
 		}
-		expectedResultJSON, err := canonicalTaskNotificationPayloadJSON(
+		expectedResultJSON, err := runtimecontrol.CanonicalTaskNotificationPayloadJSON(
 			taskID, facts.SourceToolUseEventID, facts.TaskStatus, facts.StoredResultJSON,
 		)
 		if err != nil {
@@ -212,7 +213,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		if err != nil {
 			return err
 		}
-		if !rowsAffected(result) {
+		if !runtimecontrol.RowsAffected(result) {
 			return status.Error(codes.Aborted, "task notification Inbox authority changed during commit")
 		}
 		assignedContextSequences = []int64{assignedContextSequence}
@@ -231,7 +232,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			now,
 		)
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_BarrierStale{BarrierStale: &bridgev1.CommitTaskNotificationResultBarrierStale{}}}, nil
 		}
 		return nil, err
@@ -257,7 +258,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 	logRuntimeDeclaration(
 		s.Logger,
 		request.GetScope(),
-		bridgeOpCommitTaskNotificationResult,
+		runtimecontrol.OperationCommitTaskNotificationResult,
 		"task_notification",
 		sourceID,
 		declarationDigest,
@@ -308,7 +309,7 @@ func lockTaskNotificationSettlementFactsTx(
 	if !inboxBindingID.Valid || inboxBindingID.String != scope.GetBinding().GetBindingId() ||
 		!inboxBindingGeneration.Valid || inboxBindingGeneration.Int64 != scope.GetBinding().GetBindingGeneration() ||
 		!inboxPodUID.Valid || inboxPodUID.String != scope.GetBinding().GetTargetPodUid() {
-		return taskNotificationSettlementFacts{}, scopeSupersededError(status.Error(codes.FailedPrecondition, "task notification Inbox binding is stale"))
+		return taskNotificationSettlementFacts{}, runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "task notification Inbox binding is stale"))
 	}
 	var storedResultJSON sql.NullString
 	err = tx.QueryRow(ctx, `SELECT status, source_tool_use_event_id, terminal_result_json, terminal_event_id
@@ -350,12 +351,12 @@ func deferTaskNotificationResultTx(
 	runtimeInputID string,
 	now time.Time,
 ) error {
-	binding := runtimeBindingForDelivery{
+	binding := runtimecontrol.Binding{
 		BindingID:         scope.GetBinding().GetBindingId(),
 		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 		PodUID:            scope.GetBinding().GetTargetPodUid(),
 	}
-	parked, err := parkTaskNotificationInboxTx(
+	parked, err := runtimecontrol.ParkTaskNotificationInboxTx(
 		ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeInputID, binding, now,
 	)
 	if err != nil {
@@ -365,18 +366,6 @@ func deferTaskNotificationResultTx(
 		return status.Error(codes.Aborted, "task notification Inbox authority changed during deferral")
 	}
 	return nil
-}
-
-func nullableSafeIntegerRaw(raw json.RawMessage, field string, nonNegative bool) (any, error) {
-	value, err := nullableIntegerRaw(raw, field)
-	if err != nil || value == nil {
-		return value, err
-	}
-	integer := value.(int64)
-	if integer < -9007199254740991 || integer > 9007199254740991 || (nonNegative && integer < 0) {
-		return nil, errors.New(field + " must be a safe integer or null")
-	}
-	return integer, nil
 }
 
 func rejectTaskNotificationDeclarationTx(
@@ -401,27 +390,18 @@ func rejectTaskNotificationDeclarationTx(
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.Aborted, "task notification Inbox authority changed during rejection")
 	}
-	resultJSON, err := marshalBridgeJSON(map[string]any{"validator_id": validatorID})
+	resultJSON, err := runtimecontrol.MarshalJSON(map[string]any{"validator_id": validatorID})
 	if err != nil {
 		return err
 	}
-	return insertBridgeOperationTx(ctx, tx, scope, bridgeOperationInsert{
-		Operation: bridgeOpCommitTaskNotificationResult, IdempotencyKey: key, RequestHash: requestDigest,
-		AckStatus: bridgeAckRejected, RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
+	return runtimecontrol.InsertOperationTx(ctx, tx, scope, runtimecontrol.OperationInsert{
+		Operation: runtimecontrol.OperationCommitTaskNotificationResult, IdempotencyKey: key, RequestHash: requestDigest,
+		AckStatus: runtimecontrol.AckRejected, RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
 		ErrorCode: sql.NullString{String: errorCode, Valid: true}, ResultJSON: resultJSON, Now: now,
 	})
-}
-
-func taskNotificationRejectionCode(errorCode string) bool {
-	switch errorCode {
-	case "task_notification_result_invalid", "task_notification_message_invalid", "task_notification_payload_mismatch", "task_notification_stale":
-		return true
-	default:
-		return false
-	}
 }
 
 func insertTaskNotificationStaleOperationTx(
@@ -432,13 +412,13 @@ func insertTaskNotificationStaleOperationTx(
 	requestDigest string,
 	now time.Time,
 ) error {
-	resultJSON, err := marshalBridgeJSON(map[string]any{"validator_id": "task_notification.stale_settlement"})
+	resultJSON, err := runtimecontrol.MarshalJSON(map[string]any{"validator_id": "task_notification.stale_settlement"})
 	if err != nil {
 		return err
 	}
-	return insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-		Operation: bridgeOpCommitTaskNotificationResult, IdempotencyKey: key, RequestHash: requestDigest,
-		AckStatus: bridgeAckRejected, RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
+	return runtimecontrol.InsertOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationInsert{
+		Operation: runtimecontrol.OperationCommitTaskNotificationResult, IdempotencyKey: key, RequestHash: requestDigest,
+		AckStatus: runtimecontrol.AckRejected, RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
 		ErrorCode: sql.NullString{String: "task_notification_stale", Valid: true}, ResultJSON: resultJSON, Now: now,
 	})
 }
@@ -450,7 +430,7 @@ func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, reques
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
 	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "poll", maxOutputTokens)
 	if err != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.ReadCommandResultResponse{Outcome: &bridgev1.ReadCommandResultResponse_Stale{Stale: &bridgev1.CommandReadStale{}}}, nil
 		}
 		return nil, err
@@ -465,7 +445,7 @@ func (s *PostgreSQLBridgeAPIStore) SendCommandInput(ctx context.Context, request
 	maxOutputTokens := positiveInt32(request.GetMaxOutputTokens())
 	result, err := s.acceptAndAwaitBackgroundCommand(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), "stdin", maxOutputTokens)
 	if err != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.SendCommandInputResponse{Outcome: &bridgev1.SendCommandInputResponse_Stale{Stale: &bridgev1.CommandInputStale{}}}, nil
 		}
 		return nil, err
@@ -482,7 +462,7 @@ func (s *PostgreSQLBridgeAPIStore) CancelCommand(ctx context.Context, request *b
 	}
 	result, err := s.acceptAndAwaitBackgroundCancel(ctx, request.GetScope(), request.GetOperationId(), request.GetTaskId(), request.GetToolUseEventId(), request.GetReason())
 	if err != nil {
-		if isScopeSupersededError(err) {
+		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.CancelCommandResponse{Outcome: &bridgev1.CancelCommandResponse_Stale{Stale: &bridgev1.CommandCancelStale{}}}, nil
 		}
 		return nil, err
@@ -515,13 +495,13 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 			return err
 		}
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		tool, err := loadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, "agent.tool_use", true)
+		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, "agent.tool_use", true)
 		if err != nil {
 			return err
 		}
@@ -584,7 +564,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if terminalResult != "" {
 			state = "terminal"
 			storedResult = terminalResult
-			digest = bridgeRequestHash(terminalResult)
+			digest = runtimecontrol.RequestHash(terminalResult)
 			result.ResultJSON = terminalResult
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_tool_results (
@@ -626,7 +606,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	if requestID == "" || toolUseEventID == "" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background cancellation identity is incomplete")
 	}
-	inputJSON, err := marshalBridgeJSON(map[string]string{"reason": reason})
+	inputJSON, err := runtimecontrol.MarshalJSON(map[string]string{"reason": reason})
 	if err != nil {
 		return commandOperationResult{}, err
 	}
@@ -641,7 +621,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 			return err
 		}
 		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
@@ -701,7 +681,7 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if terminalResult != "" {
 			state = "terminal"
 			storedResult = terminalResult
-			digest = bridgeRequestHash(terminalResult)
+			digest = runtimecontrol.RequestHash(terminalResult)
 			result.ResultJSON = terminalResult
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_tool_results (
@@ -876,15 +856,6 @@ func positiveInt32(value int32) int {
 	return int(value)
 }
 
-func validBackgroundTaskTerminalStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "expired", "unknown_outcome":
-		return true
-	default:
-		return false
-	}
-}
-
 func terminalStatusFromResultJSON(resultJSON string) (string, error) {
 	var payload struct {
 		Status string `json:"status"`
@@ -901,16 +872,16 @@ func terminalStatusFromResultJSON(resultJSON string) (string, error) {
 }
 
 func runtimeNotificationJSON(taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string) (string, error) {
-	canonicalResultJSON, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
+	canonicalResultJSON, err := runtimecontrol.CanonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
 	if err != nil {
 		canonicalResultJSON = `{"status":"failed","error_code":"invalid_result_json"}`
 	}
 	result := json.RawMessage(canonicalResultJSON)
-	return marshalBridgeJSON(map[string]any{
+	return runtimecontrol.MarshalJSON(map[string]any{
 		"type":                     "runtime_notification",
 		"task_id":                  taskID,
 		"source_tool_use_event_id": sourceToolUseEventID,
-		"status":                   runtimeTaskNotificationStatus(terminalStatus),
+		"status":                   runtimecontrol.RuntimeTaskNotificationStatus(terminalStatus),
 		"result":                   result,
 	})
 }
@@ -938,7 +909,7 @@ func commitTaskNotificationDeclarationTx(
 		return false, 0, err
 	}
 	eventID := id.New("evt_")
-	eventSequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	eventSequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
 		return false, 0, err
 	}
@@ -988,7 +959,7 @@ func commitTaskNotificationDeclarationTx(
 	if err != nil {
 		return false, 0, err
 	}
-	if !rowsAffected(result) {
+	if !runtimecontrol.RowsAffected(result) {
 		return false, 0, status.Error(codes.Internal, "background task terminal event fence failed")
 	}
 	return true, assigned[0], nil
@@ -1015,11 +986,11 @@ func insertTaskNotificationDeclarationOperationTx(
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		bridgeOpCommitTaskNotificationResult,
+		runtimecontrol.OperationCommitTaskNotificationResult,
 		sourceID,
 		declarationDigest,
 		receiptJSON,
-		bridgeAckCommitted,
+		runtimecontrol.AckCommitted,
 		runtimeInputID,
 		now,
 	)
@@ -1047,233 +1018,4 @@ func unmarshalTaskNotificationReplay(raw string) ([]int64, error) {
 		}
 	}
 	return append([]int64(nil), committed.GetAssignedContextSequences()...), nil
-}
-
-func canonicalTaskNotificationPayloadJSON(taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string) (string, error) {
-	value, err := canonicalTaskNotificationPayloadValue(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
-	if err != nil {
-		return "", err
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
-}
-
-func canonicalTaskNotificationPayloadValue(taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string) (map[string]any, error) {
-	if taskID == "" || sourceToolUseEventID == "" {
-		return nil, errors.New("task notification source identity is incomplete")
-	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(resultJSON), &object); err != nil || object == nil {
-		return nil, errors.New("task notification result must be a JSON object")
-	}
-	factObject := object
-	if rawResult, ok := object["result"]; ok {
-		var nested map[string]json.RawMessage
-		if err := json.Unmarshal(rawResult, &nested); err == nil && nested != nil {
-			factObject = nested
-		}
-	}
-	canonical := map[string]any{
-		"task_id":                  taskID,
-		"source_tool_use_event_id": sourceToolUseEventID,
-		"status":                   runtimeTaskNotificationStatus(terminalStatus),
-	}
-	if canonical["status"] == "" {
-		return nil, errors.New("task notification result status is invalid")
-	}
-	if raw, ok := factObject["exit_code"]; ok {
-		value, err := nullableSafeIntegerRaw(raw, "task notification result exit_code", false)
-		if err != nil {
-			return nil, err
-		}
-		canonical["exit_code"] = value
-	}
-	for _, field := range []string{"stdout", "stderr"} {
-		raw, ok := factObject[field]
-		if !ok {
-			return nil, errors.New("task notification result " + field + " is required")
-		}
-		stream, err := canonicalTaskNotificationStream(raw, "task notification result "+field)
-		if err != nil {
-			return nil, err
-		}
-		canonical[field] = stream
-	}
-	if err := fitTaskNotificationPayload(canonical); err != nil {
-		return nil, err
-	}
-	return canonical, nil
-}
-
-func fitTaskNotificationPayload(payload map[string]any) error {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if len(encoded) <= runtimeTaskNotificationPayloadMaxBytes {
-		return nil
-	}
-	stdout, stdoutOK := payload["stdout"].(map[string]any)
-	stderr, stderrOK := payload["stderr"].(map[string]any)
-	if !stdoutOK || !stderrOK {
-		return errors.New("task notification streams are invalid")
-	}
-	stdoutText, stdoutOK := stdout["text"].(string)
-	stderrText, stderrOK := stderr["text"].(string)
-	if !stdoutOK || !stderrOK {
-		return errors.New("task notification stream text is invalid")
-	}
-	stdoutBytes := len([]byte(stdoutText))
-	stderrBytes := len([]byte(stderrText))
-	bestStdout, bestStderr := "", ""
-	bestFound := false
-	for low, high := 0, stdoutBytes+stderrBytes; low <= high; {
-		candidateBytes := low + (high-low)/2
-		stdoutBudget, stderrBudget := splitTaskNotificationBudget(candidateBytes, stdoutBytes, stderrBytes)
-		candidateStdout := taskNotificationHeadTail(stdoutText, stdoutBudget)
-		candidateStderr := taskNotificationHeadTail(stderrText, stderrBudget)
-		stdout["text"] = candidateStdout
-		stderr["text"] = candidateStderr
-		candidate, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		if len(candidate) <= runtimeTaskNotificationPayloadMaxBytes {
-			bestStdout, bestStderr, bestFound = candidateStdout, candidateStderr, true
-			low = candidateBytes + 1
-		} else {
-			high = candidateBytes - 1
-		}
-	}
-	if !bestFound {
-		return errors.New("task notification metadata exceeds runtime payload limit")
-	}
-	stdout["text"] = bestStdout
-	stderr["text"] = bestStderr
-	if bestStdout != stdoutText {
-		stdout["truncated"] = true
-	}
-	if bestStderr != stderrText {
-		stderr["truncated"] = true
-	}
-	return nil
-}
-
-func splitTaskNotificationBudget(total int, stdoutBytes int, stderrBytes int) (int, int) {
-	visibleBytes := stdoutBytes + stderrBytes
-	if visibleBytes == 0 || total <= 0 {
-		return 0, 0
-	}
-	stdoutBudget := total * stdoutBytes / visibleBytes
-	if stdoutBytes > 0 && stdoutBudget == 0 {
-		stdoutBudget = 1
-	}
-	if stdoutBudget > total {
-		stdoutBudget = total
-	}
-	return stdoutBudget, total - stdoutBudget
-}
-
-func taskNotificationHeadTail(value string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len([]byte(value)) <= maxBytes {
-		return value
-	}
-	headBudget := maxBytes / 2
-	tailBudget := maxBytes - headBudget
-	headEnd := 0
-	for index := range value {
-		if index > headBudget {
-			break
-		}
-		headEnd = index
-	}
-	if headBudget >= len(value) {
-		headEnd = len(value)
-	}
-	tailStart := len(value)
-	used := 0
-	for tailStart > headEnd {
-		_, size := utf8.DecodeLastRuneInString(value[:tailStart])
-		if size == 0 || used+size > tailBudget {
-			break
-		}
-		used += size
-		tailStart -= size
-	}
-	return value[:headEnd] + value[tailStart:]
-}
-
-func canonicalTaskNotificationStream(raw json.RawMessage, field string) (map[string]any, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
-		return nil, errors.New(field + " must be a JSON object")
-	}
-	text, err := requiredStringRaw(object["text"], field+" text")
-	if err != nil {
-		return nil, err
-	}
-	truncated, err := requiredBoolRaw(object["truncated"], field+" truncated")
-	if err != nil {
-		return nil, err
-	}
-	canonical := map[string]any{
-		"text":      text,
-		"truncated": truncated,
-	}
-	for _, optional := range []struct {
-		output string
-		input  string
-	}{
-		{output: "original_bytes", input: "original_bytes"},
-		{output: "original_bytes", input: "total_bytes"},
-		{output: "original_lines", input: "original_lines"},
-		{output: "original_lines", input: "total_lines"},
-	} {
-		if _, exists := canonical[optional.output]; exists {
-			continue
-		}
-		rawOptional, ok := object[optional.input]
-		if !ok {
-			continue
-		}
-		value, err := nullableSafeIntegerRaw(rawOptional, field+" "+optional.input, true)
-		if err != nil {
-			return nil, err
-		}
-		canonical[optional.output] = value
-	}
-	return canonical, nil
-}
-
-func requiredStringRaw(raw json.RawMessage, field string) (string, error) {
-	var value string
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &value) != nil {
-		return "", errors.New(field + " must be a string")
-	}
-	return value, nil
-}
-
-func requiredBoolRaw(raw json.RawMessage, field string) (bool, error) {
-	var value bool
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &value) != nil {
-		return false, errors.New(field + " must be a boolean")
-	}
-	return value, nil
-}
-
-func nullableIntegerRaw(raw json.RawMessage, field string) (any, error) {
-	if strings.TrimSpace(string(raw)) == "null" {
-		return nil, nil
-	}
-	var value int64
-	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
-		return nil, errors.New(field + " must be an integer or null")
-	}
-	return value, nil
 }

@@ -35,3 +35,12 @@ that silently permits more than the default did.
 {{- if and .Values.cilium.gitProxyFQDNPolicy (not .Values.cilium.enabled) }}
 {{- fail "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true." }}
 {{- end }}
+{{- range $key := list "bridge" "jobRunner" "providerGateway" "mcpConnector" "webConnector" }}
+{{- $replicas := get $.Values.replicas $key }}
+{{- if or (not (has (kindOf $replicas) $numericKinds)) (not (regexMatch "^[1-9][0-9]*$" (toString $replicas))) }}
+{{- fail (printf "replicas.%s must be a positive integer." $key) }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.autoscaling.providerGateway.enabled) }}
+{{- fail "autoscaling.providerGateway.enabled must be a boolean." }}
+{{- end }}

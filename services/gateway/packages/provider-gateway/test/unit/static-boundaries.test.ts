@@ -213,9 +213,12 @@ describe("Gateway static boundaries", () => {
   });
 
   test("Gateway manifests expose headless service discovery and bounded egress intent", async () => {
-    const service = await readFile(new URL("k8s/service.yaml", serviceRoot), "utf8");
-    const networkPolicy = await readFile(new URL("k8s/networkpolicy.yaml", serviceRoot), "utf8");
+    const service = await readFile(new URL("k8s/provider-gateway/service.yaml", serviceRoot), "utf8");
+    const networkPolicy = await readFile(new URL("k8s/provider-gateway/networkpolicy.yaml", serviceRoot), "utf8");
 
+    expect(service).toContain("name: provider-gateway");
+    expect(service).toContain("selector:\n    app.kubernetes.io/name: provider-gateway");
+    expect(networkPolicy).toContain("app.kubernetes.io/name: provider-gateway");
     expect(service).toContain("clusterIP: None");
     expect(service).toContain("name: provider-grpc");
     expect(service).toContain("port: 9090");

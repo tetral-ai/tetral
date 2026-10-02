@@ -23,11 +23,10 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-// This file owns the Bridge mcp protocol-family boundary.
 
 func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinues(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -296,16 +295,16 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 		t.Fatalf("seed durable MCP config: %v", err)
 	}
 	lister := &recordingMCPManifestLister{
-		results: []MCPManifestListResult{
+		results: []mcpmanifest.ListResult{
 			{
 				ManifestETag: "etag_1",
-				Tools: []MCPManifestTool{
+				Tools: []mcpmanifest.Tool{
 					{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object","properties":{"query":{"type":"string"}}}`},
 				},
 			},
 			{
 				ManifestETag: "etag_2",
-				Tools: []MCPManifestTool{
+				Tools: []mcpmanifest.Tool{
 					{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`},
 				},
 			},
@@ -363,9 +362,9 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedUsesSessionRuntimeAgentConfig
 	); err != nil {
 		t.Fatalf("seed session runtime agent config: %v", err)
 	}
-	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{{
+	lister := &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "etag_runtime_agent",
-		Tools: []MCPManifestTool{
+		Tools: []mcpmanifest.Tool{
 			{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`},
 			{Name: "Read", Description: "MCP Read", InputSchemaJSON: `{"type":"object"}`},
 			{Name: "exec_command", Description: "MCP exec", InputSchemaJSON: `{"type":"object"}`},
@@ -398,7 +397,7 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedUsesSessionRuntimeAgentConfig
 }
 
 func TestFilterMCPManifestCollisionsUsesOnlyPinnedFamilyTools(t *testing.T) {
-	tools := []MCPManifestTool{{Name: "Read"}, {Name: "exec_command"}, {Name: "memory"}, {Name: "github_search"}}
+	tools := []mcpmanifest.Tool{{Name: "Read"}, {Name: "exec_command"}, {Name: "memory"}, {Name: "github_search"}}
 	for _, test := range []struct {
 		family string
 		want   []string
@@ -406,13 +405,13 @@ func TestFilterMCPManifestCollisionsUsesOnlyPinnedFamilyTools(t *testing.T) {
 		{family: "claude", want: []string{"exec_command", "memory", "github_search"}},
 		{family: "gpt", want: []string{"Read", "memory", "github_search"}},
 	} {
-		filtered, _ := filterMCPManifestCollisions(test.family, tools)
+		filtered, _ := mcpmanifest.FilterCollisions(test.family, tools)
 		got := make([]string, 0, len(filtered))
 		for _, tool := range filtered {
 			got = append(got, tool.Name)
 		}
 		if !reflect.DeepEqual(got, test.want) {
-			t.Fatalf("filterMCPManifestCollisions(%s) = %v; want %v", test.family, got, test.want)
+			t.Fatalf("mcpmanifest.FilterCollisions(%s) = %v; want %v", test.family, got, test.want)
 		}
 	}
 }
@@ -421,9 +420,9 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedRejectsMismatchedEtag(t *test
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest_mismatch", "thr_bridge_mcp_manifest_mismatch")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MCPManifestLister = &recordingMCPManifestLister{results: []MCPManifestListResult{{
+	store.MCPManifestLister = &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "etag_other",
-		Tools:        []MCPManifestTool{{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`}},
+		Tools:        []mcpmanifest.Tool{{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`}},
 	}}}
 
 	_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{

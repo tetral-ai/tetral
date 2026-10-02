@@ -520,7 +520,7 @@ func (a mcpCompositionBridgeAuthenticator) Authenticate(_ context.Context, token
 	switch token {
 	case "mcp-production-gateway-token":
 		return internalgrpcauth.Identity{
-			ServiceAccount: internalgrpcauth.ServiceAccount{Namespace: "tetral-system", Name: "gateway"},
+			ServiceAccount: internalgrpcauth.ServiceAccount{Namespace: "tetral-system", Name: "mcp-connector"},
 		}, nil
 	case "mcp-production-runtime-token":
 		return internalgrpcauth.Identity{

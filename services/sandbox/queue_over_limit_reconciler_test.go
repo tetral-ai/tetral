@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -56,9 +56,7 @@ func TestSandboxQueueOverLimitReconcilerContinuesAfterCandidateFailure(t *testin
 	reader := &recordingOverLimitReader{candidates: candidates}
 	finalizer := &recordingOverLimitFinalizer{results: []bool{false, true}, errors: []error{errors.New("poisoned candidate"), nil}}
 	var logs bytes.Buffer
-	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	t.Cleanup(workload.InstallDefaultLogger(workload.NewLogger(&logs, "sandbox", "test", "unit")))
 	reconciler := &SandboxQueueOverLimitReconciler{
 		Queue: reader, Finalizer: finalizer, Clock: func() time.Time { return now },
 	}
@@ -77,6 +75,13 @@ func TestSandboxQueueOverLimitReconcilerContinuesAfterCandidateFailure(t *testin
 		!strings.Contains(logs.String(), `"queue.job.id":"qjob_poisoned"`) ||
 		strings.Contains(logs.String(), "poisoned candidate") {
 		t.Fatalf("candidate failure log = %s; want identity-only safe failure", logs.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["level"] != "WARN" || record["workspace.id"] != "ws_over_limit" || record["component"] != "sandbox" || record["error.class"] != "sandbox_queue_reconciliation_error" || record["error.code"] != "sandbox_queue_candidate_finalize_failed" || record["error.message_safe"] != "sandbox queue candidate finalization failed" {
+		t.Fatalf("owned candidate failure diagnostic = %#v", record)
 	}
 }
 

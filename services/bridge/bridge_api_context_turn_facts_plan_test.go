@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -102,7 +103,7 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 			t.Fatalf("analyze closed turn history %d: %v", historySize, err)
 		}
 
-		openPlan := explainClosedTurnPlan(t, runtime, loadOpenDurableTurnIDSQL,
+		openPlan := explainClosedTurnPlan(t, runtime, captureOpenDurableTurnQuery(t, runtime, sessionID, threadID),
 			"default", sessionID, threadID)
 		turnPlan := explainClosedTurnPlan(t, runtime, loadContextTurnEventsSQL,
 			"default", sessionID, threadID, floor, "", `[]`, `[]`, "closed_for_runtime")
@@ -481,4 +482,27 @@ func mergeClosedTurnPlanStats(target *closedTurnPlanStats, other closedTurnPlanS
 func encodePlanForFailure(plan map[string]any) string {
 	raw, _ := json.Marshal(plan)
 	return string(raw)
+}
+
+// Capture the query through its owning operation so the plan oracle follows
+// the SQL actually executed in production without exporting an implementation constant.
+func captureOpenDurableTurnQuery(t *testing.T, runtime *sql.DB, sessionID, threadID string) string {
+	t.Helper()
+	traced, tracer := openLoadContextTracedDB(t, runtime)
+	client := dbconnect.NewClientForTesting(traced)
+	err := client.WithWorkspaceReadOnlyTx(context.Background(), "default", "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
+		turn, err := runtimecontrol.LoadOpenDurableTurnIDTx(context.Background(), tx, &bridgev1.RuntimeScope{WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID})
+		if err == nil && turn != nil {
+			t.Fatalf("closed turn has open durable identity: %q", *turn)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("capture open durable turn query: %v", err)
+	}
+	invocations := tracer.snapshot()
+	if len(invocations) != 1 {
+		t.Fatalf("open durable turn query count = %d; want 1", len(invocations))
+	}
+	return invocations[0].SQL
 }

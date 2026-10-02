@@ -2,7 +2,6 @@ package agentruntimebridge
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -12,18 +11,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-func TestPostgreSQLInputCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
-	for _, commitFirst := range []bool{true, false} {
-		name := "input_commit_first"
-		if !commitFirst {
-			name = "runtime_termination_first"
-		}
-		t.Run(name, func(t *testing.T) {
-			runInputCommitTerminationRace(t, commitFirst)
-		})
-	}
-}
 
 func TestPostgreSQLTaskNotificationCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
 	for _, notificationFirst := range []bool{true, false} {
@@ -173,6 +160,18 @@ func runTaskNotificationTerminationRace(t *testing.T, notificationFirst bool) {
 	}
 }
 
+func TestPostgreSQLInputCommitAndRuntimeTerminationSerializeAtSessionBoundary(t *testing.T) {
+	for _, commitFirst := range []bool{true, false} {
+		name := "input_commit_first"
+		if !commitFirst {
+			name = "runtime_termination_first"
+		}
+		t.Run(name, func(t *testing.T) {
+			runInputCommitTerminationRace(t, commitFirst)
+		})
+	}
+}
+
 func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -197,13 +196,7 @@ func runInputCommitTerminationRace(t *testing.T, commitFirst bool) {
 		t.Fatalf("seed running Runtime status: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
-		SessionThreadID: threadID, RuntimeInputID: inputID, InputKind: "messages", EventIDsJSON: `["` + eventID + `"]`,
-		SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
-	}, now)
-	if err != nil {
-		t.Fatalf("build accepted input Queue lineage: %v", err)
-	}
+	request := queue.EnqueueRequest{WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID), PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`), Now: now}
 	queued, err := queueStore.Enqueue(context.Background(), request)
 	if err != nil {
 		t.Fatalf("enqueue accepted input Queue lineage: %v", err)

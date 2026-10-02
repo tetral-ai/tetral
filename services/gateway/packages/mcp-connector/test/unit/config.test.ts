@@ -19,10 +19,10 @@ describe("MCP connector config", () => {
         namespace: "tetral-agent-runtime",
         serviceAccount: "agent-runtime",
       });
-      expect(config.config.allowedBridge).toEqual({
-        namespace: "tetral-system",
-        serviceAccount: "bridge",
-      });
+      expect(config.config.allowedDiscoveryCallers).toEqual([
+ {namespace:"tetral-system",serviceAccount:"bridge"},
+ {namespace:"tetral-system",serviceAccount:"job-runner"},
+ ]);
       expect(config.config.bridgeApiGrpcAddress).toBe("bridge.tetral-system.svc.cluster.local:9090");
       expect(config.config.bridgeTokenPath).toBe("/var/run/secrets/tetral-internal-grpc/bridge/token");
       expect(config.config.runtimeBindingTokenHMACKey).toBe("gateway-runtime-binding-token-test-key-32");
@@ -65,7 +65,7 @@ describe("MCP connector config", () => {
       "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
       "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
     ] as const) {
-      for (const value of ["0", "-1"]) {
+      for (const value of ["0","-1","1.5"," 1","01","9007199254740992",""]) {
         expect(loadMcpConnectorConfigFromEnv({
           ...validEnv(),
           [key]: value,
@@ -80,10 +80,16 @@ describe("MCP connector config", () => {
         ...validEnv(),
         TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: allowed,
       }).ok).toBe(false);
-      expect(loadMcpConnectorConfigFromEnv({
-        ...validEnv(),
-        TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: allowed,
-      }).ok).toBe(false);
+
+    }
+  });
+
+  test("discovery preserves explicit namespace overrides and rejects malformed or duplicate lists", () => {
+    const configured = loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS:"custom-system/bridge,custom-system/job-runner"});
+    expect(configured.ok).toBe(true);
+    if(configured.ok) expect(configured.config.allowedDiscoveryCallers).toEqual([{namespace:"custom-system",serviceAccount:"bridge"},{namespace:"custom-system",serviceAccount:"job-runner"}]);
+    for(const value of ["","*","tetral-system/*","tetral-system/bridge,","tetral-system/bridge,tetral-system/bridge","wrong namespace/bridge","tetral-system/ bridge",",tetral-system/bridge"]){
+      expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS:value}).ok).toBe(false);
     }
   });
 
@@ -107,7 +113,7 @@ function validEnv(): Record<string, string> {
     TETRAL_SERVICE_VERSION: "test",
     TETRAL_INTERNAL_GRPC_AUDIENCE: "tetral-internal-grpc",
     TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "tetral-agent-runtime/agent-runtime",
-    TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: "tetral-system/bridge",
+    TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS: "tetral-system/bridge,tetral-system/job-runner",
     TETRAL_BRIDGE_API_GRPC_ADDR: "bridge.tetral-system.svc.cluster.local:9090",
     TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH: "/var/run/secrets/tetral-internal-grpc/bridge/token",
     TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY: "gateway-runtime-binding-token-test-key-32",

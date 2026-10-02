@@ -15,7 +15,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const defaultShutdownTimeout = 10 * time.Second
+// DefaultShutdownTimeout bounds each Auth listener drain.
+const DefaultShutdownTimeout = 10 * time.Second
 
 type StartupDatabase struct {
 	OpenResult dbconnect.OpenResult
@@ -167,7 +168,7 @@ func WorkloadConfig(cfg Config, handler http.Handler, readiness *workload.Readin
 		ListenConfigKey:       EnvHTTPAddress,
 		Handler:               handler,
 		Readiness:             readiness,
-		ShutdownTimeout:       defaultShutdownTimeout,
+		ShutdownTimeout:       DefaultShutdownTimeout,
 		Logger:                logger,
 	}
 }

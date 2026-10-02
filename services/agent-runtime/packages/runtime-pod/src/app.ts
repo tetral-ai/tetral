@@ -54,18 +54,18 @@ export interface RuntimePodApp {
 /**
  * Creates a Runtime Pod application without binding listeners until `start` is called.
  *
- * The application authenticates Bridge commands before service handling, runs accepted commands
+ * The application authenticates Job Runner commands before service handling, runs accepted commands
  * through the lifecycle drain fence, and exposes only operational HTTP endpoints alongside the
  * internal command gRPC service.
  */
 export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodApp {
   const authenticator = runtimeAuthenticator(options.tokenReviewClient, {
-    namespace: options.config.bridge.namespace,
-    name: options.config.bridge.serviceAccount,
+    namespace: options.config.jobRunner.namespace,
+    name: options.config.jobRunner.serviceAccount,
   });
   const service = new RuntimeControlService({
     ownPod: options.config.ownPod,
-    allowedBridge: { namespace: options.config.bridge.namespace, name: options.config.bridge.serviceAccount },
+    allowedJobRunner: { namespace: options.config.jobRunner.namespace, name: options.config.jobRunner.serviceAccount },
     authenticator,
     runHost: options.commandRunHost,
     ...(options.controlInputCommitter !== undefined ? { controlInputCommitter: options.controlInputCommitter } : {}),
@@ -91,7 +91,7 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
       grpc: async () => {
         grpcServer = createRuntimeGrpcServer(service);
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
-        httpServer = createRuntimeHttpServer(options.config.httpBindAddress, lifecycle, options.metrics);
+        httpServer = createRuntimeHttpServer(options.config.httpBindAddress, lifecycle, options.metrics, options.logger);
         await options.bootstrap?.grpc?.();
       },
     },
@@ -116,18 +116,28 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
     },
     shutdown: async () => {
       service.beginShutdown();
-      const drain = lifecycle.shutdown();
-      const stopGrpc = grpcServer?.shutdown();
-      httpServer?.stop();
-      await drain;
-      await stopGrpc;
+      // Retain concurrent drain/listener shutdown, attach rejection handlers
+      // immediately, and join every started operation even if one fails.
+      let failed = false, firstFailure: unknown;
+      const observe = async (close: () => unknown): Promise<void> => {
+        try { await close(); } catch (error) {
+          if (!failed) firstFailure = error;
+          failed = true;
+        }
+      };
+      await Promise.all([
+        observe(() => lifecycle.shutdown()),
+        observe(() => grpcServer?.shutdown()),
+        observe(() => httpServer?.stop()),
+      ]);
+      if (failed) throw firstFailure;
     },
   };
 }
 
 function runtimeAuthenticator(
   tokenReviewClient: RuntimeTokenReviewClient,
-  bridge: ServiceAccountIdentity,
+  jobRunner: ServiceAccountIdentity,
 ): RuntimeAuthenticator {
   return {
     authenticate: async ({ metadata, method }) =>
@@ -135,7 +145,7 @@ function runtimeAuthenticator(
         metadata,
         method,
         tokenReviewClient,
-        allowedBridge: bridge,
+        allowedJobRunner: jobRunner,
       }),
   };
 }

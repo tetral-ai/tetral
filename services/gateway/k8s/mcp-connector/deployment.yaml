@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-connector
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-connector
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: mcp-connector
+      automountServiceAccountToken: false
+      containers:
+        - name: mcp-connector
+          image: ghcr.io/tetral-ai/gateway:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/mcp-connector/src-command.js
+          env:
+            - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
+              value: 0.0.0.0:9091
+            - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR
+              value: 0.0.0.0:8081
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: local
+            - name: TETRAL_SERVICE_VERSION
+              value: dev
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS
+              value: tetral-system/bridge,tetral-system/job-runner
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge/token
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-database
+                  key: gateway-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: engine-vault-key
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: runtime-binding-token
+                  key: hmac-key
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/mcp-connector-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: mcp-grpc
+              containerPort: 9091
+            - name: mcp-http
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp-http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mcp-http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: mcp-connector-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: mcp-connector-bridge-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge
+              readOnly: true
+      volumes:
+        - name: mcp-connector-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 600
+                  path: mcp-connector-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: mcp-connector-bridge-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token

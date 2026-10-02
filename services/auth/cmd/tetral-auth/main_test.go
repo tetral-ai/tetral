@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -48,6 +49,9 @@ func TestTetralAuthConfigAndRunnerExposeMetricsOnSeparateListener(t *testing.T) 
 	})
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
+	}
+	if cfg.InternalPrincipalTTL != 60*time.Second || cfg.DeploymentEnvironment != "local" || cfg.ServiceVersion != "unknown" {
+		t.Fatalf("boot defaults = %+v", cfg)
 	}
 	if cfg.HTTPAddress != "127.0.0.1:18080" || cfg.MetricsAddress != "127.0.0.1:18081" {
 		t.Fatalf("listen config = %+v", cfg)

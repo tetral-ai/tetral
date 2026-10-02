@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"time"
 
 	tetralauth "github.com/tetral-ai/tetral/services/auth"
 
@@ -13,8 +12,6 @@ import (
 )
 
 var runWorkload = workload.Run
-
-const defaultShutdownTimeout = 10 * time.Second
 
 type osEnv struct{}
 
@@ -27,7 +24,14 @@ func main() {
 }
 
 func run(ctx context.Context, env tetralauth.Env) error {
-	logger := workload.NewLogger(os.Stderr, "auth", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, "auth", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "auth", diagnosticErr)
+	}
 	cfg, err := tetralauth.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
@@ -41,6 +45,7 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	readiness := workload.NewReadiness()
 	handler := buildHTTPHandler(readiness, app.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", app.Client)),
@@ -75,7 +80,7 @@ func runPublicAndMetricsHTTP(
 			ListenConfigKey:       tetralauth.EnvMetricsAddress,
 			Handler:               metricsHandler,
 			Readiness:             readiness,
-			ShutdownTimeout:       defaultShutdownTimeout,
+			ShutdownTimeout:       tetralauth.DefaultShutdownTimeout,
 			Logger:                logger,
 		})
 	}()

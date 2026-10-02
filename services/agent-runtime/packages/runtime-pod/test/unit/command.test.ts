@@ -410,6 +410,8 @@ describe("Runtime Pod command entrypoint", () => {
 				"time",
 				"level",
 				"service.name",
+                "service.instance.id",
+                "process.pid",
 				"service.version",
 				"deployment.environment",
 				"event",
@@ -684,6 +686,8 @@ describe("Runtime Pod command entrypoint", () => {
 			"app.start",
 			"info:workload.started",
 			"waitForever",
+			"app.shutdown",
+			"core.close",
 		]);
 	});
 
@@ -705,7 +709,7 @@ describe("Runtime Pod command entrypoint", () => {
 			});
 		});
 
-		expect(records).toEqual(["app.start", "waitForever"]);
+		expect(records).toEqual(["app.start", "waitForever", "app.shutdown", "core.close"]);
 	});
 
 	test("command runner exposes shutdown path that closes app and core resources", async () => {
@@ -1327,7 +1331,7 @@ describe("Runtime Pod command entrypoint", () => {
 					status: {
 						authenticated: true,
 						audiences: ["tetral-internal-grpc"],
-						user: { username: "system:serviceaccount:engine:bridge" },
+						user: { username: "system:serviceaccount:engine:job-runner" },
 					},
 				}),
 				{ status: 201 },
@@ -1515,7 +1519,7 @@ function validEnv(): Record<string, string> {
 		TETRAL_DEPLOYMENT_ENVIRONMENT: "test",
 		TETRAL_SERVICE_VERSION: "test",
 		TETRAL_RUNTIME_POD_GRPC_AUDIENCE: "tetral-internal-grpc",
-		TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "engine/bridge",
+		TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "engine/job-runner",
 		KUBERNETES_API_SERVER_URL: "https://kubernetes.default.svc",
 		KUBERNETES_API_CA_CERT_PATH:
 			"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",

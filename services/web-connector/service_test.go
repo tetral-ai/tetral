@@ -30,17 +30,8 @@ func TestRunWebRejectsMissingAuthenticatedIdentityBeforeDependencies(t *testing.
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("code = %s", status.Code(err))
 	}
-	var record map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
-		t.Fatalf("decode failure log: %v", err)
-	}
-	delete(record, "time")
-	if len(record) != 4 ||
-		record["level"] != "ERROR" ||
-		record["msg"] != "web.request.failed" ||
-		record["operation"] != "search" ||
-		record["grpc.code"] != "Unauthenticated" {
-		t.Fatalf("failure log fields = %#v", record)
+	if logs.Len() != 0 {
+		t.Fatalf("direct service duplicated the RPC boundary diagnostic: %s", logs.String())
 	}
 }
 

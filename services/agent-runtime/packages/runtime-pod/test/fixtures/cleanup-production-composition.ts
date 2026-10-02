@@ -87,11 +87,11 @@ const service = new RuntimeControlService({
     uid: input.targetPodUid,
     ip: "127.0.0.1",
   },
-  allowedBridge: { namespace: "tetral-system", name: "bridge" },
+  allowedJobRunner: { namespace: "tetral-system", name: "job-runner" },
   authenticator: {
     authenticate: async () => ({
       ok: true as const,
-      serviceAccount: { namespace: "tetral-system", name: "bridge" },
+      serviceAccount: { namespace: "tetral-system", name: "job-runner" },
     }),
   },
   runHost: {} as RuntimeSessionRunHost,

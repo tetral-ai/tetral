@@ -19,6 +19,7 @@ import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } fro
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
+import { createJsonLogger } from "../../src/logger.js";
 import type { GatewayLogger } from "../../src/logger.js";
 import type { GatewayAuthenticator, ProviderAttachmentResolver, ProviderRequestStreamer } from "../../src/service.js";
 import type { RuntimeBindingRequestIdentity, RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -44,6 +45,14 @@ describe("ProviderGatewayServiceShell", () => {
     expect(authenticator.calls).toEqual(["/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest"]);
   });
 
+  test("ordinary validation denial remains Info with the safe failure tuple", async () => {
+    const lines: string[] = []; const logger = createJsonLogger({write: (line) => lines.push(line)});
+    const service = createService(new RecordingAuthenticator(),true,{verify: () => true},{logger});
+    try {
+      await expectGrpcCode(collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId: ""},metadata())),status.INVALID_ARGUMENT);
+      expect(JSON.parse(lines[0]!)).toMatchObject({level: "info",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation"});
+    } finally { logger.close(); }
+  });
   test("rejects invalid request-kind output-schema combinations before credential resolution", async () => {
     const pool = new RecordingPlatformCredentialPool(["pfk_reviewer"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
@@ -82,9 +91,9 @@ describe("ProviderGatewayServiceShell", () => {
       metadata(),
     )), status.INVALID_ARGUMENT);
 
-    expect(infoLogs).toEqual([]);
-    expect(JSON.stringify(errorLogs)).not.toContain(hostileIdentity);
-    expect(errorLogs).toEqual([
+    expect(errorLogs).toEqual([]);
+    expect(JSON.stringify(infoLogs)).not.toContain(hostileIdentity);
+    expect(infoLogs).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -97,7 +106,7 @@ describe("ProviderGatewayServiceShell", () => {
         "model_request.id": "mreq_1",
       }),
     ]);
-    expect(errorLogs[0]).not.toHaveProperty("workspace.id");
+    expect(infoLogs[0]).not.toHaveProperty("workspace.id");
   });
 
   test("valid ProviderRequest streams catalog-gated provider-unavailable terminal event", async () => {

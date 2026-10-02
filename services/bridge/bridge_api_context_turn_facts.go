@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -97,7 +99,7 @@ var bridgeLoadContextTurnEventTypes = []string{
 	"agent.tool_result",
 	"agent.mcp_tool_result",
 	"user.interrupt",
-	childInterruptRequestedEventType,
+	runtimecontrol.ChildInterruptRequestedEventType,
 	"session.error",
 	"session.status_rescheduled",
 	"session.thread_status_rescheduled",
@@ -659,8 +661,8 @@ func bridgeRepairFactFromTurnEvent(
 		!runtimeWriteID.Valid || runtimeWriteID.String == "" {
 		return bridgeLoadContextRepairFact{}, status.Error(codes.FailedPrecondition, "internal repair direct reference is malformed")
 	}
-	payload, err := decodeRuntimeDeclarationObject(payloadJSON)
-	if err != nil || requireRuntimeObjectFields(
+	payload, err := runtimecontrol.DecodeRuntimeDeclarationObject(payloadJSON)
+	if err != nil || runtimecontrol.RequireRuntimeObjectFields(
 		payload,
 		[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
 		[]string{"type", "model_tool_call_id", "tool_name", "repair_kind"},
@@ -714,7 +716,7 @@ func bridgeTurnEventFact(
 			projection.ContextThroughMessageSequence == nil || projection.RequestKind == "" {
 			return event, status.Error(codes.FailedPrecondition, "request start projection is malformed")
 		}
-		if _, err := normalizeRequestKind(projection.RequestKind); err != nil {
+		if _, err := runtimecontrol.NormalizeRequestKind(projection.RequestKind); err != nil {
 			return event, status.Error(codes.FailedPrecondition, "request start projection is malformed")
 		}
 		event.RequestStart = &bridgeLoadContextRequestStart{
@@ -860,7 +862,7 @@ func decodeContextRequestEndReschedule(
 		return nil, status.Error(codes.FailedPrecondition, "rescheduled request end receipt is malformed")
 	}
 	attempt := projection.ProviderAttempts
-	if requestKind == requestKindCompactionSummary {
+	if requestKind == runtimecontrol.RequestKindCompactionSummary {
 		attempt = projection.CompactionAttempts
 	}
 	if attempt != projection.Attempt || facts.EffectiveDeadline != projection.EffectiveDeadline {

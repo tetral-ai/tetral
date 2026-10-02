@@ -17,9 +17,23 @@ var yamlNamePattern = regexp.MustCompile(`^(\s*)- name: ([A-Za-z0-9_.-]+)\s*$`)
 
 func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
-	localFiles, err := filepath.Glob(filepath.Join(root, "services", "*", "k8s", "*.yaml"))
+	localDirectories, err := filepath.Glob(filepath.Join(root, "services", "*", "k8s"))
 	if err != nil {
-		t.Fatalf("glob service manifests: %v", err)
+		t.Fatalf("glob service manifest owners: %v", err)
+	}
+	var localFiles []string
+	for _, directory := range localDirectories {
+		if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && strings.HasSuffix(path, ".yaml") {
+				localFiles = append(localFiles, path)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk service manifests under %s: %v", directory, err)
+		}
 	}
 	topRoot := filepath.Join(root, "deploy", "kubernetes")
 	if override := os.Getenv("TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT"); override != "" {
@@ -65,7 +79,7 @@ func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 		"queue":            {path: "services/queue/cmd/tetral-queue/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"sandbox":          {path: "services/sandbox/cmd/tetral-sandbox/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"bridge-api":       {path: "services/bridge/cmd/bridge-api/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
-		"job-runner":       {path: "services/bridge/cmd/job-runner/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
+		"job-runner":       {path: "services/job-runner/cmd/job-runner/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"event-stream":     {path: "services/event-stream/cmd/event-stream/main.go", gate: ".VerifySchema(ctx)", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"cleanup":          {path: "services/cleanup/cmd/tetral-cleanup/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
 		"git-proxy":        {path: "services/git-proxy/cmd/git-proxy/main.go", gate: "verifySchema(ctx", roleGate: ".VerifyRuntimeRole(ctx)"},
@@ -120,12 +134,12 @@ func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 
 func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
-	const path = "services/bridge/cmd/job-runner/main.go"
+	const path = "services/job-runner/cmd/job-runner/main.go"
 	text := readSchemaOwnershipFile(t, filepath.Join(root, path))
 	for _, required := range []string{
-		"deliveryStore := agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(",
-		"agentruntimebridge.JobRunner{",
-		"Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{",
+		"deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(",
+		"jobrunner.JobRunner{",
+		"Deliverer: jobrunner.RuntimePodDirectDeliverer{",
 		"Store: deliveryStore,",
 	} {
 		if !strings.Contains(text, required) {
@@ -134,8 +148,8 @@ func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testin
 	}
 	// The deliverer must be a field of the JobRunner literal, not a detached
 	// value: pin the ordering so the assignment itself is proven.
-	runnerAt := strings.Index(text, "agentruntimebridge.JobRunner{")
-	delivererAt := strings.Index(text, "Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{")
+	runnerAt := strings.Index(text, "jobrunner.JobRunner{")
+	delivererAt := strings.Index(text, "Deliverer: jobrunner.RuntimePodDirectDeliverer{")
 	if runnerAt >= delivererAt {
 		t.Fatalf("job-runner startup does not assign the deliverer inside the JobRunner literal in %s (JobRunner at %d, Deliverer at %d)", path, runnerAt, delivererAt)
 	}

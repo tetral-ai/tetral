@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provider-gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: provider-gateway
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: provider-gateway
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: provider-gateway
+      automountServiceAccountToken: false
+      containers:
+        - name: provider-gateway
+          image: ghcr.io/tetral-ai/gateway:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/provider-gateway/src-command.js
+          env:
+            - name: TETRAL_PROVIDER_GATEWAY_HTTP_ADDR
+              value: 0.0.0.0:8080
+            - name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR
+              value: 0.0.0.0:9090
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: local
+            - name: TETRAL_SERVICE_VERSION
+              value: dev
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-database
+                  key: gateway-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: engine-vault-key
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge/token
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: runtime-binding-token
+                  key: hmac-key
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/provider-gateway-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: provider-grpc
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: '1'
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: provider-gateway-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: provider-gateway-bridge-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge
+              readOnly: true
+      volumes:
+        - name: provider-gateway-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 600
+                  path: provider-gateway-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: provider-gateway-bridge-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token

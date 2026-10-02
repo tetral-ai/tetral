@@ -6,9 +6,14 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
+	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -94,7 +99,7 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		ref.GetPartitionKey(), ref.GetDedupeKey(),
 	).Scan(&jobKind, &payloadJSON); err != nil {
 		if dbconnect.IsNoRows(err) {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+			return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 		}
 		return err
 	}
@@ -110,7 +115,7 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 		return err
 	}
 	if !live {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 	}
 	var payload struct {
 		SessionID       string `json:"session_id"`
@@ -261,18 +266,18 @@ type bridgeLoadContextMCPTool struct {
 }
 
 type bridgeLoadContextRuntimeConfig struct {
-	ConfigGeneration           int64                      `json:"configGeneration"`
-	ApprovalMode               string                     `json:"approvalMode"`
-	System                     *string                    `json:"system"`
-	MemoryStores               []bridgeRuntimeMemoryStore `json:"memoryStores"`
-	Agent                      bridgeLoadAgent            `json:"agent"`
-	Environment                bridgeLoadEnv              `json:"environment"`
-	ToolPolicy                 map[string]any             `json:"toolPolicy"`
-	Skills                     json.RawMessage            `json:"skills"`
-	SkillsIndex                json.RawMessage            `json:"skillsIndex"`
-	InstalledTools             json.RawMessage            `json:"installedTools"`
-	ProviderRescheduleBudget   int64                      `json:"providerRescheduleBudget"`
-	CompactionRescheduleBudget int64                      `json:"compactionRescheduleBudget"`
+	ConfigGeneration           int64                       `json:"configGeneration"`
+	ApprovalMode               string                      `json:"approvalMode"`
+	System                     *string                     `json:"system"`
+	MemoryStores               []runtimeconfig.MemoryStore `json:"memoryStores"`
+	Agent                      bridgeLoadAgent             `json:"agent"`
+	Environment                bridgeLoadEnv               `json:"environment"`
+	ToolPolicy                 map[string]any              `json:"toolPolicy"`
+	Skills                     json.RawMessage             `json:"skills"`
+	SkillsIndex                json.RawMessage             `json:"skillsIndex"`
+	InstalledTools             json.RawMessage             `json:"installedTools"`
+	ProviderRescheduleBudget   int64                       `json:"providerRescheduleBudget"`
+	CompactionRescheduleBudget int64                       `json:"compactionRescheduleBudget"`
 }
 
 type bridgeLoadAgent struct {
@@ -464,7 +469,7 @@ func loadThreadContextJSONTx(
 		if !json.Valid([]byte(raw)) {
 			return "", status.Error(codes.FailedPrecondition, "session message projection is malformed")
 		}
-		parts, err := decodeStoredRuntimeContextParts(raw)
+		parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return "", err
 		}
@@ -506,7 +511,7 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	durableTurnID, err := runtimecontrol.LoadOpenDurableTurnIDTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -524,7 +529,7 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	return marshalBridgeJSON(bridgeLoadContextPayload{
+	return runtimecontrol.MarshalJSON(bridgeLoadContextPayload{
 		ContextEntries:           contextEntries,
 		OpenRequestDraft:         openRequestDraft,
 		TurnFacts:                turnFacts,
@@ -645,56 +650,6 @@ func loadThreadMetadataForContextTx(
 	return thread, nil
 }
 
-const loadOpenDurableTurnIDSQL = `WITH latest_running AS MATERIALIZED (
-		SELECT event_id, sequence
-		  FROM session_events
-		 WHERE workspace_id=$1
-		   AND session_id=$2
-		   AND session_thread_id=$3
-		   AND type IN ('session.status_running', 'session.thread_status_running')
-		 ORDER BY sequence DESC
-		 LIMIT 1
-	)
-	SELECT running.event_id
-	  FROM latest_running running
-	 WHERE NOT EXISTS (
-	       SELECT 1
-	         FROM session_events closeout
-	        WHERE closeout.workspace_id=$1
-	          AND closeout.session_id=$2
-	          AND closeout.session_thread_id=$3
-	          AND closeout.type IN (
-	            'session.status_idle',
-	            'session.thread_status_idle',
-	            'session.status_terminated',
-	            'session.thread_status_terminated'
-	          )
-	          AND closeout.sequence > (SELECT sequence FROM latest_running)
-	        ORDER BY closeout.sequence ASC
-	        LIMIT 1
-	      )`
-
-func loadOpenDurableTurnIDTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-) (*string, error) {
-	var durableTurnID string
-	err := tx.QueryRow(ctx,
-		loadOpenDurableTurnIDSQL,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&durableTurnID)
-	if dbconnect.IsNoRows(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &durableTurnID, nil
-}
-
 // loadThreadPendingAgentMailTx restores only mail already handed to Runtime.
 // Queued mail remains Queue-owned and must enter through its ordered delivery.
 func loadThreadPendingAgentMailTx(
@@ -762,11 +717,11 @@ func loadThreadPendingAgentMailTx(
 		if mail.DeliveryID == "" || storedMessageJSON == "" {
 			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
 		}
-		publicMessage, err := validatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
 		if err != nil {
 			return nil, err
 		}
-		mail.Content, err = agentMailContentFromPublicMessage(publicMessage)
+		mail.Content, err = runtimecontrol.AgentMailContentFromPublicMessage(publicMessage)
 		if err != nil {
 			return nil, err
 		}
@@ -881,7 +836,7 @@ func loadThreadPendingAttachmentsTx(
 			return nil, err
 		}
 		var metadata transientAttachmentMetadata
-		if err := json.Unmarshal([]byte(defaultString(metadataJSON, "{}")), &metadata); err != nil {
+		if err := json.Unmarshal([]byte(runtimecontrol.DefaultString(metadataJSON, "{}")), &metadata); err != nil {
 			_ = transientRows.Close()
 			return nil, status.Error(codes.FailedPrecondition, "transient attachment metadata is malformed")
 		}
@@ -958,11 +913,11 @@ func loadSessionMCPManifestsTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		if diagnostic.Valid {
 			manifest.Diagnostic = &diagnostic.String
 		}
-		if manifest.Readiness == mcpManifestReadinessUnready {
+		if manifest.Readiness == mcpmanifest.ReadinessUnready {
 			manifests = append(manifests, manifest)
 			continue
 		}
-		if manifest.Readiness != mcpManifestReadinessReady || !toolsJSON.Valid || !manifestETag.Valid {
+		if manifest.Readiness != mcpmanifest.ReadinessReady || !toolsJSON.Valid || !manifestETag.Valid {
 			return nil, status.Error(codes.FailedPrecondition, "stored mcp manifest readiness is malformed")
 		}
 		manifest.ManifestETag = manifestETag.String
@@ -1047,15 +1002,15 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
 	agentConfigRaw := bridgeRawJSON(agentConfig, "{}")
-	memoryStores, err := bridgeRuntimeMemoryStoresTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
+	memoryStores, err := runtimeconfig.ReadMemoryStoresTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
 	if err != nil {
 		return bridgeLoadContextRuntimeConfig{}, err
 	}
-	settings, err := bridgeRuntimeSessionAgentSettings(approvalMode, agentConfig, installedTools, memoryStores)
+	settings, err := runtimeconfig.InterpretSessionSettings(approvalMode, agentConfig, installedTools, memoryStores)
 	if err != nil {
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
-	if _, err := bridgeInstalledBuiltinFamily(settings.Config); err != nil {
+	if _, err := runtimeconfig.InstalledBuiltinFamily(settings.Config); err != nil {
 		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
 	installedToolDeclarations, err := json.Marshal(settings.Config.Tools)
@@ -1251,7 +1206,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 	if ttl <= 0 {
 		ttl = defaultRuntimeBindingTokenTTL
 	}
-	payload, err := marshalBridgeJSON(runtimeBindingTokenPayload{
+	payload, err := runtimecontrol.MarshalJSON(runtimeBindingTokenPayload{
 		Version:           1,
 		WorkspaceID:       scope.GetWorkspaceId(),
 		SessionID:         scope.GetSessionId(),
@@ -1269,9 +1224,4 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 	_, _ = mac.Write([]byte(payloadPart))
 	signaturePart := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return "rtbt_v1." + payloadPart + "." + signaturePart, nil
-}
-
-func sha256Hex(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:])
 }

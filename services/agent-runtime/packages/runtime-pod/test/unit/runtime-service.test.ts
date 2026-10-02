@@ -760,7 +760,7 @@ function makeFixture(options: { readonly deny?: boolean } = {}) {
 			uid: "uid-a",
 			ip: "10.0.0.1",
 		},
-		allowedBridge: { namespace: "engine", name: "bridge" },
+		allowedJobRunner: { namespace: "engine", name: "job-runner" },
 		authenticator,
 		runHost: host,
 		cleanupController: cleanup,
@@ -782,7 +782,7 @@ class FixedAuthenticator implements RuntimeAuthenticator {
 				}
 			: {
 					ok: true as const,
-					serviceAccount: { namespace: "engine", name: "bridge" },
+					serviceAccount: { namespace: "engine", name: "job-runner" },
 				};
 	}
 }

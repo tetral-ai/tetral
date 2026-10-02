@@ -1,3 +1,4 @@
+import { diagnosticMetricsText } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -86,7 +87,7 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
   const state = {
     health: () => ({ ok: true as const }),
     ready: () => ({ ready: readyFlag }),
-    metricsText: () => service.metricsText(),
+    metricsText: () => service.metricsText() + diagnosticMetricsText(options.logger),
   };
   return {
     service,
@@ -104,11 +105,11 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
         logWorkloadStarted(options.logger);
       } catch {
         readyFlag = false;
-        options.logger.error(startupFailureLogRecord({
+        try { options.logger.error(startupFailureLogRecord({
           kind: "startup_error",
           message: "gateway service startup failed",
           causeCategory,
-        }));
+        })); } catch { /* diagnostics do not replace startup failure */ }
         throw new Error("gateway service startup failed");
       }
       if (boundGrpcPort === undefined || httpServer === undefined) {
@@ -118,8 +119,10 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
     },
     shutdown: async () => {
       readyFlag = false;
-      await httpServer?.stop();
-      await grpcServer?.shutdown();
+      let failed = false, firstFailure: unknown;
+      try { await httpServer?.stop(); } catch (error) { failed = true; firstFailure = error; }
+      try { await grpcServer?.shutdown(); } catch (error) { if (!failed) firstFailure = error; failed = true; }
+      if (failed) throw firstFailure;
     },
   };
 }

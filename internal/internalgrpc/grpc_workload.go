@@ -36,6 +36,7 @@ type GRPCWorkloadParams struct {
 	ShutdownTimeout     time.Duration
 	DBStatsProvider     workload.DBStatsProvider
 	ServerOptions       []grpc.ServerOption
+	Logger              *slog.Logger
 
 	// Seams. Production wiring fills these from the real implementations; command
 	// tests stub them to drive startup/shutdown without a real cluster. Any nil
@@ -80,9 +81,18 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = 10 * time.Second
 	}
-	deploymentEnvironment := valueOrDefault(env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), "local")
-	serviceVersion := valueOrDefault(env.Getenv("TETRAL_SERVICE_VERSION"), "unknown")
-	logger := workload.NewLogger(os.Stderr, params.ServiceName, deploymentEnvironment, serviceVersion)
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
+	deploymentEnvironment, serviceVersion := resource.DeploymentEnvironment, resource.ServiceVersion
+	logger := params.Logger
+	if logger == nil {
+		diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+		owner := workload.NewProcessLogger(os.Stderr, params.ServiceName, deploymentEnvironment, serviceVersion, diagnostics)
+		defer owner.CloseWithBudget()
+		logger = owner.Logger
+		if diagnosticErr != nil {
+			return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseConfiguration, diagnosticErr)
+		}
+	}
 	httpMetrics := workload.NewHTTPMetrics()
 	grpcMetrics := workload.NewGRPCMetrics()
 
@@ -171,6 +181,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 	}
 	if params.DBStatsProvider != nil {
 		metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", params.DBStatsProvider)))
@@ -220,7 +231,7 @@ func valueOrDefault(value string, fallback string) string {
 // is the same rule every workload applies.
 func logGRPCStartupFailure(serviceName string, logger *slog.Logger, cause workload.StartupFailureCause, err error) error {
 	if logger == nil {
-		logger = workload.NewLogger(os.Stderr, serviceName, "", "")
+		logger = workload.ComponentLogger(serviceName)
 	}
 	return workload.LogStartupFailure(logger, serviceName, workload.WithStartupFailureCause(cause, err))
 }

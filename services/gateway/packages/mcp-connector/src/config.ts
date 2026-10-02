@@ -10,10 +10,16 @@
  * loader to exercise the same validation without ambient environment access.
  */
 
-import { z } from "zod/v4";
+import { parseDatabasePoolConfig } from "@tetral/ts-dbconnect";
+import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import type { DiagnosticConfig } from "@tetral/ts-observability";
+
+import type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
+export type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
 
 interface McpConnectorConfig {
   readonly deploymentEnvironment: string;
+  readonly diagnostics: DiagnosticConfig;
   readonly serviceVersion: string;
   readonly grpcBindAddress: string;
   readonly httpBindAddress: string;
@@ -21,10 +27,10 @@ interface McpConnectorConfig {
     readonly namespace: string;
     readonly serviceAccount: string;
   };
-  readonly allowedBridge: {
+  readonly allowedDiscoveryCallers: readonly {
     readonly namespace: string;
     readonly serviceAccount: string;
-  };
+  }[];
   readonly bridgeApiGrpcAddress: string;
   readonly bridgeTokenPath: string;
   readonly runtimeBindingTokenHMACKey: string;
@@ -36,38 +42,16 @@ interface McpConnectorConfig {
   readonly tokenReviewReviewerTokenPath: string;
 }
 
-/** Contains the validated Bun PostgreSQL pool and statement lifetime bounds. */
-export interface DatabasePoolConfig {
-  readonly max: number;
-  readonly idleTimeout: number;
-  readonly maxLifetime: number;
-  readonly connectionTimeout: number;
-  readonly statementTimeoutMs: number;
-}
-
-const positiveIntegerString = (fallback: number) => z.string()
-  .regex(/^[1-9][0-9]*$/)
-  .transform((value) => Number.parseInt(value, 10))
-  .refine(Number.isSafeInteger)
-  .default(fallback);
-const DatabasePoolEnvSchema = z.strictObject({
-  TETRAL_DATABASE_POOL_MAX: positiveIntegerString(10),
-  TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: positiveIntegerString(30),
-  TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS: positiveIntegerString(1_800),
-  TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS: positiveIntegerString(30),
-  TETRAL_DATABASE_STATEMENT_TIMEOUT_MS: positiveIntegerString(30_000),
-});
-
 /** Describes either a complete validated startup configuration or a safe failure. */
 export type McpConnectorConfigResult =
   | { readonly ok: true; readonly config: McpConnectorConfig }
   | { readonly ok: false; readonly error: { readonly kind: "config_error"; readonly message: string } };
 
 const ConfigKeys = [
+  ...diagnosticEnvKeys,
   "TETRAL_MCP_CONNECTOR_GRPC_ADDR",
   "TETRAL_MCP_CONNECTOR_HTTP_ADDR",
-  "TETRAL_DEPLOYMENT_ENVIRONMENT",
-  "TETRAL_SERVICE_VERSION",
+  ...workloadResourceEnvKeys,
   "TETRAL_INTERNAL_GRPC_AUDIENCE",
   "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
   "TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS",
@@ -105,14 +89,10 @@ export function loadMcpConnectorConfigFromEnv(env: Record<string, string | undef
 
 function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpConnectorConfigResult {
   const allowedRuntimePod = parseSingleServiceAccount(env.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS ?? "");
-  const allowedBridge = parseSingleServiceAccount(env.TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS ?? "");
-  const databasePool = DatabasePoolEnvSchema.safeParse({
-    TETRAL_DATABASE_POOL_MAX: env.TETRAL_DATABASE_POOL_MAX,
-    TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: env.TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS,
-    TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS: env.TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS,
-    TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS: env.TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS,
-    TETRAL_DATABASE_STATEMENT_TIMEOUT_MS: env.TETRAL_DATABASE_STATEMENT_TIMEOUT_MS,
-  });
+  const allowedDiscoveryCallers = parseDiscoveryServiceAccounts(env.TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS ?? "");
+  const diagnostics = parseDiagnosticConfig(env);
+  const resource = parseWorkloadResourceConfig(env, 4096);
+  const databasePool = parseDatabasePoolConfig(env, { empty: "reject" });
   if (
     !nonEmpty(env.TETRAL_MCP_CONNECTOR_GRPC_ADDR) ||
     !nonEmpty(env.TETRAL_MCP_CONNECTOR_HTTP_ADDR) ||
@@ -120,8 +100,10 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
     !nonEmpty(env.TETRAL_SERVICE_VERSION) ||
     env.TETRAL_INTERNAL_GRPC_AUDIENCE !== "tetral-internal-grpc" ||
     allowedRuntimePod === undefined ||
-    allowedBridge === undefined ||
-    !databasePool.success ||
+    allowedDiscoveryCallers === undefined ||
+    databasePool === undefined ||
+    diagnostics === undefined ||
+    resource === undefined ||
     !nonEmpty(env.TETRAL_BRIDGE_API_GRPC_ADDR) ||
     !nonEmpty(env.TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH) ||
     !nonEmpty(env.TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY) ||
@@ -136,23 +118,18 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
   return {
     ok: true,
     config: {
-      deploymentEnvironment: env.TETRAL_DEPLOYMENT_ENVIRONMENT,
-      serviceVersion: env.TETRAL_SERVICE_VERSION,
+      diagnostics,
+      deploymentEnvironment: resource.deploymentEnvironment,
+      serviceVersion: resource.serviceVersion,
       grpcBindAddress: env.TETRAL_MCP_CONNECTOR_GRPC_ADDR,
       httpBindAddress: env.TETRAL_MCP_CONNECTOR_HTTP_ADDR,
       allowedRuntimePod,
-      allowedBridge,
+      allowedDiscoveryCallers,
       bridgeApiGrpcAddress: env.TETRAL_BRIDGE_API_GRPC_ADDR,
       bridgeTokenPath: env.TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH,
       runtimeBindingTokenHMACKey: env.TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY,
       databaseUrl: env.TETRAL_DATABASE_URL,
-      databasePool: {
-        max: databasePool.data.TETRAL_DATABASE_POOL_MAX,
-        idleTimeout: databasePool.data.TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS,
-        maxLifetime: databasePool.data.TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS,
-        connectionTimeout: databasePool.data.TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS,
-        statementTimeoutMs: databasePool.data.TETRAL_DATABASE_STATEMENT_TIMEOUT_MS,
-      },
+      databasePool,
       vaultKeyHex: env.ENGINE_VAULT_KEY,
       kubernetesApiServerUrl: env.KUBERNETES_API_SERVER_URL,
       kubernetesApiCaCertPath: env.KUBERNETES_API_CA_CERT_PATH,
@@ -178,10 +155,25 @@ function parseSingleServiceAccount(value: string): { readonly namespace: string;
     namespace === undefined ||
     serviceAccount === undefined ||
     extra !== undefined ||
-    namespace.length === 0 ||
-    serviceAccount.length === 0
+    !validNamespace(namespace) ||
+    !validAccount(serviceAccount)
   ) {
     return undefined;
   }
   return { namespace, serviceAccount };
 }
+
+// The compatibility environment key names Bridge, but discovery also belongs to Job Runner.
+// No discovery identity is admitted to Runtime-only tool execution.
+function parseDiscoveryServiceAccounts(value: string): readonly { readonly namespace: string; readonly serviceAccount: string }[] | undefined {
+  if (value.length > 4096) return undefined;
+  const values = value.split(",");
+  if (values.length > 16) return undefined;
+  if (new Set(values).size !== values.length) return undefined;
+  const accounts = values.map(parseSingleServiceAccount);
+  if (accounts.some((account) => account === undefined)) return undefined;
+  return accounts as readonly { readonly namespace: string; readonly serviceAccount: string }[];
+}
+
+function validNamespace(value: string): boolean { return value.length <= 63 && /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(value); }
+function validAccount(value: string): boolean { return value.length <= 253 && value.split(".").every(validNamespace); }

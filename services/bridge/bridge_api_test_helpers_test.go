@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,19 +14,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/blob"
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
-)
 
-// This file owns shared Bridge API store test fixtures and assertions.
+	"github.com/tetral-ai/tetral/internal/blob"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+)
 
 func bridgeInterruptLeaseRef(job *queue.Job) *bridgev1.InterruptLeaseRef {
 	if job == nil {
@@ -58,7 +57,7 @@ func bridgeAgentMailCommitRequestForTest(
 	messageJSON string,
 ) *bridgev1.CommitInputsRequest {
 	t.Helper()
-	eventID := stableRuntimeID(
+	eventID := runtimecontrol.StableRuntimeID(
 		"agent_mail_received_event",
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
@@ -75,7 +74,7 @@ func bridgeAgentMailCommitRequestForTest(
 	}
 	var sequence int64
 	if existing == 0 {
-		publicMessage, err := validatedPublicInterAgentMessageJSON(json.RawMessage(messageJSON))
+		publicMessage, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(messageJSON))
 		if err != nil {
 			t.Fatalf("normalize admitted agent mail message: %v", err)
 		}
@@ -98,7 +97,7 @@ func bridgeAgentMailCommitRequestForTest(
 			"type":                     "agent.thread_message_received",
 			"delivery_id":              deliveryID,
 			"source_thread_id":         sourceThreadID,
-			"source_task_name":         nullableJSONString(sourceTaskName),
+			"source_task_name":         runtimecontrol.NullableJSONString(sourceTaskName),
 			"source_tool_use_event_id": sourceToolUseEventID,
 			"message":                  publicMessage,
 		})
@@ -214,10 +213,13 @@ func bridgeSignedReasoningToolDeclarationForTest(modelToolCallID, toolName, inpu
 
 type panicSlogHandler struct{}
 
-func (panicSlogHandler) Enabled(context.Context, slog.Level) bool  { return true }
+func (panicSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
 func (panicSlogHandler) Handle(context.Context, slog.Record) error { panic("logger failed") }
-func (panicSlogHandler) WithAttrs([]slog.Attr) slog.Handler        { return panicSlogHandler{} }
-func (panicSlogHandler) WithGroup(string) slog.Handler             { return panicSlogHandler{} }
+
+func (panicSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return panicSlogHandler{} }
+
+func (panicSlogHandler) WithGroup(string) slog.Handler { return panicSlogHandler{} }
 
 func bridgeCompletedToolSettlementForTest(toolUseEventID, textValue string) *bridgev1.RuntimeToolSettlement {
 	return &bridgev1.RuntimeToolSettlement{
@@ -420,22 +422,6 @@ func nextBridgeAPIEventSequenceForTest(t *testing.T, db *sql.DB, sessionID strin
 	return sequence
 }
 
-func bridgeAPIFinishIdleRequest(
-	t *testing.T,
-	db *sql.DB,
-	scope *bridgev1.RuntimeScope,
-	durableTurnID string,
-	stopReasonJSON string,
-) *bridgev1.FinishIdleRequest {
-	t.Helper()
-	seedBridgeAPIOpenDurableTurn(t, db, scope, durableTurnID)
-	return &bridgev1.FinishIdleRequest{
-		Scope:          scope,
-		DurableTurnId:  durableTurnID,
-		StopReasonJson: stopReasonJSON,
-	}
-}
-
 func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
 	t.Helper()
 	environmentID := "env_" + sessionID
@@ -541,23 +527,6 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	}
 }
 
-func assertNoRuntimeInboxRow(t *testing.T, db *sql.DB, runtimeInputID string) {
-	t.Helper()
-	var rows int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_runtime_inbox
-		  WHERE workspace_id = 'default'
-		    AND runtime_input_id = $1`,
-		runtimeInputID,
-	).Scan(&rows); err != nil {
-		t.Fatalf("count runtime inbox rows for %s: %v", runtimeInputID, err)
-	}
-	if rows != 0 {
-		t.Fatalf("runtime inbox rows for %s = %d; want 0 before readiness gate succeeds", runtimeInputID, rows)
-	}
-}
-
 func bridgeAPIScope(sessionID string, threadID string, bindingID string, generation int64, podUID string) *bridgev1.RuntimeScope {
 	return &bridgev1.RuntimeScope{
 		WorkspaceId:     "default",
@@ -608,13 +577,6 @@ func testJSONPathString(t *testing.T, raw string, path string) string {
 	return stringValue
 }
 
-func assertNoTaskOutputPaths(t *testing.T, raw string) {
-	t.Helper()
-	if strings.Contains(raw, `"output_paths"`) || strings.Contains(raw, "/tmp/tetral-runtime/tasks/") {
-		t.Fatalf("task notification surface contains internal output paths: %s", raw)
-	}
-}
-
 func testJSONPathValue(t *testing.T, raw string, path string) any {
 	t.Helper()
 	var payload map[string]any
@@ -635,33 +597,9 @@ func testJSONPathValue(t *testing.T, raw string, path string) any {
 	return current
 }
 
-func bridgeAcceptedMessageDeliveryPayload(t *testing.T, runtime *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, eventIDs []string, sequenceFrom int64, sequenceTo int64) string {
-	t.Helper()
-	client := dbconnect.NewClientForTesting(runtime)
-	var payloadJSON string
-	if err := client.WithWorkspaceTx(context.Background(), workspaceID, "agentruntimebridge.test_accepted_message_delivery_payload", func(tx *dbconnect.Tx) error {
-		var err error
-		payloadJSON, err = acceptedMessageCommandPayloadTx(context.Background(), tx, RuntimeJob{
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     workspaceID,
-			SessionID:       sessionID,
-			SessionThreadID: threadID,
-			RuntimeInputID:  runtimeInputID,
-			EventIDs:        eventIDs,
-			SequenceFrom:    sequenceFrom,
-			SequenceTo:      sequenceTo,
-			InputKind:       "messages",
-		})
-		return err
-	}); err != nil {
-		t.Fatalf("build accepted message delivery payload: %v", err)
-	}
-	return payloadJSON
-}
-
 func assertBridgeUserContextProjection(t *testing.T, raw string, text string) {
 	t.Helper()
-	parts, err := decodeStoredRuntimeContextParts(raw)
+	parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 	if err != nil || len(parts) != 1 {
 		t.Fatalf("decode projected user context: parts=%d err=%v raw=%s", len(parts), err, raw)
 	}
@@ -676,60 +614,11 @@ func assertBridgeUserContextProjection(t *testing.T, raw string, text string) {
 
 func bridgePublicMessageJSONForTest(t *testing.T, text string) string {
 	t.Helper()
-	raw, err := publicAgentMailMessageJSON(text)
+	raw, err := runtimecontrol.PublicAgentMailMessageJSON(text)
 	if err != nil {
 		t.Fatalf("marshal public message content: %v", err)
 	}
 	return raw
-}
-
-func bridgeInterAgentMessageJSON(t *testing.T, deliveryID string, sourceThreadID string, sourceToolUseEventID string, messageJSON string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"delivery_id":              deliveryID,
-		"source_thread_id":         sourceThreadID,
-		"source_tool_use_event_id": sourceToolUseEventID,
-		"message":                  json.RawMessage(messageJSON),
-	})
-	if err != nil {
-		t.Fatalf("marshal inter-agent message: %v", err)
-	}
-	return string(raw)
-}
-
-func bridgeInterAgentSentEventJSON(t *testing.T, deliveryID string, sourceThreadID string, targetThreadID string, targetTaskName string, sourceToolUseEventID string, messageJSON string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"type":                     "agent.thread_message_sent",
-		"delivery_id":              deliveryID,
-		"source_thread_id":         sourceThreadID,
-		"target_thread_id":         targetThreadID,
-		"target_task_name":         targetTaskName,
-		"source_tool_use_event_id": sourceToolUseEventID,
-		"message":                  json.RawMessage(messageJSON),
-	})
-	if err != nil {
-		t.Fatalf("marshal inter-agent sent event: %v", err)
-	}
-	return string(raw)
-}
-
-func assertDurableInterAgentPublicContent(t *testing.T, raw string, wantText string) {
-	t.Helper()
-	var payload struct {
-		Message struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("decode durable inter-agent payload: %v", err)
-	}
-	if len(payload.Message.Content) != 1 || payload.Message.Content[0].Type != "text" || payload.Message.Content[0].Text != wantText {
-		t.Fatalf("durable public message content = %+v; want ordered text %q", payload.Message.Content, wantText)
-	}
 }
 
 func memoryCreateInputJSON(t *testing.T, path string, content string) string {
@@ -934,11 +823,11 @@ func seedBridgeAPIToolDeclarationProjection(
 	routeCapability string,
 ) {
 	t.Helper()
-	canonicalInput, _, err := canonicalRunToolInput(inputJSON)
+	canonicalInput, _, err := runtimecontrol.CanonicalRunToolInput(inputJSON)
 	if err != nil {
 		t.Fatalf("canonicalize seeded Tool declaration input: %v", err)
 	}
-	projectionJSON, err := marshalBridgeJSON(map[string]any{
+	projectionJSON, err := runtimecontrol.MarshalJSON(map[string]any{
 		"event_type":                "agent.tool_use",
 		"evaluated_permission":      "allow",
 		"model_tool_call_id":        modelToolCallID,
@@ -1081,36 +970,6 @@ func seedBridgeAPIRuntimeBinding(t *testing.T, db *sql.DB, workspaceID string, s
 	}
 }
 
-func seedRuntimePodLostStatusFence(t *testing.T, db *sql.DB, sessionID string, bindingID string, generation int64) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_runtime_status (
-			workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at
-		) VALUES ('default', $1, 'running', $2, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		sessionID, bindingID, generation); err != nil {
-		t.Fatalf("seed runtime pod-loss status: %v", err)
-	}
-}
-
-func runtimePodLostBinding(sessionID string, bindingID string, generation int64) runtimeBindingForDelivery {
-	return runtimeBindingForDelivery{
-		BindingID:         bindingID,
-		BindingGeneration: generation,
-		Namespace:         "tetral-agent-runtime",
-		PodName:           "runtime-pod-0",
-		PodUID:            "pod_uid_" + sessionID,
-		PodIP:             "10.0.0.10",
-	}
-}
-
-func assertRuntimePodLostRetryableError(t *testing.T, err error, kind string) {
-	t.Helper()
-	var prepareErr runtimeDeliveryPrepareError
-	if !errors.As(err, &prepareErr) || prepareErr.kind != kind || !prepareErr.retryable {
-		t.Fatalf("repair error = %#v; want retryable %q", err, kind)
-	}
-}
-
 func seedBridgeAPIRuntimeInput(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, bindingID string, podUID string, eventID string) {
 	t.Helper()
 	seedBridgeAPIEvent(t, db, workspaceID, sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
@@ -1122,56 +981,6 @@ func seedBridgeAPIRuntimeInput(t *testing.T, db *sql.DB, workspaceID string, ses
 		) VALUES ($1, $2, $3, $4, 'messages', $5, 1, 1, 'delivering', $6, 1, $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, threadID, runtimeInputID, `["`+eventID+`"]`, bindingID, podUID); err != nil {
 		t.Fatalf("seed runtime inbox: %v", err)
-	}
-}
-
-func seedRuntimeInboxBirthForJob(t *testing.T, db *sql.DB, job RuntimeJob) {
-	t.Helper()
-	eventIDs := job.EventIDs
-	if eventIDs == nil {
-		eventIDs = []string{}
-	}
-	eventIDsJSON, err := json.Marshal(eventIDs)
-	if err != nil {
-		t.Fatalf("marshal Runtime Inbox birth events: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
-		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,rejection_reason_code,
-		event_ids_json,sequence_from,sequence_to,status,created_at,updated_at
-	) VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7,NULLIF($8,0),NULLIF($9,0),'queued','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
-		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID, job.InputKind,
-		job.RejectionReasonCode, string(eventIDsJSON), job.SequenceFrom, job.SequenceTo,
-	); err != nil {
-		t.Fatalf("seed Runtime Inbox birth: %v", err)
-	}
-}
-
-func seedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThreadID string, deliveryID string, now time.Time) {
-	t.Helper()
-	runtimeInputID := completionRuntimeInputID(deliveryID)
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
-		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
-	) VALUES ('default',$1,$2,$3,'agent_mail','[]','queued',$4,$4)`,
-		sessionID, targetThreadID, runtimeInputID, now,
-	); err != nil {
-		t.Fatalf("seed agent-mail Inbox custody: %v", err)
-	}
-	payload, err := json.Marshal(map[string]any{
-		"workspace_id": "default", "session_id": sessionID, "session_thread_id": targetThreadID,
-		"runtime_input_id": runtimeInputID, "event_ids": []string{}, "sequence_from": 0,
-		"sequence_to": 0, "input_kind": "agent_mail",
-	})
-	if err != nil {
-		t.Fatalf("marshal agent-mail Queue custody: %v", err)
-	}
-	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(db))
-	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
-		ID: queue.NewJobID(), WorkspaceID: workspace.ID("default"), Kind: queue.KindRuntimeInput,
-		PartitionKey:   queue.FormatSessionPartitionKey(workspace.ID("default"), sessionID),
-		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.ID("default"), sessionID, runtimeInputID),
-		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: queue.DefaultMaxAttempts, Now: now,
-	}); err != nil {
-		t.Fatalf("seed agent-mail Queue custody: %v", err)
 	}
 }
 
@@ -1387,52 +1196,6 @@ func setBridgeAPIPendingApprovalStatus(t *testing.T, db *sql.DB, workspaceID str
 	}
 }
 
-func seedBridgeAPIUserMessageEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'user.message', $6, 'public', true, $6, '2026-01-01T00:31:00Z', '2026-01-01T00:31:00Z')`,
-		workspaceID,
-		sessionID,
-		threadID,
-		eventID,
-		sequence,
-		`{"type":"user.message","content":[{"type":"text","text":"next turn"}]}`,
-	); err != nil {
-		t.Fatalf("seed post-claim user message: %v", err)
-	}
-	seedBridgeAPIStreamChange(t, db, workspaceID, sessionID, threadID, eventID, 1, "public", true)
-}
-
-func seedBridgeAPIToolConfirmationEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, toolUseEventID string, decision string) {
-	t.Helper()
-	payload, err := json.Marshal(map[string]string{
-		"type":        "user.tool_confirmation",
-		"tool_use_id": toolUseEventID,
-		"result":      decision,
-	})
-	if err != nil {
-		t.Fatalf("marshal tool confirmation payload: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'user.tool_confirmation', $6, 'public', true, $6, '2026-01-01T00:31:05Z', '2026-01-01T00:31:05Z')`,
-		workspaceID,
-		sessionID,
-		threadID,
-		eventID,
-		sequence,
-		string(payload),
-	); err != nil {
-		t.Fatalf("seed tool confirmation event: %v", err)
-	}
-	seedBridgeAPIStreamChange(t, db, workspaceID, sessionID, threadID, eventID, 1, "public", true)
-}
-
 func seedBridgeAPIWritableMemoryStore(t *testing.T, db *sql.DB, workspaceID string, sessionID string, storeID string) {
 	t.Helper()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
@@ -1488,7 +1251,7 @@ func seedBridgeAPIMemory(t *testing.T, db *sql.DB, workspaceID string, storeID s
 	t.Helper()
 	now := "2026-01-01T00:00:00Z"
 	versionID := memoryID + "_ver"
-	hash := sha256Hex(content)
+	hash := runtimecontrol.Sha256Hex(content)
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("begin seed memory tx: %v", err)
@@ -1647,33 +1410,19 @@ func (s *countingGetBlobStore) DeletePrefix(ctx context.Context, prefix string) 
 	return s.inner.DeletePrefix(ctx, prefix)
 }
 
-type recordingRuntimeTargetResolver struct {
-	jobs    []RuntimeJob
-	binding runtimeBindingForDelivery
-	err     error
-}
-
-func (r *recordingRuntimeTargetResolver) ResolveRuntimeTarget(_ context.Context, _ *dbconnect.Tx, job RuntimeJob) (runtimeBindingForDelivery, error) {
-	r.jobs = append(r.jobs, job)
-	if r.err != nil {
-		return runtimeBindingForDelivery{}, r.err
-	}
-	return r.binding, nil
-}
-
 type recordingMCPManifestLister struct {
-	requests []MCPManifestListRequest
-	results  []MCPManifestListResult
+	requests []mcpmanifest.ListRequest
+	results  []mcpmanifest.ListResult
 	err      error
 }
 
-func (l *recordingMCPManifestLister) ListMCPTools(_ context.Context, request MCPManifestListRequest) (MCPManifestListResult, error) {
+func (l *recordingMCPManifestLister) ListMCPTools(_ context.Context, request mcpmanifest.ListRequest) (mcpmanifest.ListResult, error) {
 	l.requests = append(l.requests, request)
 	if l.err != nil {
-		return MCPManifestListResult{}, l.err
+		return mcpmanifest.ListResult{}, l.err
 	}
 	if len(l.results) == 0 {
-		return MCPManifestListResult{}, nil
+		return mcpmanifest.ListResult{}, nil
 	}
 	result := l.results[0]
 	l.results = l.results[1:]

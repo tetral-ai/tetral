@@ -4,18 +4,26 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const (
-	ServiceName       = "web-connector"
-	EnvSearchEndpoint = "TETRAL_WEB_SEARCH_ENDPOINT"
-	EnvReaderEndpoint = "TETRAL_WEB_READER_ENDPOINT"
-	EnvAPIKeys        = "TETRAL_WEB_API_KEYS" //nolint:gosec // configuration name, not a value
-	EnvGRPCAddress    = "TETRAL_WEB_CONNECTOR_GRPC_ADDR"
-	EnvMetricsAddress = "TETRAL_WEB_CONNECTOR_METRICS_ADDR"
-	EnvBindingHMACKey = "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY" //nolint:gosec // configuration name, not a value
+	// Listener policy remains independent from backend request and Git relay deadlines.
+	DefaultOpsReadHeaderTimeout    = 5 * time.Second
+	DefaultListenerShutdownTimeout = 10 * time.Second
+	ServiceName                    = "web-connector"
+	DefaultSearchEndpoint          = "https://s.jina.ai/"
+	DefaultReaderEndpoint          = "https://r.jina.ai/"
+	DefaultGRPCAddress             = "0.0.0.0:9092"
+	DefaultMetricsAddress          = "0.0.0.0:9464"
+	EnvSearchEndpoint              = "TETRAL_WEB_SEARCH_ENDPOINT"
+	EnvReaderEndpoint              = "TETRAL_WEB_READER_ENDPOINT"
+	EnvAPIKeys                     = "TETRAL_WEB_API_KEYS" //nolint:gosec // configuration name, not a value
+	EnvGRPCAddress                 = "TETRAL_WEB_CONNECTOR_GRPC_ADDR"
+	EnvMetricsAddress              = "TETRAL_WEB_CONNECTOR_METRICS_ADDR"
+	EnvBindingHMACKey              = "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY" //nolint:gosec // configuration name, not a value
 )
 
 type Env interface{ Getenv(string) string }
@@ -29,7 +37,7 @@ func LoadConfig(env Env) (Config, error) {
 	if env == nil {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
-	cfg := Config{SearchEndpoint: valueOrDefault(env.Getenv(EnvSearchEndpoint), "https://s.jina.ai/"), ReaderEndpoint: valueOrDefault(env.Getenv(EnvReaderEndpoint), "https://r.jina.ai/"), GRPCAddress: valueOrDefault(env.Getenv(EnvGRPCAddress), "0.0.0.0:9092"), MetricsAddress: valueOrDefault(env.Getenv(EnvMetricsAddress), "0.0.0.0:9464")}
+	cfg := Config{SearchEndpoint: valueOrDefault(env.Getenv(EnvSearchEndpoint), DefaultSearchEndpoint), ReaderEndpoint: valueOrDefault(env.Getenv(EnvReaderEndpoint), DefaultReaderEndpoint), GRPCAddress: valueOrDefault(env.Getenv(EnvGRPCAddress), DefaultGRPCAddress), MetricsAddress: valueOrDefault(env.Getenv(EnvMetricsAddress), DefaultMetricsAddress)}
 	if err := validateBackendEndpoint(cfg.SearchEndpoint, EnvSearchEndpoint); err != nil {
 		return Config{}, err
 	}

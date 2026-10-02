@@ -14,6 +14,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -104,7 +105,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 	startRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_start", ModelRequestId: "mreq_facts",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_facts", FileId: "file_start_facts"}},
 	}
 	first, err := store.WriteEvent(context.Background(), startRequest)
@@ -182,7 +183,7 @@ func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
 	rejected, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_future", ModelRequestId: "mreq_request_context_boundary_future",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: &beyondHistory, RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: &beyondHistory, RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if rejected != nil || status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "exceeds durable history") {
 		t.Fatalf("future request context boundary = %#v/%v; want InvalidArgument", rejected, err)
@@ -192,7 +193,7 @@ func TestWriteEventAcceptsRuntimeSelectedRequestContextBoundary(t *testing.T) {
 	accepted, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_request_context_boundary_selected", ModelRequestId: "mreq_request_context_boundary_selected",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: &selectedBoundary, RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: &selectedBoundary, RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if err != nil || accepted.GetCommitted() == nil {
 		t.Fatalf("Runtime-selected request context boundary = %#v/%v; want committed", accepted, err)
@@ -301,7 +302,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 				Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_attachment_authority",
 				ModelRequestId: "mreq_attachment_authority", EventType: "span.model_request_start",
 				PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
-				RequestKind: requestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{
+				RequestKind: runtimecontrol.RequestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{
 					SourceEventId: "sevt_attachment_authority", FileId: "file_attachment_authority",
 				}},
 			})
@@ -330,7 +331,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	first := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_first", ModelRequestId: "mreq_attachment_once_first",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	}
 	committed, err := store.WriteEvent(context.Background(), first)
@@ -351,7 +352,7 @@ func TestWriteEventRequestStartRequiresUniqueCommittedMessageAuthorityAndSingleC
 	second, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_attachment_once_second", ModelRequestId: "mreq_attachment_once_second",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	})
 	if status.Code(err) != codes.AlreadyExists || second != nil {
@@ -395,7 +396,7 @@ func TestWriteEventRequestStartConsumptionRollsBackEventAndRelationTogether(t *t
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_start_rollback",
 		ModelRequestId: "mreq_start_rollback", EventType: "span.model_request_start",
 		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
-		RequestKind:             requestKindAgentProviderRequest,
+		RequestKind:             runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: "sevt_start_rollback", FileId: "file_start_rollback"}},
 	})
 	if err == nil || response != nil {
@@ -437,12 +438,12 @@ func TestWriteEventRejectsSecondOpenRequest(t *testing.T) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_open_request_one", "mreq_open_request_one", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_open_request_one", "mreq_open_request_one", runtimecontrol.RequestKindAgentProviderRequest, 0)
 
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_open_request_two", ModelRequestId: "mreq_open_request_two",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: requestKindAgentProviderRequest,
+		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("second open request error = %v; want FailedPrecondition", err)
@@ -469,7 +470,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_first_start", "mreq_history_first", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_first_start", "mreq_history_first", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	first, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_first_tool", ModelRequestId: "mreq_history_first",
 		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "apply_patch", `{}`, "ask", "sandbox_execute"),
@@ -487,7 +488,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seal first request: %v", err)
 	}
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_second_start", "mreq_history_second", requestKindAgentProviderRequest, 1)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_history_second_start", "mreq_history_second", runtimecontrol.RequestKindAgentProviderRequest, 1)
 
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_history_second_tool", ModelRequestId: "mreq_history_second",

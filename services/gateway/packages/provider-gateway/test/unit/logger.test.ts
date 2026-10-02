@@ -12,7 +12,7 @@ describe("Provider Gateway logger", () => {
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     expect(record).toMatchObject({
       level: "info",
-      "service.name": "gateway",
+      "service.name": "provider-gateway",
       "deployment.environment": "unknown",
       "service.version": "unknown",
       event: "provider_request_streamed",
@@ -41,7 +41,7 @@ describe("Provider Gateway logger", () => {
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     expect(record).toMatchObject({
       level: "error",
-      "service.name": "gateway",
+      "service.name": "provider-gateway",
       "deployment.environment": "prod",
       "service.version": "v1",
       time: "2026-08-09T04:28:21.000Z",

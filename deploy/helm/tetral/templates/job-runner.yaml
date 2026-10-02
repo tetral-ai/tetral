@@ -1,0 +1,273 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: job-runner
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-runner
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: {{ .Values.replicas.jobRunner }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: job-runner
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: job-runner
+      automountServiceAccountToken: false
+      containers:
+        - name: job-runner
+          image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/job-runner
+          env:
+            - name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR
+              value: :8081
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: bridge-url
+            - name: TETRAL_QUEUE_GRPC_ADDR
+              value: queue.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
+              value: bridge-job-runner
+            - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
+              value: '30000'
+            - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
+              value: '10000'
+            - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
+              value: '8'
+            - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
+              value: '1000'
+            - name: TETRAL_KUBERNETES_NAMESPACE
+              value: tetral-agent-runtime
+            - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
+              value: app.kubernetes.io/name=agent-runtime
+            - name: TETRAL_AGENT_RUNTIME_GRPC_PORT
+              value: '9090'
+            - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
+            - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
+              value: mcp-connector.tetral-system.svc.cluster.local:9091
+            - name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/mcp-connector/token
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: secret-key
+          ports:
+            - name: http-job
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http-job
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http-job
+          resources:
+{{ toYaml .Values.resources.jobRunner | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: bridge-runtime-pod-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
+              readOnly: true
+            - name: job-runner-mcp-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/mcp-connector
+              readOnly: true
+            - name: job-runner-kubernetes-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: bridge-runtime-pod-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: job-runner-mcp-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: job-runner-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-runner
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: job-runner
+  ports:
+    - name: metrics-job
+      port: 8081
+      targetPort: http-job
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: job-runner
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: {{ (urlParse .Values.blob.endpoint).host | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.network.databasePort }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
+      ports:
+        - protocol: TCP
+          port: 9091
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: queue
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+{{- toYaml .Values.network.apiServerPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
+      ports:
+{{- range .Values.network.externalEgressPorts }}
+        - protocol: TCP
+          port: {{ . }}
+{{- end }}
+    - to:
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- if .Values.cilium.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: job-runner-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+{{- end }}

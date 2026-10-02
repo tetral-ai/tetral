@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 61 {
-		t.Fatalf("canonical object count = %d; want 61", len(canonical))
+	if len(canonical) != 80 {
+		t.Fatalf("canonical object count = %d; want 80", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -61,7 +61,10 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	requireCiliumToggleShape(t, withoutCilium, rendered, []string{
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-agent-runtime|agent-runtime-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|bridge-apiserver-egress",
-		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|gateway-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|provider-gateway-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|mcp-connector-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|web-connector-apiserver-egress",
+		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|job-runner-apiserver-egress",
 	})
 
 	withEdge := renderChart(t, helm, chart, "edge.enabled=true")
@@ -134,7 +137,10 @@ func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 	}{
 		{name: "agent-runtime", namespace: "tetral-agent-runtime"},
 		{name: "bridge", namespace: "tetral-system"},
-		{name: "gateway", namespace: "tetral-system"},
+		{name: "provider-gateway", namespace: "tetral-system"},
+		{name: "mcp-connector", namespace: "tetral-system"},
+		{name: "web-connector", namespace: "tetral-system"},
+		{name: "job-runner", namespace: "tetral-system"},
 	} {
 		key := "cilium.io/v2|CiliumNetworkPolicy|" + policy.namespace + "|" + policy.name + "-apiserver-egress"
 		got, ok := rendered[key]
@@ -355,20 +361,20 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 	for needle, count := range defaults {
 		want := 0
 		if needle == "port: 443" {
-			want = 3
+			want = 6
 		}
 		if count != want {
 			t.Fatalf("default peer %q survived the override in %d policies", needle, count)
 		}
 	}
 	want := map[string]int{
-		"172.20.0.1/32":         3,
-		"10.7.0.0/16":           9,
+		"172.20.0.1/32":         6,
+		"10.7.0.0/16":           11,
 		"edge-override-fixture": 4,
-		"dns-override-fixture":  10,
-		"203.0.113.0/24":        5,
-		"port: 25060":           9,
-		"port: 8443":            5,
+		"dns-override-fixture":  13,
+		"203.0.113.0/24":        8,
+		"port: 25060":           11,
+		"port: 8443":            8,
 	}
 	for needle, expected := range want {
 		if overrides[needle] != expected {
@@ -600,11 +606,14 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 		"agent-runtime.yaml",
 		"api.yaml",
 		"auth.yaml",
-		"bridge-rbac.yaml",
+		"job-runner-rbac.yaml",
 		"bridge.yaml",
 		"cleanup.yaml",
 		"event-stream.yaml",
-		"gateway.yaml",
+		"provider-gateway.yaml",
+		"mcp-connector.yaml",
+		"web-connector.yaml",
+		"job-runner.yaml",
 		"git-proxy.yaml",
 		"internal-grpc-tokenreview-rbac.yaml",
 		"queue.yaml",
@@ -1028,5 +1037,61 @@ func runGoTest(t *testing.T, root string, environment []string, arguments ...str
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func TestHelmSeparatedWorkloadReplicaOverrides(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	names := map[string]string{"bridge": "bridge", "jobRunner": "job-runner", "providerGateway": "provider-gateway", "mcpConnector": "mcp-connector", "webConnector": "web-connector"}
+	check := func(t *testing.T, values []string, want map[string]int, hpa bool) {
+		t.Helper()
+		objects := uniqueObjects(t, renderChart(t, helm, chart, values...))
+		for key, name := range names {
+			d := objects["apps/v1|Deployment|tetral-system|"+name]
+			spec := d["spec"].(map[string]any)
+			expected := 1
+			if want[key] != 0 {
+				expected = want[key]
+			}
+			if spec["replicas"] != expected {
+				t.Fatalf("%s replicas=%v; want%d", name, spec["replicas"], expected)
+			}
+		}
+		object, ok := objects["autoscaling/v2|HorizontalPodAutoscaler|tetral-system|provider-gateway"]
+		if ok != hpa {
+			t.Fatalf("provider HPA exists=%v; want%v", ok, hpa)
+		}
+		if hpa {
+			spec := object["spec"].(map[string]any)
+			if spec["minReplicas"] != 2 || spec["maxReplicas"] != 10 || spec["scaleTargetRef"].(map[string]any)["name"] != "provider-gateway" {
+				t.Fatalf("provider autoscaling changed: %v", spec)
+			}
+		}
+		for _, n := range []string{"bridge", "job-runner", "mcp-connector", "web-connector", "gateway"} {
+			if _, ok := objects["autoscaling/v2|HorizontalPodAutoscaler|tetral-system|"+n]; ok {
+				t.Fatalf("unexpected autoscaling owner%s", n)
+			}
+		}
+	}
+	t.Run("defaults", func(t *testing.T) { check(t, nil, nil, true) })
+	for _, key := range []string{"bridge", "jobRunner", "providerGateway", "mcpConnector", "webConnector"} {
+		t.Run(key, func(t *testing.T) {
+			check(t, []string{"autoscaling.providerGateway.enabled=false", "replicas." + key + "=3"}, map[string]int{key: 3}, false)
+		})
+	}
+	t.Run("simultaneous independent", func(t *testing.T) {
+		check(t, []string{"autoscaling.providerGateway.enabled=false", "replicas.bridge=2", "replicas.jobRunner=3", "replicas.providerGateway=4", "replicas.mcpConnector=5", "replicas.webConnector=6"}, map[string]int{"bridge": 2, "jobRunner": 3, "providerGateway": 4, "mcpConnector": 5, "webConnector": 6}, false)
+	})
+	t.Run("autoscaled provider keeps floor", func(t *testing.T) {
+		check(t, []string{"replicas.providerGateway=4"}, map[string]int{"providerGateway": 4}, true)
+	})
+	for _, value := range []string{"replicas.bridge=0", "replicas.jobRunner=-1", "replicas.providerGateway=1.5", "replicas.mcpConnector=true", "replicas.webConnector=none", "autoscaling.providerGateway.enabled=none"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := exec.Command(helm, "template", "tetral", chart, "--set", value)
+			if output, err := cmd.CombinedOutput(); err == nil {
+				t.Fatalf("invalid replica or HPA control rendered: %s", output)
+			}
+		})
 	}
 }

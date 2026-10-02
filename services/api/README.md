@@ -573,3 +573,14 @@ pagination or error contracts, the create-time-only field rules, the
 same-transaction enqueue pattern, the upload/attachment caps, the SKILL.md
 ingestion rules, or the memory content-bound/path-conflict/precondition rules in
 this folder, it updates the matching section here.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe startup and final-failure records retain their
+error tuple; healthy high-frequency polling uses Debug. Repeated degradation
+records emit bounded suppression summaries. Existing metrics report diagnostic
+drops and sink failures independently of stderr. Listener and business-resource
+cleanup completes before the bounded diagnostic close.

@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/auth"
@@ -92,25 +94,25 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 	job := readTransportRuntimeJob(t, adminDB, sessionID)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	sender := &settlingTransportSender{
-		transport: agentruntimebridge.NewRuntimePodCommandClient(fixedTransportTokenSource{}),
+		transport: jobrunner.NewRuntimePodCommandClient(fixedTransportTokenSource{}),
 		bridge:    bridgeStore,
 		threadID:  threadID,
 		bindingID: bindingID,
 		podUID:    podUID,
 		suffix:    suffix,
 	}
-	deliveryStore := agentruntimebridge.NewPostgreSQLRuntimeDeliveryStore(client, runtimePort)
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, runtimePort)
 	deliveryStore.Clock = func() time.Time {
 		return time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
 	}
-	result, err := (agentruntimebridge.RuntimePodDirectDeliverer{
+	result, err := (jobrunner.RuntimePodDirectDeliverer{
 		Store:  deliveryStore,
 		Sender: sender,
 	}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil {
 		t.Fatalf("deliver runtime input: %v", err)
 	}
-	if result.Status != agentruntimebridge.RuntimeDeliveryAccepted || sender.request == nil {
+	if result.Status != jobrunner.RuntimeDeliveryAccepted || sender.request == nil {
 		t.Fatalf("delivery result/request = %+v/%v; want accepted command", result, sender.request != nil)
 	}
 	if commandBytes := proto.Size(sender.request); commandBytes > sessionrpc.MaxRuntimeCommandGRPCMessageBytes {
@@ -163,8 +165,8 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 }
 
 type settlingTransportSender struct {
-	agentruntimebridge.RuntimeCommandSender
-	transport *agentruntimebridge.RuntimePodCommandClient
+	jobrunner.RuntimeCommandSender
+	transport *jobrunner.RuntimePodCommandClient
 	bridge    *agentruntimebridge.PostgreSQLBridgeAPIStore
 	threadID  string
 	bindingID string
@@ -175,7 +177,7 @@ type settlingTransportSender struct {
 
 func (s *settlingTransportSender) AcceptInput(
 	ctx context.Context,
-	target agentruntimebridge.RuntimePodTarget,
+	target jobrunner.RuntimePodTarget,
 	request *agentruntimev1.AcceptInputRequest,
 ) (*agentruntimev1.AcceptInputResponse, error) {
 	s.request = request
@@ -273,7 +275,7 @@ func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID s
 	}
 }
 
-func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentruntimebridge.RuntimeJob {
+func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) jobrunner.RuntimeJob {
 	t.Helper()
 	var jobID string
 	var payloadJSON string
@@ -302,7 +304,7 @@ func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentru
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		t.Fatalf("decode runtime input job: %v", err)
 	}
-	return agentruntimebridge.RuntimeJob{
+	return jobrunner.RuntimeJob{
 		JobID:           jobID,
 		LeaseToken:      "lease_transport",
 		Kind:            queue.KindRuntimeInput,

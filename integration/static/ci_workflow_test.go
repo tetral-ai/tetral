@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-const frozenForkSDKCommit = "0823430a0eef527f0dec60edb5d1fc7ce387db24"
+const frozenForkSDKCommit = "c1425d49b65fc8a4012e55b5134de0ee57f713fa"
 
 func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 	t.Helper()
@@ -146,6 +146,7 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 		"./services/event-stream/...",
 		"./services/gateway/...",
 		"./services/git-proxy/...",
+		"./services/job-runner/...",
 		"./services/queue/...",
 		"./services/web-connector/...",
 	}

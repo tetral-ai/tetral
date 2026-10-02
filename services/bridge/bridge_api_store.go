@@ -2,14 +2,15 @@ package agentruntimebridge
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 
@@ -53,33 +54,25 @@ const (
 const MaxMemoryPathConflicts = 32
 
 const (
-	bridgeAckCommitted = "committed"
-	bridgeAckRejected  = "rejected"
-
-	bridgeOpCommitInputs                   = "commit_inputs"
-	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
-	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
-	bridgeOpWriteEvent                     = "write_event"
-	bridgeOpSettleToolResult               = "settle_tool_result"
-	bridgeOpWriteRequestEnd                = "write_request_end"
-	bridgeOpFinishIdle                     = "finish_idle"
-	bridgeOpCreateChildThread              = "create_child_thread"
-	bridgeOpDeliverInterAgentMail          = "deliver_inter_agent_mail"
-	bridgeOpResolveChildThread             = "resolve_child_thread"
-	bridgeOpListChildThreads               = "list_child_threads"
-	bridgeOpCloseChildControl              = "close_child_control"
-	bridgeOpCloseApprovalReviewer          = "close_approval_reviewer"
-	bridgeOpMarkChildThreadActive          = "mark_child_thread_active"
-	bridgeOpReadCommandResult              = "read_command_result"
-	bridgeOpSendCommandInput               = "send_command_input"
-	bridgeOpCancelCommand                  = "cancel_command"
-	bridgeOpRunMemory                      = "run_memory"
-	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
-	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
-	bridgeOpRelinquishMcpToolResult        = "relinquish_mcp_tool_result"
-	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
-	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
-	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
+	bridgeOpWriteEvent               = "write_event"
+	bridgeOpSettleToolResult         = "settle_tool_result"
+	bridgeOpWriteRequestEnd          = "write_request_end"
+	bridgeOpFinishIdle               = "finish_idle"
+	bridgeOpCreateChildThread        = "create_child_thread"
+	bridgeOpDeliverInterAgentMail    = "deliver_inter_agent_mail"
+	bridgeOpResolveChildThread       = "resolve_child_thread"
+	bridgeOpListChildThreads         = "list_child_threads"
+	bridgeOpCloseChildControl        = "close_child_control"
+	bridgeOpCloseApprovalReviewer    = "close_approval_reviewer"
+	bridgeOpMarkChildThreadActive    = "mark_child_thread_active"
+	bridgeOpReadCommandResult        = "read_command_result"
+	bridgeOpSendCommandInput         = "send_command_input"
+	bridgeOpCancelCommand            = "cancel_command"
+	bridgeOpRunMemory                = "run_memory"
+	bridgeOpCommitMcpToolResult      = "commit_mcp_tool_result"
+	bridgeOpRelinquishMcpToolResult  = "relinquish_mcp_tool_result"
+	bridgeOpCommitInternalToolRepair = "commit_internal_tool_repair"
+	bridgeOpCommitRuntimeTermination = "commit_runtime_termination"
 
 	bridgeToolKindSandbox           = "sandbox_tool"
 	bridgeToolKindSandboxBackground = "sandbox_background"
@@ -100,10 +93,6 @@ const (
 	mcpClaimLeaseTTL       = 180 * time.Second
 	mcpClaimInFlightCode   = "mcp_claim_in_flight"
 	mcpClaimNotOwnedCode   = "mcp_claim_not_owned"
-
-	requestKindAgentProviderRequest = "agent_provider_request"
-	requestKindCompactionSummary    = "compaction_summary"
-	requestKindApprovalReviewer     = "approval_reviewer"
 
 	// memoryToolContentMaxBytes caps the content of a memory tool write. It MUST
 	// stay equal to internal/memory's memoryContentMaxBytes, which caps the
@@ -143,7 +132,7 @@ const (
 	// turn parks those resources. Worst-case hold for a run is the reschedule
 	// budget times this value (budget x backoff), not a retry cadence.
 	defaultRuntimeBindingTokenTTL = 5 * time.Minute
-	defaultIdleCleanupDelay       = 30 * time.Minute
+
 	defaultTransientAttachmentTTL = 15 * time.Minute
 	maxRescheduleBackoff          = 120 * time.Second
 )
@@ -154,7 +143,7 @@ type PostgreSQLBridgeAPIStore struct {
 	Clock                      func() time.Time
 	AttachmentBlobStore        blob.BlobStore
 	FileBlobStore              blob.BlobStore
-	MCPManifestLister          MCPManifestLister
+	MCPManifestLister          mcpmanifest.Lister
 	RuntimeBindingTokenHMACKey []byte
 	RuntimeBindingTokenTTL     time.Duration
 	ProviderRescheduleBudget   int64
@@ -246,20 +235,6 @@ type bridgeOperation struct {
 	StdinWriteSeq sql.NullInt64
 }
 
-type bridgeOperationInsert struct {
-	Operation      string
-	SourceKind     string
-	IdempotencyKey string
-	RequestHash    string
-	AckStatus      string
-	RuntimeInputID sql.NullString
-	RuntimeWriteID sql.NullString
-	ErrorCode      sql.NullString
-	ResultJSON     string
-	StdinWriteSeq  sql.NullInt64
-	Now            time.Time
-}
-
 type bridgeDeclarationOperation struct {
 	DeclarationDigest string
 	ReceiptJSON       string
@@ -301,37 +276,6 @@ func readBridgeOperationBySourceTx(
 		return bridgeOperation{}, false, err
 	}
 	return existing, true, nil
-}
-
-func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, op bridgeOperationInsert) error {
-	if op.ResultJSON == "" {
-		op.ResultJSON = "{}"
-	}
-	if op.SourceKind == "" {
-		op.SourceKind = op.Operation
-	}
-	_, err := tx.Exec(ctx,
-		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
-			request_hash, ack_status, runtime_input_id, runtime_write_id, error_code,
-			result_json, stdin_write_seq, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		op.Operation,
-		op.SourceKind,
-		op.IdempotencyKey,
-		op.RequestHash,
-		op.AckStatus,
-		op.RuntimeInputID,
-		op.RuntimeWriteID,
-		op.ErrorCode,
-		op.ResultJSON,
-		op.StdinWriteSeq,
-		op.Now,
-	)
-	return err
 }
 
 func readBridgeDeclarationOperationTx(
@@ -395,7 +339,7 @@ func insertBridgeDeclarationOperationTx(
 		sourceID,
 		declarationDigest,
 		receiptJSON,
-		bridgeAckCommitted,
+		runtimecontrol.AckCommitted,
 		now,
 	)
 	return err
@@ -512,7 +456,7 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 func validateRuntimeScope(scope *bridgev1.RuntimeScope) error {
 	if scope == nil || scope.GetWorkspaceId() == "" || scope.GetSessionId() == "" || scope.GetSessionThreadId() == "" || scope.GetBinding() == nil ||
 		scope.GetBinding().GetBindingId() == "" || scope.GetBinding().GetBindingGeneration() <= 0 || scope.GetBinding().GetTargetPodUid() == "" {
-		return closeoutUnrepairableError(status.Error(codes.InvalidArgument, "invalid runtime scope"))
+		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.InvalidArgument, "invalid runtime scope"))
 	}
 	return nil
 }
@@ -524,7 +468,7 @@ func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
 		return err
 	}
-	if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
+	if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 		return err
 	}
 	if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, scope); err != nil {
@@ -543,12 +487,12 @@ func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, sc
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 	).Scan(&sessionStatus); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.NotFound, "session not found"))
 	} else if err != nil {
 		return err
 	}
 	if sessionStatus == "terminated" {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is terminal"))
 	}
 	return nil
 }
@@ -569,12 +513,12 @@ func verifyRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridge
 	)
 	var podUID string
 	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	} else if err != nil {
 		return err
 	}
 	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	}
 	return nil
 }
@@ -584,38 +528,6 @@ func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.Runtime
 		return err
 	}
 	return verifyRuntimeCallerPodUID(ctx, scope)
-}
-
-func lockSessionRuntimeArbitrationTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (string, error) {
-	if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, workspaceID, sessionID); err != nil {
-		return "", err
-	}
-	var lifecycleState string
-	if err := tx.QueryRow(ctx,
-		`SELECT lifecycle_state
-		   FROM sessions
-		  WHERE workspace_id = $1
-		    AND id = $2
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-	).Scan(&lifecycleState); dbconnect.IsNoRows(err) {
-		return "", scopeSupersededError(status.Error(codes.NotFound, "session not found"))
-	} else if err != nil {
-		return "", err
-	}
-	return lifecycleState, nil
-}
-
-func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
-	lifecycleState, err := lockSessionRuntimeArbitrationTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return err
-	}
-	if lifecycleState == "deleted" {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "session is deleted"))
-	}
-	return nil
 }
 
 func verifyRuntimeScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -639,12 +551,12 @@ func verifyRuntimeScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	)
 	var podUID string
 	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	} else if err != nil {
 		return err
 	}
 	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	}
 	return nil
 }
@@ -662,7 +574,7 @@ func verifyRuntimeThreadScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	)
 	var threadID string
 	if err := row.Scan(&threadID); dbconnect.IsNoRows(err) {
-		return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
+		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
 	} else if err != nil {
 		return err
 	}
@@ -676,14 +588,6 @@ func nullableInt64(value *int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: *value, Valid: true}
 }
 
-func rowsAffected(result sql.Result) bool {
-	if result == nil {
-		return false
-	}
-	count, err := result.RowsAffected()
-	return err == nil && count > 0
-}
-
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
@@ -691,13 +595,6 @@ func rowsAffected(result sql.Result) bool {
 // Truncate like a minted timestamp: the column keeps microseconds, so an
 // untruncated wire value would be echoed and hashed at nanosecond precision
 // while the stored row holds something else.
-
-func defaultString(value string, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
 
 func bridgeRawJSON(value string, fallback string) json.RawMessage {
 	if json.Valid([]byte(value)) {
@@ -720,18 +617,6 @@ func bridgeJSONFieldRaw(raw json.RawMessage, field string, fallback string) json
 
 func nullableSQLString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
-}
-
-func bridgeRequestHash(parts ...string) string {
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(digest[:])
-}
-
-func nullableJSONString(value sql.NullString) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.String
 }
 
 var _ BridgeAPIStore = (*PostgreSQLBridgeAPIStore)(nil)

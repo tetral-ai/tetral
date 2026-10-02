@@ -172,7 +172,7 @@ resources:
       cpu: "1"
       memory: 1Gi
       ephemeral-storage: 1Gi
-  bridgeJobRunner:
+  jobRunner:
     requests:
       cpu: 100m
       memory: 256Mi
@@ -253,3 +253,14 @@ resources:
       cpu: "1"
       memory: 1Gi
       ephemeral-storage: 2Gi
+
+# Each Deployment starts independently; enabled provider autoscaling retains its floor of two.
+replicas:
+  bridge: 1
+  jobRunner: 1
+  providerGateway: 1
+  mcpConnector: 1
+  webConnector: 1
+autoscaling:
+  providerGateway:
+    enabled: true

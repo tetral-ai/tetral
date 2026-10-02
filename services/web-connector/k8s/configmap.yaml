@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-connector-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: web-connector
+    app.kubernetes.io/part-of: tetral
+data:
+  TETRAL_WEB_SEARCH_ENDPOINT: https://s.jina.ai/
+  TETRAL_WEB_READER_ENDPOINT: https://r.jina.ai/

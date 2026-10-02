@@ -403,7 +403,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 			notifyClasses[consumerClass] = struct{}{}
 		}
 	}
-	for _, consumerClass := range []string{ConsumerClassBridge, ConsumerClassSandbox} {
+	for _, consumerClass := range []string{ConsumerClassJobRunner, ConsumerClassSandbox} {
 		if _, ok := notifyClasses[consumerClass]; !ok {
 			continue
 		}

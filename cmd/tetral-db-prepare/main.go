@@ -25,7 +25,14 @@ func main() {
 }
 
 func run(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer) (result error) {
-	logger := workload.NewLogger(stderr, "db-prepare", getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(getenv)
+	diagnosticOwner := workload.NewProcessLogger(stderr, "db-prepare", getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "db-prepare", diagnosticErr)
+	}
 	ctx = storage.WithMigrationLogger(ctx, logger)
 	step := "validate_input"
 	logger.Info("database.prepare.started")

@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 
@@ -33,7 +34,7 @@ func TestQueueServerLogsSuccessfulLeaseWaitAndDurableIdentity(t *testing.T) {
 		AvailableAt: now.Add(-500 * time.Millisecond), AttemptCount: 2,
 	}}}
 	var logs bytes.Buffer
-	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, nil)))
+	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	nowCalls := 0
 	server.now = func() time.Time {
 		nowCalls++
@@ -338,4 +339,25 @@ func (s *recordingStore) Cancel(_ context.Context, request queue.CancelRequest) 
 
 func timePtr(value time.Time) *time.Time {
 	return &value
+}
+
+func TestHealthyEmptyLeasePollingIsQuietAtDefaultLevel(t *testing.T) {
+	var output bytes.Buffer
+	store := &recordingStore{}
+	server := NewServer(store, workload.NewLogger(&output, "queue", "test", "unit"))
+	for n := 0; n < 1000; n++ {
+		response, err := server.Lease(context.Background(), &queuev1.LeaseRequest{WorkspaceId: "ws_observed", Kinds: []string{queue.KindSandboxToolExecute}, LeaseOwner: "sandbox", MaxJobs: 1, LeaseDurationMs: 1000})
+		if err != nil || len(response.GetJobs()) != 0 {
+			t.Fatalf("empty poll %d: %v %+v", n, err, response)
+		}
+	}
+	for n := 0; n < 1000; n++ {
+		response, err := server.Heartbeat(context.Background(), &queuev1.HeartbeatRequest{WorkspaceId: "ws_observed", JobId: "qjob_observed", LeaseToken: "lease", LeaseDurationMs: 1000})
+		if err != nil || !response.GetUpdated() {
+			t.Fatalf("heartbeat %d: %v", n, err)
+		}
+	}
+	if output.Len() != 0 {
+		t.Fatalf("empty polling chatter at Info: %s", output.String())
+	}
 }

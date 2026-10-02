@@ -64,14 +64,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if grpcAddress == "" {
 		grpcAddress = ":9090"
 	}
-	deploymentEnvironment := env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT")
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv("TETRAL_SERVICE_VERSION")
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	reclaimInterval := time.Duration(defaultLeaseReclaimIntervalSeconds) * time.Second
 	if raw := env.Getenv(EnvLeaseReclaimIntervalSeconds); raw != "" {
 		seconds, err := strconv.Atoi(raw)
@@ -109,8 +102,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 	return Config{
 		HTTPAddress:            httpAddress,
 		GRPCAddress:            grpcAddress,
-		DeploymentEnvironment:  deploymentEnvironment,
-		ServiceVersion:         serviceVersion,
+		DeploymentEnvironment:  resource.DeploymentEnvironment,
+		ServiceVersion:         resource.ServiceVersion,
 		LeaseReclaimInterval:   reclaimInterval,
 		LeaseReclaimBatchLimit: reclaimLimit,
 		RetryBaseDelay:         time.Duration(retryBaseMS) * time.Millisecond,

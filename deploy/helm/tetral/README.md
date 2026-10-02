@@ -1,7 +1,7 @@
 # Tetral Helm chart
 
 This chart installs the same Tetral platform objects as the canonical
-manifests under `deploy/kubernetes`. Default values render those 61 objects
+manifests under `deploy/kubernetes`. Default values render those 80 objects
 without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
@@ -25,7 +25,7 @@ preparation and workspace seeding run independently before any service starts.
 
 2. **Make PostgreSQL reachable under the policy.** The default is an
    in-cluster pod in `tetral-system` labelled
-   `app.kubernetes.io/name=tetral-postgres`: nine NetworkPolicies select that
+   `app.kubernetes.io/name=tetral-postgres`: eleven NetworkPolicies select that
    label without a namespace selector. A database in another namespace, or one
    reachable at a stable address range, is admitted by overriding
    `network.databasePeers` — a `namespaceSelector` with a `podSelector`, or an
@@ -43,15 +43,16 @@ preparation and workspace seeding run independently before any service starts.
    policy admits.
 
 3. **Install the Cilium CRDs or disable their objects.** Defaults preserve
-   three canonical `CiliumNetworkPolicy` objects, one API-server entity
-   allowance each for agent-runtime, bridge, and gateway. Cilium does not
+   six canonical `CiliumNetworkPolicy` objects, one API-server entity
+   allowance each for agent-runtime, bridge, job-runner, provider-gateway,
+   mcp-connector and web-connector. Cilium does not
    match the Kubernetes API service through an `ipBlock` under the tested
-   policy mode, so the three entity rules admit both the service port 443 and
+   policy mode, so the six entity rules admit both the service port 443 and
    the node-direct port 6443. This behavior was verified on Cilium 1.19.6 with
    kube-proxy replacement disabled.
 
    A non-Cilium cluster must set `cilium.enabled=false`. That removes the
-   three Cilium objects and leaves those workloads' API-server path to
+   six Cilium objects and leaves those workloads' API-server path to
    `network.apiServerPeers`.
 
    `cilium.gitProxyFQDNPolicy=true` is a separate opt-in network-layer GitHub
@@ -185,17 +186,18 @@ The chart parameterizes only axes already present in the canonical manifests:
   exactly, and an empty list is refused at render time: Kubernetes reads an
   empty peer list as "match everything", so emptying one widens the policy
   instead of narrowing it.
-  - `apiServerPeers` — the kubeadm-style `10.96.0.1/32`, in the three ordinary
-    NetworkPolicies whose workloads call the API server (agent-runtime for its
-    runtime contract, bridge for pod visibility, gateway for TokenReview on
-    bearer-authenticated requests). Missing bearer credentials are rejected
+  - `apiServerPeers` — the kubeadm-style `10.96.0.1/32`, in six ordinary
+    NetworkPolicies. Runtime, Bridge, Provider Gateway, MCP and Web call
+    TokenReview for inbound bearer authentication; Job Runner uses the API
+    only for Runtime Pod and EndpointSlice visibility. Missing bearer
+    credentials are rejected
     before TokenReview, and health endpoints do not use it. A non-Cilium
     cluster whose service CIDR differs must override this value; the failure
-    surfaces as stalled work, not as a failed install. On Cilium, the three
+    surfaces as stalled work, not as a failed install. On Cilium, the six
     entity policies described in prerequisite 3 carry this path instead;
     `apiServerPeers` remains the non-Cilium fallback.
   - `databasePeers` and `databasePort` — the in-cluster database pod label and
-    `5432`, in nine policies. The port must match the DSN in the Secrets;
+    `5432`, in eleven policies. The port must match the DSN in the Secrets;
     managed PostgreSQL often listens elsewhere, and a pooler in front of it
     often does.
   - `publicIngressPeers` — the labelled ingress namespace, in four policies.
@@ -225,7 +227,7 @@ The chart parameterizes only axes already present in the canonical manifests:
   The other five `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
   them.
-- `cilium.enabled` controls the three API-server Cilium objects.
+- `cilium.enabled` controls the six API-server Cilium objects.
   `cilium.gitProxyFQDNPolicy` adds the opt-in git-proxy Cilium policy and
   replaces its ordinary DNS and external-HTTPS NetworkPolicy branches with
   the FQDN restriction. `edge.enabled`, `edge.tlsSecretName`, and
@@ -239,7 +241,7 @@ git endpoint route shapes are accepted, and ambient proxy environment
 variables are ignored. Setting `cilium.gitProxyFQDNPolicy=true` restores the
 network-layer FQDN restriction subject to the CNI limitation above.
 
-The gateway and sandbox egress-intent annotations derive hostnames from the
+Bridge, Runner, Web and Sandbox egress-intent annotations derive hostnames from the
 same non-secret endpoint values as their ConfigMaps. The api and Bridge blob
 endpoints are Secret-sourced, so their egress-intent annotations remain
 operator-advisory canonical literals; the chart cannot verify a value it
@@ -261,8 +263,9 @@ The following remain deliberately fixed for the initial numbered Alpha line:
 - `tetral-system` and `tetral-agent-runtime`, including every service FQDN,
   NetworkPolicy namespace selector, RBAC subject, and service-account
   allow-list.
-- Deployment replicas and the two HPA definitions. A replicas value for
-  gateway or git-proxy would fight the HPA on every upgrade.
+- Git Proxy replicas and its HPA definition. The separated workload replicas
+  and Provider HPA toggle are configurable as documented below; their existing
+  autoscaling metrics and thresholds remain fixed.
 - Repository names within the four image families and all other canonical
   security and topology literals.
 
@@ -343,3 +346,29 @@ Two follow-ups are intentionally outside this chart:
 
 1. Parameterize the two fixed namespaces as one security-reviewed change.
 2. Drop stale `kustomize` managed-by labels from the canonical manifests.
+
+## Independent workload replicas and access
+
+Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector each own
+one Deployment, ServiceAccount, Service and metrics/probe port. The chart
+removes the former combined Gateway resources and shared `gateway` identity.
+Their declared Deployment replica defaults are one. Set `replicas.bridge`,
+`replicas.jobRunner`, `replicas.providerGateway`, `replicas.mcpConnector` or
+`replicas.webConnector` independently to a positive integer.
+
+`autoscaling.providerGateway.enabled` defaults to true and retains the existing
+HPA: minimum two, maximum ten, CPU utilization target 70 percent. That HPA
+controls effective Provider Gateway replicas while enabled. Set it to false to
+use `replicas.providerGateway` directly. It has no effect on MCP or Web replicas.
+No transport proxy is installed by this ownership extraction. Provider Gateway
+retains its headless Service and Runtime client discovery; MCP and Web have
+ordinary ClusterIP Services.
+
+Runner alone watches Runtime Pods and EndpointSlices and controls Runtime RPCs.
+Bridge alone serves its durable API and has no visibility watch grant. Separate
+receiver identities hold TokenReview create permission; Runner has no inbound
+TokenReview role. Internal RPC tokens use `tetral-internal-grpc`, while projected
+Kubernetes API reviewer/watch tokens retain the API audience. Existing Secret
+names and keys remain supported, with grants limited to each owning process.
+Raw, service-owned and rendered Helm tests assert exact ports, selectors,
+credential paths, RBAC and NetworkPolicy peers, including denied inherited access.

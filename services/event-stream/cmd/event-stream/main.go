@@ -59,14 +59,7 @@ func configFromEnv(env envReader) (commandConfig, error) {
 	if metricsAddress == listenAddress {
 		return commandConfig{}, workload.NewConfigError(envMetricsAddress + " must not equal " + envHTTPAddress)
 	}
-	deploymentEnvironment := env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT")
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv("TETRAL_SERVICE_VERSION")
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	principalVerifier, err := loadInternalPrincipalVerifierFromEnv(env)
 	if err != nil {
 		return commandConfig{}, err
@@ -74,8 +67,8 @@ func configFromEnv(env envReader) (commandConfig, error) {
 	return commandConfig{
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
-		DeploymentEnvironment: deploymentEnvironment,
-		ServiceVersion:        serviceVersion,
+		DeploymentEnvironment: resource.DeploymentEnvironment,
+		ServiceVersion:        resource.ServiceVersion,
 		PrincipalVerifier:     principalVerifier,
 	}, nil
 }
@@ -104,7 +97,14 @@ func openStartupDatabaseFromEnv(ctx context.Context) (startupDatabase, error) {
 }
 
 func run(ctx context.Context, env envReader, open openStartupFunc) error {
-	logger := workload.NewLogger(os.Stderr, "event-stream", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, "event-stream", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "event-stream", diagnosticErr)
+	}
 	cfg, err := configFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "event-stream", err)
@@ -122,6 +122,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	reader := internaleventstream.NewPostgreSQLReader(database.runtimeClient)
 	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics)))
 	metricsHandler := workload.HealthRouter(readiness,
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.runtimeClient)),

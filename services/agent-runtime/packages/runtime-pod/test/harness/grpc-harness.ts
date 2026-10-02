@@ -10,7 +10,7 @@ class HarnessAuthenticator implements RuntimeAuthenticator {
     if (values.length !== 1 || String(values[0]).toLowerCase() !== "bearer caller-token") {
       return { ok: false as const, code: "Unauthenticated" as const, message: "unauthenticated" };
     }
-    return { ok: true as const, serviceAccount: { namespace: "engine", name: "bridge" } };
+    return { ok: true as const, serviceAccount: { namespace: "engine", name: "job-runner" } };
   }
 }
 
@@ -57,7 +57,7 @@ const service = new RuntimeControlService({
     uid: "uid-a",
     ip: process.env.TETRAL_TEST_RUNTIME_POD_IP ?? "10.0.0.1",
   },
-  allowedBridge: { namespace: "engine", name: "bridge" },
+  allowedJobRunner: { namespace: "engine", name: "job-runner" },
   authenticator: new HarnessAuthenticator(),
   runHost: new HarnessRunHost(),
   cleanupController: new HarnessCleanupController(),

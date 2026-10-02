@@ -417,6 +417,7 @@ func (r *SandboxOutputCaptureJobRunner) logScanFailure(work SandboxOutputCapture
 		slog.String("operation", "output_capture.finish_idle"), slog.String("event.kind", "output_capture.scan_failed"),
 		slog.String("component", ServiceName), slog.String("workspace.id", work.WorkspaceID), slog.String("session.id", work.SessionID),
 		slog.String("error.class", "output_capture_scan_error"), slog.String("error.code", kind),
+		slog.String("error.message_safe", boundedSandboxOutputCaptureDetail(valueOrDefault(detail, "sandbox output capture scan failed"))),
 		slog.String("error.capture_detail", boundedSandboxOutputCaptureDetail(detail)), slog.Bool("retryable", false), slog.String("alert.family", "output_capture"),
 	)
 }

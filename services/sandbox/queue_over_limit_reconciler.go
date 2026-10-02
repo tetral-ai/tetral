@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -56,7 +58,7 @@ func (r *SandboxQueueOverLimitReconciler) RunOnce(ctx context.Context) (int, err
 	for _, candidate := range candidates {
 		updated, err := r.Finalizer.FinalizePendingAtOrOverBudget(ctx, candidate, now)
 		if err != nil {
-			logSandboxQueueOverLimitCandidateFailure(slog.Default(), candidate)
+			logSandboxQueueOverLimitCandidateFailure(workload.ComponentLogger("sandbox"), candidate)
 			candidateErrors = append(candidateErrors, err)
 			continue
 		}

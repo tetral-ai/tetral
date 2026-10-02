@@ -4,6 +4,8 @@
  * delegates Prometheus rendering to the metrics module. It exposes no runtime command or public API,
  * returns readiness failure as HTTP 503, and returns 404 for every unrecognized path.
  */
+import { diagnosticMetricsText } from "@tetral/ts-observability";
+import type { RuntimePodLogger } from "./logger.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
 import { runtimePodMetricsText } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -19,6 +21,7 @@ export function createRuntimeHttpServer(
   address: string,
   lifecycle: RuntimePodLifecycle,
   runtimeMetrics?: RuntimePodMetricsSource,
+  logger?: RuntimePodLogger,
 ): RuntimeHttpServer {
   const bind = parseBindAddress(address);
   const server = Bun.serve({
@@ -34,7 +37,7 @@ export function createRuntimeHttpServer(
         return Response.json({ ready }, { status: ready ? 200 : 503 });
       }
       if (path === "/metrics") {
-        return new Response(runtimePodMetricsText(lifecycle, runtimeMetrics), {
+        return new Response(runtimePodMetricsText(lifecycle, runtimeMetrics) + (logger ? diagnosticMetricsText(logger) : ""), {
           status: 200,
           headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
         });

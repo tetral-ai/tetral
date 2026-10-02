@@ -21,10 +21,11 @@ is restated here.
 | `services/api` | Public REST control plane (sessions, agents, environments, vaults, memory, files, skills). |
 | `services/queue` | Durable job queue: lease, transition, wake. |
 | `services/sandbox` | Provider-backed Sandbox lifecycle, tool execution, and resource projection. |
-| `services/bridge` | Durable runtime reconciliation, Runtime APIs, settlement, cleanup. |
+| `services/bridge` | Runtime RPC APIs, context loading, declaration and result settlement, attachment reads. |
+| `services/job-runner` | Queue consumption, Runtime placement/delivery, binding-loss recovery and Session cleanup. |
 | `services/agent-runtime` | Hot in-pod TypeScript Runtime Core (agent loop, tools). |
-| `services/gateway` | Provider lowering + MCP connector. |
-| `services/web-connector` | Web search/fetch backend (gateway pod container). |
+| `services/gateway` | Provider lowering and MCP connector packages, deployed as independent workloads. |
+| `services/web-connector` | Independently deployed web search/fetch backend. |
 | `services/event-stream` | Read-only public event list and SSE. |
 | `services/git-proxy` | Credential-injecting Git smart-HTTP proxy. |
 | `services/cleanup` | Scheduled cleanup. |

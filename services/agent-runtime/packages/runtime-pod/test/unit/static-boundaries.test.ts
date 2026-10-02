@@ -238,13 +238,28 @@ describe("Runtime Pod static boundaries", () => {
     expect(command).not.toContain("RuntimePodBridgeReleaseBinding");
     expect(command).not.toContain("FailClosedRuntimeInternalToolRepairStore");
     expect(command).not.toContain("Gateway provider stream client is not wired yet");
-    expect(command).toContain('process.once("SIGTERM"');
-    expect(command).toContain('process.once("SIGINT"');
+    const sharedEntryUrl = new URL(import.meta.resolve("@tetral/ts-observability"));
+    const signalOwner = await readFile(new URL("./process-boundary.ts", sharedEntryUrl), "utf8");
+    const sharedEntry = await readFile(sharedEntryUrl, "utf8");
+    expect(importSpecifiers(command)).toContain("@tetral/ts-observability");
+    expect(sharedEntry).toContain('export { processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "./process-boundary.js"');
+    expect(hasCallExpression(command, "registerProcessSignalHandlers", ["shutdown"])).toBe(true);
+    for (const signal of ["SIGTERM", "SIGINT"]) {
+      expect(hasCallExpression(signalOwner, "process.once", [JSON.stringify(signal), "stop"])).toBe(true);
+      expect(hasCallExpression(signalOwner, "process.off", [JSON.stringify(signal), "stop"])).toBe(true);
+    }
     expect(coreHosts).toContain("SessionManager.layer");
     expect(coreHosts).toContain("SessionRunHost.layer");
     expect(coreHosts).not.toContain("sessionBinding");
     expect(coreHosts).not.toContain("RuntimePodLocalReleaseBinding");
     expect(coreHosts).not.toContain("GrpcBackendSessionBindingClient");
+  });
+
+  test("signal registration parsing requires executable once hooks and shutdown delegation", () => {
+    expect(hasCallExpression('// process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
+    expect(hasCallExpression('process.on("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
+    expect(hasCallExpression('registerProcessSignalHandlers(otherClose);', "registerProcessSignalHandlers", ["shutdown"])).toBe(false);
+    expect(hasCallExpression('process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(true);
   });
 
   test("Runtime Pod uses headless Gateway DNS with grpc-js round-robin", async () => {
@@ -254,11 +269,11 @@ describe("Runtime Pod static boundaries", () => {
     expect(gatewayClient).toContain("\"grpc.service_config\"");
     expect(gatewayClient).toContain("round_robin");
     expect(deployment).toContain("TETRAL_GATEWAY_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9090");
+    expect(deployment).toContain("dns:///provider-gateway.tetral-system.svc.cluster.local:9090");
     expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9091");
+    expect(deployment).toContain("dns:///mcp-connector.tetral-system.svc.cluster.local:9091");
     expect(deployment).toContain("TETRAL_WEB_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///gateway.tetral-system.svc.cluster.local:9092");
+    expect(deployment).toContain("dns:///web-connector.tetral-system.svc.cluster.local:9092");
     // Presence is the invariant — the workload refuses to start without it.
     // Which model reviews approvals is an operator cost decision, so the value
     // is deliberately not pinned here.
@@ -322,6 +337,21 @@ describe("Runtime Pod static boundaries", () => {
     expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
   });
 });
+
+function hasCallExpression(text: string, callee: string, expectedArguments: readonly string[]): boolean {
+  const source = ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) && node.expression.getText(source) === callee &&
+      node.arguments.length === expectedArguments.length &&
+      node.arguments.every((argument, index) => argument.getText(source).replace(/\s+/g, "") === expectedArguments[index])
+    ) found = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
 
 function hasNewExpression(
   text: string,

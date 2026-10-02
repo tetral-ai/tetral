@@ -25,6 +25,22 @@ describe("Runtime Pod lifecycle", () => {
     expect(lifecycle.ready()).toEqual({ ready: true });
   });
 
+  test("a throwing diagnostic callback cannot retain ready admission after failed bootstrap", async () => {
+    let failCore = false;
+    const lifecycle = new RuntimePodLifecycle({
+      config: validConfig(),
+      logger: { info: () => undefined, error: () => { throw new Error("PRIVATE_LIFECYCLE_LOG_SENTINEL"); } },
+      bootstrap: { ...successfulBootstrap(), core: async () => { if (failCore) throw new Error("PRIVATE_BOOTSTRAP_SENTINEL"); } },
+    });
+    await lifecycle.start();
+    expect(lifecycle.ready()).toEqual({ ready: true });
+    failCore = true;
+    await lifecycle.start();
+    expect(lifecycle.ready()).toEqual({ ready: false });
+    expect(lifecycle.metricsSnapshot()).toEqual({ ready: false, accepting: false, inFlightCommands: 0 });
+    expect(() => lifecycle.runCommand(async () => "must not run")).toThrow("runtime pod shutting down");
+  });
+
   test("config/env failure is classified as config_error and readiness remains false", async () => {
     const sink: string[] = [];
     const parsed = loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_POD_IP: "runtime.service.local" });

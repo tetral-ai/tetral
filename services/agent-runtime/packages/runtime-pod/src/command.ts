@@ -1,3 +1,4 @@
+import { createDiagnosticStreamSink, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  * Boots the Runtime Pod process and composes its Runtime Core, Bridge, Gateway, tool, authentication,
@@ -67,7 +68,8 @@ import {
 	RuntimePodGatewayClient,
 	runtimeProviderStreamObserver,
 } from "./gateway-client.js";
-import type { RuntimePodLogger } from "./logger.js";
+import type { ProcessFailurePhase } from "@tetral/ts-observability";
+import type { RuntimePodLogRecord, RuntimePodLogger } from "./logger.js";
 import {
 	acceptedInputCommitLogRecord,
 	createJsonLogger,
@@ -143,51 +145,84 @@ function providerStreamTimeoutOptions(
  * app, and then waits for process termination. Startup failures are logged with bounded records and
  * rethrown without dependency details.
  */
-export async function runRuntimePodCommand(
-	options: RuntimePodCommandOptions = {},
-): Promise<void> {
-	const startupLogger =
-		options.logger ??
-		createJsonLogger({ write: (line) => process.stderr.write(line) });
-	const config = loadRuntimePodConfigFromProcessEnv();
-	if (!config.ok) {
-		startupLogger.error(startupFailureLogRecord(config.error));
-		throw new Error("runtime pod config error");
-	}
-	const logger =
-		options.logger ??
-		createJsonLogger({
-			write: (line) => process.stderr.write(line),
-			deploymentEnvironment: config.config.deploymentEnvironment,
-			serviceVersion: config.config.serviceVersion,
-		});
-	let dependencies: RuntimePodCommandDependencies;
-	try {
-		dependencies = await (
-			options.dependencyBuilder ?? buildRuntimePodCommandDependencies
-		)({
-			config: config.config,
-			logger,
-		});
-	} catch (error) {
-		logger.error(
-			startupFailureLogRecord({
-				kind: "startup_error",
-				message: "runtime pod startup failed",
-				cause: error,
-				causeCategory: "dependency_readiness",
-			}),
-		);
-		throw new Error("runtime pod startup error");
-	}
-	const shutdown = async (): Promise<void> => {
-		await dependencies.app.shutdown();
-		await dependencies.coreHosts.close();
+export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {}): Promise<void> {
+	const diagnosticSink = options.logger === undefined ? createDiagnosticStreamSink(process.stderr) : undefined;
+	const diagnosticOwners: object[] = [];
+	const diagnosticReleases: (() => void)[] = [];
+	const registerDiagnosticCleanup = (owner: object): void => {
+		if (diagnosticOwners.includes(owner)) return;
+		diagnosticOwners.push(owner);
+		try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
 	};
-	(options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
-	await dependencies.app.start();
-	logWorkloadStarted(logger);
-	await (options.waitForever ?? waitForever)();
+	let logger: RuntimePodLogger | undefined;
+	const report = (record: RuntimePodLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
+	const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
+	let stopping: Promise<void> | undefined;
+	const shutdown = (): Promise<void> => {
+		if (stopping !== undefined) return stopping;
+		let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
+		stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
+		void (async () => {
+			let failed = false;
+			let firstFailure: unknown;
+			try {
+				for (const step of closes.slice().reverse()) {
+					try {
+						await step.close();
+					} catch (error) {
+						if (!failed) firstFailure = error;
+						failed = true;
+						report(processFailureLogRecord(step.phase, true));
+					}
+				}
+			} finally {
+				for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
+				diagnosticSink?.close();
+			}
+			if (failed) throw firstFailure;
+		})().then(resolveShutdown, rejectShutdown);
+		return stopping;
+	};
+	let phase: ProcessFailurePhase = "configuration", failureReported = false, failed = false;
+	let releaseSignals: (() => void) | void = undefined;
+	try {
+		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0 });
+		registerDiagnosticCleanup(logger);
+		const config = loadRuntimePodConfigFromProcessEnv();
+		if (!config.ok) {
+			failureReported = true; report(startupFailureLogRecord(config.error));
+			throw new Error("runtime pod config error");
+		}
+		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
+		registerDiagnosticCleanup(logger);
+		phase = "dependency";
+		let dependencies: RuntimePodCommandDependencies;
+		try { dependencies = await (options.dependencyBuilder ?? buildRuntimePodCommandDependencies)({ config: config.config, logger }); }
+		catch (error) {
+			failureReported = true;
+			report(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error, causeCategory: "dependency_readiness" }));
+			throw new Error("runtime pod startup error");
+		}
+		closes.push({ phase: "runtime_core", close: () => dependencies.coreHosts.close() });
+		closes.push({ phase: "app", close: () => dependencies.app.shutdown() });
+		releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
+		phase = "listener";
+		await dependencies.app.start();
+		logWorkloadStarted(logger);
+		phase = "wait";
+		await (options.waitForever ?? waitForever)();
+	} catch (error) {
+		failed = true;
+		if (!failureReported) report(processFailureLogRecord(phase));
+		throw error;
+	} finally {
+		releaseSignals?.();
+		try {
+			await shutdown();
+		} catch (error) {
+			if (!failed) throw error;
+		}
+	}
 }
 
 /**
@@ -411,15 +446,6 @@ export async function buildRuntimePodCommandDependencies(input: {
 
 async function waitForever(): Promise<never> {
 	return await new Promise<never>(() => undefined);
-}
-
-function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
-	process.once("SIGTERM", () => {
-		void shutdown().then(() => process.exit(0));
-	});
-	process.once("SIGINT", () => {
-		void shutdown().then(() => process.exit(0));
-	});
 }
 
 /**
@@ -1133,5 +1159,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 if (import.meta.main) {
-	await runRuntimePodCommand();
+	await runProcessEntry(() => runRuntimePodCommand());
 }

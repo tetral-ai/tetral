@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	DefaultInternalPrincipalTTL       = 60 * time.Second
 	EnvHTTPAddress                    = "TETRAL_AUTH_HTTP_ADDR"
 	EnvMetricsAddress                 = "TETRAL_AUTH_METRICS_ADDR"
 	EnvBootstrapAPIKey                = "ENGINE_API_KEY" //nolint:gosec // Env-var name, not an API key value.
@@ -48,14 +49,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if metricsAddress == httpAddress {
 		return Config{}, workload.NewConfigError(EnvMetricsAddress + " must not equal " + EnvHTTPAddress)
 	}
-	deploymentEnvironment := env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT")
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv("TETRAL_SERVICE_VERSION")
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	bootstrapWorkspaceID := env.Getenv(EnvBootstrapWorkspaceID)
 	if bootstrapWorkspaceID == "" {
 		return Config{}, workload.NewConfigError(EnvBootstrapWorkspaceID + " is required")
@@ -71,7 +65,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if _, err := auth.DecodeEd25519PrivateKey(privateKey); err != nil {
 		return Config{}, workload.NewConfigError(err.Error())
 	}
-	ttl := 60 * time.Second
+	ttl := DefaultInternalPrincipalTTL
 	if raw := env.Getenv(EnvInternalPrincipalTTLSeconds); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds <= 0 {
@@ -82,8 +76,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 	return Config{
 		HTTPAddress:                    httpAddress,
 		MetricsAddress:                 metricsAddress,
-		DeploymentEnvironment:          deploymentEnvironment,
-		ServiceVersion:                 serviceVersion,
+		DeploymentEnvironment:          resource.DeploymentEnvironment,
+		ServiceVersion:                 resource.ServiceVersion,
 		BootstrapAPIKey:                bootstrapAPIKey,
 		BootstrapWorkspaceID:           workspace.ID(bootstrapWorkspaceID),
 		InternalPrincipalPrivateKeyB64: privateKey,

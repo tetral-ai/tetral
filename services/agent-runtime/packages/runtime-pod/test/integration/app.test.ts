@@ -125,10 +125,11 @@ function validConfig(): RuntimePodConfig {
       ip: "10.0.0.1",
     },
     deploymentEnvironment: "test",
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
     serviceVersion: "test",
-    bridge: {
+    jobRunner: {
       namespace: "engine",
-      serviceAccount: "bridge",
+      serviceAccount: "job-runner",
     },
     grpcBindAddress: "127.0.0.1:0",
     httpBindAddress: "127.0.0.1:0",
@@ -277,7 +278,7 @@ class AllowingTokenReviewClient implements RuntimeTokenReviewClient {
     return {
       authenticated: true,
       audiences: ["tetral-internal-grpc"],
-      username: "system:serviceaccount:engine:bridge",
+      username: "system:serviceaccount:engine:job-runner",
     };
   }
 }

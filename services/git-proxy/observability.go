@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/gitticket"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const (
@@ -94,7 +95,7 @@ func NewJSONAccessLogger(writer io.Writer, options ...AccessLoggerOption) *JSONA
 		writer = os.Stderr
 	}
 	logger := &JSONAccessLogger{
-		Logger:                slog.New(slog.NewJSONHandler(writer, nil)),
+
 		Writer:                writer,
 		ServiceName:           ServiceName,
 		ServiceVersion:        "unknown",
@@ -104,6 +105,9 @@ func NewJSONAccessLogger(writer io.Writer, options ...AccessLoggerOption) *JSONA
 		if option != nil {
 			option(logger)
 		}
+	}
+	if logger.Logger == nil {
+		logger.Logger = workload.NewLogger(writer, logger.ServiceName, logger.DeploymentEnvironment, logger.ServiceVersion)
 	}
 	return logger
 }
@@ -118,7 +122,7 @@ func (l *JSONAccessLogger) LogAccess(ctx context.Context, record AccessLogRecord
 		if writer == nil {
 			writer = os.Stderr
 		}
-		logger = slog.New(slog.NewJSONHandler(writer, nil))
+		logger = workload.NewLogger(writer, ServiceName, l.DeploymentEnvironment, l.ServiceVersion)
 	}
 	logger.InfoContext(ctx, AccessLogEventKind,
 		slog.String("service.name", valueOrDefault(l.ServiceName, ServiceName)),
@@ -149,4 +153,9 @@ func requestIDForAccessLog(requestID string) string {
 		return "gitreq_unknown"
 	}
 	return "gitreq_" + hex.EncodeToString(raw[:])
+}
+
+// WithAccessLogLogger connects access records to the process-owned bounded sink.
+func WithAccessLogLogger(logger *slog.Logger) AccessLoggerOption {
+	return func(access *JSONAccessLogger) { access.Logger = logger }
 }

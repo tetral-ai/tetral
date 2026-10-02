@@ -41,7 +41,7 @@ spec:
             - name: TETRAL_RUNTIME_POD_HTTP_ADDR
               value: 0.0.0.0:8080
             - name: TETRAL_RUNTIME_POD_GRPC_PORT
-              value: "9090"
+              value: '9090'
             - name: TETRAL_RUNTIME_POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -65,23 +65,23 @@ spec:
             - name: TETRAL_RUNTIME_POD_GRPC_AUDIENCE
               value: tetral-internal-grpc
             - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
-              value: tetral-system/bridge
+              value: tetral-system/job-runner
             - name: TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/runtime-pod/token
             - name: TETRAL_BRIDGE_API_GRPC_ADDR
               value: bridge.tetral-system.svc.cluster.local:9090
             - name: TETRAL_GATEWAY_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9090
+              value: dns:///provider-gateway.tetral-system.svc.cluster.local:9090
             - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9091
+              value: dns:///mcp-connector.tetral-system.svc.cluster.local:9091
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
-              value: dns:///gateway.tetral-system.svc.cluster.local:9092
+              value: dns:///web-connector.tetral-system.svc.cluster.local:9092
             - name: TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL
               value: deepseek/deepseek-v4-pro
             - name: TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES
-              value: "32768"
+              value: '32768'
             - name: TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS
-              value: "1800000"
+              value: '1800000'
             - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
               value: /var/run/secrets/tetral-kubernetes-api/runtime-pod-tokenreview/token
             - name: KUBERNETES_API_SERVER_URL
@@ -107,7 +107,7 @@ spec:
               memory: 512Mi
               ephemeral-storage: 256Mi
             limits:
-              cpu: "1"
+              cpu: '1'
               memory: 1Gi
               ephemeral-storage: 1Gi
           securityContext:
@@ -195,7 +195,7 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
+              app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
           port: 9090
@@ -216,12 +216,28 @@ spec:
               kubernetes.io/metadata.name: tetral-system
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: gateway
+              app.kubernetes.io/name: provider-gateway
       ports:
         - protocol: TCP
           port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-connector
+      ports:
         - protocol: TCP
           port: 9091
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web-connector
+      ports:
         - protocol: TCP
           port: 9092
     - to:
@@ -260,7 +276,7 @@ spec:
         - kube-apiserver
       toPorts:
         - ports:
-            - port: "443"
+            - port: '443'
               protocol: TCP
-            - port: "6443"
+            - port: '6443'
               protocol: TCP

@@ -21,6 +21,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -250,7 +251,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_spawn_prefix_"+name, "evt_spawn_prefix_user_"+name, 1)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-			seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_prefix_start_"+name, modelRequestID, requestKindAgentProviderRequest, 1)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_prefix_start_"+name, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 1)
 			inputJSON := `{"task_name":"worker","agent_type":"worker","fork_turns":"all"}`
 			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_tool_" + name, ModelRequestId: modelRequestID,
@@ -306,7 +307,7 @@ func TestPostgreSQLCreateSubagentThreadAcceptsMechanicallyValidRuntimeAgentType(
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_declared_type_start", "mreq_spawn_declared_type", requestKindAgentProviderRequest, 0)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_declared_type_start", "mreq_spawn_declared_type", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_spawn_declared_type_tool", ModelRequestId: "mreq_spawn_declared_type",
 		ToolDeclaration: bridgeToolDeclarationForTest(
@@ -466,7 +467,7 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 	client := bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
 	request := &bridgev1.DeliverInterAgentMailRequest{
 		Scope:      bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
-		DeliveryId: agentMailDeliveryID(sourceID, childID), TargetThreadId: childID,
+		DeliveryId: runtimecontrol.AgentMailDeliveryID(sourceID, childID), TargetThreadId: childID,
 		SourceToolUseEventId: sourceID, Content: content,
 	}
 
@@ -515,7 +516,7 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'runtime_input_id'=$2),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation=$3 AND idempotency_key=$4)`,
-		sessionID, completionRuntimeInputID(request.GetDeliveryId()), bridgeOpDeliverInterAgentMail, request.GetDeliveryId(),
+		sessionID, runtimecontrol.CompletionRuntimeInputID(request.GetDeliveryId()), bridgeOpDeliverInterAgentMail, request.GetDeliveryId(),
 	).Scan(&sent, &received, &inbox, &queued, &operation); err != nil {
 		t.Fatalf("read atomic mail state: %v", err)
 	}
@@ -552,7 +553,7 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 		t.Fatalf("install Queue failure: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	deliveryID := agentMailDeliveryID(sourceID, childID)
+	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceID, childID)
 	if _, err := store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), DeliveryId: deliveryID,
 		TargetThreadId: childID, SourceToolUseEventId: sourceID, Content: content,
@@ -566,7 +567,7 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
 		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'runtime_input_id'=$2),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation=$3 AND idempotency_key=$4)`,
-		sessionID, completionRuntimeInputID(deliveryID), bridgeOpDeliverInterAgentMail, deliveryID,
+		sessionID, runtimecontrol.CompletionRuntimeInputID(deliveryID), bridgeOpDeliverInterAgentMail, deliveryID,
 	).Scan(&sent, &received, &inbox, &queued, &operation); err != nil {
 		t.Fatalf("read rolled-back atomic mail state: %v", err)
 	}
@@ -610,7 +611,7 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
 	preRequest := &bridgev1.DeliverInterAgentMailRequest{
-		Scope: mainScope, DeliveryId: agentMailDeliveryID(preSourceID, siblingID), TargetThreadId: siblingID,
+		Scope: mainScope, DeliveryId: runtimecontrol.AgentMailDeliveryID(preSourceID, siblingID), TargetThreadId: siblingID,
 		SourceToolUseEventId: preSourceID, Content: "committed before interrupt",
 	}
 	if response, err := store.DeliverInterAgentMail(context.Background(), preRequest); err != nil || response.GetCommitted() == nil {
@@ -630,22 +631,22 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		t.Fatalf("pre-interrupt mail replay = %#v/%v; want duplicate", response, err)
 	}
 	siblingRequest := &bridgev1.DeliverInterAgentMailRequest{
-		Scope: mainScope, DeliveryId: agentMailDeliveryID(siblingSource, siblingID), TargetThreadId: siblingID,
+		Scope: mainScope, DeliveryId: runtimecontrol.AgentMailDeliveryID(siblingSource, siblingID), TargetThreadId: siblingID,
 		SourceToolUseEventId: siblingSource, Content: "external sibling mail waits",
 	}
 	if response, err := store.DeliverInterAgentMail(context.Background(), siblingRequest); err != nil || response.GetCommitted() == nil {
 		t.Fatalf("sibling mail behind barrier = %#v/%v; want committed", response, err)
 	}
 	lateRequest := &bridgev1.DeliverInterAgentMailRequest{
-		Scope: siblingScope, DeliveryId: agentMailDeliveryID(lateSourceID, grandchildID), TargetThreadId: grandchildID,
+		Scope: siblingScope, DeliveryId: runtimecontrol.AgentMailDeliveryID(lateSourceID, grandchildID), TargetThreadId: grandchildID,
 		SourceToolUseEventId: lateSourceID, Content: "must be rejected",
 	}
-	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !isThreadInterruptBarrierStaleError(err) {
+	if _, err := store.DeliverInterAgentMail(context.Background(), lateRequest); !runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source mail error = %v; want interrupt barrier stale", err)
 	}
 	if _, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: siblingScope, SourceToolUseEventId: childSourceID, TaskName: "late-child", AgentType: "worker", InitialPrompt: "must be stale",
-	}); !isThreadInterruptBarrierStaleError(err) {
+	}); !runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 		t.Fatalf("interrupted-source child error = %v; want interrupt barrier stale", err)
 	}
 	var sent, received, inbox, queued, lateOperations, lateChildren int
@@ -816,7 +817,7 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
 		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$3),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1
-		 AND operation='mark_child_thread_active' AND idempotency_key=$4)`, sessionID, childID, otherID, stableRuntimeID("child_resume", sourceID)).Scan(&statusValue, &otherStatus, &operationCount); err != nil {
+		 AND operation='mark_child_thread_active' AND idempotency_key=$4)`, sessionID, childID, otherID, runtimecontrol.StableRuntimeID("child_resume", sourceID)).Scan(&statusValue, &otherStatus, &operationCount); err != nil {
 		t.Fatalf("read resumed child: %v", err)
 	}
 	if statusValue != "idle" || otherStatus != "closed_for_runtime" || operationCount != 1 {

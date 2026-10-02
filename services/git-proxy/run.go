@@ -35,6 +35,12 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 	if cfg.HTTPAddress == cfg.MetricsAddress {
 		return workload.NewConfigError(EnvMetricsAddress + " must not equal " + EnvHTTPAddress)
 	}
+	logger := runtime.Logger
+	if logger == nil {
+		owner := workload.NewProcessLogger(nil, ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		logger = owner.Logger
+	}
 	readiness := workload.NewReadiness()
 	metrics := NewGitProxyMetrics()
 	proxyHandler := BuildHTTPHandler(readiness, NewHTTPHandler(
@@ -48,19 +54,15 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 		HandlerOptions{
 			PublicBaseURL:     cfg.PublicBaseURL,
 			LegacyPathCutover: cfg.LegacyPathCutover,
-			AccessLogger:      NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion)),
+			AccessLogger:      NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion), WithAccessLogLogger(logger)),
 			Metrics:           metrics,
 		},
 	))
-	metricsHandler := BuildMetricsHTTPHandler(readiness, metrics, runtime.DBStatsProvider)
+	metricsHandler := BuildMetricsHTTPHandler(readiness, metrics, runtime.DBStatsProvider, logger)
 	readiness.MarkReady()
 	runHTTP := runtime.RunHTTP
 	if runHTTP == nil {
 		runHTTP = workload.Run
-	}
-	logger := runtime.Logger
-	if logger == nil {
-		logger = workload.NewLogger(nil, ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion)
 	}
 	return runHTTPPair(ctx, runHTTP, runtime.Listen, logger, readiness, cfg, proxyHandler, metricsHandler)
 }
@@ -134,7 +136,7 @@ func BuildHTTPHandler(readiness *workload.Readiness, proxy http.Handler) http.Ha
 	return mux
 }
 
-func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider) http.Handler {
+func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider, loggers ...*slog.Logger) http.Handler {
 	if metrics == nil {
 		metrics = NewGitProxyMetrics()
 	}
@@ -161,6 +163,9 @@ func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMet
 		}
 		_, _ = w.Write([]byte(workload.RuntimeMetricsTextWith(extra)))
 		_, _ = w.Write([]byte(metrics.render()))
+		if len(loggers) > 0 {
+			_, _ = w.Write([]byte(workload.DiagnosticMetricsText(loggers[0])))
+		}
 	})
 	return mux
 }

@@ -28,20 +28,33 @@ func TestSelectPlanSlicesDominantPackagesAcrossRaceShards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	packageName := "github.com/tetral-ai/tetral/services/bridge"
-	tests := []string{
-		"TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues",
-		"TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand",
-		"TestSubagentRetainedAssistantAndTerminalToolResultColdResume",
-		"TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody",
-		"TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition",
-		"TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority",
-		"TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas",
-		"TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors",
-		"TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation",
-		"TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs",
+	bridge := "github.com/tetral-ai/tetral/services/bridge"
+	composition := "github.com/tetral-ai/tetral/integration"
+	tests := map[string]string{
+		"TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues":                 composition,
+		"TestPostgreSQLRuntimeAbortCancelsJoinedBackgroundCommand":                          bridge,
+		"TestSubagentRetainedAssistantAndTerminalToolResultColdResume":                      composition,
+		"TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody":                   composition,
+		"TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionComposition": composition,
+		"TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority":                      composition,
+		"TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas":                  bridge,
+		"TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors":              bridge,
+		"TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation":        bridge,
+		"TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs":                         bridge,
 	}
-	plan := Plan{Profile: ProfileFull, Selections: []Selection{{Group: "go", Packages: []string{packageName}, Tests: tests}}}
+	plan := Plan{Profile: ProfileFull}
+	for _, owner := range []string{bridge, composition} {
+		selection := Selection{Group: "go", Packages: []string{owner}}
+		for test, packageName := range tests {
+			if packageName == owner {
+				if calibration.Packages[owner].TestsMS[test] <= 0 {
+					t.Fatalf("moved case %s lost its calibrated weight under %s", test, owner)
+				}
+				selection.Tests = append(selection.Tests, test)
+			}
+		}
+		plan.Selections = append(plan.Selections, selection)
+	}
 	seen := map[string]int{}
 	weights := make([]int, 4)
 	for shardIndex := 0; shardIndex < 4; shardIndex++ {
@@ -49,15 +62,23 @@ func TestSelectPlanSlicesDominantPackagesAcrossRaceShards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(shard.Selections) != 1 || shard.Selections[0].Packages[0] != packageName {
-			t.Fatalf("shard %d did not retain one package process: %+v", shardIndex, shard.Selections)
-		}
-		for _, test := range shard.Selections[0].Tests {
-			seen[test]++
-			weights[shardIndex] += calibration.Packages[packageName].TestsMS[test]
+		packages := map[string]bool{}
+		for _, selection := range shard.Selections {
+			packageName := selection.Packages[0]
+			if packages[packageName] {
+				t.Fatalf("shard %d started multiple processes for %s", shardIndex, packageName)
+			}
+			packages[packageName] = true
+			for _, test := range selection.Tests {
+				if tests[test] != packageName {
+					t.Fatalf("shard %d moved %s to wrong owner %s", shardIndex, test, packageName)
+				}
+				seen[test]++
+				weights[shardIndex] += calibration.Packages[packageName].TestsMS[test]
+			}
 		}
 	}
-	for _, test := range tests {
+	for test := range tests {
 		if seen[test] != 1 {
 			t.Fatalf("%s executed %d times", test, seen[test])
 		}

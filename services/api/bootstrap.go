@@ -17,7 +17,14 @@ type RunWorkloadFunc func(context.Context, workload.Config) error
 // Run is the service-local api process bootstrap. cmd/tetral-api is
 // intentionally thin: it supplies os env/stderr and exits with the mapped code.
 func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildApplicationFunc, runWorkload RunWorkloadFunc) error {
-	logger := workload.NewLogger(stderr, "api", env.Getenv(EnvDeploymentEnvironment), env.Getenv(EnvServiceVersion))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(stderr, "api", env.Getenv(EnvDeploymentEnvironment), env.Getenv(EnvServiceVersion), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, "api", diagnosticErr)
+	}
 	cfg, err := ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "api", err)
@@ -34,6 +41,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	readiness := workload.NewReadiness()
 	handler := BuildHTTPHandler(readiness, application.Handler)
 	metricsHandler := workload.HealthRouter(readiness,
+		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", application.Client)),

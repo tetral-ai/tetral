@@ -3,7 +3,6 @@ package kubernetesmanifest_test
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -172,33 +171,10 @@ var workloadManifests = []workloadManifest{
 			"KUBERNETES_API_CA_CERT_PATH",
 		},
 	},
-	{
-		file:          "gateway.yaml",
-		configMapName: "gateway-config",
-		name:          "gateway",
-		namespace:     "tetral-system",
-		binary:        "bun",
-		httpEnv:       "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
-		httpPortName:  "http",
-		internalGRPC:  true,
-		grpcEnv:       "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
-		grpcPortName:  "provider-grpc",
-		autoscaling:   true,
-		ciliumPolicy:  true,
-		requiredEnvVar: []string{
-			"ENGINE_VAULT_KEY",
-			"TETRAL_DEPLOYMENT_ENVIRONMENT",
-			"TETRAL_SERVICE_VERSION",
-			"TETRAL_INTERNAL_GRPC_AUDIENCE",
-			"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
-			"TETRAL_MCP_CONNECTOR_GRPC_ADDR",
-			"TETRAL_WEB_CONNECTOR_GRPC_ADDR",
-			"TETRAL_WEB_CONNECTOR_METRICS_ADDR",
-			"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-			"KUBERNETES_API_SERVER_URL",
-			"KUBERNETES_API_CA_CERT_PATH",
-		},
-	},
+	{file: "provider-gateway.yaml", name: "provider-gateway", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", httpPortName: "http", internalGRPC: true, grpcEnv: "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR", grpcPortName: "provider-grpc", autoscaling: true, ciliumPolicy: true},
+	{file: "mcp-connector.yaml", name: "mcp-connector", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_MCP_CONNECTOR_HTTP_ADDR", httpPortName: "mcp-http", internalGRPC: true, grpcEnv: "TETRAL_MCP_CONNECTOR_GRPC_ADDR", grpcPortName: "mcp-grpc", ciliumPolicy: true},
+	{file: "web-connector.yaml", configMapName: "web-connector-config", name: "web-connector", namespace: "tetral-system", binary: "web-connector", httpEnv: "TETRAL_WEB_CONNECTOR_METRICS_ADDR", httpPortName: "web-metrics", internalGRPC: true, grpcEnv: "TETRAL_WEB_CONNECTOR_GRPC_ADDR", grpcPortName: "web-grpc", ciliumPolicy: true},
+	{file: "job-runner.yaml", name: "job-runner", namespace: "tetral-system", binary: "job-runner", httpEnv: "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR", httpPortName: "http-job", ciliumPolicy: true},
 	{
 		file:         "git-proxy.yaml",
 		name:         "git-proxy",
@@ -370,64 +346,33 @@ func TestKubernetesManifestLabelSelectorsAreConsistent(t *testing.T) {
 
 func TestKubernetesManifestDeploymentTargetsCorrectWorkloadBinary(t *testing.T) {
 	documents := readManifestDocuments(t)
-	for _, workload := range workloadManifests {
-		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
-		requireContains(t, deployment, "serviceAccountName: "+workload.name)
-		if workload.name == "bridge" {
-			requireContains(t, deployment, "containers:\n        - name: bridge-api")
-			requireContains(t, deployment, "        - name: job-runner")
-			requireContains(t, deployment, "command:\n            - /usr/local/bin/bridge-api")
-			requireContains(t, deployment, "command:\n            - /usr/local/bin/job-runner")
-			if err := validateContainerCount(deployment.text, 2); err != nil {
-				t.Fatalf("%s Deployment %v", workload.file, err)
-			}
-			for _, envName := range append([]string{workload.httpEnv}, workload.requiredEnvVar...) {
-				requireContains(t, deployment, "name: "+envName)
-			}
-			continue
+	for _, w := range workloadManifests {
+		d := requireDocument(t, documents, w.file, "Deployment", w.name)
+		requireContains(t, d, "serviceAccountName: "+w.name)
+		if err := validateSingleContainer(d.text); err != nil {
+			t.Fatalf("%s: %v", w.file, err)
 		}
-		if workload.name == "gateway" {
-			metadata := readProviderGatewayPackageMetadata(t)
-			requireContains(t, deployment, "containers:\n        - name: provider-gateway")
-			requireContains(t, deployment, "        - name: mcp-connector")
-			requireContains(t, deployment, "        - name: web-connector")
-			requireContains(t, deployment, "command:\n            - "+metadata.Tetral.ProviderGateway.ContainerCommand[0]+"\n            - "+metadata.Tetral.ProviderGateway.ContainerCommand[1])
-			requireContains(t, deployment, "command:\n            - "+metadata.Tetral.MCPConnector.ContainerCommand[0]+"\n            - "+metadata.Tetral.MCPConnector.ContainerCommand[1])
-			requireContains(t, deployment, "image: ghcr.io/tetral-ai/tetral:0.0.0-dev")
-			requireContains(t, deployment, "command:\n            - /usr/local/bin/web-connector")
-			if err := validateContainerCount(deployment.text, 3); err != nil {
-				t.Fatalf("%s Deployment %v", workload.file, err)
-			}
-			for _, envName := range append([]string{workload.httpEnv, workload.grpcEnv}, workload.requiredEnvVar...) {
-				requireContains(t, deployment, "name: "+envName)
-			}
-			continue
+		container := w.name
+		if w.name == "bridge" {
+			container = "bridge-api"
 		}
-		requireContains(t, deployment, "containers:\n        - name: "+workload.name)
-		switch workload.name {
+		requireContains(t, d, "containers:\n        - name: "+container)
+		command := []string{"/usr/local/bin/" + w.binary}
+		switch w.name {
 		case "agent-runtime":
-			metadata := readAgentRuntimePackageMetadata(t)
-			requireContains(t, deployment, "command:\n            - "+metadata.Tetral.AgentRuntimePod.ContainerCommand[0]+"\n            - "+metadata.Tetral.AgentRuntimePod.ContainerCommand[1])
-		default:
-			requireContains(t, deployment, "command:\n            - /usr/local/bin/"+workload.binary)
+			command = readAgentRuntimePackageMetadata(t).Tetral.AgentRuntimePod.ContainerCommand
+		case "provider-gateway":
+			command = readProviderGatewayPackageMetadata(t).Tetral.ProviderGateway.ContainerCommand
+		case "mcp-connector":
+			command = readProviderGatewayPackageMetadata(t).Tetral.MCPConnector.ContainerCommand
 		}
-		if err := validateSingleContainer(deployment.text); err != nil {
-			t.Fatalf("%s Deployment %v", workload.file, err)
-		}
-		envNames := append([]string{workload.httpEnv}, workload.requiredEnvVar...)
-		if workload.metricsEnv != "" {
-			envNames = append(envNames, workload.metricsEnv)
-		}
-		for _, envName := range envNames {
-			requireContains(t, deployment, "name: "+envName)
+		requireContains(t, d, "command:\n            - "+strings.Join(command, "\n            - "))
+		for _, e := range append([]string{w.httpEnv}, w.requiredEnvVar...) {
+			requireContains(t, d, "name: "+e)
 		}
 	}
 }
 
-// TestKubernetesManifestSingleContainerGuardScopesToContainersBlock proves the sidecar
-// guard counts container entries only inside the containers: block, so a sibling block at
-// the same indentation (volumes:, whose entries share the 8-space "- name:" form) never
-// false-positives as a second container, while a genuine second container is still caught.
 func TestKubernetesManifestSingleContainerGuardScopesToContainersBlock(t *testing.T) {
 	documents := readManifestDocuments(t)
 	base := requireDocument(t, documents, "api.yaml", "Deployment", "api")
@@ -795,6 +740,9 @@ func TestKubernetesManifestTetralAPIProvidesBlobStoreConfig(t *testing.T) {
 func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, workload := range workloadManifests {
+		if isSeparatedWorkload(workload.name) {
+			continue
+		}
 		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
 		service := requireDocument(t, documents, workload.file, "Service", workload.name)
 		if workload.name == "gateway" {
@@ -874,14 +822,14 @@ func TestKubernetesManifestDeploymentsHaveHTTPHealthAndReadinessProbes(t *testin
 		requireContains(t, deployment, "livenessProbe:")
 		healthPath := "/health"
 		readyPath := "/ready"
-		if workload.name == "gateway" {
+		if workload.name == "provider-gateway" || workload.name == "mcp-connector" {
 			healthPath = "/healthz"
 			readyPath = "/readyz"
 		}
 		requireContains(t, deployment, "path: "+healthPath)
 		requireContains(t, deployment, "readinessProbe:")
 		requireContains(t, deployment, "path: "+readyPath)
-		if strings.Count(deployment.text, "port: http") < 2 {
+		if strings.Count(deployment.text, "port: "+workload.httpPortName) < 2 {
 			t.Fatalf("%s Deployment probes must both target the HTTP probe port", workload.file)
 		}
 	}
@@ -1094,11 +1042,11 @@ func TestKubernetesManifestTopLevelDeploymentsDeclareResourceBounds(t *testing.T
 	}{
 		{file: "agent-runtime.yaml", name: "agent-runtime", container: "agent-runtime"},
 		{file: "bridge.yaml", name: "bridge", container: "bridge-api"},
-		{file: "bridge.yaml", name: "bridge", container: "job-runner"},
+		{file: "job-runner.yaml", name: "job-runner", container: "job-runner"},
 		{file: "event-stream.yaml", name: "event-stream", container: "event-stream"},
-		{file: "gateway.yaml", name: "gateway", container: "provider-gateway"},
-		{file: "gateway.yaml", name: "gateway", container: "mcp-connector"},
-		{file: "gateway.yaml", name: "gateway", container: "web-connector"},
+		{file: "provider-gateway.yaml", name: "provider-gateway", container: "provider-gateway"},
+		{file: "mcp-connector.yaml", name: "mcp-connector", container: "mcp-connector"},
+		{file: "web-connector.yaml", name: "web-connector", container: "web-connector"},
 		{file: "auth.yaml", name: "auth", container: "auth"},
 		{file: "api.yaml", name: "api", container: "api"},
 		{file: "git-proxy.yaml", name: "git-proxy", container: "git-proxy"},
@@ -1145,7 +1093,7 @@ func TestKubernetesManifestNoDefaultTokenServiceAccountsDisableAutomount(t *test
 		"bridge",
 		"agent-runtime",
 		"event-stream",
-		"gateway",
+		"provider-gateway", "mcp-connector", "web-connector", "job-runner",
 		"api",
 		"auth",
 		"cleanup",
@@ -1154,6 +1102,9 @@ func TestKubernetesManifestNoDefaultTokenServiceAccountsDisableAutomount(t *test
 		"sandbox",
 	} {
 		path := filepath.Join("..", "..", "services", serviceName, "k8s", "serviceaccount.yaml")
+		if serviceName == "provider-gateway" || serviceName == "mcp-connector" {
+			path = filepath.Join("..", "..", "services", "gateway", "k8s", serviceName, "serviceaccount.yaml")
+		}
 		source := string(mustReadFile(t, path))
 		requireContains(t, &manifestDocument{file: path, kind: "ServiceAccount", name: serviceName, text: source}, "automountServiceAccountToken: false")
 	}
@@ -1237,7 +1188,10 @@ func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 		{"bridge.yaml", "bridge"},
 		{"cleanup.yaml", "cleanup"},
 		{"event-stream.yaml", "event-stream"},
-		{"gateway.yaml", "gateway"},
+		{"provider-gateway.yaml", "provider-gateway"},
+		{"mcp-connector.yaml", "mcp-connector"},
+		{"web-connector.yaml", "web-connector"},
+		{"job-runner.yaml", "job-runner"},
 		{"git-proxy.yaml", "git-proxy"},
 		{"queue.yaml", "queue"},
 		{"sandbox.yaml", "sandbox"},
@@ -1319,9 +1273,7 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	requireContains(t, bridge, "policyTypes:\n    - Ingress\n    - Egress")
 	requireContains(t, bridge, `tetral.ai/egress-intent: "blob.example.internal"`)
 	requireNetworkPolicyEgressEdge(t, bridge, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
-	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "queue"})
-	requireNetworkPolicyEgressEdge(t, bridge, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
-	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
+	requireNetworkPolicyEgressEdge(t, bridge, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "mcp-connector"})
 	requireNetworkPolicyEgressIPBlock(t, bridge, 443, "10.96.0.1/32")
 	requireNetworkPolicyEgressIPBlock(t, bridge, 443, "0.0.0.0/0")
 	requireNoBroadNetworkPolicyEgressPeers(t, bridge, 5432)
@@ -1416,116 +1368,6 @@ func TestKubernetesManifestServiceLocalSecretExamples(t *testing.T) {
 			}
 		}
 	}
-}
-
-func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
-	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "bridge.yaml", "Deployment", "bridge")
-	configMap := requireDocument(t, documents, "bridge.yaml", "ConfigMap", "bridge-config")
-	service := requireDocument(t, documents, "bridge.yaml", "Service", "bridge")
-	networkPolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
-	requireContains(t, configMap, "TETRAL_PROVIDER_RESCHEDULE_BUDGET: \"3\"")
-	requireContains(t, configMap, "TETRAL_COMPACTION_RESCHEDULE_BUDGET: \"2\"")
-
-	bridgeAPI := requireDeploymentContainerBlock(t, deployment, "bridge-api")
-	jobRunner := requireDeploymentContainerBlock(t, deployment, "job-runner")
-	for _, required := range []string{
-		"command:\n            - /usr/local/bin/bridge-api",
-		"name: TETRAL_BRIDGE_API_HTTP_ADDR\n              value: \":8080\"",
-		"name: TETRAL_BRIDGE_API_GRPC_ADDR\n              value: \":9090\"",
-		"name: TETRAL_DATABASE_URL",
-		"name: TETRAL_INTERNAL_GRPC_AUDIENCE\n              value: tetral-internal-grpc",
-		"name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS\n              value: tetral-agent-runtime/agent-runtime,tetral-system/bridge,tetral-system/gateway",
-		"name: TETRAL_BRIDGE_MCP_CONNECTOR_GRPC_ADDR\n              value: gateway.tetral-system.svc.cluster.local:9091",
-		"name: TETRAL_BRIDGE_GATEWAY_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/gateway/token",
-		"name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
-		"name: runtime-binding-token",
-		"key: hmac-key",
-		"name: TETRAL_PROVIDER_RESCHEDULE_BUDGET",
-		"name: TETRAL_COMPACTION_RESCHEDULE_BUDGET",
-		"name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token",
-		"name: KUBERNETES_API_SERVER_URL\n              value: https://kubernetes.default.svc",
-		"name: KUBERNETES_API_CA_CERT_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/ca.crt",
-		"name: TETRAL_BLOB_ENDPOINT",
-		"name: TETRAL_BLOB_SECRET_KEY",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
-	} {
-		if !manifestTextContains(bridgeAPI, required) {
-			t.Fatalf("bridge-api container missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{"TETRAL_SANDBOX_DRIVER", "DAYTONA_"} {
-		if manifestTextContains(configMap.text, forbidden) || strings.Contains(bridgeAPI, forbidden) {
-			t.Fatalf("Bridge must not receive Sandbox-provider configuration %q", forbidden)
-		}
-	}
-	for _, required := range []string{
-		"command:\n            - /usr/local/bin/job-runner",
-		"name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR\n              value: \":8081\"",
-		"name: TETRAL_DATABASE_URL",
-		"name: TETRAL_QUEUE_GRPC_ADDR\n              value: queue.tetral-system.svc.cluster.local:9090",
-		"name: TETRAL_KUBERNETES_NAMESPACE\n              value: tetral-agent-runtime",
-		"name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR\n              value: app.kubernetes.io/name=agent-runtime",
-		"name: TETRAL_AGENT_RUNTIME_GRPC_PORT\n              value: \"9090\"",
-		"name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token",
-		"name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR\n              value: gateway.tetral-system.svc.cluster.local:9091",
-		"name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/gateway/token",
-		"name: TETRAL_BLOB_ENDPOINT",
-		"name: TETRAL_BLOB_REGION",
-		"name: TETRAL_BLOB_BUCKET",
-		"name: TETRAL_BLOB_ACCESS_KEY",
-		"name: TETRAL_BLOB_SECRET_KEY",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
-		"mountPath: /var/run/secrets/kubernetes.io/serviceaccount",
-	} {
-		if !manifestTextContains(jobRunner, required) {
-			t.Fatalf("job-runner container missing %q", required)
-		}
-	}
-	if strings.Contains(jobRunner, "TETRAL_WORKSPACE_ID") {
-		t.Fatal("job-runner must discover workspaces instead of using TETRAL_WORKSPACE_ID")
-	}
-	for _, forbidden := range []string{
-		"TETRAL_SANDBOX_DRIVER",
-		"DAYTONA_",
-	} {
-		if strings.Contains(jobRunner, forbidden) {
-			t.Fatalf("job-runner container must not receive Sandbox-provider configuration %q", forbidden)
-		}
-	}
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		volume:            "bridge-api-kubernetes-api",
-		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
-		filePath:          "bridge-api-tokenreview/token",
-		audienceMode:      projectedTokenNoAudience,
-		expirationSeconds: 600,
-	})
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "TETRAL_BRIDGE_GATEWAY_TOKEN_PATH",
-		volume:            "bridge-api-gateway-token",
-		mountPath:         "/var/run/secrets/tetral-internal-grpc/gateway",
-		filePath:          "token",
-		audienceMode:      projectedTokenWithAudience,
-		audience:          "tetral-internal-grpc",
-		expirationSeconds: 600,
-	})
-	requireProjectedBoundedServiceAccountTokenShape(t, deployment, projectedTokenExpectation{
-		volume:            "job-runner-kubernetes-api",
-		mountPath:         "/var/run/secrets/kubernetes.io/serviceaccount",
-		filePath:          "token",
-		audienceMode:      projectedTokenNoAudience,
-		expirationSeconds: 600,
-	})
-	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
-	requireContains(t, service, "- name: grpc\n      port: 9090\n      targetPort: grpc")
-	requireContains(t, service, "- name: metrics-job\n      port: 8081\n      targetPort: http-job")
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9090)
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 8081, networkPolicyPeer{namespace: "tetral-system", podPartOf: "tetral"})
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 8081)
 }
 
 func TestKubernetesManifestTetralAPIHasNoLegacyRuntimeClientConfigOrKubernetesToken(t *testing.T) {
@@ -1663,9 +1505,10 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 		name  string
 		count int
 	}{
-		"api.yaml":       {name: "api", count: 1},
-		"gateway.yaml":   {name: "gateway", count: 2},
-		"git-proxy.yaml": {name: "git-proxy", count: 1},
+		"api.yaml":              {name: "api", count: 1},
+		"provider-gateway.yaml": {name: "provider-gateway", count: 1},
+		"mcp-connector.yaml":    {name: "mcp-connector", count: 1},
+		"git-proxy.yaml":        {name: "git-proxy", count: 1},
 	}
 	for file, expectation := range allowed {
 		deployment := requireDocument(t, documents, file, "Deployment", expectation.name)
@@ -1689,9 +1532,10 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 	requireNotContains(t, cleanup, "name: ENGINE_VAULT_KEY")
 
 	serviceLocalAllowed := map[string]int{
-		filepath.Join("api", "k8s", "deployment.yaml"):       1,
-		filepath.Join("gateway", "k8s", "deployment.yaml"):   2,
-		filepath.Join("git-proxy", "k8s", "deployment.yaml"): 1,
+		filepath.Join("api", "k8s", "deployment.yaml"):                         1,
+		filepath.Join("gateway", "k8s", "provider-gateway", "deployment.yaml"): 1,
+		filepath.Join("gateway", "k8s", "mcp-connector", "deployment.yaml"):    1,
+		filepath.Join("git-proxy", "k8s", "deployment.yaml"):                   1,
 	}
 	for path, count := range serviceLocalAllowed {
 		text := readServiceLocalManifestText(t, path)
@@ -1733,13 +1577,13 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 		"TETRAL_DEPLOYMENT_ENVIRONMENT":                          "local",
 		"TETRAL_SERVICE_VERSION":                                 "dev",
 		"TETRAL_RUNTIME_POD_GRPC_AUDIENCE":                       "tetral-internal-grpc",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS":               "tetral-system/bridge",
+		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS":               "tetral-system/job-runner",
 		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH":            "/var/run/secrets/tetral-kubernetes-api/runtime-pod-tokenreview/token",
 		"KUBERNETES_API_SERVER_URL":                              "https://kubernetes.default.svc",
 		"KUBERNETES_API_CA_CERT_PATH":                            "/var/run/secrets/tetral-kubernetes-api/ca.crt",
 		"TETRAL_BRIDGE_API_GRPC_ADDR":                            "bridge.tetral-system.svc.cluster.local:9090",
-		"TETRAL_GATEWAY_GRPC_ADDR":                               "dns:///gateway.tetral-system.svc.cluster.local:9090",
-		"TETRAL_MCP_CONNECTOR_GRPC_ADDR":                         "dns:///gateway.tetral-system.svc.cluster.local:9091",
+		"TETRAL_GATEWAY_GRPC_ADDR":                               "dns:///provider-gateway.tetral-system.svc.cluster.local:9090",
+		"TETRAL_MCP_CONNECTOR_GRPC_ADDR":                         "dns:///mcp-connector.tetral-system.svc.cluster.local:9091",
 		"TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES": "32768",
 		"TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS":              "1800000",
 	} {
@@ -1814,9 +1658,9 @@ func TestKubernetesManifestAgentRuntimePodEgressIsBounded(t *testing.T) {
 
 	requireContains(t, networkPolicy, "policyTypes:\n    - Ingress\n    - Egress")
 	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
-	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
-	requireNetworkPolicyEgressEdge(t, networkPolicy, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
-	requireNetworkPolicyEgressEdge(t, networkPolicy, 9092, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
+	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "provider-gateway"})
+	requireNetworkPolicyEgressEdge(t, networkPolicy, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "mcp-connector"})
+	requireNetworkPolicyEgressEdge(t, networkPolicy, 9092, networkPolicyPeer{namespace: "tetral-system", podName: "web-connector"})
 	requireNetworkPolicyEgressIPBlock(t, networkPolicy, 443, "10.96.0.1/32")
 	requireNoBroadNetworkPolicyEgressPeers(t, networkPolicy, 9090)
 	requireNoBroadNetworkPolicyEgressPeers(t, networkPolicy, 9091)
@@ -1901,254 +1745,10 @@ func TestKubernetesManifestAgentRuntimeBuildArtifactMapping(t *testing.T) {
 	}
 }
 
-func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
-	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "gateway.yaml", "Deployment", "gateway")
-	service := requireDocument(t, documents, "gateway.yaml", "Service", "gateway")
-	networkPolicy := requireDocument(t, documents, "gateway.yaml", "NetworkPolicy", "gateway")
-	mcpConnector := requireDeploymentContainerBlock(t, deployment, "mcp-connector")
-
-	for envName, want := range map[string]string{ // #nosec G101 -- Kubernetes fixture env values, not credentials.
-		"TETRAL_PROVIDER_GATEWAY_HTTP_ADDR":           "0.0.0.0:8080",
-		"TETRAL_PROVIDER_GATEWAY_GRPC_ADDR":           "0.0.0.0:9090",
-		"TETRAL_MCP_CONNECTOR_GRPC_ADDR":              "0.0.0.0:9091",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT":               "local",
-		"TETRAL_SERVICE_VERSION":                      "dev",
-		"TETRAL_INTERNAL_GRPC_AUDIENCE":               "tetral-internal-grpc",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS":    "tetral-agent-runtime/agent-runtime",
-		"TETRAL_BRIDGE_API_GRPC_ADDR":                 "bridge.tetral-system.svc.cluster.local:9090",
-		"TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH":   "/var/run/secrets/tetral-internal-grpc/bridge/token",
-		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH": "/var/run/secrets/tetral-kubernetes-api/gateway-tokenreview/token",
-		"KUBERNETES_API_SERVER_URL":                   "https://kubernetes.default.svc",
-		"KUBERNETES_API_CA_CERT_PATH":                 "/var/run/secrets/tetral-kubernetes-api/ca.crt",
-	} {
-		if actual := requireDeploymentEnvValue(t, deployment, envName); actual != want {
-			t.Fatalf("%s value = %q; want %q", envName, actual, want)
-		}
-	}
-	requireContains(t, deployment, "name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY")
-	requireContains(t, deployment, "name: runtime-binding-token")
-	requireContains(t, deployment, "key: hmac-key")
-	requireContains(t, deployment, "name: TETRAL_DATABASE_URL")
-	requireContains(t, deployment, "name: tetral-database")
-	requireContains(t, deployment, "key: gateway-url")
-	requireContains(t, deployment, "name: ENGINE_VAULT_KEY")
-	requireContains(t, deployment, "name: api-secrets")
-	requireContains(t, deployment, "key: engine-vault-key")
-	for _, required := range []string{
-		"name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS\n              value: tetral-agent-runtime/agent-runtime",
-		"name: TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS\n              value: tetral-system/bridge",
-		"name: TETRAL_BRIDGE_API_GRPC_ADDR\n              value: bridge.tetral-system.svc.cluster.local:9090",
-		"name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/bridge/token",
-		"name: TETRAL_DATABASE_URL",
-		"name: ENGINE_VAULT_KEY",
-		"name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/bridge",
-	} {
-		if !manifestTextContains(mcpConnector, required) {
-			t.Fatalf("mcp-connector container missing %q", required)
-		}
-	}
-	requireContains(t, deployment, "automountServiceAccountToken: false")
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		volume:            "gateway-kubernetes-api",
-		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
-		filePath:          "gateway-tokenreview/token",
-		audienceMode:      projectedTokenNoAudience,
-		expirationSeconds: 600,
-	})
-	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH",
-		volume:            "gateway-bridge-token",
-		mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge",
-		filePath:          "token",
-		audienceMode:      projectedTokenWithAudience,
-		audience:          "tetral-internal-grpc",
-		expirationSeconds: 600,
-	})
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH",
-		volume:            "gateway-bridge-token",
-		mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge",
-		filePath:          "token",
-		audienceMode:      projectedTokenWithAudience,
-		audience:          "tetral-internal-grpc",
-		expirationSeconds: 600,
-	})
-	if reviewer := requireDeploymentEnvValue(t, deployment, "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH"); reviewer == "/var/run/secrets/kubernetes.io/serviceaccount/token" {
-		t.Fatalf("Gateway reviewer token path uses default service-account token path %q", reviewer)
-	}
-	for _, forbidden := range []string{
-		"OPENAI",
-		"ANTHROPIC",
-		"PROVIDER_API_KEY",
-		"provider_api_key",
-		"session_events",
-		"session_messages",
-	} {
-		requireNotContains(t, deployment, forbidden)
-		requireNotContains(t, service, forbidden)
-		requireNotContains(t, networkPolicy, forbidden)
-	}
-	configSource, err := os.ReadFile(filepath.Join("..", "..", "services", "gateway", "packages", "provider-gateway", "src", "config.ts"))
-	if err != nil {
-		t.Fatalf("read gateway config source: %v", err)
-	}
-	for _, envName := range []string{
-		"TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
-		"TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT",
-		"TETRAL_SERVICE_VERSION",
-		"TETRAL_DATABASE_URL",
-		"ENGINE_VAULT_KEY",
-		"TETRAL_INTERNAL_GRPC_AUDIENCE",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
-		"TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
-		"TETRAL_BRIDGE_API_GRPC_ADDR",
-		"TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH",
-		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		"KUBERNETES_API_SERVER_URL",
-		"KUBERNETES_API_CA_CERT_PATH",
-	} {
-		if !strings.Contains(string(configSource), envName) {
-			t.Fatalf("gateway config source does not contain manifest env %s", envName)
-		}
-	}
-	mcpConfigSource, err := os.ReadFile(filepath.Join("..", "..", "services", "gateway", "packages", "mcp-connector", "src", "config.ts"))
-	if err != nil {
-		t.Fatalf("read mcp connector config source: %v", err)
-	}
-	for _, envName := range []string{
-		"TETRAL_MCP_CONNECTOR_GRPC_ADDR",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT",
-		"TETRAL_SERVICE_VERSION",
-		"TETRAL_INTERNAL_GRPC_AUDIENCE",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
-		"TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS",
-		"TETRAL_BRIDGE_API_GRPC_ADDR",
-		"TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH",
-		"TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
-		"TETRAL_DATABASE_URL",
-		"ENGINE_VAULT_KEY",
-		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		"KUBERNETES_API_SERVER_URL",
-		"KUBERNETES_API_CA_CERT_PATH",
-	} {
-		if !strings.Contains(string(mcpConfigSource), envName) {
-			t.Fatalf("mcp connector config source does not contain manifest env %s", envName)
-		}
-	}
-	configMap := requireDocument(t, documents, "gateway.yaml", "ConfigMap", "gateway-config")
-	searchEndpoint := requireConfigMapDataValue(t, documents, "gateway.yaml", "gateway-config", "TETRAL_WEB_SEARCH_ENDPOINT")
-	readerEndpoint := requireConfigMapDataValue(t, documents, "gateway.yaml", "gateway-config", "TETRAL_WEB_READER_ENDPOINT")
-	cacheEndpoint := requireConfigMapDataValue(t, documents, "gateway.yaml", "gateway-config", "TETRAL_BLOB_ENDPOINT")
-	if searchEndpoint != "https://s.jina.ai/" || readerEndpoint != "https://r.jina.ai/" || cacheEndpoint != "https://blob.example.internal" {
-		t.Fatalf("gateway Web endpoints = search %q reader %q cache %q", searchEndpoint, readerEndpoint, cacheEndpoint)
-	}
-	requireNotContains(t, configMap, "WEB_DOC_TTL_DAYS")
-	requireNotContains(t, configMap, "TETRAL_WEB_API_KEYS")
-	requireNotContains(t, configMap, "TETRAL_BLOB_ACCESS_KEY")
-	requireNotContains(t, configMap, "TETRAL_BLOB_SECRET_KEY")
-
-	webContainer := requireDeploymentContainerBlock(t, deployment, "web-connector")
-	for _, required := range []string{
-		"image: ghcr.io/tetral-ai/tetral:0.0.0-dev",
-		"command:\n            - /usr/local/bin/web-connector",
-		"name: TETRAL_WEB_CONNECTOR_GRPC_ADDR\n              value: 0.0.0.0:9092",
-		"name: TETRAL_WEB_CONNECTOR_METRICS_ADDR\n              value: 0.0.0.0:9464",
-		"name: TETRAL_WEB_API_KEYS",
-		"name: gateway-web-keypool",
-		"name: gateway-web-blob",
-		"# Provision this external bucket with an enabled expire-web-cache\n            # lifecycle rule that expires objects after seven days.\n            - name: TETRAL_BLOB_BUCKET",
-		"name: web-grpc\n              containerPort: 9092",
-		"name: web-metrics\n              containerPort: 9464",
-		"path: /health\n              port: web-metrics",
-		"path: /ready\n              port: web-metrics",
-	} {
-		if !manifestTextContains(webContainer, required) {
-			t.Fatalf("web-connector container missing %q", required)
-		}
-	}
-	for _, envName := range []string{"TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_REGION", "TETRAL_BLOB_BUCKET", "TETRAL_BLOB_ACCESS_KEY", "TETRAL_BLOB_SECRET_KEY"} {
-		exact := "name: " + envName + "\n              valueFrom:\n                secretKeyRef:\n                  name: gateway-web-blob\n                  key: " + envName
-		if !manifestTextContains(webContainer, exact) {
-			t.Fatalf("web-connector blob setting %s is not sourced from the matching Web-only Secret key", envName)
-		}
-		if strings.Contains(webContainer, "name: "+envName+"\n              valueFrom:\n                configMapKeyRef:") {
-			t.Fatalf("web-connector blob setting %s bypasses the Web-only blob Secret", envName)
-		}
-	}
-	for _, sibling := range []string{
-		requireDeploymentContainerBlock(t, deployment, "provider-gateway"),
-		requireDeploymentContainerBlock(t, deployment, "mcp-connector"),
-	} {
-		for _, forbidden := range []string{"gateway-web-keypool", "gateway-web-blob", "TETRAL_WEB_API_KEYS", "TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_REGION", "TETRAL_BLOB_BUCKET", "TETRAL_BLOB_ACCESS_KEY", "TETRAL_BLOB_SECRET_KEY"} {
-			if strings.Contains(sibling, forbidden) {
-				t.Fatalf("Gateway sibling container received Web-only secret %s", forbidden)
-			}
-		}
-	}
-	requireContains(t, service, "name: web-grpc\n      port: 9092\n      targetPort: web-grpc")
-	requireContains(t, service, "name: web-metrics\n      port: 9464\n      targetPort: web-metrics")
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9090)
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9091, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9092, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
-	requireNetworkPolicyIngressEdge(t, networkPolicy, 9464, networkPolicyPeer{namespace: "tetral-system", podPartOf: "tetral"})
-	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
-	requireNoBroadNetworkPolicyEgressPeers(t, networkPolicy, 9090)
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9091)
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9092)
-	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9464)
-	webEndpoints := []string{searchEndpoint, readerEndpoint, cacheEndpoint}
-	expectedHosts := []string{"api.anthropic.com", "api.openai.com", "auth.openai.com", "chatgpt.com", "api.deepseek.com", "api.kimi.com", "api.z.ai", "api.githubcopilot.com"}
-	for _, endpoint := range webEndpoints {
-		parsed, err := url.Parse(endpoint)
-		if err != nil || parsed.Hostname() == "" {
-			t.Fatalf("parse configured Web endpoint %q: %v", endpoint, err)
-		}
-		expectedHosts = append(expectedHosts, parsed.Hostname())
-	}
-	actualHosts := requireNetworkPolicyEgressIntentHosts(t, networkPolicy)
-	sort.Strings(expectedHosts)
-	sort.Strings(actualHosts)
-	if !reflect.DeepEqual(actualHosts, expectedHosts) {
-		t.Fatalf("gateway egress intent hosts = %v; want configured host set %v", actualHosts, expectedHosts)
-	}
-	requireGatewayRuntimeNetworkPolicyEdgesArePaired(
-		t,
-		service,
-		networkPolicy,
-		requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime"),
-	)
-
-	serviceLocalGatewayService := readServiceLocalManifestDocument(t, "gateway", "service.yaml")
-	serviceLocalGatewayPolicy := readServiceLocalManifestDocument(t, "gateway", "networkpolicy.yaml")
-	serviceLocalRuntimePolicy := readServiceLocalManifestDocument(t, "agent-runtime", "networkpolicy.yaml")
-	requireGatewayRuntimeNetworkPolicyEdgesArePaired(t, serviceLocalGatewayService, serviceLocalGatewayPolicy, serviceLocalRuntimePolicy)
-
-	hpa := requireDocument(t, documents, "gateway.yaml", "HorizontalPodAutoscaler", "gateway")
-	requireContains(t, hpa, "apiVersion: autoscaling/v2")
-	requireContains(t, hpa, "scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: gateway")
-	requireContains(t, hpa, "minReplicas: 2")
-	requireContains(t, hpa, "maxReplicas: 10")
-	requireContains(t, hpa, `tetral.ai/hpa-metric-source: "resource: cpu"`)
-	requireContains(t, hpa, "type: Resource")
-	requireContains(t, hpa, "name: cpu")
-	requireContains(t, hpa, "type: Utilization")
-	requireContains(t, hpa, "averageUtilization: 70")
-	requireNotContains(t, hpa, "type: Pods")
-	requireNotContains(t, hpa, "concurrent")
-	requireNotContains(t, hpa, "averageValue:")
-}
-
 func TestKubernetesManifestGatewayRuntimePolicyGuardRejectsProtocolMismatch(t *testing.T) {
 	documents := readManifestDocuments(t)
-	service := requireDocument(t, documents, "gateway.yaml", "Service", "gateway")
-	gateway := requireDocument(t, documents, "gateway.yaml", "NetworkPolicy", "gateway")
+	service := requireDocument(t, documents, "web-connector.yaml", "Service", "web-connector")
+	gateway := requireDocument(t, documents, "web-connector.yaml", "NetworkPolicy", "web-connector")
 	runtime := *requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime")
 	runtime.text = strings.Replace(
 		runtime.text,
@@ -2166,7 +1766,7 @@ func TestKubernetesManifestGatewayRuntimePolicyGuardRejectsProtocolMismatch(t *t
 
 func TestKubernetesManifestGatewayServiceBuildArtifactMapping(t *testing.T) {
 	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "gateway.yaml", "Deployment", "gateway")
+	deployment := requireDocument(t, documents, "provider-gateway.yaml", "Deployment", "provider-gateway")
 	metadata := readProviderGatewayPackageMetadata(t)
 	dockerfile := readProviderGatewayDockerfile(t)
 
@@ -2217,7 +1817,9 @@ func TestKubernetesManifestGatewayServiceBuildArtifactMapping(t *testing.T) {
 	requireContains(t, deployment, "runAsUser: 1000")
 	requireContains(t, deployment, "runAsGroup: 1000")
 	requireContains(t, deployment, "command:\n            - bun\n            - /app/"+metadata.Tetral.ProviderGateway.BuildArtifact)
-	requireContains(t, deployment, "command:\n            - bun\n            - /app/"+metadata.Tetral.MCPConnector.BuildArtifact)
+	mcp := requireDocument(t, documents, "mcp-connector.yaml", "Deployment", "mcp-connector")
+	requireDeploymentContainerImage(t, mcp, metadata.Tetral.MCPConnector.Image)
+	requireContains(t, mcp, "command:\n            - bun\n            - /app/"+metadata.Tetral.MCPConnector.BuildArtifact)
 }
 
 func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testing.T) {
@@ -2235,8 +1837,8 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 		})
 		requireContains(t, deployment, "automountServiceAccountToken: false")
 	})
-	t.Run("bridge", func(t *testing.T) {
-		deployment := requireDocument(t, documents, "bridge.yaml", "Deployment", "bridge")
+	t.Run("job-runner", func(t *testing.T) {
+		deployment := requireDocument(t, documents, "job-runner.yaml", "Deployment", "job-runner")
 		requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
 			envName:           "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH",
 			volume:            "bridge-runtime-pod-token",
@@ -2248,8 +1850,8 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 		})
 		requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
 			envName:           "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH",
-			volume:            "bridge-job-runner-gateway-token",
-			mountPath:         "/var/run/secrets/tetral-internal-grpc/gateway",
+			volume:            "job-runner-mcp-token",
+			mountPath:         "/var/run/secrets/tetral-internal-grpc/mcp-connector",
 			filePath:          "token",
 			audienceMode:      projectedTokenWithAudience,
 			audience:          "tetral-internal-grpc",
@@ -2315,14 +1917,15 @@ func TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests(t *tes
 }
 
 func TestKubernetesManifestGatewayServiceIsComposedFromServiceLocalManifests(t *testing.T) {
-	requireServiceLocalManifestComposition(t, "gateway", "gateway.yaml", []string{
-		"configmap.yaml",
-		"serviceaccount.yaml",
-		"deployment.yaml",
-		"service.yaml",
-		"networkpolicy.yaml",
-		"hpa.yaml",
-	})
+	for _, n := range []string{"provider-gateway", "mcp-connector"} {
+		files := []string{n + "/serviceaccount.yaml", n + "/deployment.yaml", n + "/service.yaml", n + "/networkpolicy.yaml"}
+		if n == "provider-gateway" {
+			files = append(files, n+"/hpa.yaml")
+		}
+		requireServiceLocalManifestComposition(t, "gateway", n+".yaml", files)
+	}
+	requireServiceLocalManifestComposition(t, "job-runner", "job-runner.yaml", []string{"serviceaccount.yaml", "deployment.yaml", "service.yaml", "networkpolicy.yaml"})
+	requireServiceLocalManifestComposition(t, "web-connector", "web-connector.yaml", []string{"configmap.yaml", "serviceaccount.yaml", "deployment.yaml", "service.yaml", "networkpolicy.yaml"})
 }
 
 func TestKubernetesManifestGitProxyIsComposedFromServiceLocalManifests(t *testing.T) {
@@ -2361,7 +1964,7 @@ func TestKubernetesManifestBridgeServiceIsComposedFromServiceLocalManifests(t *t
 }
 
 func TestKubernetesManifestBridgeRBACIsComposedFromServiceLocalManifests(t *testing.T) {
-	requireServiceLocalManifestComposition(t, "bridge", "bridge-rbac.yaml", []string{
+	requireServiceLocalManifestComposition(t, "job-runner", "job-runner-rbac.yaml", []string{
 		"rbac.yaml",
 	})
 }
@@ -2397,7 +2000,9 @@ func TestKubernetesManifestInternalGRPCTokenReviewRBACIsComposedFromServiceLocal
 	requireManifestComposition(t, "internal-grpc-tokenreview-rbac.yaml", []string{
 		filepath.Join("..", "..", "services", "agent-runtime", "k8s", "tokenreview-rbac.yaml"),
 		filepath.Join("..", "..", "services", "bridge", "k8s", "tokenreview-rbac.yaml"),
-		filepath.Join("..", "..", "services", "gateway", "k8s", "tokenreview-rbac.yaml"),
+		filepath.Join("..", "..", "services", "gateway", "k8s", "provider-gateway", "tokenreview-rbac.yaml"),
+		filepath.Join("..", "..", "services", "gateway", "k8s", "mcp-connector", "tokenreview-rbac.yaml"),
+		filepath.Join("..", "..", "services", "web-connector", "k8s", "tokenreview-rbac.yaml"),
 	})
 }
 
@@ -2434,24 +2039,26 @@ func internalGRPCTokenReviewGrants() []tokenReviewGrant {
 	return []tokenReviewGrant{
 		{name: "agent-runtime-tokenreview", serviceAccountName: "agent-runtime", serviceAccountNamespace: "tetral-agent-runtime"},
 		{name: "bridge-tokenreview", serviceAccountName: "bridge", serviceAccountNamespace: "tetral-system"},
-		{name: "gateway-tokenreview", serviceAccountName: "gateway", serviceAccountNamespace: "tetral-system"},
+		{name: "provider-gateway-tokenreview", serviceAccountName: "provider-gateway", serviceAccountNamespace: "tetral-system"},
+		{name: "mcp-connector-tokenreview", serviceAccountName: "mcp-connector", serviceAccountNamespace: "tetral-system"},
+		{name: "web-connector-tokenreview", serviceAccountName: "web-connector", serviceAccountNamespace: "tetral-system"},
 	}
 }
 
 func TestKubernetesManifestRBACPermissionsAreExact(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeRole := requireDocument(t, documents, "bridge-rbac.yaml", "Role", "bridge-visibility")
-	bridgeBinding := requireDocument(t, documents, "bridge-rbac.yaml", "RoleBinding", "bridge-visibility")
+	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
+	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
 	requireExactRBACRules(t, bridgeRole, []rbacRule{
 		{apiGroups: []string{""}, resources: []string{"pods"}, verbs: []string{"get", "list", "watch"}},
 		{apiGroups: []string{"discovery.k8s.io"}, resources: []string{"endpointslices"}, verbs: []string{"get", "list", "watch"}},
 	})
-	requireExactRBACSubjects(t, bridgeBinding, []rbacSubject{{kind: "ServiceAccount", name: "bridge", namespace: "tetral-system"}})
+	requireExactRBACSubjects(t, bridgeBinding, []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}})
 	requireExactRBACRoleRef(t, bridgeBinding, rbacRoleRef{
 		apiGroup: "rbac.authorization.k8s.io",
 		kind:     "Role",
-		name:     "bridge-visibility",
+		name:     "job-runner-visibility",
 	})
 
 	allowedClusterRBAC := map[string]bool{}
@@ -2483,7 +2090,7 @@ func TestKubernetesManifestRBACPermissionsAreExact(t *testing.T) {
 
 func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeBinding := requireDocument(t, documents, "bridge-rbac.yaml", "RoleBinding", "bridge-visibility")
+	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
 	tests := []struct {
 		name     string
@@ -2495,7 +2102,7 @@ func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 			name:     "bridge extra subject",
 			document: bridgeBinding,
 			extra:    "\n  - kind: ServiceAccount\n    name: api\n    namespace: tetral-system",
-			expected: []rbacSubject{{kind: "ServiceAccount", name: "bridge", namespace: "tetral-system"}},
+			expected: []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}},
 		},
 	}
 	for _, grant := range internalGRPCTokenReviewGrants() {
@@ -2524,7 +2131,7 @@ func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 
 func TestKubernetesManifestRBACRulesRejectExtraPermissions(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeRole := requireDocument(t, documents, "bridge-rbac.yaml", "Role", "bridge-visibility")
+	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
 	tokenReviewRole := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRole", internalGRPCTokenReviewGrants()[0].name)
 
 	tests := []struct {
@@ -2588,13 +2195,16 @@ var retiredAgentRuntimeLabel = "app.kubernetes.io/" + "compone" + "nt" + ": " + 
 func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, workload := range workloadManifests {
+		if isSeparatedWorkload(workload.name) {
+			continue
+		}
 		networkPolicy := requireDocument(t, documents, workload.file, "NetworkPolicy", workload.name)
 		if workload.internalGRPC {
 			requireContains(t, networkPolicy, "port: 9090")
 			if workload.name == "queue" {
 				for _, port := range []int{8080, 9090} {
 					requireNetworkPolicyIngressEdge(t, networkPolicy, port, networkPolicyPeer{namespace: "tetral-system", podName: "api"})
-					requireNetworkPolicyIngressEdge(t, networkPolicy, port, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
+					requireNetworkPolicyIngressEdge(t, networkPolicy, port, networkPolicyPeer{namespace: "tetral-system", podName: "job-runner"})
 					requireNetworkPolicyIngressEdge(t, networkPolicy, port, networkPolicyPeer{namespace: "tetral-system", podName: "sandbox"})
 					requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, port)
 				}
@@ -2605,7 +2215,7 @@ func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 				continue
 			}
 			if workload.name == "agent-runtime" {
-				requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
+				requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "job-runner"})
 				requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9090)
 				for _, forbiddenSource := range []string{"api", "event-stream"} {
 					requireNotContains(t, networkPolicy, "app.kubernetes.io/name: "+forbiddenSource)
@@ -2669,24 +2279,25 @@ func TestKubernetesManifestAgentRuntimeNamespaceIsConsistent(t *testing.T) {
 	documents := readManifestDocuments(t)
 
 	bridgeDeployment := requireDocument(t, documents, "bridge.yaml", "Deployment", "bridge")
-	watchNamespace := requireDeploymentEnvValue(t, bridgeDeployment, "TETRAL_KUBERNETES_NAMESPACE")
+	runner := requireDocument(t, documents, "job-runner.yaml", "Deployment", "job-runner")
+	watchNamespace := requireDeploymentEnvValue(t, runner, "TETRAL_KUBERNETES_NAMESPACE")
 
 	runtimeServiceAccount := requireDocument(t, documents, "agent-runtime.yaml", "ServiceAccount", "agent-runtime")
-	gatewayDeployment := requireDocument(t, documents, "gateway.yaml", "Deployment", "gateway")
+	gatewayDeployment := requireDocument(t, documents, "provider-gateway.yaml", "Deployment", "provider-gateway")
 	runtimeNamespace := requireMetadataNamespace(t, runtimeServiceAccount)
 	bridgeAllowedServiceAccounts := requireDeploymentEnvValue(t, bridgeDeployment, "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS")
 	bridgeServiceAccountNamespace := serviceAccountNamespaceFromAllowlist(t, bridgeAllowedServiceAccounts, "tetral-agent-runtime/agent-runtime")
-	requireServiceAccountAllowlistContains(t, bridgeAllowedServiceAccounts, "tetral-system/bridge")
-	requireServiceAccountAllowlistContains(t, bridgeAllowedServiceAccounts, "tetral-system/gateway")
+	requireServiceAccountAllowlistContains(t, bridgeAllowedServiceAccounts, "tetral-system/provider-gateway")
+	requireServiceAccountAllowlistContains(t, bridgeAllowedServiceAccounts, "tetral-system/mcp-connector")
 	gatewayServiceAccountNamespace := serviceAccountNamespace(t, requireDeploymentEnvValue(t, gatewayDeployment, "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS"))
 
 	bridgePolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
-	gatewayPolicy := requireDocument(t, documents, "gateway.yaml", "NetworkPolicy", "gateway")
+	gatewayPolicy := requireDocument(t, documents, "provider-gateway.yaml", "NetworkPolicy", "provider-gateway")
 	bridgePeerNamespace := requireSelectorValue(t, bridgePolicy, "kubernetes.io/metadata.name")
 	gatewayPeerNamespace := requireSelectorValue(t, gatewayPolicy, "kubernetes.io/metadata.name")
 
-	bridgeRole := requireDocument(t, documents, "bridge-rbac.yaml", "Role", "bridge-visibility")
-	bridgeBinding := requireDocument(t, documents, "bridge-rbac.yaml", "RoleBinding", "bridge-visibility")
+	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
+	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 	roleNamespace := requireMetadataNamespace(t, bridgeRole)
 	bindingNamespace := requireMetadataNamespace(t, bridgeBinding)
 
@@ -2741,13 +2352,13 @@ func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.
 	// Read the RBAC side from subjects[].namespace, NOT metadata.namespace: the Bridge
 	// RoleBinding's metadata namespace is the watched Runtime namespace, while its subject
 	// lives in tetral-system.
-	bridgeBinding := requireDocument(t, documents, "bridge-rbac.yaml", "RoleBinding", "bridge-visibility")
+	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
 	bridgeSubjects, err := parseRBACSubjects(bridgeBinding.text)
 	if err != nil {
 		t.Fatalf("%s %s/%s parse subjects: %v", bridgeBinding.file, bridgeBinding.kind, bridgeBinding.name, err)
 	}
-	requireSubjectNamespaces(t, bridgeBinding, bridgeSubjects, map[string]string{"bridge": "tetral-system"})
+	requireSubjectNamespaces(t, bridgeBinding, bridgeSubjects, map[string]string{"job-runner": "tetral-system"})
 
 	for _, grant := range internalGRPCTokenReviewGrants() {
 		tokenReviewBinding := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRoleBinding", grant.name)
@@ -2767,12 +2378,12 @@ func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.
 func TestKubernetesManifestAgentRuntimeLabelSelectorIsConsistent(t *testing.T) {
 	documents := readManifestDocuments(t)
 
-	bridgeDeployment := requireDocument(t, documents, "bridge.yaml", "Deployment", "bridge")
+	bridgeDeployment := requireDocument(t, documents, "job-runner.yaml", "Deployment", "job-runner")
 	envKey, envValue := splitLabelSelector(t, requireDeploymentEnvValue(t, bridgeDeployment, "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR"))
 
 	runtimeDeployment := requireDocument(t, documents, "agent-runtime.yaml", "Deployment", "agent-runtime")
-	bridgePolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
-	gatewayPolicy := requireDocument(t, documents, "gateway.yaml", "NetworkPolicy", "gateway")
+	bridgePolicy := requireDocument(t, documents, "job-runner.yaml", "NetworkPolicy", "job-runner")
+	gatewayPolicy := requireDocument(t, documents, "provider-gateway.yaml", "NetworkPolicy", "provider-gateway")
 	runtimeKey, runtimeValue := requireDeploymentPodLabel(t, runtimeDeployment, "app.kubernetes.io/name")
 	bridgePeerKey, bridgePeerValue := peerPodSelectorLabel(t, bridgePolicy)
 	gatewayPeerKey, gatewayPeerValue := peerPodSelectorLabel(t, gatewayPolicy)
@@ -3042,16 +2653,9 @@ func requireNetworkPolicyEgressEdge(t *testing.T, document *manifestDocument, po
 	t.Fatalf("%s %s/%s missing egress edge %s/%s/%s on port %d", document.file, document.kind, document.name, peer.namespace, peer.podName, peer.podPartOf, port)
 }
 
-func requireGatewayRuntimeNetworkPolicyEdgesArePaired(t *testing.T, service *manifestDocument, gateway *manifestDocument, runtime *manifestDocument) {
-	t.Helper()
-	if err := validateGatewayRuntimeNetworkPolicyEdgesArePaired(t, service, gateway, runtime); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func validateGatewayRuntimeNetworkPolicyEdgesArePaired(t *testing.T, service *manifestDocument, gateway *manifestDocument, runtime *manifestDocument) error {
 	t.Helper()
-	gatewayPeer := networkPolicyPeer{namespace: "tetral-system", podName: "gateway"}
+	gatewayPeer := networkPolicyPeer{namespace: "tetral-system", podName: gateway.name}
 	runtimePeer := networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"}
 	ingressTransports := networkPolicyTransportsForPeer(t, parseNetworkPolicyIngressRules(t, gateway), runtimePeer)
 	egressTransports := networkPolicyTransportsForPeer(t, parseNetworkPolicyEgressRules(t, runtime), gatewayPeer)
@@ -3145,22 +2749,6 @@ func requireNetworkPolicyEgressIPBlock(t *testing.T, document *manifestDocument,
 		return
 	}
 	t.Fatalf("%s %s/%s missing egress ipBlock %s on port %d", document.file, document.kind, document.name, cidr, port)
-}
-
-func readServiceLocalManifestDocument(t *testing.T, service string, filename string) *manifestDocument {
-	t.Helper()
-	path := filepath.Join("..", "..", "services", service, "k8s", filename)
-	body, err := os.ReadFile(path) //nolint:gosec // repository-local manifest path.
-	if err != nil {
-		t.Fatalf("read service-local manifest %s: %v", path, err)
-	}
-	text := strings.TrimSpace(string(body))
-	return &manifestDocument{
-		file: path,
-		kind: requireScalar(t, path, text, "kind"),
-		name: requireMetadataName(t, path, text),
-		text: text,
-	}
 }
 
 func networkPolicyHasEgressIPBlock(t *testing.T, document *manifestDocument, port int, cidr string) bool {
@@ -4065,9 +3653,12 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 	expectedFiles := []string{
 		"agent-runtime.yaml",
 		"bridge.yaml",
-		"bridge-rbac.yaml",
+		"job-runner-rbac.yaml",
 		"event-stream.yaml",
-		"gateway.yaml",
+		"provider-gateway.yaml",
+		"mcp-connector.yaml",
+		"web-connector.yaml",
+		"job-runner.yaml",
 		"internal-grpc-tokenreview-rbac.yaml",
 		"auth.yaml",
 		"api.yaml",

@@ -49,6 +49,7 @@ func TestRunGRPCWorkloadMetricsIncludeDatabaseStats(t *testing.T) {
 				"go_goroutines",
 				"grpc_request_duration_seconds",
 				`db_pool_open_connections{pool="runtime"} 4`,
+				"tetral_diagnostic_sink_failures_total 0",
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("/metrics body missing %q:\n%s", want, body)

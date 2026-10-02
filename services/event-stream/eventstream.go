@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -98,7 +97,7 @@ func newOptions(opts ...Option) *options {
 		option(options)
 	}
 	if options.logger == nil {
-		options.logger = defaultLogger(os.Stderr)
+		options.logger = workload.ComponentLogger("event-stream")
 	}
 	return options
 }

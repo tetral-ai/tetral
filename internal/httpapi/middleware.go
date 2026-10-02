@@ -103,7 +103,11 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 					slog.String("error.message_safe", "HTTP request failed"),
 				)
 			}
-			logger.Info("http.request", attrs...)
+			if tracker.status >= http.StatusInternalServerError {
+				logger.Error("http.request", attrs...)
+			} else {
+				logger.Info("http.request", attrs...)
+			}
 		})
 	}
 }

@@ -14,3 +14,13 @@ Before applying updated workloads, complete the separate database preparation
 step described in the [upgrade procedure](../helm/tetral/README.md#upgrade-and-rollback).
 Every serving process verifies readiness; applying API first no longer migrates
 the database. The former `rollout-schema-ordered.sh` is removed for that reason.
+
+Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector are
+independent workloads with separate ServiceAccounts and access grants. Their
+source-owned fragments live under their service `k8s/` directories; the Gateway
+workspace holds `k8s/provider-gateway/` and `k8s/mcp-connector/`. The aggregate
+files here compose those fragments exactly. `job-runner-rbac.yaml` grants only
+Runner Runtime visibility. TokenReview bindings cover receiving workloads only.
+The obsolete combined `gateway.yaml` and Bridge visibility role are removed.
+See the [workload replica and access contract](../helm/tetral/README.md#independent-workload-replicas-and-access)
+for default replicas, Provider autoscaling and credential audience separation.

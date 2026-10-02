@@ -17,6 +17,9 @@ import type {
 	RuntimeTerminalSettlementObservation,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type {
+	DiagnosticConfig,
+	ProcessFailurePhase,
+	TetralDiagnosticLogger,
 	TetralJsonLogger,
 	TetralLogRecord,
 } from "@tetral/ts-observability";
@@ -60,7 +63,7 @@ export type RuntimeContextLoadParseReason =
 	| "invalid_pending_attachments_shape"
 	| "invalid_pending_agent_mail_shape";
 
-/** Closed diagnostic phases for the authenticated Bridge-to-Runtime ingress. */
+/** Closed diagnostic phases for the authenticated Job Runner-to-Runtime ingress. */
 export type RuntimeIngressRejectionPhase =
 	| "authentication"
 	| "lifecycle"
@@ -110,7 +113,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
 	readonly "mcp.tool_catalog.eligible"?: boolean;
 	readonly "reconstruction.phase"?: "cold_checkpoint";
 	readonly "failure.kind"?: "invalid_durable_facts";
-	readonly phase?: RuntimeContextLoadParsePhase | RuntimeIngressRejectionPhase;
+	readonly phase?: RuntimeContextLoadParsePhase | RuntimeIngressRejectionPhase | ProcessFailurePhase;
 	readonly reason?:
 		| RuntimeContextLoadParseReason
 		| RuntimeIngressRejectionReason;
@@ -180,7 +183,9 @@ export function recordContextLoadParseFailure(
 
 /** Configures the JSON sink and optional service resource attributes for Runtime Pod logs. */
 export interface JsonLoggerOptions {
-	readonly write: (line: string) => void;
+	readonly write: (line: string) => unknown;
+  readonly sinkFailures?: (() => number) | undefined;
+	readonly diagnostics?: DiagnosticConfig;
 	readonly serviceName?: string;
 	readonly deploymentEnvironment?: string;
 	readonly serviceVersion?: string;
@@ -188,9 +193,11 @@ export interface JsonLoggerOptions {
 }
 
 /** Creates a Runtime Pod JSON logger backed by the shared observability serializer. */
-export function createJsonLogger(options: JsonLoggerOptions): RuntimePodLogger {
+export function createJsonLogger(options: JsonLoggerOptions): TetralDiagnosticLogger<RuntimePodLogRecord> {
 	return createTetralJsonLogger<RuntimePodLogRecord>({
 		write: options.write,
+    sinkFailures: options.sinkFailures,
+		diagnostics: options.diagnostics,
 		serviceName: options.serviceName ?? "agent-runtime",
 		deploymentEnvironment: options.deploymentEnvironment,
 		serviceVersion: options.serviceVersion,

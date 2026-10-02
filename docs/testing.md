@@ -46,6 +46,15 @@ commit, install frozen dependencies with lifecycle scripts disabled, run
 These source proofs complement the local SDK integration suite; they do not
 establish runtime or database interoperability by themselves.
 
+Bridge, Job Runner and their shared Runtime configuration, MCP manifest and
+durable-control packages form one verification boundary. Affected selection
+includes both Go owners, cross-service integration tests and Runtime/Gateway
+consumers; Go imports alone cannot describe their RPC and Bun test dependencies.
+Service-owned `k8s/` changes select deployment evidence, including the raw
+manifest invariants, Helm rendering tests and Helm lint. Unknown ownership
+continues to select Full. Service-owned `proto/` changes also select protocol
+generation and compatibility checks.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.

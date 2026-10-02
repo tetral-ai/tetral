@@ -19,8 +19,8 @@ func TestConfigFromEnvLoadsGitProxyRuntimeSurface(t *testing.T) {
 		EnvDatabaseURL:           "postgres://runtime:secret@postgres/tetral",
 		EnvVaultKey:              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		EnvPublicBaseURL:         "https://git.tetral.example/",
-		EnvDeploymentEnvironment: "test",
-		EnvServiceVersion:        "unit",
+		EnvDeploymentEnvironment: " test ",
+		EnvServiceVersion:        " unit ",
 		EnvDrainGraceSeconds:     "42",
 		EnvLegacyPathCutover:     "true",
 	})

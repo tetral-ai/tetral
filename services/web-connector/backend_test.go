@@ -1,6 +1,7 @@
 package webconnector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,10 +11,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/blob"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func TestJinaBackendUsesClosedHeadersAndCommittedReaderFixture(t *testing.T) {
@@ -498,4 +501,40 @@ func fixtureResponse(t *testing.T, fixture []byte) []byte {
 		t.Fatal(err)
 	}
 	return envelope.Response
+}
+
+func TestJinaBackendUnknownClientErrorCannotPublishRawTaxonomy(t *testing.T) {
+	const sentinel = "PRIVATE_BACKEND_CONTENT_SENTINEL"
+	var logs bytes.Buffer
+	var calls atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte(`{"name":"` + sentinel + `","status":999}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"url":"https://example.com/","content":"safe page","httpStatus":200,"usage":{"tokens":1}}}`))
+	}))
+	t.Cleanup(server.Close)
+	server.Start()
+	backend := NewJinaBackend(server.Client(), server.URL, server.URL, []string{"fixture-key"}, time.Now).WithLogger(workload.NewLogger(&logs, "web-connector", "test", "unit"))
+	_, outcome := backend.Fetch(context.Background(), "https://example.com/")
+	if outcome.Kind != BackendToolError || outcome.Message != "Web backend rejected the request." || calls.Load() != 1 {
+		t.Fatalf("business outcome changed: %+v calls=%d", outcome, calls.Load())
+	}
+	if strings.Contains(logs.String(), sentinel) {
+		t.Fatalf("raw dependency taxonomy reached diagnostic: %s", logs.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["backend.error.name"] != "unknown_client_error" || record["backend.error.status"] != float64(http.StatusTeapot) || record["error.class"] != "backend_error" || record["error.code"] != "unmatched_client_error" || record["error.message_safe"] != "web backend rejected the request" {
+		t.Fatalf("backend classification = %#v", record)
+	}
+	before := logs.Len()
+	_, positive := backend.Fetch(context.Background(), "https://example.com/")
+	if positive.Kind != BackendSuccess || calls.Load() != 2 || logs.Len() != before {
+		t.Fatalf("healthy call/unchanged key policy = %+v calls=%d logs=%s", positive, calls.Load(), logs.String())
+	}
 }

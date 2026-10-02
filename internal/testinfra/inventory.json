@@ -5,6 +5,41 @@
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology",
       "dependencies": ["postgresql", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersRuntimeConfiguration",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersManifestAcceptance",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersTransactionRollback",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersSettlementRecovery",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersCustodyReplay",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLSeparatedOwnersResourceLifecycle",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestSeparatedServiceWorkloadAuthentication",
+      "dependencies": ["postgresql", "bun-workspaces"]
     }
   ],
   "groups": [
@@ -38,7 +73,7 @@
       "kind": "bun-runtime",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["services/agent-runtime/**", "services/gateway/packages/protocol/**", "proto/**"]
+      "paths": ["services/agent-runtime/**", "services/gateway/packages/protocol/**", "internal/ts-observability/**", "proto/**"]
     },
     {
       "id": "gateway",
@@ -46,7 +81,7 @@
       "kind": "bun-gateway",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["services/gateway/**", "proto/**"]
+      "paths": ["services/gateway/**", "internal/ts-observability/**", "internal/ts-dbconnect/**", "proto/**"]
     },
     {
       "id": "protocol",
@@ -54,7 +89,7 @@
       "kind": "protocol",
       "profiles": ["affected", "full"],
       "dependencies": ["sdk"],
-      "paths": ["proto/**", "buf.gen.yaml", "buf.yaml"]
+      "paths": ["proto/**", "services/*/proto/**", "buf.gen.yaml", "buf.yaml"]
     },
     {
       "id": "deployment",
@@ -62,7 +97,7 @@
       "kind": "deployment",
       "profiles": ["affected", "full"],
       "dependencies": [],
-      "paths": ["deploy/**"]
+      "paths": ["deploy/**", "services/*/k8s/**"]
     },
     {
       "id": "sandbox-image",

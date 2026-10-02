@@ -1,9 +1,9 @@
 /**
  * Owns service-account authentication for Runtime Pod internal gRPC boundaries. Outbound Bridge,
  * Gateway, and tool clients call this module to read a mounted token into request metadata, while
- * application command handling calls it to validate inbound Bridge callers through Kubernetes
+ * application command handling calls it to validate inbound Job Runner callers through Kubernetes
  * TokenReview. It requires one bearer credential, the internal audience, a canonical Kubernetes
- * service-account username, an allowed method, and the exact configured Bridge identity; failures
+ * service-account username, an allowed method, and the exact configured Job Runner identity; failures
  * expose only fixed messages and never token contents.
  */
 import { readFile } from "node:fs/promises";
@@ -37,7 +37,7 @@ export interface RuntimeCallerAuthInput {
   readonly metadata: Metadata;
   readonly method: string;
   readonly tokenReviewClient: RuntimeTokenReviewClient;
-  readonly allowedBridge: ServiceAccountIdentity;
+  readonly allowedJobRunner: ServiceAccountIdentity;
 }
 
 /** Abstracts Kubernetes TokenReview so command authentication can fail closed without SDK payloads. */
@@ -94,7 +94,7 @@ export async function buildOutboundBearerMetadata(config: ServiceAccountTokenCon
  *
  * The function asks the injected TokenReview client for the fixed internal audience, accepts only
  * canonical service-account usernames, and permits only the closed Runtime Pod method set for the
- * configured Bridge service account. Missing metadata and verifier failures return a bounded result.
+ * configured Job Runner service account. Missing metadata and verifier failures return a bounded result.
  */
 export async function authenticateRuntimeCaller(input: RuntimeCallerAuthInput): Promise<RuntimeCallerAuthResult> {
   const token = bearerToken(input.metadata);
@@ -116,8 +116,8 @@ export async function authenticateRuntimeCaller(input: RuntimeCallerAuthInput): 
   }
   if (
     !RuntimePodMethods.has(input.method) ||
-    input.allowedBridge.namespace !== serviceAccount.namespace ||
-    input.allowedBridge.name !== serviceAccount.name
+    input.allowedJobRunner.namespace !== serviceAccount.namespace ||
+    input.allowedJobRunner.name !== serviceAccount.name
   ) {
     return { ok: false, code: "PermissionDenied", message: "permission denied" };
   }

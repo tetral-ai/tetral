@@ -3,6 +3,8 @@ package agentruntimebridge
 import (
 	"context"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc"
@@ -55,8 +57,13 @@ type BridgeAPIServer struct {
 	store BridgeAPIStore
 }
 
+// NewBridgeAPIServer binds the independently owned RPC store to its server.
+func NewBridgeAPIServer(store BridgeAPIStore) BridgeAPIServer {
+	return BridgeAPIServer{store: store}
+}
+
 func RegisterBridgeAPI(server *grpc.Server, store BridgeAPIStore) {
-	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, BridgeAPIServer{store: store})
+	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, NewBridgeAPIServer(store))
 }
 
 func (s BridgeAPIServer) requireStore() (BridgeAPIStore, error) {
@@ -88,7 +95,7 @@ func (s BridgeAPIServer) CommitInputs(ctx context.Context, request *bridgev1.Com
 		return nil, err
 	}
 	response, err := store.CommitInputs(ctx, request)
-	if isScopeSupersededError(err) {
+	if runtimecontrol.IsScopeSupersededError(err) {
 		return &bridgev1.CommitInputsResponse{Outcome: &bridgev1.CommitInputsResponse_Stale{Stale: &bridgev1.CommitInputsStale{}}}, nil
 	}
 	return response, err
@@ -100,7 +107,7 @@ func (s BridgeAPIServer) CommitTaskNotificationResult(ctx context.Context, reque
 		return nil, err
 	}
 	response, err := store.CommitTaskNotificationResult(ctx, request)
-	if isScopeSupersededError(err) {
+	if runtimecontrol.IsScopeSupersededError(err) {
 		return &bridgev1.CommitTaskNotificationResultResponse{Outcome: &bridgev1.CommitTaskNotificationResultResponse_Stale{Stale: &bridgev1.CommitTaskNotificationResultStale{}}}, nil
 	}
 	return response, err
@@ -112,7 +119,7 @@ func (s BridgeAPIServer) WriteEvent(ctx context.Context, request *bridgev1.Write
 		return nil, err
 	}
 	response, err := store.WriteEvent(ctx, request)
-	if isScopeSupersededError(err) {
+	if runtimecontrol.IsScopeSupersededError(err) {
 		return &bridgev1.WriteEventResponse{Outcome: &bridgev1.WriteEventResponse_Stale{Stale: &bridgev1.WriteEventStale{}}}, nil
 	}
 	return response, err
@@ -132,7 +139,7 @@ func (s BridgeAPIServer) WriteRequestEnd(ctx context.Context, request *bridgev1.
 		return nil, err
 	}
 	response, err := store.WriteRequestEnd(ctx, request)
-	if isScopeSupersededError(err) {
+	if runtimecontrol.IsScopeSupersededError(err) {
 		return &bridgev1.WriteRequestEndResponse{Outcome: &bridgev1.WriteRequestEndResponse_Stale{Stale: &bridgev1.WriteRequestEndStale{}}}, nil
 	}
 	return response, err
@@ -160,7 +167,7 @@ func (s BridgeAPIServer) FinishIdle(ctx context.Context, request *bridgev1.Finis
 		return nil, err
 	}
 	response, err := store.FinishIdle(ctx, request)
-	if isScopeSupersededError(err) {
+	if runtimecontrol.IsScopeSupersededError(err) {
 		return &bridgev1.FinishIdleResponse{Outcome: &bridgev1.FinishIdleResponse_Stale{Stale: &bridgev1.FinishIdleStale{}}}, nil
 	}
 	return response, err
@@ -188,7 +195,7 @@ func (s BridgeAPIServer) EnsureApprovalReviewerTrunk(ctx context.Context, reques
 		return nil, err
 	}
 	response, err := store.EnsureApprovalReviewerTrunk(ctx, request)
-	if isConversationMutationStaleError(err) {
+	if runtimecontrol.IsConversationMutationStaleError(err) {
 		return &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Stale{
 			Stale: &bridgev1.EnsureApprovalReviewerTrunkStale{},
 		}}, nil
@@ -202,7 +209,7 @@ func (s BridgeAPIServer) EnsureApprovalReviewerSidecar(ctx context.Context, requ
 		return nil, err
 	}
 	response, err := store.EnsureApprovalReviewerSidecar(ctx, request)
-	if isConversationMutationStaleError(err) {
+	if runtimecontrol.IsConversationMutationStaleError(err) {
 		return &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Stale{
 			Stale: &bridgev1.EnsureApprovalReviewerSidecarStale{},
 		}}, nil

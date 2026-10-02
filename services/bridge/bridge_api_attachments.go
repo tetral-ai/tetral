@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -384,7 +386,13 @@ func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Con
 	}
 	result := TransientAttachmentGCResult{Marked: len(rows)}
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		if err := s.AttachmentBlobStore.Delete(ctx, row.BlobPointer); err != nil {
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				return result, err
+			}
 			var notFound *blob.NotFoundError
 			if !errors.As(err, &notFound) {
 				result.Failed++
@@ -392,6 +400,9 @@ func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Con
 			}
 		}
 		if err := s.markTransientAttachmentDeleted(ctx, row, s.now()); err != nil {
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				return result, err
+			}
 			result.Failed++
 			continue
 		}
@@ -477,11 +488,15 @@ func (s *PostgreSQLBridgeAPIStore) markTransientAttachmentDeleted(ctx context.Co
 	})
 }
 
-func StartTransientAttachmentGC(ctx context.Context, store *PostgreSQLBridgeAPIStore, logger *slog.Logger, interval time.Duration, limit int) {
+// StartTransientAttachmentGC returns the owning process's stop-and-join operation.
+func StartTransientAttachmentGC(ctx context.Context, store *PostgreSQLBridgeAPIStore, logger *slog.Logger, interval time.Duration, limit int) func() {
 	if store == nil || interval <= 0 {
-		return
+		return func() {}
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -490,10 +505,19 @@ func StartTransientAttachmentGC(ctx context.Context, store *PostgreSQLBridgeAPIS
 				return
 			case <-ticker.C:
 				result, err := store.ReconcileTransientAttachments(ctx, limit)
+				if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+					// Planned stop is quiet, while failures already observed before
+					// cancellation keep their own partial-failure disposition.
+					if result.Failed > 0 {
+						logTransientAttachmentGC(logger, result, nil)
+					}
+					return
+				}
 				logTransientAttachmentGC(logger, result, err)
 			}
 		}
 	}()
+	return func() { cancel(); <-done }
 }
 
 func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCResult, err error) {
@@ -914,7 +938,7 @@ func readTransientAttachmentIndexTx(ctx context.Context, tx *dbconnect.Tx, reque
 		return transientAttachmentIndexRow{}, err
 	}
 	var metadata transientAttachmentMetadata
-	if err := json.Unmarshal([]byte(defaultString(metadataJSON, "{}")), &metadata); err != nil {
+	if err := json.Unmarshal([]byte(runtimecontrol.DefaultString(metadataJSON, "{}")), &metadata); err != nil {
 		return transientAttachmentIndexRow{}, err
 	}
 	if metadata.SizeBytes <= 0 || metadata.SizeBytes > transientAttachmentMaxBytes || len(metadata.Digest) != sha256.Size*2 {

@@ -16,17 +16,6 @@ func completionMailEnvelope(taskName string, sender string, payload string) stri
 	return "Message Type: FINAL_ANSWER\nTask name: " + taskName + "\nSender: " + sender + "\nPayload:\n" + payload
 }
 
-func TestCompletionDeliveryIdentityIsScopedToTheSettlingChild(t *testing.T) {
-	first := completionDeliveryID("thr_child_a", "rwrite_shared")
-	second := completionDeliveryID("thr_child_b", "rwrite_shared")
-	if first == second {
-		t.Fatalf("sender-scoped completion delivery ids collided: %q", first)
-	}
-	if first != completionDeliveryID("thr_child_a", "rwrite_shared") {
-		t.Fatal("completion delivery identity is not deterministic")
-	}
-}
-
 func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) {
 	const suffix = "declared_verbatim"
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

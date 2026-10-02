@@ -110,12 +110,6 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 			statusLabel = statusName(response.GetStatus())
 		}
 		s.metrics.ObserveRequest(operation, statusLabel, s.now().Sub(started))
-		if err != nil && s.logger != nil {
-			s.logger.Error("web.request.failed",
-				slog.String("operation", operation),
-				slog.String("grpc.code", status.Code(err).String()),
-			)
-		}
 	}()
 	identity, ok := grpcauth.IdentityFromContext(ctx)
 	if !ok || identity.KubernetesPodUID == "" {
@@ -141,13 +135,13 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 	}
 	if errors.Is(claimErr, errIdempotencyConflict) {
 		if s.logger != nil {
-			s.logger.Warn("web.idempotency.conflict", slog.String("operation", "web.idempotency.lookup"), slog.String("error.code", "idempotency_conflict"))
+			s.logger.Warn("web.idempotency.conflict", slog.String("operation", "web.idempotency.lookup"), slog.String("error.class", "idempotency_error"), slog.String("error.code", "idempotency_conflict"), slog.String("error.message_safe", "web tool delivery conflict"))
 		}
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR, "tool delivery conflict", operation, started), nil
 	}
 	if claimErr != nil || claim == nil {
 		if s.logger != nil {
-			s.logger.Warn("web.idempotency.lookup_failed", slog.String("operation", "web.idempotency.lookup"), slog.String("error.code", "cache_unavailable"))
+			s.logger.Warn("web.idempotency.lookup_failed", slog.String("operation", "web.idempotency.lookup"), slog.String("error.class", "storage_error"), slog.String("error.code", "cache_unavailable"), slog.String("error.message_safe", "web idempotency lookup unavailable"))
 		}
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR, "web backend temporarily unavailable", operation, started), nil
 	}

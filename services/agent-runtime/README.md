@@ -5,15 +5,15 @@ Everything it holds lives in memory and is disposable by construction —
 durable truth stays in the database behind Bridge, and the pod mutates hot
 state only after the matching Bridge ACK (one named exception: the interrupt
 closeout is hot-first by design and commits its snapshot last). Its wires are
-Bridge RPCs for persistence, the Gateway Pod's provider rail (the streaming
-provider request) and its tool rails (`RunMcpTool` on the mcp-connector
-container, `RunWeb` on the web-connector container), its own gRPC command server
-for Bridge-issued commands, and the Kubernetes TokenReview call that
+Bridge RPCs for persistence, the Provider Gateway service's provider rail (the streaming
+provider request) and its tool rails (`RunMcpTool` on the MCP Connector
+service, `RunWeb` on the Web Connector service), its own gRPC command server
+for Job Runner commands, and the Kubernetes TokenReview call that
 authenticates them. It holds no SQL connection, no sandbox provider key, and no
 provider API key; its only mounted credentials are the Kubernetes
 service-account tokens used for internal gRPC authentication. Because nothing
 here is the source of truth, anything lost with the pod is either rebuilt from
-durable state on the next cold load or settled by Bridge's repair.
+durable state on the next cold load or settled by Job Runner repair.
 
 The package is three Bun/TypeScript workspaces:
 
@@ -339,8 +339,8 @@ with separate anchors.
 | Route kind | Operation | Target |
 | --- | --- | --- |
 | `sandbox` | `AcceptSandboxExecution` / `AwaitSandboxExecution`; `CommandIO` | Bridge durable acceptance/result read; Sandbox Service executes provider work |
-| `gateway` | `RunWeb` | web-connector container |
-| `gateway` | `RunMcpTool` | mcp-connector container |
+| `gateway` | `RunWeb` | independent Web Connector Service (`web-connector`) |
+| `gateway` | `RunMcpTool` | independent MCP Connector Service (`mcp-connector`) |
 | `bridge` | `RunMemory` | Bridge |
 | `subagent` | `spawn_agent` … `list_agents` | in-process child thread |
 
@@ -464,7 +464,8 @@ Conformance tests: `core/test/unit/session-manager.test.ts`,
 
 ### Command boundary
 
-Every inbound method-specific request must select this exact pod UID, carry a
+The deployed control caller is `tetral-system/job-runner`; Bridge and the tool
+connectors have no control authority. Every inbound method-specific request must select this exact pod UID, carry a
 non-empty current binding id and a non-zero binding generation, and authenticate
 through TokenReview to the closed RPC set; a mismatch is a retryable rejection,
 never a processed command. The Runtime Pod does not accept or echo Pod
@@ -516,3 +517,24 @@ If a PR changes the `run_slot` law, the loop algorithm, the request-turn
 lifecycle, the compaction trigger or cycle, the tool family/gate/route rules,
 the sub-agent delivery contract, or the command-validation surface in this
 folder, it updates the matching section here.
+
+## Process diagnostics
+
+The Runtime command uses the shared
+[TypeScript diagnostic contract](../../internal/ts-observability/README.md).
+Diagnostic level, record byte ceiling, summary interval and burst controls are
+read once at startup. The default level is Info. Existing safe admission,
+provider transport, reviewer, closeout and committed-settlement builders retain
+bounded operator classifications and identities. Stream backpressure and
+asynchronous stderr failures appear through the existing HTTP metrics endpoint.
+Startup and shutdown cleanup release logger timers/listeners without waiting
+for stderr, after the business resource owner completes its cleanup.
+
+The command attempts app shutdown before Runtime Core close even when startup,
+waiting or an earlier close rejects, and makes repeated shutdown calls share
+one cleanup attempt. The app observes all started drain and listener shutdown
+operations. Programmatic callers retain the original run failure, or the first
+cleanup failure after a successful run. Executable and signal boundaries use
+fixed safe phase/class records and nonzero failure exits without exception text
+or stacks. Diagnostic faults add no stderr-flush wait; existing business drain
+settings remain owned by the lifecycle.

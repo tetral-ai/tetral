@@ -357,6 +357,19 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			selected[group.ID] = group
 		}
 	}
+	// These owners share durable configuration, manifest and control contracts.
+	// Go import traversal cannot see RPC edges or the Bun children in their
+	// composition tests. Keep that evidence relation explicit after separation.
+	serviceContract := separatedServiceContractChange(revision.ChangedPaths)
+	if serviceContract {
+		for _, id := range []string{"go", "runtime", "gateway"} {
+			group, ok := inventory.Group(id)
+			if !ok {
+				return nil, fmt.Errorf("service contract evidence group %q is missing", id)
+			}
+			selected[id] = group
+		}
+	}
 	var groups []Group
 	for _, group := range selected {
 		groups = append(groups, group)
@@ -365,16 +378,47 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 	selections := selectionsForGroups(groups, "affected path closure")
 	for index := range selections {
 		if selections[index].Group == "go" {
-			packages, err := affectedGoPackages(root, revision.ChangedPaths)
+			paths := append([]string(nil), revision.ChangedPaths...)
+			if serviceContract {
+				paths = append(paths, "services/bridge", "services/job-runner", "integration")
+			}
+			packages, err := affectedGoPackages(root, paths)
 			if err != nil || len(packages) == 0 {
 				revision.FullFallbackCause = "Go dependency closure unavailable"
 				return selectionsForGroups(inventory.GroupsForProfile("full"), "full fallback: "+revision.FullFallbackCause), nil
 			}
 			selections[index].Packages = packages
 			selections[index].Reason = "changed Go owners and repository-local reverse dependencies"
+			if serviceContract {
+				selections[index].Reason = "shared service contract, both Go owners, cross-service compositions and reverse dependencies"
+			}
 		}
 	}
 	return selections, nil
+}
+
+func separatedServiceContractChange(paths []string) bool {
+	for _, path := range paths {
+		for _, owner := range []string{
+			"internal/runtimeconfig", "internal/mcpmanifest", "internal/runtimecontrol",
+			"internal/internalgrpc",
+			"services/bridge", "services/job-runner",
+			"services/web-connector",
+			"services/agent-runtime/k8s", "services/gateway/k8s",
+			"services/agent-runtime/packages/runtime-pod",
+			"services/agent-runtime/packages/protocol", "services/agent-runtime/proto",
+			"services/gateway/packages/provider-gateway", "services/gateway/packages/mcp-connector",
+			"services/gateway/packages/protocol", "services/gateway/proto",
+		} {
+			if path == owner || strings.HasPrefix(path, owner+"/") {
+				return true
+			}
+		}
+		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") {
+			return true
+		}
+	}
+	return false
 }
 
 func selectionsForGroups(groups []Group, reason string) []Selection {

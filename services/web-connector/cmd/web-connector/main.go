@@ -23,7 +23,14 @@ func main() {
 }
 
 func run(ctx context.Context, env webconnector.Env) error {
-	logger := workload.NewLogger(os.Stderr, webconnector.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, webconnector.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, webconnector.ServiceName, diagnosticErr)
+	}
 	cfg, err := webconnector.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)

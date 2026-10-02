@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -11,26 +12,25 @@ import (
 )
 
 const (
-	gatewayServiceAccount    = "tetral-system/gateway"
-	bridgeServiceAccount     = "tetral-system/bridge"
+	providerServiceAccount   = "tetral-system/provider-gateway"
+	mcpServiceAccount        = "tetral-system/mcp-connector"
 	runtimePodServiceAccount = "tetral-agent-runtime/agent-runtime"
 )
 
-// BridgeAPIMethodAuthorizer keeps gateway's Bridge credential scoped to
-// the Gateway-owned read/notification surfaces. Sandbox and Runtime write
-// methods stay Runtime Pod only.
+// BridgeAPIMethodAuthorizer admits Provider only to attachment reads and MCP only
+// to manifest/result custody. Sandbox and Runtime write methods stay Runtime Pod only.
 func BridgeAPIMethodAuthorizer(identity auth.Identity, method string) error {
 	switch identity.ServiceAccount.String() {
 	case runtimePodServiceAccount:
 		if isRuntimePodBridgeAPIMethod(method) {
 			return nil
 		}
-	case gatewayServiceAccount:
-		if isGatewayBridgeAPIMethod(method) {
+	case providerServiceAccount:
+		if isProviderAttachmentMethod(method) {
 			return nil
 		}
-	case bridgeServiceAccount:
-		if method == bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName {
+	case mcpServiceAccount:
+		if isMcpConnectorBridgeMethod(method) {
 			return nil
 		}
 	}
@@ -75,12 +75,20 @@ func isRuntimePodBridgeAPIMethod(method string) bool {
 	}
 }
 
-func isGatewayBridgeAPIMethod(method string) bool {
+func isProviderAttachmentMethod(method string) bool {
+	switch method {
+	case bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName:
+		return true
+	default:
+		return false
+	}
+}
+
+func isMcpConnectorBridgeMethod(method string) bool {
 	switch method {
 	case bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName,
-		bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName,
-		bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName,
-		bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_RelinquishMcpToolResult_FullMethodName:
@@ -99,7 +107,7 @@ func verifyRuntimeCallerPodUID(ctx context.Context, scope *bridgev1.RuntimeScope
 		return status.Error(codes.PermissionDenied, "runtime caller pod UID is not verified")
 	}
 	if identity.KubernetesPodUID != scope.GetBinding().GetTargetPodUid() {
-		return scopeSupersededError(status.Error(codes.PermissionDenied, "runtime caller pod UID does not match binding"))
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.PermissionDenied, "runtime caller pod UID does not match binding"))
 	}
 	return nil
 }

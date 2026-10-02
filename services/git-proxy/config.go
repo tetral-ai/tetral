@@ -17,8 +17,8 @@ const (
 	EnvDatabaseURL           = "TETRAL_DATABASE_URL"
 	EnvVaultKey              = "ENGINE_VAULT_KEY"
 	EnvPublicBaseURL         = "TETRAL_GIT_PROXY_PUBLIC_BASE_URL"
-	EnvDeploymentEnvironment = "TETRAL_DEPLOYMENT_ENVIRONMENT"
-	EnvServiceVersion        = "TETRAL_SERVICE_VERSION"
+	EnvDeploymentEnvironment = workload.EnvDeploymentEnvironment
+	EnvServiceVersion        = workload.EnvServiceVersion
 	EnvDrainGraceSeconds     = "TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS"
 	EnvLegacyPathCutover     = "TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER"
 
@@ -46,13 +46,14 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if env == nil {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
+	resource := workload.ResourceConfigFromEnvWithTrimPolicy(env.Getenv, true)
 	cfg := Config{
 		HTTPAddress:           valueOrDefault(env.Getenv(EnvHTTPAddress), DefaultHTTPAddress),
 		MetricsAddress:        valueOrDefault(env.Getenv(EnvMetricsAddress), DefaultMetricsAddress),
 		DatabaseURL:           strings.TrimSpace(env.Getenv(EnvDatabaseURL)),
 		VaultKey:              strings.TrimSpace(env.Getenv(EnvVaultKey)),
-		DeploymentEnvironment: valueOrDefault(env.Getenv(EnvDeploymentEnvironment), "local"),
-		ServiceVersion:        valueOrDefault(env.Getenv(EnvServiceVersion), "unknown"),
+		DeploymentEnvironment: resource.DeploymentEnvironment,
+		ServiceVersion:        resource.ServiceVersion,
 		DrainGrace:            time.Duration(DefaultDrainGraceSeconds) * time.Second,
 	}
 	if cfg.DatabaseURL == "" {

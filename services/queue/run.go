@@ -40,7 +40,9 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	}
 	logger := runtime.Logger
 	if logger == nil {
-		logger = workload.NewLogger(nil, "queue", cfg.DeploymentEnvironment, cfg.ServiceVersion)
+		owner := workload.NewProcessLogger(nil, "queue", cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		logger = owner.Logger
 	}
 	grpcListener, err := listen("tcp", cfg.GRPCAddress)
 	if err != nil {
@@ -83,7 +85,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 
 	httpErr := make(chan error, 1)
 	go func() {
-		metricsOptions := []workload.HealthRouterOption{}
+		metricsOptions := []workload.HealthRouterOption{workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger))}
 		if runtime.DBStatsProvider != nil {
 			metricsOptions = append(metricsOptions, workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", runtime.DBStatsProvider)))
 		}

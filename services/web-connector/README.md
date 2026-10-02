@@ -3,9 +3,9 @@
 ## Responsibilities
 
 `web-connector` is the execution service behind the platform `web` tool —
-search the web, open a page, find within an opened page. It is the third
-container of the Gateway Pod, alongside `provider-gateway` and
-`mcp-connector`, and terminates exactly one method, `ProviderGatewayService.RunWeb`,
+search the web, open a page, find within an opened page. Its independent
+Deployment has one business container, `web-connector`, and its Service
+terminates exactly one method, `ProviderGatewayService.RunWeb`,
 on its own gRPC port; every other method on that service returns
 `UNIMPLEMENTED` here. It contains no provider-lowering code and no MCP code,
 never talks to a model provider or an MCP server, and owns no tables and no
@@ -200,8 +200,8 @@ backend lands without touching operation semantics, storage, or formatters; a
 replacement implements `Backend` and nothing above it changes in this service.
 Two things outside the interface do move for a differently-hosted vendor: the
 backend endpoint hosts (`s.jina.ai` / `r.jina.ai`) are also listed in the
-Gateway Pod NetworkPolicy egress-intent host list
-(`services/gateway/k8s/networkpolicy.yaml`), so a swap to a new host
+Web Connector Deployment NetworkPolicy egress-intent host list
+(`services/web-connector/k8s/networkpolicy.yaml`), so a swap to a new host
 needs that manifest edit; and the vendor's fixtures must be recorded before the
 suite can stay fixture-only (see the testing guide).
 
@@ -385,3 +385,35 @@ If a PR changes the `RunWeb` pipeline, the search/open/find semantics, the
 cache-bucket keys or snapshot normalization, the backend taxonomy or key pool,
 the URL classifier, or the usage and metrics surface in this folder, it
 updates the matching section here and the conformance tests named above.
+
+## Deployment ownership
+
+`k8s/` owns this service's Deployment, ordinary ClusterIP Service, ServiceAccount,
+TokenReview RBAC and NetworkPolicies. The only business container is
+`web-connector`, exposing gRPC 9092 and health/readiness/metrics on 9464. It
+admits the Runtime workload identity and then verifies the signed Session
+binding and reviewed Runtime Pod UID before backend or object-store effects.
+Its Web-only key pool and cache Secret grants remain independent of Provider
+Gateway and MCP. It receives neither a database DSN nor provider vault keys,
+and has no provider HPA. Helm's `replicas.webConnector` controls it independently
+of the other workloads. The external cache bucket still requires its enabled
+seven-day expiry lifecycle rule. The deployment contract and denied-access
+controls live in `deploy/kubernetes/separated_workloads_test.go`.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe startup and final-failure records retain their
+error tuple; healthy high-frequency polling uses Debug. Repeated degradation
+records emit bounded suppression summaries. Existing metrics report diagnostic
+drops and sink failures independently of stderr. Listener and business-resource
+cleanup completes before the bounded diagnostic close.
+
+The internal gRPC boundary owns request rejection summaries: ordinary
+unauthenticated, invalid and denied requests emit Info, cancellation emits Debug,
+and terminal internal failures emit Error. `RunWeb` retains request metrics and
+specific idempotency warnings without duplicating that boundary record. Unknown
+backend client-error taxonomy is recorded as `unknown_client_error` with the
+actual HTTP status; arbitrary dependency response names never enter diagnostics.

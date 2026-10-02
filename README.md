@@ -89,6 +89,12 @@ workspace.
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.
 
+Bridge handles Runtime RPCs and durable settlement; Job Runner consumes Queue
+work and owns Runtime placement, delivery and recovery. They run in separate
+workloads with separate database pools and process resources. Provider Gateway,
+MCP Connector and Web Connector also deploy independently. See the
+[service map](AGENTS.md#service-map) for their owning packages and contracts.
+
 Repository test profiles, CI ownership, and evidence artifacts are documented
 in [docs/testing.md](docs/testing.md).
 

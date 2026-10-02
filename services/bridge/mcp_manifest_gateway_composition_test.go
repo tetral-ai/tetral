@@ -13,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestPostgreSQLMCPManifestCapacityClassificationAcrossBridgeAndGateway(t *testing.T) {
@@ -38,8 +39,8 @@ func TestPostgreSQLMCPManifestCapacityClassificationAcrossBridgeAndGateway(t *te
 		t.Fatalf("seed capacity manifest config: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MCPManifestLister = staticManifestLister{tools: []MCPManifestTool{{
-		Name: "github_search", Description: strings.Repeat("x", MaxMcpManifestBytes), InputSchemaJSON: `{"type":"object"}`,
+	store.MCPManifestLister = staticManifestLister{tools: []mcpmanifest.Tool{{
+		Name: "github_search", Description: strings.Repeat("x", mcpmanifest.MaxBytes), InputSchemaJSON: `{"type":"object"}`,
 	}}}
 	bridge := capacityClassificationBridgeServer{store: store}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -91,10 +92,10 @@ func (s capacityClassificationBridgeServer) McpManifestChanged(ctx context.Conte
 	return s.store.McpManifestChanged(ctx, request)
 }
 
-type staticManifestLister struct{ tools []MCPManifestTool }
+type staticManifestLister struct{ tools []mcpmanifest.Tool }
 
-func (l staticManifestLister) ListMCPTools(_ context.Context, request MCPManifestListRequest) (MCPManifestListResult, error) {
-	return MCPManifestListResult{ManifestETag: request.ManifestETag, Tools: l.tools}, nil
+func (l staticManifestLister) ListMCPTools(_ context.Context, request mcpmanifest.ListRequest) (mcpmanifest.ListResult, error) {
+	return mcpmanifest.ListResult{ManifestETag: request.ManifestETag, Tools: l.tools}, nil
 }
 
 func TestPostgreSQLMCPManifestAckLossReplaysThroughGatewayRetry(t *testing.T) {
@@ -251,13 +252,13 @@ type echoManifestETagLister struct {
 	calls int
 }
 
-func (l *echoManifestETagLister) ListMCPTools(_ context.Context, request MCPManifestListRequest) (MCPManifestListResult, error) {
+func (l *echoManifestETagLister) ListMCPTools(_ context.Context, request mcpmanifest.ListRequest) (mcpmanifest.ListResult, error) {
 	l.mu.Lock()
 	l.calls++
 	l.mu.Unlock()
-	return MCPManifestListResult{
+	return mcpmanifest.ListResult{
 		ManifestETag: request.ManifestETag,
-		Tools: []MCPManifestTool{{
+		Tools: []mcpmanifest.Tool{{
 			Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`,
 		}},
 	}, nil

@@ -8,6 +8,9 @@
  */
 import { isIP } from "node:net";
 import { z } from "zod/v4";
+import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, workloadResourceEnvKeys } from "@tetral/ts-observability";
+import type { DiagnosticConfig } from "@tetral/ts-observability";
+
 
 /** Identifies the local pod used to reject commands addressed to another Runtime Pod instance. */
 export interface RuntimePodIdentity {
@@ -30,8 +33,9 @@ export interface RuntimePodModelRef {
 export interface RuntimePodConfig {
   readonly ownPod: RuntimePodIdentity;
   readonly deploymentEnvironment: string;
+  readonly diagnostics: DiagnosticConfig;
   readonly serviceVersion: string;
-  readonly bridge: {
+  readonly jobRunner: {
     readonly namespace: string;
     readonly serviceAccount: string;
   };
@@ -93,6 +97,10 @@ const ServiceAccountSchema = z
   .max(511)
   .refine((value) => parseSingleServiceAccount(value) !== undefined);
 const ConfigSchema = z.strictObject({
+  TETRAL_LOG_LEVEL: z.string().optional(),
+  TETRAL_LOG_MAX_RECORD_BYTES: z.string().optional(),
+  TETRAL_LOG_SUMMARY_INTERVAL_MS: z.string().optional(),
+  TETRAL_LOG_BURST: z.string().optional(),
   TETRAL_RUNTIME_POD_NAMESPACE: IdentityFieldSchema,
   TETRAL_RUNTIME_POD_NAME: IdentityFieldSchema,
   TETRAL_RUNTIME_POD_UID: IdentityFieldSchema,
@@ -116,14 +124,14 @@ const ConfigSchema = z.strictObject({
   TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES: SkillGuidanceDescriptionBudgetSchema,
 });
 const RuntimePodEnvKeys = [
+  ...diagnosticEnvKeys,
   "TETRAL_RUNTIME_POD_NAMESPACE",
   "TETRAL_RUNTIME_POD_NAME",
   "TETRAL_RUNTIME_POD_UID",
   "TETRAL_RUNTIME_POD_IP",
   "TETRAL_RUNTIME_POD_GRPC_PORT",
   "TETRAL_RUNTIME_POD_HTTP_ADDR",
-  "TETRAL_DEPLOYMENT_ENVIRONMENT",
-  "TETRAL_SERVICE_VERSION",
+  ...workloadResourceEnvKeys,
   "TETRAL_RUNTIME_POD_GRPC_AUDIENCE",
   "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
   "KUBERNETES_API_SERVER_URL",
@@ -144,8 +152,10 @@ const RuntimePodEnvKeys = [
  * Invalid fields return the same bounded configuration error rather than schema diagnostics.
  */
 export function loadRuntimePodConfig(env: Record<string, string | undefined>): RuntimePodConfigResult {
+  const diagnostics = parseDiagnosticConfig(env);
+  const resource = parseWorkloadResourceConfig(env, 253);
   const parsed = ConfigSchema.safeParse(env);
-  if (!parsed.success) {
+  if (!parsed.success || diagnostics === undefined || resource === undefined) {
     return {
       ok: false,
       error: {
@@ -154,8 +164,8 @@ export function loadRuntimePodConfig(env: Record<string, string | undefined>): R
       },
     };
   }
-  const bridge = parseSingleServiceAccount(parsed.data.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS);
-  if (bridge === undefined) {
+  const jobRunner = parseSingleServiceAccount(parsed.data.TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS);
+  if (jobRunner === undefined) {
     return {
       ok: false,
       error: {
@@ -177,17 +187,18 @@ export function loadRuntimePodConfig(env: Record<string, string | undefined>): R
   return {
     ok: true,
     config: {
+      diagnostics,
       ownPod: {
         namespace: parsed.data.TETRAL_RUNTIME_POD_NAMESPACE,
         name: parsed.data.TETRAL_RUNTIME_POD_NAME,
         uid: parsed.data.TETRAL_RUNTIME_POD_UID,
         ip: parsed.data.TETRAL_RUNTIME_POD_IP,
       },
-      deploymentEnvironment: parsed.data.TETRAL_DEPLOYMENT_ENVIRONMENT,
-      serviceVersion: parsed.data.TETRAL_SERVICE_VERSION,
-      bridge: {
-        namespace: bridge.namespace,
-        serviceAccount: bridge.serviceAccount,
+      deploymentEnvironment: resource.deploymentEnvironment,
+      serviceVersion: resource.serviceVersion,
+      jobRunner: {
+        namespace: jobRunner.namespace,
+        serviceAccount: jobRunner.serviceAccount,
       },
       grpcBindAddress: `0.0.0.0:${parsed.data.TETRAL_RUNTIME_POD_GRPC_PORT}`,
       httpBindAddress: parsed.data.TETRAL_RUNTIME_POD_HTTP_ADDR,

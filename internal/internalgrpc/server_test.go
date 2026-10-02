@@ -128,7 +128,7 @@ func TestInternalGRPCOKBoundaryLogOmitsFailureClassification(t *testing.T) {
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
-		Logger:        newTestLogger(&buffer),
+		Logger:        slog.New(slog.NewJSONHandler(&buffer, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Register: func(server *grpc.Server) {
 			registerTestService(server, func(context.Context) error { return nil })
 		},
@@ -481,3 +481,18 @@ func hasMetricLabel(labels []workload.MetricLabel, name string, value string) bo
 }
 
 var _ io.Writer = (*bytes.Buffer)(nil)
+
+func TestHealthyAuthenticatedRPCsAreQuietAtDefaultLevel(t *testing.T) {
+	var buffer bytes.Buffer
+	client, cleanup := newInternalGRPCClient(t, Config{ServiceName: "test-service", Authenticator: &allowingAuthenticator{}, Logger: workload.NewLogger(&buffer, "test-service", "test", "unit"), Register: func(server *grpc.Server) { registerTestService(server, func(context.Context) error { return nil }) }})
+	defer cleanup()
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer ok-token"))
+	for n := 0; n < 1000; n++ {
+		if err := client.Invoke(ctx, testMethod, &emptypb.Empty{}, &emptypb.Empty{}); err != nil {
+			t.Fatalf("healthy RPC %d: %v", n, err)
+		}
+	}
+	if buffer.Len() != 0 {
+		t.Fatalf("healthy RPC chatter at default Info: %s", buffer.String())
+	}
+}

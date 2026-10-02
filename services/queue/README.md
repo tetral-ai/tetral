@@ -194,11 +194,11 @@ and a few transport transitions are kind-specific.
 
 | Kind | Partition family | Leased by |
 |---|---|---|
-| `runtime_input` | Session causal partition; Thread delivery lane | Bridge Job Runner |
-| `runtime_recovery` | Session causal partition; Thread delivery lane | Bridge Job Runner |
-| `runtime_config_update` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
-| `cleanup_session` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
-| `session_delete_cleanup` | Session causal partition; Session-exclusive delivery | Bridge Job Runner |
+| `runtime_input` | Session causal partition; Thread delivery lane | Job Runner |
+| `runtime_recovery` | Session causal partition; Thread delivery lane | Job Runner |
+| `runtime_config_update` | Session causal partition; Session-exclusive delivery | Job Runner |
+| `cleanup_session` | Session causal partition; Session-exclusive delivery | Job Runner |
+| `session_delete_cleanup` | Session causal partition; Session-exclusive delivery | Job Runner |
 | `environment_build` | `environment:<workspace_id>:<environment_id>` | Sandbox Service |
 | `environment_ready_fanout` | `environment:…` | Sandbox Service |
 | `sandbox_tool_execute` | `sandbox-execution:<workspace>:<session>:<thread>:<tool-use-event>` | dedicated Sandbox execution runner |
@@ -279,7 +279,7 @@ distinct from a new business execution-attempt generation.
 
 ### Seam 2 — Lease semantics a consumer must preserve
 
-A consumer is any process that leases and settles jobs (Bridge Job Runner,
+A consumer is any process that leases and settles jobs (Job Runner,
 Sandbox Service). The lease contract is what lets a crashed or slow consumer be
 replaced without losing or double-committing work.
 
@@ -342,3 +342,22 @@ Run the store suite (and any test that opens PostgreSQL) with the race detector
 on. If a PR changes the `queue_jobs` invariants, admission validation, lease
 selection or barrier, any transition, the backoff formula, or the maintenance loop in
 this folder, it updates the matching section here.
+
+## Process diagnostics
+
+The command uses the shared [Go process diagnostic contract](../../internal/workload/README.md).
+`TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
+`TETRAL_LOG_SUMMARY_INTERVAL_MS`, and `TETRAL_LOG_BURST` are restart-only controls.
+The default level is Info. Safe startup and final-failure records retain their
+error tuple; healthy high-frequency polling uses Debug. Repeated degradation
+records emit bounded suppression summaries. Existing metrics report diagnostic
+drops and sink failures independently of stderr. Listener and business-resource
+cleanup completes before the bounded diagnostic close.
+
+Queue wake notifications retain the established consumer-class payload `bridge`
+for Job Runner work. The Go name `ConsumerClassJobRunner` describes its current
+owner; changing the process owner does not migrate persisted or wire vocabulary.
+
+A notification disconnect emits a safe warning and bounded repeat summaries.
+The existing successful reconnect broadcasts its catch-up wake before emitting
+an Info recovery, so logging does not determine Queue wake delivery.

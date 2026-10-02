@@ -5,12 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,18 +20,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
-
-// stableRuntimeID derives deterministic identities for durable replay keys.
-func stableRuntimeID(parts ...string) string {
-	hasher := sha256.New()
-	var length [4]byte
-	for _, part := range parts {
-		binary.BigEndian.PutUint32(length[:], uint32(len([]byte(part)))) // #nosec G115 -- identifiers are bounded below uint32 at protocol validation.
-		_, _ = hasher.Write(length[:])
-		_, _ = hasher.Write([]byte(part))
-	}
-	return "stid_" + hex.EncodeToString(hasher.Sum(nil))
-}
 
 func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 	var buffer bytes.Buffer
@@ -100,18 +89,18 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"approval_review_text": request.GetApprovalReviewText(),
 		"input_kind":           inputKind,
-		"operation_kind":       bridgeOpCommitInputs,
+		"operation_kind":       runtimecontrol.OperationCommitInputs,
 		"runtime_input_id":     request.GetRuntimeInputId(),
 		"session_thread_id":    request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func writeEventDeclarationDigest(
@@ -140,14 +129,14 @@ func writeEventDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
-func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration runtimeToolProjectionPayload) (string, error) {
+func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration runtimecontrol.ToolProjection) (string, error) {
 	contextDelta, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(declaration))
 	if err != nil {
 		return "", err
@@ -170,11 +159,11 @@ func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func writeRequestEndDeclarationDigest(
@@ -256,11 +245,11 @@ func writeRequestEndDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReasonJSON string) (string, error) {
@@ -274,11 +263,11 @@ func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReason
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func runtimeTerminationRequestHash(
@@ -294,11 +283,11 @@ func runtimeTerminationRequestHash(
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func childLifecycleDeclarationDigest(
@@ -327,11 +316,11 @@ func childLifecycleDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func internalToolRepairDeclarationDigest(
@@ -342,7 +331,7 @@ func internalToolRepairDeclarationDigest(
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, "internal Tool repair input is invalid")
 	}
-	errorValue, err := decodeRuntimeToolErrorJSON(request.GetError().GetErrorJson())
+	errorValue, err := runtimecontrol.DecodeRuntimeToolErrorJSON(request.GetError().GetErrorJson())
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, "internal Tool repair error is invalid")
 	}
@@ -359,29 +348,29 @@ func internalToolRepairDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
 ) (string, error) {
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"operation_kind":    bridgeOpCommitTaskNotificationResult,
+		"operation_kind":    runtimecontrol.OperationCommitTaskNotificationResult,
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func mcpToolCommitDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest) (string, error) {
@@ -412,11 +401,11 @@ func mcpToolCommitDeclarationDigest(request *bridgev1.CommitMcpToolResultRequest
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func mcpToolRelinquishDeclarationDigest(request *bridgev1.RelinquishMcpToolResultRequest) (string, error) {
@@ -429,11 +418,11 @@ func mcpToolRelinquishDeclarationDigest(request *bridgev1.RelinquishMcpToolResul
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalRunToolJSON(string(raw))
+	canonical, err := runtimecontrol.CanonicalRunToolJSON(string(raw))
 	if err != nil {
 		return "", err
 	}
-	return sha256Hex(canonical), nil
+	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
 func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) (any, error) {
@@ -443,8 +432,8 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 	value := map[string]any{"tool_use_event_id": settlement.GetToolUseEventId()}
 	switch outcome := settlement.GetOutcome().(type) {
 	case *bridgev1.RuntimeToolSettlement_Completed:
-		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
-		if err != nil || validateRuntimeBoundedText(output) != nil {
+		output, err := runtimecontrol.DecodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
+		if err != nil || runtimecontrol.ValidateRuntimeBoundedText(output) != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
 		}
 		canonical, err := canonicalRuntimeDeclarationJSON(outcome.Completed.GetOutputJson())
@@ -460,7 +449,7 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 			"server_tool_use": json.RawMessage(usage.CanonicalJSON),
 		}
 	case *bridgev1.RuntimeToolSettlement_Error:
-		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
+		toolError, err := runtimecontrol.DecodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
 		}
@@ -475,7 +464,7 @@ func canonicalRuntimeToolSettlement(settlement *bridgev1.RuntimeToolSettlement) 
 	case *bridgev1.RuntimeToolSettlement_Cancelled:
 		var errorValue any
 		if outcome.Cancelled.ErrorJson != nil {
-			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
+			toolError, err := runtimecontrol.DecodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
 			if err != nil {
 				return nil, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
 			}
@@ -492,7 +481,7 @@ func canonicalRuntimeDeclarationJSON(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("missing declaration JSON")
 	}
-	return canonicalRunToolJSON(raw)
+	return runtimecontrol.CanonicalRunToolJSON(raw)
 }
 
 func nullableDeclarationString(value string) any {
@@ -556,12 +545,12 @@ func commitWriteRequestEndContextTx(
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
 	requestKind string,
-	threadScope threadMutationScope,
+	threadScope runtimecontrol.ThreadMutationScope,
 	requestEndEventID string,
 	now time.Time,
 ) (requestEndDurableFacts, error) {
 	facts := requestEndDurableFacts{RequestEndEventID: requestEndEventID}
-	if requestKind != requestKindCompactionSummary {
+	if requestKind != runtimecontrol.RequestKindCompactionSummary {
 		if request.GetCompactionContext() != nil || request.GetPrefixConsumption() != nil ||
 			request.CompactedThroughMessageSequence != nil ||
 			request.GetCompactionEventPayloadJson() != "" {
@@ -630,9 +619,9 @@ func commitWriteRequestEndContextTx(
 	if request.GetCompactedThroughMessageSequence() != durableBoundary {
 		return requestEndDurableFacts{}, status.Error(codes.FailedPrecondition, "compaction message boundary is stale")
 	}
-	visibility, sessionVisible := threadScope.publicProjection("agent.thread_context_compacted")
+	visibility, sessionVisible := threadScope.PublicProjection("agent.thread_context_compacted")
 	compactionEventID := id.New("evt_")
-	compactionEventSequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+	compactionEventSequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 	if err != nil {
 		return requestEndDurableFacts{}, err
 	}
@@ -656,7 +645,7 @@ func commitWriteRequestEndContextTx(
 	); err != nil {
 		return requestEndDurableFacts{}, err
 	}
-	if _, err := appendSessionEventStreamChangeTx(
+	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(
 		ctx,
 		tx,
 		request.GetScope(),
@@ -776,7 +765,7 @@ func consumeThreadContextPrefixTx(
 	if err != nil {
 		return err
 	}
-	if !rowsAffected(updateResult) {
+	if !runtimecontrol.RowsAffected(updateResult) {
 		return status.Error(codes.FailedPrecondition, "thread context prefix consumption lost its fence")
 	}
 	return nil
@@ -833,8 +822,8 @@ func appendRuntimeAssistantContextTx(
 		return durableContextWrite{}, err
 	}
 
-	stored, err := decodeRuntimeDeclarationObject(existingJSON)
-	if err != nil || requireRuntimeObjectFields(stored, []string{"parts"}, []string{"parts"}) != nil {
+	stored, err := runtimecontrol.DecodeRuntimeDeclarationObject(existingJSON)
+	if err != nil || runtimecontrol.RequireRuntimeObjectFields(stored, []string{"parts"}, []string{"parts"}) != nil {
 		return durableContextWrite{}, status.Error(codes.FailedPrecondition, "durable assistant context is invalid")
 	}
 	existingParts, ok := stored["parts"].([]any)
@@ -908,172 +897,15 @@ func appendRuntimeAssistantContextTx(
 		if err != nil {
 			return durableContextWrite{}, err
 		}
-		if !rowsAffected(result) {
+		if !runtimecontrol.RowsAffected(result) {
 			return durableContextWrite{}, status.Error(codes.FailedPrecondition, "assistant append lost its durable context")
 		}
 	}
 	return durableContextWrite{MessageID: messageID, MessageSequence: messageSequence, CreatedToolUseEventIDs: createdToolIDs}, nil
 }
 
-func settleRuntimeToolPartTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelRequestID string,
-	settlement *bridgev1.RuntimeToolSettlement,
-	now time.Time,
-) (runtimeToolProjectionPayload, error) {
-	if modelRequestID == "" || settlement == nil || settlement.GetToolUseEventId() == "" {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime Tool settlement is incomplete")
-	}
-	var eventType string
-	if err := tx.QueryRow(ctx,
-		`SELECT type FROM session_events
-		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		    AND event_id=$4 AND type IN ('agent.tool_use','agent.mcp_tool_use')
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), settlement.GetToolUseEventId(),
-	).Scan(&eventType); dbconnect.IsNoRows(err) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement target is missing")
-	} else if err != nil {
-		return runtimeToolProjectionPayload{}, err
-	}
-	tool, err := loadDurableToolExecutionTx(ctx, tx, scope, settlement.GetToolUseEventId(), eventType, false)
-	if err != nil {
-		return runtimeToolProjectionPayload{}, err
-	}
-	if tool.ModelRequestID != modelRequestID {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement request identity is inconsistent")
-	}
-	result := &bridgev1.RuntimeContextToolResult{ModelToolCallId: tool.ModelToolCallID}
-	switch outcome := settlement.GetOutcome().(type) {
-	case *bridgev1.RuntimeToolSettlement_Completed:
-		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
-		if err != nil || validateRuntimeBoundedText(output) != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
-		}
-		outputObject := output.(map[string]any)
-		contextOutputJSON, err := marshalBridgeJSON(map[string]any{"text": outputObject["text"]})
-		if err != nil {
-			return runtimeToolProjectionPayload{}, err
-		}
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Completed{Completed: &bridgev1.RuntimeContextToolCompleted{OutputJson: contextOutputJSON}}
-	case *bridgev1.RuntimeToolSettlement_Error:
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Error{Error: &bridgev1.RuntimeContextToolError{ErrorJson: outcome.Error.GetErrorJson()}}
-	case *bridgev1.RuntimeToolSettlement_Cancelled:
-		result.Outcome = &bridgev1.RuntimeContextToolResult_Cancelled{Cancelled: &bridgev1.RuntimeContextToolCancelled{}}
-	default:
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
-	}
-	resultValue, err := canonicalRuntimeToolResultOutcome(result)
-	if err != nil {
-		return runtimeToolProjectionPayload{}, err
-	}
-	resultPartsJSON, err := json.Marshal([]map[string]any{{
-		"type": "tool_result", "modelToolCallId": tool.ModelToolCallID, "result": resultValue,
-	}})
-	if err != nil {
-		return runtimeToolProjectionPayload{}, err
-	}
-	updateResult, err := tx.Exec(ctx,
-		`UPDATE session_messages
-		    SET data_json = jsonb_set(
-		          data_json::jsonb,
-		          '{parts}',
-		          (data_json::jsonb -> 'parts') || $5::jsonb
-		        )::text,
-		        updated_at = $6
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
-		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		modelRequestID, string(resultPartsJSON), now,
-	)
-	if err != nil {
-		return runtimeToolProjectionPayload{}, err
-	}
-	if !rowsAffected(updateResult) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
-	}
-	return runtimeToolProjectionFromSettlement(tool, settlement)
-}
-
-func runtimeToolProjectionFromSettlement(tool durableToolExecution, settlement *bridgev1.RuntimeToolSettlement) (runtimeToolProjectionPayload, error) {
-	var result map[string]any
-	switch outcome := settlement.GetOutcome().(type) {
-	case *bridgev1.RuntimeToolSettlement_Completed:
-		output, err := decodeRuntimeDeclarationValue(outcome.Completed.GetOutputJson())
-		if err != nil || validateRuntimeBoundedText(output) != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool completion is invalid")
-		}
-		result = map[string]any{"type": "completed", "output": output}
-	case *bridgev1.RuntimeToolSettlement_Error:
-		toolError, err := decodeRuntimeToolErrorJSON(outcome.Error.GetErrorJson())
-		if err != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool error is invalid")
-		}
-		result = map[string]any{"type": "error", "error": toolError}
-	case *bridgev1.RuntimeToolSettlement_Cancelled:
-		result = map[string]any{"type": "cancelled"}
-		if outcome.Cancelled.ErrorJson != nil {
-			toolError, err := decodeRuntimeToolErrorJSON(outcome.Cancelled.GetErrorJson())
-			if err != nil {
-				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool cancellation is invalid")
-			}
-			result["error"] = toolError
-		}
-	default:
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool settlement outcome is missing")
-	}
-	return runtimeToolProjectionFromDurableTool(tool, result), nil
-}
-
-// Runtime owns failure projection; Bridge accepts and stores only the strict
-// durable Tool error contract used by Tool settlement and repair declarations.
-func decodeRuntimeToolErrorJSON(raw string) (map[string]any, error) {
-	declared, err := decodeRuntimeDeclarationObject(raw)
-	if err != nil || validateRuntimeToolError(declared) != nil {
-		return nil, fmt.Errorf("invalid durable Tool error")
-	}
-	return declared, nil
-}
-
-func runtimeToolProjectionFromDurableTool(tool durableToolExecution, result map[string]any) runtimeToolProjectionPayload {
-	projection := runtimeToolProjectionPayload{
-		ModelToolCallID:         tool.ModelToolCallID,
-		ToolName:                tool.ToolName,
-		ProviderInput:           json.RawMessage(tool.ProviderInputJSON),
-		CanonicalExecutionInput: json.RawMessage(tool.InputJSON),
-	}
-	if result != nil {
-		projection.State, _ = result["type"].(string)
-		if output, ok := result["output"].(map[string]any); ok {
-			encoded, _ := json.Marshal(output)
-			var bounded struct {
-				Text      string `json:"text"`
-				Truncated bool   `json:"truncated"`
-			}
-			if json.Unmarshal(encoded, &bounded) == nil {
-				projection.Output = &bounded
-			}
-		}
-		if normalizedError, ok := result["error"].(map[string]any); ok {
-			encoded, _ := json.Marshal(normalizedError)
-			var failure struct {
-				Type      string `json:"type"`
-				Message   string `json:"message"`
-				Retryable bool   `json:"retryable"`
-			}
-			if json.Unmarshal(encoded, &failure) == nil {
-				projection.Error = &failure
-			}
-		}
-	}
-	return projection
-}
-
 func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	_, err := lockThreadMutationTx(ctx, tx, scope)
+	_, err := runtimecontrol.LockThreadMutationTx(ctx, tx, scope)
 	return err
 }
 
@@ -1104,7 +936,7 @@ func insertCompactionContextEntryTx(
 		return durableContextWrite{}, err
 	}
 	messageID := id.New("msg_")
-	dataJSON, err := runtimeContextDataJSON(parts)
+	dataJSON, err := runtimecontrol.RuntimeContextDataJSON(parts)
 	if err != nil {
 		return durableContextWrite{}, err
 	}

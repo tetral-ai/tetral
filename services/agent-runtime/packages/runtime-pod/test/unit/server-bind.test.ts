@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Writable } from "node:stream";
+import { createDiagnosticStreamSink, createTetralJsonLogger } from "@tetral/ts-observability";
 import { createRuntimeGrpcServer } from "../../src/grpc-server.js";
 import { createRuntimeHttpServer } from "../../src/http-server.js";
 import { RuntimePodLifecycle } from "../../src/lifecycle.js";
@@ -6,6 +8,41 @@ import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import { RuntimeControlService } from "../../src/runtime-service.js";
 
 describe("Runtime Pod server bind addresses", () => {
+	test("HTTP metrics reports actual diagnostic emissions and rejected sink writes", async () => {
+		let acceptSink = true;
+		const logger = createTetralJsonLogger({ serviceName: "agent-runtime", write: () => acceptSink });
+		logger.info({ event: "http_diagnostic_probe" });
+		acceptSink = false;
+		logger.error({ event: "http_diagnostic_drop" });
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), undefined, logger);
+		try {
+			const response = await fetch(new URL("/metrics", httpServer.url));
+			expect(response.status).toBe(200);
+			const body = await response.text();
+			expect(body).toContain("tetral_diagnostic_emitted_total 1\n");
+			expect(body).toContain("tetral_diagnostic_dropped_total 1\n");
+			expect(body).toContain("tetral_diagnostic_sink_failures_total 0\n");
+		} finally {
+			httpServer.stop();
+			logger.close();
+		}
+	});
+	test("HTTP metrics includes an asynchronous production stream failure", async () => {
+		const stream = new Writable({ write(_chunk, _encoding, done) { done(); } });
+		const sink = createDiagnosticStreamSink(stream);
+		const logger = createTetralJsonLogger({ serviceName: "agent-runtime", write: sink.write, sinkFailures: () => sink.stats().failures });
+		logger.info({ event: "http_diagnostic_probe" });
+		stream.emit("error", new Error("asynchronous stderr failure"));
+		logger.info({ event: "http_diagnostic_after_error" });
+		const httpServer = createRuntimeHttpServer("127.0.0.1:0", fakeLifecycle(), undefined, logger);
+		try {
+			const response = await fetch(new URL("/metrics", httpServer.url));
+			const body = await response.text();
+			expect(body).toContain("tetral_diagnostic_emitted_total 1\n");
+			expect(body).toContain("tetral_diagnostic_dropped_total 1\n");
+			expect(body).toContain("tetral_diagnostic_sink_failures_total 1\n");
+		} finally { httpServer.stop(); logger.close(); sink.close(); stream.destroy(); }
+	});
 	test("HTTP server accepts explicit production host addresses, serves metrics, and rejects hostless addresses", async () => {
 		const metricsRegistry = new RuntimePodMetricsRegistry();
 		metricsRegistry.recordHotState({
@@ -103,8 +140,9 @@ function fakeLifecycle() {
 					ip: "10.0.0.1",
 				},
 				deploymentEnvironment: "test",
+ diagnostics: {level:"info",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1},
 				serviceVersion: "test",
-				bridge: { namespace: "engine", serviceAccount: "bridge" },
+				jobRunner: { namespace: "engine", serviceAccount: "job-runner" },
 				grpcBindAddress: "127.0.0.1:0",
 				httpBindAddress: "127.0.0.1:0",
 				kubernetesApiServerUrl: "https://kubernetes.default.svc",
@@ -148,11 +186,11 @@ function fakeRuntimeControlService(): RuntimeControlService {
 			uid: "uid-a",
 			ip: "10.0.0.1",
 		},
-		allowedBridge: { namespace: "engine", name: "bridge" },
+		allowedJobRunner: { namespace: "engine", name: "job-runner" },
 		authenticator: {
 			authenticate: async () => ({
 				ok: true,
-				serviceAccount: { namespace: "engine", name: "bridge" },
+				serviceAccount: { namespace: "engine", name: "job-runner" },
 			}),
 		},
 		runHost: {

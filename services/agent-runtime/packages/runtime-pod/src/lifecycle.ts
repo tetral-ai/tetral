@@ -100,7 +100,7 @@ export class RuntimePodLifecycle {
    */
   async start(): Promise<void> {
     if (!this.options.config.ok) {
-      this.options.logger.error(startupFailureLogRecord(this.options.config.error));
+      try { this.options.logger.error(startupFailureLogRecord(this.options.config.error)); } catch { /* lifecycle state remains authoritative */ }
       this.readyFlag = false;
       this.accepting = false;
       return;
@@ -116,12 +116,12 @@ export class RuntimePodLifecycle {
       this.readyFlag = true;
       this.accepting = true;
     } catch (error) {
-      this.options.logger.error(startupFailureLogRecord({
+      try { this.options.logger.error(startupFailureLogRecord({
         kind: "startup_error",
         message: "runtime pod startup failed",
         cause: error,
         causeCategory,
-      }));
+      })); } catch { /* lifecycle state remains authoritative */ }
       this.readyFlag = false;
       this.accepting = false;
     }
@@ -210,7 +210,7 @@ export class RuntimePodLifecycle {
   /**
    * Closes readiness and admission, asks Runtime Core to interrupt and join active runs locally,
    * and waits for tracked work up to the configured bound before failing outstanding command
-   * promises. Durable repair after pod loss belongs to the Bridge job runner, not this hook.
+   * promises. Durable repair after pod loss belongs to Job Runner, not this hook.
    */
   async shutdown(): Promise<void> {
     this.readyFlag = false;
@@ -218,10 +218,10 @@ export class RuntimePodLifecycle {
     // Shutdown starts Runtime Core's local interrupt-and-join hook, then waits for
     // that promise and tracked commands together under the configured timeout.
     const activeRunSettlement = (this.options.shutdownHooks?.shutdownActiveRuns?.() ?? Promise.resolve()).catch(() => {
-      this.options.logger.error(shutdownFailureLogRecord({
+      try { this.options.logger.error(shutdownFailureLogRecord({
         event: "shutdown_active_run_settlement_failed",
         message: "runtime pod shutdown active-run settlement failed",
-      }));
+      })); } catch { /* settlement remains authoritative */ }
     });
     const timeout = sleep(this.options.drainTimeoutMs ?? 5_000).then(() => "timeout" as const);
     const drained = Promise.allSettled([...this.inFlight].map((tracked) => tracked.promise).concat(activeRunSettlement)).then(() => "drained" as const);
@@ -230,10 +230,10 @@ export class RuntimePodLifecycle {
       for (const tracked of this.inFlight) {
         tracked.fail(new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutdown drain timed out"));
       }
-      this.options.logger.error(shutdownFailureLogRecord({
+      try { this.options.logger.error(shutdownFailureLogRecord({
         event: "shutdown_drain_timeout",
         message: "runtime pod shutdown drain timed out",
-      }));
+      })); } catch { /* drain outcome remains authoritative */ }
     }
   }
 }

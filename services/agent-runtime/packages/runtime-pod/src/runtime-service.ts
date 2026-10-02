@@ -1,5 +1,5 @@
 /**
- * Authenticated, method-specific Bridge-to-Runtime Pod ingress.
+ * Authenticated, method-specific Job Runner-to-Runtime Pod ingress.
  *
  * Each RPC validates only its owned contract. The method identifies the
  * operation; no command-kind discriminator, Event range, pod address echo, or
@@ -366,7 +366,7 @@ export interface RuntimeControlServiceOptions {
 		readonly uid: string;
 		readonly ip: string;
 	};
-	readonly allowedBridge: ServiceAccountIdentity;
+	readonly allowedJobRunner: ServiceAccountIdentity;
 	readonly authenticator: RuntimeAuthenticator;
 	readonly runHost: RuntimeSessionRunHost;
 	readonly controlInputCommitter?: RuntimeControlInputCommitter;
@@ -1295,8 +1295,8 @@ export class RuntimeControlService {
 		}
 		if (
 			result.serviceAccount.namespace !==
-				this.options.allowedBridge.namespace ||
-			result.serviceAccount.name !== this.options.allowedBridge.name
+				this.options.allowedJobRunner.namespace ||
+			result.serviceAccount.name !== this.options.allowedJobRunner.name
 		) {
 			throw new GrpcStatusError(status.PERMISSION_DENIED, "permission denied");
 		}

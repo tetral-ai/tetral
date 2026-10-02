@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/workload"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -42,7 +43,14 @@ func main() {
 }
 
 func run(ctx context.Context, env envReader) error {
-	logger := workload.NewLogger(os.Stderr, agentruntimebridge.ServiceNameBridgeAPI, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnosticConfig, err := workload.DiagnosticConfigFromEnv(env.Getenv)
+	owner := workload.NewProcessLogger(os.Stderr, agentruntimebridge.ServiceNameBridgeAPI, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnosticConfig)
+	defer owner.CloseWithBudget()
+	logger := owner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if err != nil {
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
+	}
 	database, err := openDatabase(ctx, agentruntimebridge.EnvDatabaseURL, env.Getenv(agentruntimebridge.EnvDatabaseURL))
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -83,14 +91,16 @@ func run(ctx context.Context, env envReader) error {
 	}
 	store.AttachmentBlobStore = blobStore
 	store.FileBlobStore = blobStore
-	store.MCPManifestLister = agentruntimebridge.NewGatewayMCPManifestLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
+	store.MCPManifestLister = mcpmanifest.NewConnectorLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})
 	// One process-local LISTEN connection feeds AwaitSandboxExecution waiters
 	// their wake hints; initial readiness and reconnect trigger catch-up reads.
 	executionResultListenerCtx, cancelExecutionResultListener := context.WithCancel(ctx)
-	defer cancelExecutionResultListener()
+	executionResultListenerDone := make(chan struct{})
+	defer func() { cancelExecutionResultListener(); <-executionResultListenerDone }()
 	go func() {
+		defer close(executionResultListenerDone)
 		if err := store.RunExecutionResultListener(executionResultListenerCtx); err != nil && executionResultListenerCtx.Err() == nil {
 			logger.Error("bridge.execution_result_listener.stopped",
 				"operation", "agentruntimebridge.listen_sandbox_execution_result",
@@ -100,9 +110,11 @@ func run(ctx context.Context, env envReader) error {
 			)
 		}
 	}()
-	agentruntimebridge.StartTransientAttachmentGC(ctx, store, logger, time.Minute, 100)
+	stopAttachmentGC := agentruntimebridge.StartTransientAttachmentGC(ctx, store, logger, time.Minute, 100)
+	defer stopAttachmentGC()
 	return internalgrpc.RunGRPCWorkload(ctx, env, internalgrpc.GRPCWorkloadParams{
 		ServiceName:       agentruntimebridge.ServiceNameBridgeAPI,
+		Logger:            logger,
 		HTTPListenEnvKey:  agentruntimebridge.EnvBridgeAPIHTTPAddress,
 		HTTPListenDefault: ":8080",
 		GRPCListenEnvKey:  agentruntimebridge.EnvBridgeAPIGRPCAddress,

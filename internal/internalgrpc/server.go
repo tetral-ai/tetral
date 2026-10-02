@@ -45,6 +45,11 @@ type Config struct {
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.Logger == nil {
+		owner := workload.NewProcessLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
+		defer owner.CloseWithBudget()
+		cfg.Logger = owner.Logger
+	}
 	server, listener, healthServer, err := buildServer(cfg)
 	if err != nil {
 		return err
@@ -107,11 +112,7 @@ func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error)
 		return nil, nil, nil, fmt.Errorf("registration callback is required")
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, nil)).With(
-			slog.String("service.name", cfg.ServiceName),
-			slog.String("deployment.environment", deploymentEnvironmentOrDefault(cfg.DeploymentEnvironment)),
-			slog.String("service.version", serviceVersionOrDefault(cfg.ServiceVersion)),
-		)
+		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
 	}
 	options := append(SessionRPCServerOptions(),
 		grpc.ChainUnaryInterceptor(recoveryUnaryInterceptor(cfg.Logger, cfg.Metrics), authUnaryInterceptor(cfg)),
@@ -140,20 +141,6 @@ func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error)
 		listener = created
 	}
 	return server, listener, healthServer, nil
-}
-
-func deploymentEnvironmentOrDefault(value string) string {
-	if value == "" {
-		return "local"
-	}
-	return value
-}
-
-func serviceVersionOrDefault(value string) string {
-	if value == "" {
-		return "unknown"
-	}
-	return value
 }
 
 func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {
@@ -332,7 +319,16 @@ func logBoundary(logger *slog.Logger, metrics *workload.GRPCMetrics, method stri
 				slog.String("error.message_safe", "internal gRPC request failed"),
 			)
 		}
-		logger.LogAttrs(context.Background(), slog.LevelInfo, "internal.grpc.request", attrs...)
+		level := slog.LevelInfo
+		switch code {
+		case codes.OK, codes.Canceled:
+			level = slog.LevelDebug
+		case codes.Internal, codes.DataLoss:
+			level = slog.LevelError
+		case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded:
+			level = slog.LevelWarn
+		}
+		logger.LogAttrs(context.Background(), level, "internal.grpc.request", attrs...)
 	}
 }
 

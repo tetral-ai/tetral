@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -42,11 +44,11 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		return nil, status.Error(codes.InvalidArgument, "invalid sub-agent parent Message references")
 	}
 	parentMessageSequencesJSON, _ := json.Marshal(request.GetParentMessageSequences())
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetInitialPrompt(), string(parentMessageSequencesJSON))
+	requestHash := runtimecontrol.RequestHash(bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId(), request.GetTaskName(), request.GetAgentType(), request.GetInitialPrompt(), string(parentMessageSequencesJSON))
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.create_subagent_thread", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -62,7 +64,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			response = &bridgev1.CreateSubagentThreadResponse{Outcome: &bridgev1.CreateSubagentThreadResponse_Duplicate{Duplicate: &bridgev1.CreateSubagentThreadDuplicate{ChildThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_create"); err != nil {
@@ -90,7 +92,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err != nil {
 			return err
 		}
-		_, err = appendDeclaredSubagentReceivedEventTx(ctx, tx, scopeForThread(request.GetScope(), childThreadID), envelope, now)
+		_, err = appendDeclaredSubagentReceivedEventTx(ctx, tx, runtimecontrol.ScopeForThread(request.GetScope(), childThreadID), envelope, now)
 		if err != nil {
 			return err
 		}
@@ -111,11 +113,11 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 	if request.GetScope() == nil || request.GetEnsureOperationId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "reviewer trunk ensure operation is required")
 	}
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceReviewerTrunk, request.GetEnsureOperationId())
+	requestHash := runtimecontrol.RequestHash(bridgeOpCreateChildThread, childCreateSourceReviewerTrunk, request.GetEnsureOperationId())
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.ensure_approval_reviewer_trunk", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -131,7 +133,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 			response = &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerTrunkDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -163,11 +165,11 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 	if request.GetScope() == nil || request.GetReviewId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "reviewer sidecar review id is required")
 	}
-	requestHash := bridgeRequestHash(bridgeOpCreateChildThread, childCreateSourceReviewerSidecar, request.GetReviewId())
+	requestHash := runtimecontrol.RequestHash(bridgeOpCreateChildThread, childCreateSourceReviewerSidecar, request.GetReviewId())
 	now := s.now()
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.ensure_approval_reviewer_sidecar", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -183,7 +185,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 			response = &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerSidecarDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		parentThreadID := request.GetScope().GetSessionThreadId()
@@ -227,7 +229,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 	now := s.now()
 	phase = "durable_transaction"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.admit_approval_review_input", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -257,7 +259,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		} else if !dbconnect.IsNoRows(err) {
 			return err
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		isTrunk, err := validateApprovalReviewerAdmissionTargetTx(ctx, tx, request, false)
@@ -288,7 +290,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		if rowsAffected(result) {
+		if runtimecontrol.RowsAffected(result) {
 			committed = true
 			return nil
 		}
@@ -307,7 +309,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 		}
 		return nil
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.AdmitApprovalReviewInputResponse{Outcome: &bridgev1.AdmitApprovalReviewInputResponse_Stale{
 				Stale: &bridgev1.AdmitApprovalReviewInputStale{},
 			}}, nil
@@ -321,7 +323,7 @@ func (s *PostgreSQLBridgeAPIStore) AdmitApprovalReviewInput(ctx context.Context,
 }
 
 func approvalReviewRuntimeInputID(scope *bridgev1.RuntimeScope, reviewID string) string {
-	return strings.Replace(stableRuntimeID("approval_review_input", scope.GetWorkspaceId(), scope.GetSessionId(), reviewID), "stid_", "rin_", 1)
+	return strings.Replace(runtimecontrol.StableRuntimeID("approval_review_input", scope.GetWorkspaceId(), scope.GetSessionId(), reviewID), "stid_", "rin_", 1)
 }
 
 func validateApprovalReviewerAdmissionTargetTx(
@@ -366,7 +368,7 @@ func (s *PostgreSQLBridgeAPIStore) ResolveChildThread(ctx context.Context, reque
 }
 
 func (s *PostgreSQLBridgeAPIStore) ListChildThreads(ctx context.Context, request *bridgev1.ListChildThreadsRequest) (response *bridgev1.ListChildThreadsResponse, resultErr error) {
-	parentThreadID := defaultString(request.GetParentThreadId(), request.GetScope().GetSessionThreadId())
+	parentThreadID := runtimecontrol.DefaultString(request.GetParentThreadId(), request.GetScope().GetSessionThreadId())
 	phase := "validate"
 	defer func() {
 		logActorBoundaryRejected(s.Logger, request.GetScope(), "list_child_threads", parentThreadID, phase, resultErr)
@@ -416,7 +418,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		return nil, status.Error(codes.InvalidArgument, "agent mail scope, identities, target, and content are required")
 	}
 	now := s.now()
-	requestHash := bridgeRequestHash(
+	requestHash := runtimecontrol.RequestHash(
 		bridgeOpDeliverInterAgentMail,
 		request.GetDeliveryId(),
 		request.GetTargetThreadId(),
@@ -425,7 +427,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 	)
 	phase = "durable_transaction"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.deliver_inter_agent_mail", func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -440,7 +442,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 			response = &bridgev1.DeliverInterAgentMailResponse{Outcome: &bridgev1.DeliverInterAgentMailResponse_Duplicate{Duplicate: &bridgev1.DeliverInterAgentMailDuplicate{}}}
 			return nil
 		}
-		if err := requireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
+		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_message"); err != nil {
@@ -472,28 +474,28 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		if err != nil {
 			return err
 		}
-		binding, err := readRuntimeBindingForDeliveryTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId())
+		binding, err := runtimecontrol.ReadRuntimeBindingForDeliveryTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId())
 		if err != nil {
 			return err
 		}
-		targetScope := scopeForThread(request.GetScope(), envelope.TargetThreadID)
+		targetScope := runtimecontrol.ScopeForThread(request.GetScope(), envelope.TargetThreadID)
 		if _, err := appendDeclaredSubagentReceivedEventTx(ctx, tx, targetScope, envelope, now); err != nil {
 			return err
 		}
-		_, targetInterrupted, err := activeInterruptBarrierTx(
+		_, targetInterrupted, err := runtimecontrol.ActiveInterruptBarrierTx(
 			ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId(),
 		)
 		if err != nil {
 			return err
 		}
 		if !targetInterrupted {
-			if _, err := admitAgentMailDeliveryTx(ctx, tx, targetScope, envelope, binding, now); err != nil {
+			if _, err := runtimecontrol.AdmitAgentMailDeliveryTx(ctx, tx, targetScope, envelope, binding, now); err != nil {
 				return err
 			}
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
+		if err := runtimecontrol.InsertOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationInsert{
 			Operation: bridgeOpDeliverInterAgentMail, IdempotencyKey: request.GetDeliveryId(), RequestHash: requestHash,
-			AckStatus: bridgeAckCommitted, Now: now,
+			AckStatus: runtimecontrol.AckCommitted, Now: now,
 		}); err != nil {
 			return err
 		}
@@ -553,11 +555,11 @@ func (s *PostgreSQLBridgeAPIStore) ReadAgentMail(ctx context.Context, request *b
 		if deliveryID == "" || storedMessageJSON == "" {
 			return status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
 		}
-		messageJSON, err := validatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
+		messageJSON, err := runtimecontrol.ValidatedPublicInterAgentMessageJSON(json.RawMessage(storedMessageJSON))
 		if err != nil {
 			return err
 		}
-		content, err := agentMailContentFromPublicMessage(messageJSON)
+		content, err := runtimecontrol.AgentMailContentFromPublicMessage(messageJSON)
 		if err != nil {
 			return err
 		}
@@ -669,7 +671,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		custodyTransitions childCloseCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, scope, "agentruntimebridge."+operationKind, func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, scope); err != nil {
@@ -695,7 +697,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		if err != nil {
 			return err
 		}
-		if err := lockRuntimeInputQueueCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetIDs); err != nil {
+		if err := runtimecontrol.LockRuntimeInputQueueCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetIDs); err != nil {
 			return err
 		}
 		if command.sourceKind == "tool_use" {
@@ -706,13 +708,13 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
-		lockedThreads := make(map[string]threadMutationScope, len(targetIDs))
+		lockedThreads := make(map[string]runtimecontrol.ThreadMutationScope, len(targetIDs))
 		for _, targetID := range targetIDs {
-			mutation, err := lockThreadMutationTx(ctx, tx, scopeForThread(scope, targetID))
+			mutation, err := runtimecontrol.LockThreadMutationTx(ctx, tx, runtimecontrol.ScopeForThread(scope, targetID))
 			if err != nil {
 				return err
 			}
-			if mutation.role == "main" {
+			if mutation.Role == "main" {
 				return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
 			}
 			lockedThreads[targetID] = mutation
@@ -722,10 +724,10 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 			return err
 		}
 		for _, threadID := range targetIDs {
-			childScope := scopeForThread(scope, threadID)
+			childScope := runtimecontrol.ScopeForThread(scope, threadID)
 			threadScope := lockedThreads[threadID]
 			disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
-			switch threadScope.status {
+			switch threadScope.Status {
 			case "closed_for_runtime":
 				// The per-target stored result still records this target in the frozen subtree.
 			case "failed":
@@ -748,14 +750,14 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 				); err != nil {
 					return err
 				}
-				runtimeWriteID := stableRuntimeID("child_close_status", command.operationID, threadID)
+				runtimeWriteID := runtimecontrol.StableRuntimeID("child_close_status", command.operationID, threadID)
 				if err := insertChildThreadIdleStatusEventTx(ctx, tx, childScope, threadScope, runtimeWriteID, `{"type":"closed_for_runtime"}`, now); err != nil {
 					return err
 				}
 				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED
 			}
 			child := &bridgev1.ChildLifecycleResult{ChildThreadId: threadID, Disposition: disposition}
-			resultJSON, err := marshalBridgeJSON(childLifecycleStoredResult{ChildThreadID: threadID, Disposition: disposition.String()})
+			resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: threadID, Disposition: disposition.String()})
 			if err != nil {
 				return err
 			}
@@ -776,13 +778,13 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 		}
 		return nil
 	}); err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &closeChildLifecycleResult{stale: true}, nil
 		}
 		return nil, err
 	}
-	logRuntimeInputCustodyTransition(s.Logger, scope, "accepted_to_parked", custodyTransitions.parked)
-	logRuntimeInputCustodyTransition(s.Logger, scope, "accepted_to_cancelled", custodyTransitions.cancelled)
+	runtimecontrol.LogRuntimeInputCustodyTransition(s.Logger, ServiceNameBridgeAPI, scope, "accepted_to_parked", custodyTransitions.parked)
+	runtimecontrol.LogRuntimeInputCustodyTransition(s.Logger, ServiceNameBridgeAPI, scope, "accepted_to_cancelled", custodyTransitions.cancelled)
 	current, err := s.runtimeScopeApplicationCurrent(ctx, scope)
 	if err != nil {
 		return nil, err
@@ -812,10 +814,10 @@ type childCloseCustodyTransitions struct {
 func agentMailMessageCoveredByRequestStartTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
-	job RuntimeJob,
-	inbox lockedRuntimeInboxFinalization,
+	job runtimecontrol.InputIdentity,
+	inbox runtimecontrol.InputFinalization,
 ) (bool, error) {
-	if len(inbox.eventIDs) != 1 {
+	if len(inbox.EventIDs) != 1 {
 		return false, nil
 	}
 	var covered bool
@@ -831,7 +833,7 @@ func agentMailMessageCoveredByRequestStartTx(
 		   AND message.session_thread_id=$3 AND message.source_event_id=$4
 		   AND jsonb_typeof(request_start.projection_json::jsonb -> 'context_through_message_sequence')='number'
 		   AND (request_start.projection_json::jsonb ->> 'context_through_message_sequence')::bigint >= message.sequence
-	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID, inbox.eventIDs[0]).Scan(&covered)
+	)`, job.WorkspaceID, job.SessionID, job.SessionThreadID, inbox.EventIDs[0]).Scan(&covered)
 	return covered, err
 }
 
@@ -867,18 +869,18 @@ func settleChildCloseRuntimeInputsTx(
 		if err := rows.Close(); err != nil {
 			return childCloseCustodyTransitions{}, err
 		}
-		binding := runtimeBindingForDelivery{
+		binding := runtimecontrol.Binding{
 			BindingID: scope.GetBinding().GetBindingId(), BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 			PodUID: scope.GetBinding().GetTargetPodUid(),
 		}
 		for _, input := range inputs {
 			consumedAgentMail := false
 			if input.inputKind == "agent_mail" {
-				job := RuntimeJob{
+				job := runtimecontrol.InputIdentity{
 					WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: targetID,
-					RuntimeInputID: input.runtimeInputID, Kind: queue.KindRuntimeInput, InputKind: "agent_mail",
+					RuntimeInputID: input.runtimeInputID, InputKind: "agent_mail",
 				}
-				inbox, err := lockRuntimeInboxFinalizationTx(ctx, tx, job)
+				inbox, err := runtimecontrol.LockRuntimeInboxFinalizationTx(ctx, tx, job)
 				if err != nil {
 					return childCloseCustodyTransitions{}, err
 				}
@@ -895,7 +897,7 @@ func settleChildCloseRuntimeInputsTx(
 				return childCloseCustodyTransitions{}, err
 			}
 			if input.inputKind == "task_notification" {
-				parked, err := parkTaskNotificationInboxTx(
+				parked, err := runtimecontrol.ParkTaskNotificationInboxTx(
 					ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetID, input.runtimeInputID, binding, now,
 				)
 				if err != nil {
@@ -915,7 +917,7 @@ func settleChildCloseRuntimeInputsTx(
 				if err != nil {
 					return childCloseCustodyTransitions{}, err
 				}
-				if !rowsAffected(result) {
+				if !runtimecontrol.RowsAffected(result) {
 					return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "consumed agent mail Inbox authority changed during child close")
 				}
 				continue
@@ -926,7 +928,7 @@ func settleChildCloseRuntimeInputsTx(
 			if err != nil {
 				return childCloseCustodyTransitions{}, err
 			}
-			if !rowsAffected(result) {
+			if !runtimecontrol.RowsAffected(result) {
 				return childCloseCustodyTransitions{}, status.Error(codes.Aborted, "runtime Inbox authority changed during child close")
 			}
 			transitions.cancelled++
@@ -952,7 +954,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 	)
 	phase = "durable_transaction"
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadActive, func(tx *dbconnect.Tx) error {
-		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
@@ -973,7 +975,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err != nil {
 			return err
 		}
-		childScope := scopeForThread(request.GetScope(), childThreadID)
+		childScope := runtimecontrol.ScopeForThread(request.GetScope(), childThreadID)
 		if existingResults, ok, err := readChildLifecycleOperationResultSetTx(
 			ctx,
 			tx,
@@ -993,11 +995,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_resume"); err != nil {
 			return err
 		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
+		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, childScope)
 		if err != nil {
 			return err
 		}
-		if threadScope.role == "main" {
+		if threadScope.Role == "main" {
 			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
 		}
 		if closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), childThreadID); err != nil {
@@ -1006,7 +1008,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			return status.Error(codes.FailedPrecondition, "child thread is closing")
 		}
 		disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
-		switch threadScope.status {
+		switch threadScope.Status {
 		case "failed":
 			// Resume never revives a terminal child or changes its durable outcome.
 			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED
@@ -1033,7 +1035,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			if err != nil {
 				return err
 			}
-			if !rowsAffected(result) {
+			if !runtimecontrol.RowsAffected(result) {
 				return status.Error(codes.FailedPrecondition, "child resume status update failed")
 			}
 			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED
@@ -1043,7 +1045,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 				return err
 			}
 		}
-		resultJSON, err := marshalBridgeJSON(childLifecycleStoredResult{ChildThreadID: childThreadID, Disposition: disposition.String()})
+		resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: childThreadID, Disposition: disposition.String()})
 		if err != nil {
 			return err
 		}
@@ -1064,7 +1066,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		if isThreadInterruptBarrierStaleError(err) {
+		if runtimecontrol.IsThreadInterruptBarrierStaleError(err) {
 			return &bridgev1.MarkChildThreadActiveResponse{Outcome: &bridgev1.MarkChildThreadActiveResponse_Stale{Stale: &bridgev1.MarkChildThreadActiveStale{}}}, nil
 		}
 		return nil, err
@@ -1201,7 +1203,7 @@ func parseChildLifecycleCommand(
 		operationID = sourceCommandID
 	}
 	if operationID == "" {
-		operationID = stableRuntimeID(operationIDParts...)
+		operationID = runtimecontrol.StableRuntimeID(operationIDParts...)
 	}
 	settlementKind := ""
 	settlementEventID := ""
@@ -1603,7 +1605,7 @@ func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *
 			if !sealed {
 				return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is not sealed")
 			}
-			parts, err := decodeStoredRuntimeContextParts(raw)
+			parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 			if err != nil {
 				return nil, err
 			}
@@ -1659,7 +1661,7 @@ func selectReviewerSidecarPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope 
 	} else if err != nil {
 		return nil, err
 	}
-	entries, _, err := loadDurablePrefixEntriesThroughTx(ctx, tx, scopeForThread(scope, trunkThreadID), boundarySequence)
+	entries, _, err := loadDurablePrefixEntriesThroughTx(ctx, tx, runtimecontrol.ScopeForThread(scope, trunkThreadID), boundarySequence)
 	if err != nil {
 		return nil, err
 	}
@@ -1750,7 +1752,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		if err := rows.Scan(&kind, &sequence, &raw, &modelRequestID, &contextState, &requestRescheduled, &completeToolRepair); err != nil {
 			return nil, nil, err
 		}
-		parts, err := decodeStoredRuntimeContextParts(raw)
+		parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1790,7 +1792,7 @@ func validActorTaskName(value string) bool {
 }
 
 func validActorInitialPrompt(value string) bool {
-	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= AgentMailContentMaxBytes
+	return value == strings.TrimSpace(value) && value != "" && utf8.ValidString(value) && len([]byte(value)) <= runtimecontrol.AgentMailContentMaxBytes
 }
 
 func validActorIdentity(value string) bool {
@@ -1917,7 +1919,7 @@ func insertOwnedChildThreadTx(
 	); err != nil {
 		return createChildThreadResult{}, err
 	}
-	childScope := scopeForThread(parentScope, childThreadID)
+	childScope := runtimecontrol.ScopeForThread(parentScope, childThreadID)
 	_, _, err := insertChildThreadCreatedEventTx(ctx, tx, childScope, parentThreadID, role, visibility, agentType, taskName, sourceToolUseEventID, now)
 	if err != nil {
 		return createChildThreadResult{}, err
@@ -1940,13 +1942,13 @@ func persistCreatedChildOperationTx(
 	result createChildThreadResult,
 	now time.Time,
 ) error {
-	resultJSON, err := marshalBridgeJSON(result)
+	resultJSON, err := runtimecontrol.MarshalJSON(result)
 	if err != nil {
 		return err
 	}
-	return insertBridgeOperationTx(ctx, tx, scope, bridgeOperationInsert{
+	return runtimecontrol.InsertOperationTx(ctx, tx, scope, runtimecontrol.OperationInsert{
 		Operation: bridgeOpCreateChildThread, SourceKind: sourceKind, IdempotencyKey: key,
-		RequestHash: requestHash, AckStatus: bridgeAckCommitted, ResultJSON: resultJSON, Now: now,
+		RequestHash: requestHash, AckStatus: runtimecontrol.AckCommitted, ResultJSON: resultJSON, Now: now,
 	})
 }
 
@@ -1962,26 +1964,26 @@ func insertChildThreadCreatedEventTx(
 	sourceToolUseEventID string,
 	now time.Time,
 ) (string, int64, error) {
-	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return "", 0, err
 	}
-	eventVisibility, sessionVisible := threadScope.publicProjection("session.thread_created")
-	payloadJSON, err := marshalBridgeJSON(map[string]any{
+	eventVisibility, sessionVisible := threadScope.PublicProjection("session.thread_created")
+	payloadJSON, err := runtimecontrol.MarshalJSON(map[string]any{
 		"type":                     "session.thread_created",
 		"session_thread_id":        scope.GetSessionThreadId(),
 		"parent_thread_id":         parentThreadID,
 		"role":                     role,
 		"visibility":               visibility,
 		"agent_type":               agentType,
-		"task_name":                nullableJSONString(nullableSQLString(taskName)),
-		"source_tool_use_event_id": nullableJSONString(nullableSQLString(sourceToolUseEventID)),
+		"task_name":                runtimecontrol.NullableJSONString(nullableSQLString(taskName)),
+		"source_tool_use_event_id": runtimecontrol.NullableJSONString(nullableSQLString(sourceToolUseEventID)),
 	})
 	if err != nil {
 		return "", 0, err
 	}
 	eventID := id.New("evt_")
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
 		return "", 0, err
 	}
@@ -2002,7 +2004,7 @@ func insertChildThreadCreatedEventTx(
 	); err != nil {
 		return "", 0, err
 	}
-	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, eventVisibility, sessionVisible, now); err != nil {
+	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, eventVisibility, sessionVisible, now); err != nil {
 		return "", 0, err
 	}
 	return eventID, sequence, nil

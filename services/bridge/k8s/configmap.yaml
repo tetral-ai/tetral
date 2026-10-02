@@ -7,5 +7,5 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
 data:
-  TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
-  TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"
+  TETRAL_PROVIDER_RESCHEDULE_BUDGET: '3'
+  TETRAL_COMPACTION_RESCHEDULE_BUDGET: '2'

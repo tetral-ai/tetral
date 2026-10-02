@@ -8,8 +8,8 @@ const (
 	EnvLegacyPort            = "ENGINE_PORT"
 	EnvVaultKey              = "ENGINE_VAULT_KEY"
 	EnvDataDir               = "ENGINE_DATA_DIR"
-	EnvDeploymentEnvironment = "TETRAL_DEPLOYMENT_ENVIRONMENT"
-	EnvServiceVersion        = "TETRAL_SERVICE_VERSION"
+	EnvDeploymentEnvironment = workload.EnvDeploymentEnvironment
+	EnvServiceVersion        = workload.EnvServiceVersion
 
 	defaultDataDir     = "/var/tetral"
 	defaultPort        = "8080"
@@ -53,20 +53,13 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if dataDir == "" {
 		dataDir = defaultDataDir
 	}
-	deploymentEnvironment := env.Getenv(EnvDeploymentEnvironment)
-	if deploymentEnvironment == "" {
-		deploymentEnvironment = "local"
-	}
-	serviceVersion := env.Getenv(EnvServiceVersion)
-	if serviceVersion == "" {
-		serviceVersion = "unknown"
-	}
+	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	return Config{
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
 		VaultKey:              env.Getenv(EnvVaultKey),
 		DataDir:               dataDir,
-		DeploymentEnvironment: deploymentEnvironment,
-		ServiceVersion:        serviceVersion,
+		DeploymentEnvironment: resource.DeploymentEnvironment,
+		ServiceVersion:        resource.ServiceVersion,
 	}, nil
 }

@@ -40,13 +40,20 @@ func main() {
 }
 
 func run(ctx context.Context, env envReader) error {
-	logger := workload.NewLogger(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
+	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	diagnosticOwner := workload.NewProcessLogger(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
+	defer diagnosticOwner.CloseWithBudget()
+	logger := diagnosticOwner.Logger
+	defer workload.InstallDefaultLogger(logger)()
+	if diagnosticErr != nil {
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, diagnosticErr)
+	}
 	cfg, err := tetralsandbox.ConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	if cfg.DebugLogging {
-		logger = workload.NewLoggerWithLevel(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), slog.LevelDebug)
+		diagnosticOwner.SetLevel(slog.LevelDebug)
 	}
 	openResult, err := openDatabase(ctx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {
@@ -316,6 +323,7 @@ func run(ctx context.Context, env envReader) error {
 		ListenConfigKey:       tetralsandbox.EnvHTTPAddress,
 		Listen:                listenTCP,
 		Handler: workload.HealthRouter(readiness,
+			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 			workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", openResult.Client)),
 		),
 		Readiness: readiness,
