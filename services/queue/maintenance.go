@@ -29,9 +29,10 @@ func RunStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg
 // already owns database work. The service later cancels that work at its drain
 // deadline and joins this loop before returning database ownership to command.
 type maintenanceAdmission struct {
-	mu       sync.Mutex
-	stopping bool
-	stop     chan struct{}
+	mu           sync.Mutex
+	stopping     bool
+	stop         chan struct{}
+	admissionCtx context.Context
 }
 
 func (a *maintenanceAdmission) close() {
@@ -46,7 +47,10 @@ func (a *maintenanceAdmission) close() {
 func (a *maintenanceAdmission) admit() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return !a.stopping
+	// Signal cancellation closes new-cycle admission even before the service's
+	// shutdown goroutine runs. The separate work context still lets the current
+	// cycle complete within its drain window.
+	return !a.stopping && a.admissionCtx.Err() == nil
 }
 
 func runStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig, admission *maintenanceAdmission) {

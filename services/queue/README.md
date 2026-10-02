@@ -140,9 +140,10 @@ empty-partition-counter sweep from running.
 
 The serving process owns this loop together with its RPC and HTTP listeners.
 Shutdown marks readiness unavailable and closes both request and maintenance
-cycle admission. A cycle already admitted may finish during the same drain
-window as existing RPCs. At the deadline the service cancels maintenance and
-HTTP database work and force-stops RPC transport, then joins every admitted
+cycle admission. New maintenance cycles observe signal cancellation directly,
+even before the main shutdown path is scheduled. A cycle already admitted may
+finish during the same drain window as existing RPCs. At the deadline the service
+cancels maintenance and HTTP database work and force-stops RPC transport, then joins every admitted
 user before returning. Only then does the command close its database pool.
 A cancelled reclaim transaction rolls back as a whole; another replica can
 reclaim the remaining expired leases. Shutdown never implies reclamation

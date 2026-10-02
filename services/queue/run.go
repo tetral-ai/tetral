@@ -86,7 +86,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	}
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(serverCtx))
 	defer cancelWork()
-	maintenanceAdmission := &maintenanceAdmission{stop: make(chan struct{})}
+	maintenanceAdmission := &maintenanceAdmission{stop: make(chan struct{}), admissionCtx: serverCtx}
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
