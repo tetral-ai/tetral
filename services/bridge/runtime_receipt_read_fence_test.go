@@ -3,16 +3,21 @@ package agentruntimebridge
 import (
 	"context"
 	"fmt"
+	"net"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -237,6 +242,49 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 	}
 }
 
+// Observe the actual handler's return separately from the TCP caller deadline:
+// client expiry can precede server cancellation and transaction cleanup.
+func memoryReceiptJoinedRPC(t *testing.T, store *PostgreSQLBridgeAPIStore, podUID string) (bridgev1.AgentRuntimeBridgeServiceClient, <-chan struct{}) {
+	t.Helper()
+	identity := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: podUID}
+	returned := make(chan struct{}, 2)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		defer func() { returned <- struct{}{} }()
+		if err := BridgeAPIMethodAuthorizer(identity, info.FullMethod); err != nil {
+			return nil, err
+		}
+		return handler(auth.ContextWithIdentity(ctx, identity), request)
+	}))
+	RegisterBridgeAPI(server, store)
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		// A released tracer lets GracefulStop join all admitted handlers;
+		// Stop/Serve exit alone would not establish that ownership proof.
+		joined := make(chan struct{})
+		go func() { server.GracefulStop(); close(joined) }()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			server.Stop()
+			<-joined
+			t.Error("memory receipt RPC exceeded graceful join")
+		}
+		_ = listener.Close()
+		<-served
+	})
+	return bridgev1.NewAgentRuntimeBridgeServiceClient(conn), returned
+}
+
 // Actual RunMemory converges a pending projection after at least one poll. The
 // independent publisher completes accepted work between validation and receipt
 // SELECT; retirement alone permits replay, while a binding cut denies content.
@@ -250,20 +298,67 @@ func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 			seedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
 			request := durableMemoryRequestForTest(t, admin, scope, "evt_memory_projection_receipt", `{"action":"create","path":"notes/replay.md","content":"original"}`)
 			tracer := &bridgeExecutionQueryTracer{}
-			rpc := processRegistryRPCWithStore(t, newAwaitNotificationTracedStore(t, runtime, tracer), scope.Binding.TargetPodUid, nil)
-			firstCtx, stop := context.WithTimeout(context.Background(), 60*time.Millisecond)
-			first, err := rpc.RunMemory(firstCtx, request)
-			stop()
-			if status.Code(err) != codes.DeadlineExceeded {
-				t.Fatalf("pending admission=%v/%v", first, err)
+			traced := newAwaitNotificationTracedStore(t, runtime, tracer)
+			rpc, handlerReturned := memoryReceiptJoinedRPC(t, traced, scope.Binding.TargetPodUid)
+			// The real caller deadline is outside the unchanged 3s admission
+			// phase and inside the unchanged 30s projection wait. Admission is
+			// proved by the committed scope boundary and independent SQL.
+			firstCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			firstFired, firstRelease := tracer.armBarrier("", "/* runtime receipt scope validation */", 1)
+			firstReleased := false
+			defer func() {
+				if !firstReleased {
+					close(firstRelease)
+				}
+			}()
+			type outcome struct {
+				response *bridgev1.RunMemoryResponse
+				err      error
 			}
-			var projectionState string
-			var queued int
-			if err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, request.ToolUseEventId).Scan(&projectionState); err != nil || projectionState != "pending" {
-				t.Fatalf("projection=%s/%v", projectionState, err)
+			firstDone := make(chan outcome, 1)
+			go func() { response, err := rpc.RunMemory(firstCtx, request); firstDone <- outcome{response, err} }()
+			select {
+			case <-firstFired:
+			case <-firstCtx.Done():
+				t.Fatal("caller expired before committed projection scope boundary")
 			}
-			if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE kind=$1`, queue.KindSandboxMemoryProjection).Scan(&queued); err != nil || queued != 1 {
-				t.Fatalf("independently accepted projection Queue custody=%d/%v", queued, err)
+			assertPending := func() {
+				t.Helper()
+				var projectionState string
+				var queued, matching int
+				if err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, request.ToolUseEventId).Scan(&projectionState); err != nil || projectionState != "pending" {
+					t.Fatalf("projection=%s/%v", projectionState, err)
+				}
+				if err := admin.QueryRow(`SELECT count(*), count(*) FILTER (WHERE workspace_id=$2 AND payload_json::jsonb->>'session_id'=$3 AND payload_json::jsonb->>'memory_write_id'=$4)
+				 FROM queue_jobs WHERE kind=$1`, queue.KindSandboxMemoryProjection, scope.WorkspaceId, scope.SessionId, request.ToolUseEventId).Scan(&queued, &matching); err != nil || queued != 1 || matching != 1 {
+					t.Fatalf("independently accepted projection Queue custody=%d matching=%d/%v", queued, matching, err)
+				}
+			}
+			assertPending()
+			beforeExpiry := receiptTenantSnapshot(t, admin)
+			if err := firstCtx.Err(); err != nil {
+				t.Fatalf("caller expired before independent committed custody proof: %v", err)
+			}
+			<-firstCtx.Done()
+			close(firstRelease)
+			firstReleased = true
+			select {
+			case first := <-firstDone:
+				if status.Code(first.err) != codes.DeadlineExceeded || first.response != nil {
+					t.Fatalf("pending admission=%v/%v", first.response, first.err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("expired caller did not join")
+			}
+			select {
+			case <-handlerReturned:
+			case <-time.After(3 * time.Second):
+				t.Fatal("expired server handler did not join before replay")
+			}
+			assertPending()
+			if after := receiptTenantSnapshot(t, admin); !reflect.DeepEqual(beforeExpiry, after) {
+				t.Fatal("caller expiry changed accepted memory/Queue custody")
 			}
 			replacement := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: scope.Binding.TargetPodUid, ID: "replacement_memory_projection"}
 			registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(runtime), replacement)
@@ -274,30 +369,29 @@ func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 				t.Fatal(err)
 			}
 			fired, release := tracer.armBarrier("", "/* runtime receipt scope validation */", 2)
-			type outcome struct {
-				response *bridgev1.RunMemoryResponse
-				err      error
-			}
+			var releaseOnce sync.Once
+			releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+			defer releaseBarrier()
 			done := make(chan outcome, 1)
 			go func() { response, err := rpc.RunMemory(context.Background(), request); done <- outcome{response, err} }()
 			select {
 			case <-fired:
 			case <-time.After(3 * time.Second):
-				close(release)
+				releaseBarrier()
 				t.Fatal("second actual pending receipt poll did not reach barrier")
 			}
 			if _, err := admin.Exec(`UPDATE session_runtime_tool_results SET memory_projection_state='refreshed',result_json='{"status":"completed","original":true}' WHERE tool_use_event_id=$1`, request.ToolUseEventId); err != nil {
-				close(release)
+				releaseBarrier()
 				t.Fatal(err)
 			}
 			if cut {
 				if _, err := admin.Exec(`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, scope.SessionId); err != nil {
-					close(release)
+					releaseBarrier()
 					t.Fatal(err)
 				}
 			}
 			before := receiptTenantSnapshot(t, admin)
-			close(release)
+			releaseBarrier()
 			select {
 			case got := <-done:
 				if got.err != nil || (got.response.GetStale() != nil) != cut || (!cut && got.response.GetDuplicate().GetResultJson() != `{"status":"completed","original":true}`) {

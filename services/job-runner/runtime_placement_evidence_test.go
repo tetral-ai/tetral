@@ -182,24 +182,54 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 	candidates := placementEvidenceCandidates(t, client)
 	for _, scenario := range []string{"selected", "no_candidates", "invalid_metrics", "capacity_excluded", "timeout", "http_error"} {
 		t.Run(scenario, func(t *testing.T) {
+			wantCount := 4
+			if scenario == "no_candidates" {
+				wantCount = 0
+			}
+			if scenario == "selected" {
+				wantCount = 2
+			}
+			entered, exited := make(chan string, 4), make(chan string, 4)
+			gates := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+			var releaseOnce [2]sync.Once
+			release := func(round int) { releaseOnce[round].Do(func() { close(gates[round]) }) }
+			var arrivals atomic.Int32
 			httpClient := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				index := int(arrivals.Add(1)) - 1
+				entered <- r.Host
+				defer func() { exited <- r.Host }()
+				if scenario == "timeout" {
+					// The failure is an admitted native HTTP probe, never an
+					// incidental expiry while establishing its registry proof.
+					<-r.Context().Done()
+					return
+				}
+				if index >= 4 {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				select {
+				case <-gates[index/2]:
+				case <-r.Context().Done():
+					return
+				}
 				switch scenario {
 				case "invalid_metrics":
 					_, _ = io.WriteString(w, "provider payload PRIVATE_SENTINEL")
 				case "capacity_excluded":
 					_, _ = io.WriteString(w, placementVectorBody(16, 100))
-				case "timeout":
-					<-r.Context().Done()
 				case "http_error":
 					w.WriteHeader(http.StatusServiceUnavailable)
 				default:
 					_, _ = io.WriteString(w, placementVectorBody(0, 100))
 				}
 			}))
+			t.Cleanup(func() { release(0); release(1) })
 			metrics := &RuntimePlacementMetrics{}
+			// The production policy bounds both registry lookup and HTTP.
+			// Response gates model each reason after actual probe entry;
+			// scheduler latency is not a synthetic 30ms eligibility oracle.
 			policy := DefaultRuntimePlacementPolicy()
-			policy.ProbeTimeout = 30 * time.Millisecond
-			policy.ProbeBudget = 100 * time.Millisecond
 			resolver := KubernetesRuntimeTargetResolver{PlacementMetrics: metrics, PlacementPolicy: policy, LoadClient: httpClient, RandomIndex: func(n int) int { return n - 1 }, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 				inventory := candidates
 				if scenario == "no_candidates" {
@@ -236,29 +266,70 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			store := NewPostgreSQLRuntimeDeliveryStore(client, 19090)
 			store.Logger = owner.Logger
 			store.TargetResolver = resolver
-			plan, err := store.ActivateRuntimeRecovery(context.Background(), job)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			var plan RuntimeCommandPlan
+			var err error
+			joined := make(chan struct{})
+			go func() {
+				defer close(joined)
+				plan, err = store.ActivateRuntimeRecovery(ctx, job)
+			}()
+			defer func() {
+				cancel()
+				release(0)
+				release(1)
+				select {
+				case <-joined:
+				case <-time.After(3 * time.Second):
+					t.Error("actual placement did not join")
+				}
+			}()
+			hosts := map[string]bool{}
+			for index := 0; index < wantCount; index++ {
+				select {
+				case host := <-entered:
+					if hosts[host] {
+						t.Fatalf("actual HTTP probe repeated candidate %s", host)
+					}
+					hosts[host] = true
+					if index%2 == 1 && scenario != "timeout" {
+						release(index / 2)
+					}
+				case <-ctx.Done():
+					t.Fatalf("native HTTP entry %d/%d: %v", index, wantCount, ctx.Err())
+				}
+			}
+			select {
+			case <-joined:
+			case <-ctx.Done():
+				t.Fatalf("actual placement did not finish: %v", ctx.Err())
+			}
+			for index := 0; index < wantCount; index++ {
+				select {
+				case <-exited:
+				case <-ctx.Done():
+					t.Fatalf("native HTTP handler %d/%d did not join", index, wantCount)
+				}
+			}
+			if got := int(arrivals.Load()); got != wantCount {
+				t.Fatalf("actual HTTP requests=%d; want %d", got, wantCount)
+			}
 			if plan.placement == nil {
 				t.Fatalf("actual placement attempt observations missing:%+v/%v", plan, err)
 			}
 			choice := *plan.placement
 			owner.CloseWithBudget()
 			var record map[string]any
-			decoder := json.NewDecoder(&sink)
+			output := sink.String()
+			decoder := json.NewDecoder(strings.NewReader(output))
 			if decodeErr := decoder.Decode(&record); decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
 			if decoder.More() {
 				t.Fatal("placement emitted duplicate attempt records")
 			}
-			if record["event"] != "runtime_placement" || strings.Contains(sink.String(), "PRIVATE_SENTINEL") {
+			if record["event"] != "runtime_placement" || strings.Contains(output, "PRIVATE_SENTINEL") {
 				t.Fatalf("unsafe placement sink=%v", record)
-			}
-			wantCount := 4
-			if scenario == "no_candidates" {
-				wantCount = 0
-			}
-			if scenario == "selected" {
-				wantCount = 2
 			}
 			if len(choice.Observations) != wantCount {
 				t.Fatalf("observation bounds=%+v", choice)
@@ -269,7 +340,7 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				if scenario == "selected" {
 					reason = "eligible"
 				}
-				if record[prefix+"reason"] != reason || record[prefix+"kubernetes.uid"] != observation.Candidate.PodUID || record[prefix+"runtime.process.id"] != observation.ProcessID {
+				if record[prefix+"reason"] != reason || record[prefix+"kubernetes.uid"] != observation.Candidate.PodUID || record[prefix+"runtime.process.id"] != observation.ProcessID || observation.ProcessID != "process_"+observation.Candidate.PodUID {
 					t.Fatalf("safe rejected/winning observation lost:%v", record)
 				}
 				if scenario == "selected" || scenario == "capacity_excluded" {
