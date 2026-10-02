@@ -513,7 +513,8 @@ describe("ThreadLoop", () => {
 			type: "retry",
 			error: { code: "timeout" },
 		});
-		expect(timeoutSleeps).toBe(2);
+		expect(timeoutSleeps).toBe(1);
+		// Only the memo observation runs a timer; raw FinishIdle owns its deadline.
 		idleResult.resolve({
 			ok: true,
 			eventId: `bridge-${idleWriteId}`,

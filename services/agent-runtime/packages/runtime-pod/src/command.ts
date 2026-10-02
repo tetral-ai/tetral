@@ -382,10 +382,6 @@ export async function buildRuntimePodCommandDependencies(input: {
 					policy.kind === "fixed" ? policy.timeoutMs : 0,
 				),
 			),
-			commitAcceptedInputTimeoutMs:
-				input.config.bridgeMethodPolicies.commitInputs.kind === "fixed"
-					? input.config.bridgeMethodPolicies.commitInputs.timeoutMs
-					: 3000,
 			phaseDeadline: () => phaseDeadline,
 			recordProviderReschedule: (event) => {
 				input.logger.info(providerRescheduleSelectedLogRecord(event));

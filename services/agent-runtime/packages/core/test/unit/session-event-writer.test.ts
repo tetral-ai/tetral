@@ -28,6 +28,20 @@ function envelope(writeId = "write_1"): SessionEventEnvelope {
 }
 
 describe("SessionEventWriter boundary", () => {
+	test("an uncooperative raw adapter remains owned without overlapping retries", async () => {
+		let release!: (result: SessionEventWriterAppendResult) => void;
+		let calls = 0, completed = false;
+		const writer = createSessionEventWriter({
+			append: () => { calls++; return new Promise(resolve => { release = resolve; }); },
+			sleep: async () => { throw new Error("no retry before raw join"); },
+		});
+		const result = writer.append(envelope()).then(value => { completed = true; return value; });
+		await Bun.sleep(10);
+		expect(completed).toBe(false); expect(calls).toBe(1);
+		release({ok: true, type: "committed", eventId: "original"});
+		expect(await result).toMatchObject({ok: true, eventId: "original"});
+		expect(calls).toBe(1);
+	});
 	test("accepts an operation-specific result that does not echo the request", async () => {
 		const requests: SessionEventEnvelope[] = [];
 		const writer = createSessionEventWriter({

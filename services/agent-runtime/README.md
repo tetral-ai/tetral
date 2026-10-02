@@ -540,6 +540,35 @@ receipt recovery repeats only the unchanged operation; generic unknown-outcome
 retries and whole-turn drain are absent. The generated-method inventory and
 policy projection must remain exhaustive when methods change.
 
+Core ordinary writer and accepted-input consumers await the adapter's actual
+transport result before retrying. The generated Bridge owner supplies parsed
+method deadlines, cancels real RPC handles and joins callbacks; an expired shared
+phase cannot dispatch another RPC. The existing retry owners retain three
+attempts and 100/300 ms backoffs where allowed. Core does not race a second fixed
+three-second timer against configured transport deadlines. Metadata preparation
+precedes the generated RPC attempt; an earlier Core observation cannot discard a
+healthy result or abandon the raw operation.
+
+Failed-run closeout is distinct: its existing three-second memo observation
+window may expire while separately owned settlement continues. Later observers
+rejoin the same memo work, and observer cancellation does not cancel transport.
+The generic writer also serves the production reviewer failure host. Its abstract
+promise-only adapter must own a bounded deadline and cancellation/join behavior;
+an adapter that never settles keeps the reusable consumer pending. Executable
+shutdown supplies the separate absolute exit bound while retaining required
+dependencies until joined work completes.
+
+The real Runtime handoff composition exercises independent held provider requests,
+fresh placement after admission closes, exact original turn/tool/result context,
+all-thread checkpoints, reviewer Read continuation and expiry, and authenticated
+old-owner fences. Fault controls distinguish precommit rejection, committed lost
+responses, selected process death, same-Pod container restart, and simultaneous
+legal input/recovery binding owners. A child must have actual spawn lineage before
+its normal completion; its original mail can remain accepted after Runner admission
+and is handed back through the same durable input identity. Queue ordering retains
+that input ahead of a handoff wake. The fixture drives those existing owners without
+manual acknowledgement or extra input to trigger the original continuation.
+
 ## Testing guide
 
 Run from the package root:
@@ -570,7 +599,8 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |
-| `runtime-pod/test/unit/bridge-client.test.ts` | Bridge RPC clients and input committers |
+| `runtime-pod/test/unit/bridge-client.test.ts`, `core-writer-policy.test.ts` | Bridge clients/input committers, parsed method policy through actual Core assembly, bounded attempts and independent failed-run observation |
+| `integration/replica_runtime_handoff_test.go` (repository root) | real-process checkpoint, reviewer and fault continuation, exact durable custody/context, binding races and joined exit |
 | `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |
 | `protocol/test/unit/bounds.test.ts` | shared bound constants |
 

@@ -9,6 +9,19 @@ import {
 	userMessage,
 } from "./thread-loop-test-support.js";
 
+test("quiesce preserves the checkpoint signal already captured by an admitted reviewer dependency", () => {
+	const session = new ThreadRuntime("sesn_reviewer_read_checkpoint");
+	const captured = session.state.checkpointSignal()!;
+	expect(captured.aborted).toBe(false);
+	session.state.beginRuntimeQuiesce(() => true);
+	expect(captured.aborted).toBe(false);
+	expect(session.state.runtimeCheckpointYieldRequested()).toBe(false);
+	expect(session.state.checkpointSignal()).toBeUndefined();
+	session.state.beginRuntimeQuiesce(() => false);
+	expect(captured.aborted).toBe(true);
+	expect(session.state.runtimeCheckpointYieldRequested()).toBe(true);
+});
+
 test("quiesce completes the admitted response and yields its durable checkpoint without idle closeout", async () => {
 	const session = new ThreadRuntime("sesn_checkpoint");
 	let requests = 0;

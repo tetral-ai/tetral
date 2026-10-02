@@ -651,7 +651,7 @@ export async function finishIdleWithRetry(
 		attempt <= SessionEventWriterRetryPolicy.attempts;
 		attempt += 1
 	) {
-		const result = await finishIdleWithTimeout(options, envelope);
+		const result = await finishIdleOnce(options, envelope);
 		if (result.ok) return result;
 		lastFailure = result;
 		if (
@@ -687,24 +687,8 @@ export async function commitRuntimeTerminationWithRetry(
 		attempt <= SessionEventWriterRetryPolicy.attempts;
 		attempt += 1
 	) {
-		const result = await Promise.race([
-			commitRuntimeTerminationOnce(options, envelope),
-			options.runtime
-				.sleep(
-					SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-					new AbortController().signal,
-				)
-				.then(
-					(): SessionEventWriterRuntimeTerminationResult => ({
-						ok: false,
-						error: normalizeSessionEventWriterError({
-							code: "timeout",
-							sessionId: envelope.sessionId,
-							writeId: envelope.writeId,
-						}),
-					}),
-				),
-		]);
+		// Await the transport-owned deadline and joined result before any retry.
+		const result = await commitRuntimeTerminationOnce(options, envelope);
 		if (result.ok) {
 			return result;
 		}
@@ -761,29 +745,6 @@ async function commitRuntimeTerminationOnce(
 			}),
 		};
 	}
-}
-
-async function finishIdleWithTimeout(
-	options: ThreadLoopRuntimeOptions,
-	envelope: SessionEventWriterFinishIdleEnvelope,
-): Promise<SessionEventWriterFinishIdleResult> {
-	const rawOperation = finishIdleOnce(options, envelope);
-	const timeoutController = new AbortController();
-	const first = await Promise.race([
-		rawOperation.then((result) => ({ type: "raw" as const, result })),
-		options.runtime
-			.sleep(
-				SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-				timeoutController.signal,
-			)
-			.then(() => ({ type: "local_timeout" as const })),
-	]);
-	if (first.type === "raw") {
-		timeoutController.abort();
-		return first.result;
-	}
-	// The transport has no cancellation contract, so ownership stays with the raw write.
-	return await rawOperation;
 }
 
 async function finishIdleOnce(

@@ -636,7 +636,7 @@ describe("ThreadLoop", () => {
 				.filter((message) => message.contextKind === "user"),
 		).toHaveLength(1);
 	});
-	test("hung CommitInputs attempts exhaust the bounded writer budget without opening provider work", async () => {
+	test("hung CommitInputs transports join deadline failures before exhausting the writer budget without opening provider work", async () => {
 		const session = new ThreadRuntime("sesn_hung_commit_inputs");
 		const input = acceptedInput("rin_hung_commit_inputs", session.sessionId);
 		session.state.enqueueAcceptedInput(input);
@@ -649,7 +649,9 @@ describe("ThreadLoop", () => {
 			buildContext: async () => [],
 			loadPendingInput: async () => ({ type: "empty" }),
 			commitAcceptedInput: async () => {
-				return await new Promise<never>(() => undefined);
+				// The adapter owns its transport deadline and raw cancellation join;
+				// a Core observation alone cannot cancel a promise-only port.
+				throw normalizeContextLoaderError({code: "timeout", sessionId: session.sessionId});
 			},
 		};
 		const baseWriter = writerFrom((envelope) => ({

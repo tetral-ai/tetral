@@ -571,7 +571,6 @@ export interface ThreadLoopRuntimeOptions {
 	readonly runtime: RuntimeDependencies;
 	readonly llmService: LLMServiceInterface;
 	readonly storeOperationTimeoutMs: number;
-	readonly commitAcceptedInputTimeoutMs?: number;
 	readonly phaseDeadline?: () => number | undefined;
 	readonly maxNormalizedTextPreviewBytes?: number;
 	readonly createProcessor?: (
@@ -2468,87 +2467,38 @@ export async function commitAcceptedInputWithRetry(
 			"started",
 		);
 		try {
-			const timeoutController = new AbortController();
-			let settled:
-				| {
-						readonly type: "result";
-						readonly result: AcceptedInputCommitResult;
-				  }
-				| { readonly type: "error"; readonly error: unknown }
-				| undefined;
-			const rawAttempt = contextLoader
-				.commitAcceptedInput(
-					input,
-					input.kind === "approval_review"
-						? { approvalReviewText: input.promptText }
-						: undefined,
-				)
-				.then(
-					(result) => {
-						runtimeMetrics(options).observeContextLoadLatency(
-							"commit_accepted_input",
-							options.runtime.monotonicMs() - attemptStartedAt,
-							"success",
-						);
-						return (settled = { type: "result" as const, result });
-					},
-					(error) => {
-						runtimeMetrics(options).observeContextLoadLatency(
-							"commit_accepted_input",
-							options.runtime.monotonicMs() - attemptStartedAt,
-							"error",
-						);
-						return (settled = { type: "error" as const, error });
-					},
-				);
-			// A test clock and some embedders may resolve sleep immediately. Give an
-			// already-settled transport result one microtask to win before arming
-			// the local timeout; an actually pending write remains bounded below.
-			await Promise.resolve();
-			const attemptResult =
-				settled ??
-				(await Promise.race([
-					rawAttempt,
-					options.runtime
-						.sleep(
-							options.commitAcceptedInputTimeoutMs ??
-								SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-							timeoutController.signal,
-						)
-						.then((elapsed) => ({
-							type: elapsed ? ("timeout" as const) : ("cancelled" as const),
-						})),
-				]));
-			timeoutController.abort();
-			if (attemptResult.type === "result") {
-				recordAcceptedInputCommit(
-					options,
-					input,
-					attempt,
-					attemptStartedAt,
-					attemptResult.result.type === "task_notification_deferred"
-						? "deferred"
-						: attemptResult.result.type === "task_notification_rejected"
-							? "rejected"
-							: "committed",
-					attemptResult.result.type === "task_notification_rejected"
-						? attemptResult.result.errorCode
-						: undefined,
-				);
-				return { ok: true, result: attemptResult.result, contextDrafts };
-			}
-			if (attemptResult.type === "error") {
-				throw attemptResult.error;
-			}
-			lastError = normalizeContextLoaderError({
-				code: attemptResult.type === "timeout" ? "timeout" : "unavailable",
-				sessionId: input.sessionId,
-				reason:
-					attemptResult.type === "timeout"
-						? "accepted input commit attempt timed out"
-						: "accepted input commit was cancelled",
-			});
+			const result = await contextLoader.commitAcceptedInput(
+				input,
+				input.kind === "approval_review"
+					? { approvalReviewText: input.promptText }
+					: undefined,
+			);
+			runtimeMetrics(options).observeContextLoadLatency(
+				"commit_accepted_input",
+				options.runtime.monotonicMs() - attemptStartedAt,
+				"success",
+			);
+			recordAcceptedInputCommit(
+				options,
+				input,
+				attempt,
+				attemptStartedAt,
+				result.type === "task_notification_deferred"
+					? "deferred"
+					: result.type === "task_notification_rejected"
+						? "rejected"
+						: "committed",
+				result.type === "task_notification_rejected"
+					? result.errorCode
+					: undefined,
+			);
+			return { ok: true, result, contextDrafts };
 		} catch (error) {
+			runtimeMetrics(options).observeContextLoadLatency(
+				"commit_accepted_input",
+				options.runtime.monotonicMs() - attemptStartedAt,
+				"error",
+			);
 			lastError = error;
 			const parsed = ContextLoaderErrorSchema.safeParse(error);
 			if (!parsed.success || !parsed.data.retryable) {

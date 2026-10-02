@@ -1307,8 +1307,9 @@ export type SessionEventWriterRuntimeTerminationEnvelope = z.infer<
 	typeof SessionEventWriterRuntimeTerminationEnvelopeSchema
 >;
 
-// This timeout bounds both each ordinary transport attempt and each failed-run
-// closeout observation window; the latter never cancels its in-flight transport.
+// Canonical initial short-write deadline and retry schedule. Actual transports
+// project their parsed method policy to consumers. Failed-run memo observers
+// retain this separate initial observation window without cancelling transport.
 export const SessionEventWriterRetryPolicy = {
 	attempts: 3,
 	timeoutPerAttemptMs: 3000,
@@ -1413,7 +1414,11 @@ export type SessionEventWriterToolSettlementAttempt =
 	  }
 	| { readonly ok: false; readonly error: SessionEventWriterError };
 
-/** Durable event port whose closed operation results gate the corresponding hot projection. */
+/**
+ * Durable event port whose closed results gate hot projection. Adapters own
+ * bounded transport deadlines, actual cancellation and raw joins. Promise-only
+ * consumers cannot cancel an uncooperative adapter by observing a timeout.
+ */
 export interface SessionEventWriter {
 	/**
 	 * Appends one Bridge-bound event before its matching event projection mutates hot

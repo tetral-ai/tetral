@@ -30,6 +30,13 @@ export class BridgeUnaryCalls {
         ? options.deadline
         : Math.min(this.phaseDeadline, options.deadline ?? Infinity);
     const deadline = bridgeMethodDeadline(this.policies, method, Date.now(), remaining);
+    if (deadline <= Date.now()) {
+      // Expired shared authority must not dispatch a fresh business RPC.
+      throw Object.assign(new Error("Bridge method deadline exceeded"), {
+        code: status.DEADLINE_EXCEEDED,
+        details: "Bridge method deadline exceeded",
+      });
+    }
     let joined!: () => void;
     const join = new Promise<void>((resolve) => {
       joined = resolve;

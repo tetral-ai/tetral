@@ -1,10 +1,11 @@
 /**
  * @packageDocumentation
  * Provides Runtime's session-event normalization and a generic retrying writer.
- * It guards envelope validation, stable write identity, bounded retry and timeout
+ * It guards envelope validation, stable write identity and bounded retry
  * behavior, ACK matching, and public session.error projection at durable emission.
- * Unit-level callers exercise the generic writer; the production BridgeAPI writer
- * reuses sessionEventForDurableWrite while owning its transport policy directly.
+ * The production reviewer failure host wraps the BridgeAPI writer here. The
+ * transport owns its parsed deadline and cancellation; an observer cannot join
+ * an arbitrary adapter by abandoning its raw promise.
  */
 import type {
 	RuntimeFailure,
@@ -51,7 +52,7 @@ export function createSessionEventWriter(
 				attempt <= SessionEventWriterRetryPolicy.attempts;
 				attempt += 1
 			) {
-				const result = await appendWithTimeout(options, envelope);
+				const result = await appendOnce(options, envelope);
 				if (result.ok) {
 					return result;
 				}
@@ -163,25 +164,6 @@ function publicRetryStatus(failure: RuntimeFailure): {
 	// Unstamped non-terminal failures reach this mapper only from in-run emissions.
 	// Idle-accompanying closeout paths stamp exhausted before they write.
 	return { type: "retrying" };
-}
-
-async function appendWithTimeout(
-	options: SessionEventWriterOptions,
-	envelope: SessionEventEnvelope,
-): Promise<SessionEventWriterAppendResult> {
-	return await Promise.race([
-		appendOnce(options, envelope),
-		options.sleep(SessionEventWriterRetryPolicy.timeoutPerAttemptMs).then(
-			(): SessionEventWriterAppendResult => ({
-				ok: false,
-				error: normalizeSessionEventWriterError({
-					code: "timeout",
-					sessionId: envelope.sessionId,
-					writeId: envelope.writeId,
-				}),
-			}),
-		),
-	]);
 }
 
 async function appendOnce(

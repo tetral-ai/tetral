@@ -632,8 +632,11 @@ export class ThreadState {
 			this.#quiesceModelRequestId =
 				this.#threadTurnCheckpoint.request?.modelRequestId;
 		this.#runtimeQuiesceRequested = true;
-		this.#quiesceController.abort();
 		this.#drainDependencyAllowed = dependencyAllowed;
+		// A reviewer may already be awaiting Read with this signal. Preserve that
+		// admitted dependency across the scheduling fence; expiry still cancels
+		// its owning run and joins the real transport before resource close.
+		if (!dependencyAllowed?.()) this.#quiesceController.abort();
 	}
 
 	beginRuntimeCheckpointExpiry(): void {
