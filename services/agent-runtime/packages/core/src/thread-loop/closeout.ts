@@ -7,6 +7,7 @@
  */
 
 import type {
+	FinishIdleOperationControls,
 	RuntimeContextEntry,
 	RuntimeFailure,
 	SessionEventWriterAppendResult,
@@ -638,33 +639,73 @@ async function observeFailedRunCloseoutStep<
 	return observed.result;
 }
 
-export async function finishIdleWithRetry(
-	options: ThreadLoopRuntimeOptions,
-	envelope: SessionEventWriterFinishIdleEnvelope,
-): Promise<SessionEventWriterFinishIdleResult> {
-	if (options.sessionEventWriter.finishIdle === undefined) {
-		return writerUnavailable(envelope.sessionId, envelope.durableTurnId);
-	}
-	let lastFailure: SessionEventWriterFinishIdleResult | undefined;
-	for (
-		let attempt = 1;
-		attempt <= SessionEventWriterRetryPolicy.attempts;
-		attempt += 1
-	) {
-		const result = await finishIdleOnce(options, envelope);
-		if (result.ok) return result;
-		lastFailure = result;
-		if (
-			!result.error.retryable ||
-			attempt === SessionEventWriterRetryPolicy.attempts
-		) {
-			return result;
-		}
-		await retryBackoff(options, attempt);
-	}
-	return (
-		lastFailure ?? writerUnknown(envelope.sessionId, envelope.durableTurnId)
-	);
+export async function finishIdleWithRetry(options: ThreadLoopRuntimeOptions, envelope: SessionEventWriterFinishIdleEnvelope, controls: FinishIdleOperationControls = {}): Promise<SessionEventWriterFinishIdleResult> {
+    if (options.sessionEventWriter.finishIdle === undefined) {
+        return writerUnavailable(envelope.sessionId, envelope.durableTurnId);
+    }
+    let ordinaryFailures = 0;
+    let waitExpiries = 0;
+    const operationControls = (): FinishIdleOperationControls => {
+        const deadlineEpochMs = Math.min(controls.deadlineEpochMs ?? Infinity, options.phaseDeadline?.() ?? Infinity);
+        return {
+            ...(controls.signal === undefined ? {} : {
+                signal: controls.signal
+            }),
+            ...(Number.isFinite(deadlineEpochMs) ? {
+                deadlineEpochMs
+            } : {}),
+        };
+    };
+    const stopped = (): boolean => controls.signal?.aborted === true ||
+        Date.now() >= (operationControls().deadlineEpochMs ?? Infinity);
+    const terminal = (): SessionEventWriterFinishIdleResult => ({
+        ok: false,
+        error: {
+            ...normalizeSessionEventWriterError({
+                code: "timeout", sessionId: envelope.sessionId, writeId: envelope.durableTurnId
+            }),
+            retryable: false,
+        },
+    });
+    for (;;) {
+        if (stopped())
+            return terminal();
+        // Each returned attempt has joined its actual transport before rejoining this operation.
+        const result = await finishIdleOnce(options, envelope, operationControls());
+        if (result.ok)
+            return result;
+        if (!result.error.retryable)
+            return result;
+        if (stopped())
+            return terminal();
+        if (result.error.code === "timeout")
+            waitExpiries += 1;
+        else
+            ordinaryFailures += 1;
+        if (ordinaryFailures >= SessionEventWriterRetryPolicy.attempts)
+            return result;
+        const backoffs = SessionEventWriterRetryPolicy.backoffMs;
+        const failureCount = result.error.code === "timeout" ? waitExpiries : ordinaryFailures;
+        const backoffMs = backoffs[Math.min(failureCount - 1, backoffs.length - 1)] ?? 0;
+        const backoffControls = operationControls();
+        const controller = new AbortController();
+        const cancel = (): void => controller.abort();
+        backoffControls.signal?.addEventListener("abort", cancel, {
+            once: true
+        });
+        const remaining = (backoffControls.deadlineEpochMs ?? Infinity) - Date.now();
+        const timer = Number.isFinite(remaining) ? setTimeout(cancel, Math.max(0, remaining)) : undefined;
+        try {
+            if (backoffControls.signal?.aborted)
+                cancel();
+            await options.runtime.sleep(Math.min(backoffMs, Math.max(0, remaining)), controller.signal);
+        }
+        finally {
+            if (timer !== undefined)
+                clearTimeout(timer);
+            backoffControls.signal?.removeEventListener("abort", cancel);
+        }
+    }
 }
 
 export async function commitRuntimeTerminationWithRetry(
@@ -750,10 +791,11 @@ async function commitRuntimeTerminationOnce(
 async function finishIdleOnce(
 	options: ThreadLoopRuntimeOptions,
 	envelope: SessionEventWriterFinishIdleEnvelope,
+	controls: FinishIdleOperationControls,
 ): Promise<SessionEventWriterFinishIdleResult> {
 	const startedAt = options.runtime.monotonicMs();
 	try {
-		const result = await options.sessionEventWriter.finishIdle!(envelope);
+		const result = await options.sessionEventWriter.finishIdle!(envelope, controls);
 		observeEventWrite(
 			options,
 			"finish_idle",
@@ -806,20 +848,6 @@ function writerUnavailable(
 		ok: false,
 		error: normalizeSessionEventWriterError({
 			code: "unavailable",
-			sessionId,
-			writeId,
-		}),
-	};
-}
-
-function writerUnknown(
-	sessionId: string,
-	writeId: string,
-): SessionEventWriterFinishIdleResult {
-	return {
-		ok: false,
-		error: normalizeSessionEventWriterError({
-			code: "unknown",
 			sessionId,
 			writeId,
 		}),

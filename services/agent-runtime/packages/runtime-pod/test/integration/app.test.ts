@@ -149,7 +149,7 @@ function validConfig(): RuntimePodConfig {
     routingProxyRequired: true,
     maxLocalSessions: 256,
     maxConcurrentTools: 8,
-    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
+    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
     platformModels: {
       approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
     },

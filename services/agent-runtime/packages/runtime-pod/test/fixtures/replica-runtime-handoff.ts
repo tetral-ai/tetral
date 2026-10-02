@@ -352,11 +352,12 @@ const app = createRuntimePodApp({
     },
     quiesce: async (options) => {
         phaseDeadline = options.settlementDeadline;
-        writer.beginDrain(phaseDeadline);
-        loader.beginDrain(phaseDeadline);
-        committer.beginDrain(phaseDeadline);
-        toolRunner.beginDrain(phaseDeadline);
-        reviewerCreator.beginDrain(phaseDeadline);
+        const bridgePhase = { currentStepDeadline: options.currentStepDeadline, settlementDeadline: options.settlementDeadline, settlementAttemptTimeoutMs: config.lifecycle.settlementAttemptTimeoutMs };
+        writer.beginDrain(bridgePhase);
+        loader.beginDrain(bridgePhase);
+        committer.beginDrain(bridgePhase);
+        toolRunner.beginDrain(bridgePhase);
+        reviewerCreator.beginDrain(bridgePhase);
         await hosts.quiesce(options);
     },
     closeClients: async () => {

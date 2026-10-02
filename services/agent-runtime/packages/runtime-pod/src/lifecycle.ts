@@ -17,6 +17,7 @@ import type { RuntimePodConfigResult } from "./config.js";
 import type { RuntimePodLogger, RuntimePodLogRecord } from "./logger.js";
 import { shutdownFailureLogRecord, startupFailureLogRecord } from "./logger.js";
 import { GrpcStatusError } from "./errors.js";
+import { DefaultRuntimeShutdownPolicy } from "./lifecycle-policy.js";
 
 export { GrpcStatusError } from "./errors.js";
 
@@ -477,12 +478,17 @@ export class RuntimePodLifecycle {
       started +
       (this.options.drainTimeoutMs ??
         config?.lifecycle.currentStepTimeoutMs ??
-        5000);
+        DefaultRuntimeShutdownPolicy.currentStepTimeoutMs);
     const settlementDeadline =
       this.options.drainTimeoutMs !== undefined
         ? currentStepDeadline
         : currentStepDeadline +
-          (config?.lifecycle.settlementTimeoutMs ?? 15000);
+          (config?.lifecycle.settlementTimeoutMs ?? DefaultRuntimeShutdownPolicy.settlementTimeoutMs);
+    this.options.runtimeProcess?.beginDrain?.({
+      currentStepDeadline,
+      settlementDeadline,
+      settlementAttemptTimeoutMs: config?.lifecycle.settlementAttemptTimeoutMs ?? DefaultRuntimeShutdownPolicy.settlementAttemptTimeoutMs,
+    });
     let resolveDraining!: () => void, rejectDraining!: (error: unknown) => void;
     const draining = new Promise<void>((resolve, reject) => {
       resolveDraining = resolve;
@@ -609,7 +615,7 @@ export class RuntimePodLifecycle {
           Date.now() +
           (this.options.drainTimeoutMs !== undefined
             ? 0
-            : (config?.lifecycle.localJoinTimeoutMs ?? 5000));
+            : (config?.lifecycle.localJoinTimeoutMs ?? DefaultRuntimeShutdownPolicy.localJoinTimeoutMs));
         const joinWindow = new AbortController();
         try {
           await Promise.race([

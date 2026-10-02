@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,57 @@ func replicaBridgePair(t *testing.T, db *sql.DB, podUID string, after func(conte
 	return first, []string{a.Address, b.Address}
 }
 func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
+	t.Run("Core rejoins pending capture after three actual wait expiries", func(t *testing.T) {
+		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		const session, thread, binding, pod = "sesn_core_capture_rejoin", "thr_core_capture_rejoin", "bind_core_capture", "pod_core_capture"
+		seedBridgeAPISession(t, admin, "default", session, thread)
+		seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, pod)
+		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		provider := &heldCoreCaptureProvider{handoffCaptureProvider: handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}, release: make(chan struct{})}
+		t.Cleanup(provider.finish)
+		startHandoffOutputCapturesWithProvider(t, runtimeDB, provider)
+		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+		observed := &coreCaptureRejoinStore{BridgeAPIStore: store}
+		endpoint := serveReplicaBridge(t, observed, map[string]string{"runtime": pod}, nil)
+		request := bridgeAPIFinishIdleRequest(t, admin, bridgeAPIScope(session, thread, binding, 1, pod), "turn_core_capture_original", `{"type":"end_turn"}`)
+		child := startReplicaFinishIdleCoreChild(t, endpoint.Address, bridgeChildRequest(t, request))
+		waitHandoffCondition(t, "three joined actual pending capture waits", func() bool { return observed.joined.Load() >= 3 })
+		writeID, generation, err := waitForPendingOutputCapture(admin, session, "")
+		if err != nil || writeID != request.DurableTurnId || provider.calls.Load() != 1 {
+			t.Fatalf("one original held capture id=%s generation=%d dispatches=%d err=%v", writeID, generation, provider.calls.Load(), err)
+		}
+		provider.finish()
+		var report struct {
+			Result struct {
+				Type              string `json:"type"`
+				ModelMessageCount int    `json:"modelMessageCount"`
+			} `json:"result"`
+			Backoffs []int `json:"backoffs"`
+		}
+		waitHandoffCondition(t, "Core late capture completes normally", func() bool {
+			raw, readErr := os.ReadFile(filepath.Join(child.directory, "results.json"))
+			return readErr == nil && json.Unmarshal(raw, &report) == nil
+		})
+		child.join(t)
+		if report.Result.Type != "completed" || report.Result.ModelMessageCount != 0 || len(report.Backoffs) < 3 || report.Backoffs[0] != 100 || report.Backoffs[1] != 300 || report.Backoffs[2] != 300 {
+			t.Fatalf("late-ready Core result=%+v backoffs=%v", report.Result, report.Backoffs)
+		}
+		observed.mu.Lock()
+		requests := append([]*bridgev1.FinishIdleRequest(nil), observed.requests...)
+		observed.mu.Unlock()
+		if len(requests) < 4 || observed.maximum.Load() != 1 || observed.active.Load() != 0 || observed.joined.Load() != int32(len(requests)) {
+			t.Fatalf("serial raw waits=%d maximum=%d active=%d joined=%d", len(requests), observed.maximum.Load(), observed.active.Load(), observed.joined.Load())
+		}
+		for _, actual := range requests {
+			if !proto.Equal(actual, request) {
+				t.Fatalf("capture declaration changed: %v versus %v", actual, request)
+			}
+		}
+		var captures, adopted, idle, failures int
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1),(SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1 AND state='adopted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error')`, session).Scan(&captures, &adopted, &idle, &failures); err != nil || captures != 1 || adopted != 1 || idle != 1 || failures != 0 || provider.calls.Load() != 1 {
+			t.Fatalf("original capture=%d adopted=%d idle=%d failures=%d dispatches=%d err=%v", captures, adopted, idle, failures, provider.calls.Load(), err)
+		}
+	})
 	t.Run("lost declaration response and exact retired fences", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		seedBridgeAPISession(t, admin, "default", "sesn_bridge_replica", "thr_bridge_replica")
@@ -351,6 +403,82 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			t.Fatalf("capture expiry terminal errors=%d captures=%d/%v", errors, count, err)
 		}
 	})
+}
+
+type heldCoreCaptureProvider struct {
+	handoffCaptureProvider
+	mu      sync.Once
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *heldCoreCaptureProvider) finish() { p.mu.Do(func() { close(p.release) }) }
+func (p *heldCoreCaptureProvider) CaptureOutputs(ctx context.Context, target sandboxdriver.OutputCaptureTarget) tetralsandbox.ProviderOutcome[sandboxdriver.OutputCaptureScan] {
+	p.calls.Add(1)
+	select {
+	case <-p.release:
+		return p.handoffCaptureProvider.CaptureOutputs(ctx, target)
+	case <-ctx.Done():
+		return tetralsandbox.ProviderOutcome[sandboxdriver.OutputCaptureScan]{Disposition: tetralsandbox.ProviderRetryable, ErrorKind: "fixture_cancelled", SafeMessage: "fixture stopped"}
+	}
+}
+
+type coreCaptureRejoinStore struct {
+	bridge.BridgeAPIStore
+	active, maximum, joined atomic.Int32
+	mu                      sync.Mutex
+	requests                []*bridgev1.FinishIdleRequest
+}
+
+func (s *coreCaptureRejoinStore) FinishIdle(ctx context.Context, request *bridgev1.FinishIdleRequest) (*bridgev1.FinishIdleResponse, error) {
+	s.mu.Lock()
+	s.requests = append(s.requests, proto.Clone(request).(*bridgev1.FinishIdleRequest))
+	s.mu.Unlock()
+	active := s.active.Add(1)
+	for maximum := s.maximum.Load(); active > maximum; maximum = s.maximum.Load() {
+		if s.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	defer func() { s.active.Add(-1); s.joined.Add(1) }()
+	return s.BridgeAPIStore.FinishIdle(ctx, request)
+}
+func startReplicaFinishIdleCoreChild(t *testing.T, address string, request json.RawMessage) *handoffRuntimeChild {
+	t.Helper()
+	child := &handoffRuntimeChild{directory: t.TempDir(), done: make(chan struct{})}
+	input, err := json.Marshal(map[string]any{"address": address, "token": "runtime", "directory": child.directory, "request": request, "env": map[string]string{"TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS": "80"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(child.directory, "input.json")
+	if err = os.WriteFile(path, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := os.Create(filepath.Join(child.directory, "output.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child.command = exec.Command("bun", "packages/runtime-pod/test/fixtures/replica-finish-idle-policy.ts", path) //nolint:gosec // Fixed repository child and test-owned input.
+	child.command.Dir = "../services/agent-runtime"
+	child.command.Stdout, child.command.Stderr = output, output
+	if err = child.command.Start(); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	go func() { child.err = child.command.Wait(); _ = output.Close(); close(child.done) }()
+	t.Cleanup(func() {
+		select {
+		case <-child.done:
+		default:
+			_ = child.command.Process.Kill()
+			select {
+			case <-child.done:
+			case <-time.After(5 * time.Second):
+				t.Error("FinishIdle child cleanup did not join")
+			}
+		}
+	})
+	return child
 }
 
 type replicaBackgroundProvider struct {

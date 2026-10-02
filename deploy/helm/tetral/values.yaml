@@ -301,6 +301,8 @@ lifecycle:
   # Checked projections of the Runtime typed phase defaults; Pod grace adds a fixed 5s signal margin.
   runtimeDrainMs: 60000
   runtimeSettlementMs: 15000
+  # Per-attempt final settlement cap, clipped to method/caller/remaining phase; not another phase allocation.
+  settlementAttemptTimeoutMs: 5000
   runtimeLocalJoinMs: 5000
   runtimeProxyJoinMs: 5000
   runtimeGraceSeconds: 90

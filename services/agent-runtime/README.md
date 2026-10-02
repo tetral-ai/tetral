@@ -524,7 +524,8 @@ allocation remains a separate deployment and listener cleanup bound.
 
 Lifecycle controls are `TETRAL_RUNTIME_REPORT_INTERVAL_MS`,
 `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS`, `TETRAL_RUNTIME_DRAIN_TIMEOUT_MS`,
-`TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS`, `TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS`,
+`TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS`,
+`TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS`, `TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS`,
 and `TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS`. The register/report RPC controls are
 `TETRAL_RUNTIME_REGISTER_TIMEOUT_MS` and `TETRAL_RUNTIME_REPORT_TIMEOUT_MS`;
 report timeout must be shorter than interval, which must be shorter than
@@ -540,6 +541,16 @@ receipt recovery repeats only the unchanged operation; generic unknown-outcome
 retries and whole-turn drain are absent. The generated-method inventory and
 policy projection must remain exhaustive when methods change.
 
+The typed shutdown policy owns a separate final-settlement attempt maximum,
+five seconds by default. At quiesce, clients receive both the current-step and
+settlement boundaries. Current-step calls retain their method deadlines. After
+the current-step boundary, each Bridge attempt clips to the configured final
+maximum and remaining settlement time. An already retained current-step call
+has at most that maximum remaining at the transition; its actual handle cancels
+and callback joins before retry or client close. A two-second total settlement
+window with the default five-second attempt maximum is valid: the shorter
+shared window wins. Attempts cannot reset either phase or extend process grace.
+
 Core ordinary writer and accepted-input consumers await the adapter's actual
 transport result before retrying. The generated Bridge owner supplies parsed
 method deadlines, cancels real RPC handles and joins callbacks; an expired shared
@@ -548,6 +559,18 @@ attempts and 100/300 ms backoffs where allowed. Core does not race a second fixe
 three-second timer against configured transport deadlines. Metadata preparation
 precedes the generated RPC attempt; an earlier Core observation cannot discard a
 healthy result or abandon the raw operation.
+
+FinishIdle owns a durable capture/closeout operation rather than an ordinary
+short write. A joined retryable wait expiry rejoins the identical declaration,
+serially, with 100/300 ms backoffs capped at 300 ms. It does not exhaust the
+ordinary three-failure budget. Other retryable failures retain their separate
+three attempts and 100/300 ms backoffs; stale and deterministic rejection stop
+immediately. Explicit FinishIdle operation cancellation or an absolute caller
+or settlement deadline cancels and joins the actual unary call and stops rejoin.
+These operation controls must not carry a failed-run observation signal: the
+independent three-second memo observer may expire while the same raw FinishIdle
+remains owned, and later observation rejoins that memo. Ordinary Core interruption
+also retains non-abandonable closeout ownership until the actual callback joins.
 
 Failed-run closeout is distinct: its existing three-second memo observation
 window may expire while separately owned settlement continues. Later observers
@@ -563,7 +586,14 @@ fresh placement after admission closes, exact original turn/tool/result context,
 all-thread checkpoints, reviewer Read continuation and expiry, and authenticated
 old-owner fences. Fault controls distinguish precommit rejection, committed lost
 responses, selected process death, same-Pod container restart, and simultaneous
-legal input/recovery binding owners. A child must have actual spawn lineage before
+legal input/recovery binding owners. The same-Pod restart kills and joins the old
+container after its original Read has reached the independent Sandbox owner. A
+fresh boot under the unchanged ready Pod causes production loss repair, Queue
+recovery and rebinding; the new Core rejoins that same external execution and
+consumes its exact result before dispatching the successor provider request.
+The final census retains one original user input, one external dispatch and one
+adopted output capture keyed to the original turn, with no further user trigger.
+A child must have actual spawn lineage before
 its normal completion; its original mail can remain accepted after Runner admission
 and is handed back through the same durable input identity. Queue ordering retains
 that input ahead of a handoff wake. The fixture drives those existing owners without

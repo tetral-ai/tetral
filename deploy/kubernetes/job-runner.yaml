@@ -271,6 +271,8 @@ spec:
               app.kubernetes.io/name: agent-runtime
       ports:
         - protocol: TCP
+          port: 8080
+        - protocol: TCP
           port: 19090
     - to:
         - ipBlock:

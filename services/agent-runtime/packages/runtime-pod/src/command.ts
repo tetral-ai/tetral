@@ -467,16 +467,21 @@ export async function buildRuntimePodCommandDependencies(input: {
 		runtimeProcess,
 		quiesce: async (options) => {
 			phaseDeadline = options.settlementDeadline;
+			const bridgePhase = {
+				currentStepDeadline: options.currentStepDeadline,
+				settlementDeadline: options.settlementDeadline,
+				settlementAttemptTimeoutMs: input.config.lifecycle.settlementAttemptTimeoutMs,
+			};
 			for (const adapter of [
 				eventWriter,
 				bridgeContextLoader,
 				approvalReviewerThreadCreator,
 				internalToolRepairCommitter,
 			])
-				adapter.beginDrain(options.settlementDeadline);
-			toolRunner.beginDrain(options.settlementDeadline);
+				adapter.beginDrain(bridgePhase);
+			toolRunner.beginDrain(bridgePhase);
 			if (controlInputCommitter instanceof BridgeAPIControlInputCommitter)
-				controlInputCommitter.beginDrain(options.settlementDeadline);
+				controlInputCommitter.beginDrain(bridgePhase);
 			await coreHosts.quiesce(options);
 		},
 		closeClients: async () => {

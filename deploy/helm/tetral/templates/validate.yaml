@@ -68,9 +68,10 @@ that silently permits more than the default did.
 {{- if lt (int .Values.transport.databaseCapacity) (int $required) }}{{ fail (printf "transport.databaseCapacity is below the required aggregate connection budget %d" $required) }}{{ end }}
 {{- end }}
 
-{{- range $key := list "runtimeDrainMs" "runtimeSettlementMs" "runtimeLocalJoinMs" "runtimeProxyJoinMs" "runtimeGraceSeconds" "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
+{{- range $key := list "runtimeDrainMs" "runtimeSettlementMs" "settlementAttemptTimeoutMs" "runtimeLocalJoinMs" "runtimeProxyJoinMs" "runtimeGraceSeconds" "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.lifecycle $key))) }}{{ fail (printf "lifecycle.%s must be a bounded positive number of milliseconds" $key) }}{{ end }}
 {{- end }}
+{{- if gt (float64 .Values.lifecycle.settlementAttemptTimeoutMs) (float64 2147483647) }}{{ fail "lifecycle.settlementAttemptTimeoutMs must not exceed 2147483647 milliseconds" }}{{ end }}
 {{- $runtimeRequired := add (int .Values.lifecycle.runtimeDrainMs) (int .Values.lifecycle.runtimeSettlementMs) (int .Values.lifecycle.runtimeLocalJoinMs) (int .Values.lifecycle.runtimeProxyJoinMs) (int (include "tetral.runtimeShutdownMarginMs" .)) -}}
 {{- if gt $runtimeRequired (mul (int .Values.lifecycle.runtimeGraceSeconds) 1000) }}{{ fail "Runtime current step, settlement, local/proxy joins and 5s signal margin must fit configured Pod grace" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.bridgeDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Bridge drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}

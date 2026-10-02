@@ -340,14 +340,19 @@ func TestRuntimeDeploymentPhaseBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	phaseKeys := map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "runtimeDrainMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "runtimeSettlementMs", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "runtimeLocalJoinMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "runtimeProxyJoinMs"}
+	policy, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/lifecycle-policy.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phaseKeys := map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "localJoinTimeoutMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "proxyJoinTimeoutMs"}
 	defaultObjects := uniqueObjects(t, renderChart(t, helm, chart))
 	defaultRuntime := defaultObjects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
 	defaultEnv := transportEnv(t, defaultRuntime)
-	for key := range phaseKeys {
-		match := regexp.MustCompile(key + `:\s*ProviderStreamTimeoutSchema\.default\("([0-9]+)"\)`).FindStringSubmatch(string(source))
-		if len(match) != 2 || defaultEnv[key] != match[1] {
-			t.Fatalf("%s deployment default differs from actual typed Runtime policy: rendered=%s match=%v", key, defaultEnv[key], match)
+	for key, field := range phaseKeys {
+		projection := regexp.MustCompile(key + `\s*:\s*ProviderStreamTimeoutSchema\s*\.\s*default\s*\(\s*String\s*\(\s*DefaultRuntimeShutdownPolicy\s*\.\s*` + field + `\s*,?\s*\)\s*,?\s*\)`)
+		match := regexp.MustCompile(`\b` + field + `:\s*([0-9_]+),`).FindStringSubmatch(string(policy))
+		if !projection.Match(source) || len(match) != 2 || defaultEnv[key] != strings.ReplaceAll(match[1], "_", "") {
+			t.Fatalf("%s deployment default differs from actual typed Runtime policy: rendered=%s owner=%v", key, defaultEnv[key], match)
 		}
 	}
 	for _, profile := range []string{"standard-routed", "hardened"} {
@@ -376,6 +381,33 @@ func TestRuntimeDeploymentPhaseBudget(t *testing.T) {
 	}
 	renderChart(t, helm, chart, "lifecycle.runtimeDrainMs=59000", "lifecycle.runtimeGraceSeconds=89")
 	renderChart(t, helm, chart, "lifecycle.runtimeDrainMs=60001", "lifecycle.runtimeGraceSeconds=91")
+}
+
+func TestRuntimeSettlementAttemptProjection(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
+	for _, profile := range []string{"standard-routed", "hardened"} {
+		for _, cap := range []string{"700", "2147483647"} {
+			objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "lifecycle.settlementAttemptTimeoutMs="+cap))
+			runtime := objects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
+			if actual := transportEnv(t, runtime)["TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS"]; actual != cap {
+				t.Fatalf("%s settlement attempt cap=%s want%s", profile, actual, cap)
+			}
+			if fmt.Sprint(transportAt(t, runtime, "spec", "template", "spec", "terminationGracePeriodSeconds")) != "90" {
+				t.Fatal("nested attempt cap changed Runtime phase allocation")
+			}
+		}
+		// An attempt cap may exceed the phase: the application clips it to
+		// the remaining shared deadline rather than allocating another phase.
+		objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "lifecycle.runtimeSettlementMs=2000"))
+		env := transportEnv(t, objects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"])
+		if env["TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS"] != "5000" || env["TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS"] != "2000" {
+			t.Fatal("independent attempt cap and shorter settlement phase were not projected")
+		}
+		for _, bad := range []string{"0", "-1", "1.5", "NaN", ".inf", "2147483648"} {
+			requireRenderError(t, helm, chart, []string{"transport.profile=" + profile, "lifecycle.settlementAttemptTimeoutMs=" + bad}, "lifecycle.settlementAttemptTimeoutMs")
+		}
+	}
 }
 
 func TestQueueAndWebDeploymentJoinBudget(t *testing.T) {

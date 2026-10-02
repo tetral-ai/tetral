@@ -1414,6 +1414,14 @@ export type SessionEventWriterToolSettlementAttempt =
 	  }
 	| { readonly ok: false; readonly error: SessionEventWriterError };
 
+/** Controls the FinishIdle operation lifetime separately from any observing caller. */
+export interface FinishIdleOperationControls {
+	/** Cancels the owned operation, never a separately owned closeout observation. */
+	readonly signal?: AbortSignal;
+	/** Absolute operation/settlement boundary; an RPC attempt cannot reset it. */
+	readonly deadlineEpochMs?: number;
+}
+
 /**
  * Durable event port whose closed results gate hot projection. Adapters own
  * bounded transport deadlines, actual cancellation and raw joins. Promise-only
@@ -1437,6 +1445,7 @@ export interface SessionEventWriter {
 	) => Promise<SessionEventWriterRequestEndResult>;
 	readonly finishIdle?: (
 		envelope: SessionEventWriterFinishIdleEnvelope,
+		controls?: FinishIdleOperationControls,
 	) => Promise<SessionEventWriterFinishIdleResult>;
 	readonly commitRuntimeTermination?: (
 		envelope: SessionEventWriterRuntimeTerminationEnvelope,

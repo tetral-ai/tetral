@@ -614,8 +614,12 @@ func readHandoffPendingInput(t *testing.T, admin *sql.DB, session string) handof
 	return input
 }
 
-func assertHandoffExactToolContext(t *testing.T, admin *sql.DB, session, modelRequestID, contextJSON string) {
+func assertHandoffExactToolContext(t *testing.T, admin *sql.DB, session, modelRequestID, contextJSON string, names ...string) {
 	t.Helper()
+	expectedName := "list_agents"
+	if len(names) > 0 {
+		expectedName = names[0]
+	}
 	var durableOutput, durableInput string
 	if err := admin.QueryRow(`SELECT (SELECT part->'result'->'output' FROM jsonb_array_elements(data_json::jsonb->'parts') part WHERE part->>'type'='tool_result' AND part->>'modelToolCallId'='tool-current')::text,(SELECT part->'canonicalInput' FROM jsonb_array_elements(data_json::jsonb->'parts') part WHERE part->>'type'='tool_call' AND part->>'modelToolCallId'='tool-current')::text FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, session, modelRequestID).Scan(&durableOutput, &durableInput); err != nil {
 		t.Fatal(err)
@@ -643,7 +647,7 @@ func assertHandoffExactToolContext(t *testing.T, admin *sql.DB, session, modelRe
 		for _, item := range entry.Content {
 			if item.ToolCall != nil && item.ToolCall.ModelToolCallID == "tool-current" {
 				calls++
-				if item.ToolCall.Name != "list_agents" || !handoffEqualJSON(item.ToolCall.InputJSON, durableInput) {
+				if item.ToolCall.Name != expectedName || !handoffEqualJSON(item.ToolCall.InputJSON, durableInput) {
 					t.Fatalf("original Tool Use context=%+v durable input=%s", item.ToolCall, durableInput)
 				}
 			}
@@ -1612,13 +1616,17 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 	})
 	t.Run("selected container restart retains Pod UID and fences old binding", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		const session, thread, binding, pod = "sesn_container_restart", "thr_container_restart", "bind_container_restart", "pod_same"
+		const session, thread, binding, pod = "sesn_container_restart_b", "thr_container_restart", "bind_container_restart", "pod_same"
 		seedBridgeAPISession(t, admin, "default", session, thread)
 		seedHandoffRuntimeBinding(t, admin, session, binding, 1, pod)
 		seedRuntimePodLostStatusFence(t, admin, session, binding, 1)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 		store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
-		endpoint := serveReplicaBridge(t, store, map[string]string{"one": pod, "two": pod}, nil)
+		startHandoffResultListener(t, store)
+		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		startHandoffOutputCaptures(t, runtimeDB)
+		observed := &handoffObservedBridgeStore{BridgeAPIStore: store}
+		endpoint := serveReplicaBridge(t, observed, map[string]string{"one": pod, "two": pod}, nil)
 		first := startHandoffRuntimeChild(t, endpoint.Address, pod, "process_"+pod, "one", false, nil)
 		registration, err := endpoint.Client.RegisterRuntimeProcess(replicaRuntimeContext(context.Background(), "one"), &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: "process_" + pod})
 		if err != nil {
@@ -1629,8 +1637,32 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if err != nil || original.GetCommitted() == nil {
 			t.Fatalf("first container write=%v err=%v", original, err)
 		}
+		client := dbconnect.NewClientForTesting(runtimeDB)
+		appendHandoffMessage(t, client, session, "original_container_work")
+		deliverAttachmentRuntimeInput(t, runtimeDB, admin, first.port, session, "runtime-pod-0", pod)
+		waitHandoffCondition(t, "old container actual Read admitted", func() bool {
+			var accepted int
+			_ = admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1`, session).Scan(&accepted)
+			return accepted == 1 && first.calls(session) == 1
+		})
+		originalProvider := first.providerEntries(t, session)[0]
+		originalInput := readHandoffPendingInput(t, admin, session)
+		var toolID, originalTurnID string
+		if err := admin.QueryRow(`SELECT tool.event_id,(SELECT event_id FROM session_events WHERE session_id=$1 AND type='session.status_running' ORDER BY sequence DESC LIMIT 1) FROM session_events tool WHERE tool.session_id=$1 AND tool.model_request_id=$2 AND tool.type='agent.tool_use'`, session, originalProvider.ModelRequestID).Scan(&toolID, &originalTurnID); err != nil {
+			t.Fatal(err)
+		}
+		external := startHandoffSandboxOwner(t, runtimeDB, session)
+		waitHandoffCondition(t, "old actual external command and Bridge wait", func() bool {
+			return external.calls.Load() == 1 && external.observations.Load() > 0 && observed.activeAwait.Load() == 1
+		})
 		first.kill(t)
-		second := startHandoffRuntimeChild(t, endpoint.Address, pod, "boot_after_restart", "two", false, nil)
+		waitHandoffCondition(t, "dead container raw Bridge waiter returned", func() bool { return observed.activeAwait.Load() == 0 && observed.joinedAwait.Load() > 0 })
+		select {
+		case <-external.done:
+			t.Fatal("killing Runtime completed independent external work")
+		default:
+		}
+		second := startHandoffRuntimeChild(t, endpoint.Address, pod, "boot_after_restart", "two", true, nil)
 		_, err = endpoint.Client.ReportRuntimeProcess(replicaRuntimeContext(context.Background(), "one"), &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: "process_" + pod, RegistrationReceipt: registration.RegistrationReceipt, Phase: bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING})
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("dead container promotion=%v", err)
@@ -1649,6 +1681,113 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		var current string
 		if err := admin.QueryRow(`SELECT count(*),MAX(runtime_process_id) FILTER(WHERE is_current) FROM runtime_processes WHERE namespace='tetral-agent-runtime' AND pod_uid=$1`, pod).Scan(&count, &current); err != nil || count != 2 || current != "boot_after_restart" {
 			t.Fatalf("same Pod process rows=%d current=%s err=%v", count, current, err)
+		}
+		// The Pod remains the same ready object. Only the committed fresh boot
+		// promotion supplies the process-loss fact; there is no absent-Pod seam.
+		targetURL, err := url.Parse(second.httpURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, targetURL.Host)
+		}}
+		defer transport.CloseIdleConnections()
+		delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, second.port)
+		delivery.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
+			GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
+				return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: pod, IP: "127.0.0.1", Running: true, Ready: true}, nil
+			},
+			LoadClient: &http.Client{Transport: transport},
+			Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: pod, PodIP: "127.0.0.1"}})
+			},
+		}
+		if repaired, err := delivery.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+			t.Fatalf("same ready Pod superseded-process repair=%d err=%v", repaired, err)
+		}
+		if handoffBindingCount(t, admin, session) != 0 {
+			t.Fatal("old process binding retained after real supersession repair")
+		}
+		queueStore := queue.NewPostgreSQLStore(client)
+		leases, err := queueStore.Lease(context.Background(), queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeRecovery}, LeaseOwner: "container-restart-runner", MaxJobs: 1, LeaseDuration: time.Minute})
+		if err != nil || len(leases) != 1 {
+			t.Fatalf("original container work recovery lease=%v err=%v", leases, err)
+		}
+		job, err := jobrunner.DecodeRuntimeJob(queueJobProto(leases[0]))
+		if err != nil || job.SessionID != session || job.SessionThreadID != thread || job.RecoverySourceEventID != toolID || job.RecoveryHandoffID != "" {
+			t.Fatalf("original recovery identity=%+v tool=%s err=%v", job, toolID, err)
+		}
+		sender := jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})
+		defer func() {
+			if err := sender.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		observedDelivery := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}}
+		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: observedDelivery}
+		if err := runIssuedLeaseThroughRunner(context.Background(), runner, queueJobProto(leases[0]), jobrunner.JobRunnerConfig{LeaseOwner: "container-restart-runner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}); err != nil {
+			t.Fatal(err)
+		}
+		if observedDelivery.result.Status != jobrunner.RuntimeDeliveryAccepted && observedDelivery.result.Status != jobrunner.RuntimeDeliveryDuplicate {
+			t.Fatalf("same Pod original recovery admission=%+v", observedDelivery.result)
+		}
+		var newBinding, newPod, newProcess, newName, newIP, wakeState string
+		var newGeneration int64
+		if err := admin.QueryRow(`SELECT binding_id,binding_generation,agent_runtime_pod_uid,runtime_process_id,agent_runtime_pod_name,agent_runtime_pod_ip FROM session_runtime_bindings WHERE session_id=$1`, session).Scan(&newBinding, &newGeneration, &newPod, &newProcess, &newName, &newIP); err != nil || newBinding == binding || newGeneration <= 1 || newPod != pod || newProcess != "boot_after_restart" || newName != "runtime-pod-0" || newIP != "127.0.0.1" {
+			t.Fatalf("same Pod fresh binding=%s/%d/%s/%s/%s/%s err=%v", newBinding, newGeneration, newPod, newProcess, newName, newIP, err)
+		}
+		if err := admin.QueryRow(`SELECT status FROM queue_jobs WHERE id=$1`, job.JobID).Scan(&wakeState); err != nil || wakeState != queue.StatusAcknowledged {
+			t.Fatalf("original recovery Queue custody=%s status=%s err=%v", job.JobID, wakeState, err)
+		}
+		waitHandoffCondition(t, "same Pod new Core rejoins original external command", func() bool { return observed.activeAwait.Load() == 1 })
+		if second.calls(session) != 0 || external.calls.Load() != 1 {
+			t.Fatal("replacement requested model/reexecuted command before original result")
+		}
+		late, err = endpoint.Client.WriteEvent(replicaRuntimeContext(context.Background(), "one"), fresh)
+		if err != nil || late.GetStale() == nil {
+			t.Fatalf("old generation after new binding=%v err=%v", late, err)
+		}
+		var unchanged string
+		if err := admin.QueryRow(`SELECT binding_id FROM session_runtime_bindings WHERE session_id=$1`, session).Scan(&unchanged); err != nil || unchanged != newBinding {
+			t.Fatalf("old write changed new binding=%s err=%v", unchanged, err)
+		}
+		external.finish()
+		select {
+		case err := <-external.done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("original external owner did not join")
+		}
+		waitHandoffCondition(t, "same Pod original result starts successor provider", func() bool { return second.calls(session) == 1 })
+		successor := second.providerEntries(t, session)[0]
+		if successor.ModelRequestID == originalProvider.ModelRequestID || successor.RequestID == originalProvider.RequestID {
+			t.Fatal("successor reused original provider request identity")
+		}
+		assertHandoffExactToolContext(t, admin, session, originalProvider.ModelRequestID, successor.MessagesJSON, "Read")
+		if !strings.Contains(successor.MessagesJSON, "original_container_work") {
+			t.Fatal("original business input absent from recovered context")
+		}
+		var results, errors, ends int
+		var endSequence, resultSequence int64
+		var recoveredTurn string
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND model_request_id=$3 AND payload_json::jsonb->>'is_error'='false'),(SELECT sequence FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND model_request_id=$3),(SELECT sequence FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2),(SELECT event_id FROM session_events WHERE session_id=$1 AND type='session.status_running' ORDER BY sequence DESC LIMIT 1)`, session, toolID, originalProvider.ModelRequestID).Scan(&results, &errors, &ends, &endSequence, &resultSequence, &recoveredTurn); err != nil || results != 1 || errors != 0 || ends != 1 || endSequence >= resultSequence || recoveredTurn != originalTurnID || external.calls.Load() != 1 {
+			t.Fatalf("original restart facts results=%d errors=%d End=%d order=%d/%d turn=%s/%s external=%d err=%v", results, errors, ends, endSequence, resultSequence, recoveredTurn, originalTurnID, external.calls.Load(), err)
+		}
+		retainedInput := readHandoffPendingInput(t, admin, session)
+		if retainedInput != originalInput || retainedInput.InboxStatus != "committed" || retainedInput.QueueStatus != queue.StatusAcknowledged {
+			t.Fatalf("original input custody changed before=%+v after=%+v", originalInput, retainedInput)
+		}
+		second.signal(t, session+"-1.release")
+		waitHandoffCondition(t, "same Pod successor successful End and durable idle", func() bool {
+			var idle, successful, failed int
+			_ = admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')`, session).Scan(&idle, &successful, &failed)
+			return idle == 1 && successful == 2 && failed == 0
+		})
+		var inputs, originalInputs, userMessages, captures, originalAdoptedCaptures int
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1),(SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND runtime_input_id=$2 AND status='committed'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='user.message'),(SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1),(SELECT count(*) FROM sandbox_output_capture_operations WHERE session_id=$1 AND finish_idle_write_id=$3 AND capture_generation=1 AND state='adopted')`, session, originalInput.InputID, originalTurnID).Scan(&inputs, &originalInputs, &userMessages, &captures, &originalAdoptedCaptures); err != nil || inputs != 1 || originalInputs != 1 || userMessages != 1 || captures != 1 || originalAdoptedCaptures != 1 {
+			t.Fatalf("same Pod original-work census inputs=%d original=%d userMessages=%d captures=%d originalAdopted=%d err=%v", inputs, originalInputs, userMessages, captures, originalAdoptedCaptures, err)
 		}
 		second.signal(t, "quiesce")
 		second.join(t)
@@ -1746,9 +1885,13 @@ func readHandoffDiagnostics(t *testing.T, child *handoffRuntimeChild) []map[stri
 }
 
 func startHandoffOutputCaptures(t *testing.T, runtimeDB *sql.DB) {
+	startHandoffOutputCapturesWithProvider(t, runtimeDB, handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}})
+}
+
+func startHandoffOutputCapturesWithProvider(t *testing.T, runtimeDB *sql.DB, provider tetralsandbox.ProviderAdapter) {
 	t.Helper()
 	client := dbconnect.NewClientForTesting(runtimeDB)
-	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{"daytona": handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}})
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{"daytona": provider})
 	if err != nil {
 		t.Fatal(err)
 	}

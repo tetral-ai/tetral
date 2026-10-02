@@ -44,6 +44,8 @@ spec:
               value: "60000"
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
               value: "15000"
+            - name: TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS
+              value: "5000"
             - name: TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS
               value: "5000"
             - name: TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS

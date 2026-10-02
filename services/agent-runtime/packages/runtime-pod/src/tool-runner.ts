@@ -1,3 +1,4 @@
+import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
 /**
  * Routes Runtime Core tool requests to the process or in-process boundary that
  * owns each tool kind. The runner preserves the accepted thread scope and
@@ -315,10 +316,9 @@ export class RuntimePodToolRunner {
 	>();
 	private nextChildTaskOperationSequence = 0;
 
-	beginDrain(deadline: number): void {
-		ownBridgeClient(
-			this.bridgeClient as AgentRuntimeBridgeServiceClient,
-		).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		const owner = ownBridgeClient(this.bridgeClient as AgentRuntimeBridgeServiceClient);
+		owner.beginDrain(deadline);
 	}
 
 	async close(): Promise<void> {

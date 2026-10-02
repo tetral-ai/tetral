@@ -15,6 +15,7 @@ import {
 	parseBridgeMethodPolicies,
 } from "./bridge-policy.js";
 import type { BridgeMethodPolicies } from "./bridge-policy.js";
+import { DefaultRuntimeShutdownPolicy } from "./lifecycle-policy.js";
 
 
 /** Identifies the local pod used to reject commands addressed to another Runtime Pod instance. */
@@ -65,6 +66,7 @@ export interface RuntimePodConfig {
 		readonly processFreshnessMs: number;
 		readonly currentStepTimeoutMs: number;
 		readonly settlementTimeoutMs: number;
+		readonly settlementAttemptTimeoutMs: number;
 		readonly localJoinTimeoutMs: number;
 		readonly proxyJoinTimeoutMs: number;
 	};
@@ -152,13 +154,15 @@ const ConfigSchema = z.strictObject({
 		ProviderStreamTimeoutSchema.default("2000"),
 	TETRAL_RUNTIME_PROCESS_FRESHNESS_MS:
 		ProviderStreamTimeoutSchema.default("10000"),
-	TETRAL_RUNTIME_DRAIN_TIMEOUT_MS: ProviderStreamTimeoutSchema.default("60000"),
+	TETRAL_RUNTIME_DRAIN_TIMEOUT_MS: ProviderStreamTimeoutSchema.default(String(DefaultRuntimeShutdownPolicy.currentStepTimeoutMs)),
 	TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS:
-		ProviderStreamTimeoutSchema.default("15000"),
+		ProviderStreamTimeoutSchema.default(String(DefaultRuntimeShutdownPolicy.settlementTimeoutMs)),
+	TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS:
+		ProviderStreamTimeoutSchema.default(String(DefaultRuntimeShutdownPolicy.settlementAttemptTimeoutMs)),
 	TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS:
-		ProviderStreamTimeoutSchema.default("5000"),
+		ProviderStreamTimeoutSchema.default(String(DefaultRuntimeShutdownPolicy.localJoinTimeoutMs)),
 	TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS:
-		ProviderStreamTimeoutSchema.default("5000"),
+		ProviderStreamTimeoutSchema.default(String(DefaultRuntimeShutdownPolicy.proxyJoinTimeoutMs)),
 	TETRAL_RUNTIME_MAX_LOCAL_SESSIONS: ProviderStreamTimeoutSchema.default("256"),
 	TETRAL_RUNTIME_MAX_CONCURRENT_TOOLS: ProviderStreamTimeoutSchema.default("8"),
 	TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: ModelRefSchema,
@@ -192,6 +196,7 @@ const RuntimePodEnvKeys = [
 	"TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
 	"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS",
 	"TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS",
+	"TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS",
 	"TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS",
 	"TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS",
 	"TETRAL_RUNTIME_MAX_LOCAL_SESSIONS",
@@ -281,6 +286,9 @@ export function loadRuntimePodConfig(
 				),
 				settlementTimeoutMs: Number(
 					parsed.data.TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS,
+				),
+				settlementAttemptTimeoutMs: Number(
+					parsed.data.TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS,
 				),
 				localJoinTimeoutMs: Number(
 					parsed.data.TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS,

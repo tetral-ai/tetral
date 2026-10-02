@@ -50,6 +50,8 @@ spec:
               value: {{ .Values.lifecycle.runtimeDrainMs | quote }}
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
               value: {{ .Values.lifecycle.runtimeSettlementMs | quote }}
+            - name: TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS
+              value: {{ .Values.lifecycle.settlementAttemptTimeoutMs | quote }}
             - name: TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.runtimeLocalJoinMs | quote }}
             - name: TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS

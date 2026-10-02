@@ -1,4 +1,6 @@
 import { bridgeUnaryCall, ownBridgeClient } from "./bridge-calls.js";
+import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
+import type { FinishIdleOperationControls } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { BridgeMethodPolicies } from "./bridge-policy.js";
 /**
  * @packageDocumentation
@@ -152,8 +154,8 @@ export interface BridgeAPIControlInputCommitterOptions {
 export class BridgeAPIControlInputCommitter
 	implements RuntimeControlInputCommitter
 {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 	}
 
 	close(): Promise<void> {
@@ -317,8 +319,8 @@ export interface BridgeAPITaskNotificationCommitterOptions {
  * closing custody or return stale/rejected durable outcomes; malformed results fail without retry.
  */
 export class BridgeAPITaskNotificationCommitter {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 	}
 
 	close(): Promise<void> {
@@ -503,8 +505,8 @@ export interface BridgeAPIApprovalReviewerThreadCreatorOptions {
 export class BridgeAPIApprovalReviewerThreadCreator
 	implements RuntimeApprovalReviewerThreadCreator
 {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 	}
 
 	close(): Promise<void> {
@@ -755,8 +757,8 @@ const RuntimeBindingTokenRefreshPolicy = {
  * It coalesces concurrent binding-token refreshes for the same binding identity.
  */
 export class BridgeAPIContextLoader implements ContextLoader {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 		this.taskNotificationCommitter.beginDrain(deadline);
 	}
 
@@ -1158,8 +1160,8 @@ export interface BridgeAPIEventWriterOptions {
  * rejections are deterministic and stop the shared writer retry policy.
  */
 export class BridgeAPIEventWriter implements SessionEventWriter {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 	}
 
 	close(): Promise<void> {
@@ -1581,7 +1583,12 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 	/** Persists one database-named running interval's idle closeout. */
 	async finishIdle(
 		envelope: SessionEventWriterFinishIdleEnvelope,
+		controls: FinishIdleOperationControls = {},
 	): Promise<SessionEventWriterFinishIdleResult> {
+		const callOptions = {
+			...(controls.signal === undefined ? {} : { signal: controls.signal }),
+			...(controls.deadlineEpochMs === undefined ? {} : { deadline: controls.deadlineEpochMs }),
+		};
 		try {
 			const metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
@@ -1592,7 +1599,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				stopReasonJson: JSON.stringify(envelope.stopReason),
 				completionMailText: envelope.completionMailText,
 			};
-			const response = await finishIdle(this.client, request, metadata);
+			const response = await finishIdle(this.client, request, metadata, callOptions);
 			if (
 				!exactlyOneDefined(
 					response.committed,
@@ -1619,11 +1626,14 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 				idleEventId: result.idleEventId,
 			};
 		} catch (error) {
-			return eventWriterOperationTransportFailure(
+			const failure = eventWriterOperationTransportFailure(
 				envelope.sessionId,
 				envelope.durableTurnId,
 				error,
 			);
+			return ownBridgeClient(this.client).operationStopped(callOptions)
+				? { ...failure, error: { ...failure.error, retryable: false } }
+				: failure;
 		}
 	}
 
@@ -1692,8 +1702,8 @@ export interface BridgeAPIInternalToolRepairCommitterOptions {
  * authentication, transport, and conflicting ACKs into the message-store result vocabulary.
  */
 export class BridgeAPIInternalToolRepairCommitter {
-	beginDrain(deadline: number): void {
-		ownBridgeClient(this.client).setDeadline(deadline);
+	beginDrain(deadline: RuntimeBridgeDrainPhase): void {
+		ownBridgeClient(this.client).beginDrain(deadline);
 	}
 
 	close(): Promise<void> {
@@ -2019,8 +2029,9 @@ function finishIdle(
 	client: AgentRuntimeBridgeServiceClient,
 	request: FinishIdleRequest,
 	metadata: Metadata,
+	options: { readonly signal?: AbortSignal; readonly deadline?: number },
 ): Promise<FinishIdleResponse> {
-	return bridgeUnaryCall(client, "finishIdle", request, metadata);
+	return bridgeUnaryCall(client, "finishIdle", request, metadata, options);
 }
 
 function commitRuntimeTermination(

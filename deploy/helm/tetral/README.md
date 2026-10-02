@@ -341,6 +341,9 @@ channel without installing its own replica load-balancing policy. MCP and Web
 also use ordinary ClusterIP Services.
 
 Runner alone watches Runtime Pods and EndpointSlices and controls Runtime RPCs.
+In both profiles its placement probes use Runtime TCP 8080, with egress scoped
+to the Runtime namespace and pod selector. The same peer permits only the
+profile-selected direct command port alongside that probe port.
 Bridge alone serves its durable API and has no visibility watch grant. Separate
 receiver identities hold TokenReview create permission; Runner has no inbound
 TokenReview role. Internal RPC tokens use `tetral-internal-grpc`, while projected
@@ -383,7 +386,9 @@ no endpoint/profile fallback or cross-Pod replay.
 All deployed PostgreSQL and object-store consumers use native verified TLS.
 Supply `transport.storeTrustConfigMap` with `database-ca.crt` and
 `object-store-ca.crt`, and set the exact `databaseServerName` and
-`blobServerName`. Every constructor rejects missing trust/name. PostgreSQL URL
+`blobServerName`. The deployed chart supplies both trust/name references;
+explicit TLS construction validates them. Programmatic Bun SQL callers that
+omit both explicit TLS options retain URL-selected transport. PostgreSQL URL
 sslmode cannot downgrade explicit TLS, and protected Unix sockets are refused.
 Protected object stores require HTTPS and use direct connections; environment
 HTTP/CONNECT proxies do not own their TLS path. Ordinary store bytes,
@@ -428,7 +433,12 @@ existing typed phase defaults through `runtimeDrainMs=60000`,
 `runtimeProxyJoinMs=5000`; the actual Runtime proxy drain annotation follows the
 configured proxy phase. `runtimeGraceSeconds=90` must cover all four phases plus
 the fixed five-second scheduling/signal margin. These are shared phase deadlines,
-not per-Session extensions or preStop sleeps. Queue and Web receive the configured
+not per-Session extensions or preStop sleeps. `settlementAttemptTimeoutMs=5000`
+sets the final phase's per-Bridge-attempt cap through
+`TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS`. It accepts 1–2147483647
+milliseconds and is clipped by the method, caller and remaining settlement
+deadline. It can exceed the total settlement phase and adds no time to Pod grace.
+Queue and Web receive the configured
 `cancelJoinMs` through `TETRAL_CANCEL_JOIN_TIMEOUT_MS`. Queue drain plus join must
 fit 30 seconds in the standard profile or 25 seconds in the hardened profile,
 which reserves five seconds for proxy shutdown. Web drain plus join must fit

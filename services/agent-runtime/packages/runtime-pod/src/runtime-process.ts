@@ -17,9 +17,11 @@ import { GrpcStatusError } from "./errors.js";
 import type { BridgeMethodPolicies } from "./bridge-policy.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
+import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
 
 export interface RuntimeProcessPort {
   readonly runtimeProcessId: string;
+  beginDrain?(phase: RuntimeBridgeDrainPhase): void;
   register(deadline: number): Promise<void>;
   report(phase: "accepting" | "draining", deadline: number): Promise<void>;
   release(
@@ -33,6 +35,10 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
   private registration: RegisterRuntimeProcessResponse | undefined;
   private readonly owner: BridgeUnaryCalls;
   private readonly metadata: () => Promise<Metadata>;
+
+  beginDrain(phase: RuntimeBridgeDrainPhase): void {
+    this.owner.beginDrain(phase);
+  }
 
   constructor(
     readonly runtimeProcessId: string,
