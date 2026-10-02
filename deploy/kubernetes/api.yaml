@@ -11,8 +11,8 @@ metadata:
 data:
   TETRAL_API_HTTP_ADDR: ":8080"
   TETRAL_API_METRICS_ADDR: ":8081"
-  TETRAL_DEPLOYMENT_ENVIRONMENT: local
-  TETRAL_SERVICE_VERSION: dev
+  TETRAL_DEPLOYMENT_ENVIRONMENT: "local"
+  TETRAL_SERVICE_VERSION: "dev"
   ENGINE_DATA_DIR: /var/tetral/data
   TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev
 ---
@@ -40,6 +40,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: api
@@ -60,6 +65,16 @@ spec:
           command:
             - /usr/local/bin/tetral-api
           env:
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_BLOB_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/object-store-ca.crt
+            - name: TETRAL_BLOB_TLS_SERVER_NAME
+              value: "tetral-object-store.tetral-system.svc.cluster.local"
             - name: TETRAL_API_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -83,17 +98,17 @@ spec:
             - name: ENGINE_VAULT_KEY
               valueFrom:
                 secretKeyRef:
-                  name: api-secrets
+                  name: "api-secrets"
                   key: engine-vault-key
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: api-database
+                  name: "api-database"
                   key: url
             - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
               valueFrom:
                 secretKeyRef:
-                  name: auth-internal-principal
+                  name: "auth-internal-principal"
                   key: public_key_b64
             - name: ENGINE_DATA_DIR
               valueFrom:
@@ -108,27 +123,27 @@ spec:
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: endpoint
             - name: TETRAL_BLOB_REGION
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: region
             - name: TETRAL_BLOB_BUCKET
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: bucket
             - name: TETRAL_BLOB_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: access-key
             - name: TETRAL_BLOB_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: secret-key
           ports:
             - name: http
@@ -144,14 +159,15 @@ spec:
               path: /ready
               port: http
           resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-              ephemeral-storage: 128Mi
+
             limits:
               cpu: "1"
-              memory: 1Gi
               ephemeral-storage: 1Gi
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              ephemeral-storage: 128Mi
+              memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -160,9 +176,15 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: engine-data
               mountPath: /var/tetral
       volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
         - name: engine-data
           emptyDir: {}
 ---
@@ -178,6 +200,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: api

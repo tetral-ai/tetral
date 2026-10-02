@@ -12,7 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
-var openDatabase = dbconnect.OpenPlainDSN
+var openDatabase = dbconnect.OpenProtectedDSN
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 var newEncryptor = vault.NewEncryptor
 var runGitProxy = gitproxy.Run
@@ -41,7 +41,7 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
-	openResult, err := openDatabase(ctx, gitproxy.EnvDatabaseURL, cfg.DatabaseURL)
+	openResult, err := openDatabase(ctx, cfg.DatabaseURL, env.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), env.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}

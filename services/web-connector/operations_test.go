@@ -647,7 +647,7 @@ func TestMaximumWebCallWithThreeKeyJinaRotationRemainsOwnedUntilExactReplay(t *t
 	input := maximumWebCallInput()
 	request := &providergatewayv1.RunWebRequest{
 		WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr",
-		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1,
+		ToolUseEventId: "event-maximum-claim", BindingId: "bind", BindingGeneration: 1, RuntimeProcessId: "process_web_fixture",
 		Input: input,
 	}
 	started := clock.Now()
@@ -1587,7 +1587,7 @@ func testService(objects blob.BlobStore, backend Backend) (*Service, []byte, fun
 	return NewService(objects, backend, NewBindingVerifier(key, now), NewMetrics(), now, nil), key, now
 }
 func testRequest(input *providergatewayv1.WebToolInput, event string, key []byte, now func() time.Time) *providergatewayv1.RunWebRequest {
-	request := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: event, BindingId: "bind", BindingGeneration: 1, Input: input}
+	request := &providergatewayv1.RunWebRequest{WorkspaceId: "ws", SessionId: "ses", SessionThreadId: "thr", ToolUseEventId: event, BindingId: "bind", BindingGeneration: 1, RuntimeProcessId: "process_web_fixture", Input: input}
 	request.RuntimeBindingToken = signRequest(request, "runtime-pod", now().Add(time.Hour), key)
 	return request
 }

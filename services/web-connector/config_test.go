@@ -2,6 +2,7 @@ package webconnector
 
 import (
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -52,3 +53,24 @@ func TestMethodAuthorizerAdmitsOnlyRuntimeServiceAccountToProviderMethods(t *tes
 type mapEnv map[string]string
 
 func (e mapEnv) Getenv(key string) string { return e[key] }
+
+func TestDrainBudgetLeavesRoomForJoinAndProxy(t *testing.T) {
+	for _, raw := range []string{"", "200", "20000", "0", "20001", "-1", "unbounded"} {
+		env := mapEnv{EnvAPIKeys: `["fixture"]`, EnvBindingHMACKey: "binding-verifier-key-with-at-least-32-bytes", EnvDrainTimeout: raw}
+		cfg, err := LoadConfig(env)
+		switch raw {
+		case "":
+			if err != nil || cfg.DrainTimeout != 10*time.Second {
+				t.Fatalf("default drain=%v/%v", cfg.DrainTimeout, err)
+			}
+		case "200", "20000":
+			if err != nil || cfg.DrainTimeout+10*time.Second > 30*time.Second {
+				t.Fatalf("drain/join/proxy exceeds Pod budget: %v/%v", cfg.DrainTimeout, err)
+			}
+		default:
+			if err == nil {
+				t.Fatalf("unbounded/invalid drain accepted: %q", raw)
+			}
+		}
+	}
+}

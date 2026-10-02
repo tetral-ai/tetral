@@ -14,3 +14,6 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    - name: grpc-direct
+      port: 19090
+      targetPort: 19090

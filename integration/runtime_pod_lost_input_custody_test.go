@@ -49,7 +49,8 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return now }
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
 		}})
@@ -316,7 +317,8 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 	replacement := enginekubernetes.BindingCandidate{
 		Namespace: "tetral-agent-runtime", PodName: "runtime-pod-1", PodUID: "pod_pod_loss_commit_new", PodIP: "10.0.0.11",
 	}
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), replacement.Namespace, replacement.PodUID)
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotStateWithCandidatesForTest(
 			true, oldPod, enginekubernetes.BindingVisibilityDeleted, []enginekubernetes.BindingCandidate{replacement},
 		)

@@ -83,6 +83,8 @@ export interface RuntimeRecoveryLoadAuthority {
 
 export interface RuntimeContextLoadOptions {
 	readonly recovery?: RuntimeRecoveryLoadAuthority | undefined;
+	readonly sourceEventId?: string | undefined;
+	readonly handoffId?: string | undefined;
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */

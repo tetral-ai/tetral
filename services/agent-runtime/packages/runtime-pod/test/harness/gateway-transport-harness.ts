@@ -578,6 +578,7 @@ export async function runMaximumReadTransportProof() {
 		bindingGeneration: 1,
 		runtimeBindingToken: "binding-token",
 		targetPodUid: "pod_capacity",
+		runtimeProcessId: "process-test",
 		modelRequestId: "mreq_maximum_read",
 		modelToolCallId: "call_maximum_read",
 		modelOrder: 0,
@@ -1077,6 +1078,7 @@ async function loadCapacityContext(
 		loadContext(
 			_request: unknown,
 			_metadata: Metadata,
+			_options: unknown,
 			callback: (error: Error | null, response?: unknown) => void,
 		) {
 			callback(null, {
@@ -1099,6 +1101,7 @@ async function loadCapacityContext(
 		bindingId: "bind_capacity",
 		bindingGeneration: 1,
 		targetPodUid: "pod_capacity",
+		runtimeProcessId: "process-test",
 	});
 	return {
 		contextEntries: loaded.contextEntries,
@@ -1124,6 +1127,7 @@ function assembledVector(
 			bindingId: "bind_capacity",
 			bindingGeneration: 1,
 			targetPodUid: "pod_capacity",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token",
 		},
 		requestId: `req_${name}`,

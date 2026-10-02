@@ -45,6 +45,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly readyPath: string;
 	readonly statePath: string;
 	readonly closePath: string;
@@ -572,6 +573,7 @@ const cleanupController = {
 } satisfies RuntimeCleanupController;
 const controlInputCommitter = new BridgeAPIControlInputCommitter(bridgeOptions);
 const runtimeService = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "tetral-agent-runtime",
 		name: "runtime-pod-provider-timeout",

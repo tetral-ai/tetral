@@ -47,6 +47,7 @@ const thread = new ThreadRuntime({
 	bindingId: "bind_oauth_manifest",
 	bindingGeneration: 1,
 	targetPodUid: "pod_oauth_manifest",
+	runtimeProcessId: "process-test",
 	runtimeBindingToken: "runtime-binding-token",
 });
 const result = await Effect.runPromise(

@@ -256,6 +256,8 @@ resources:
 
 # Each Deployment starts independently; enabled provider autoscaling retains its floor of two.
 replicas:
+  api: 1
+  auth: 1
   bridge: 1
   jobRunner: 1
   providerGateway: 1
@@ -264,3 +266,44 @@ replicas:
 autoscaling:
   providerGateway:
     enabled: true
+    maxReplicas: 10
+
+# Istiod is installed separately; these workload routes are mandatory in both profiles.
+routing:
+  enabled: true
+  version: 1.31.1
+  revision: 1-31-1
+  trustDomain: cluster.local
+transport:
+  profile: standard-routed
+  # Operator-provided public trust; no workload receives an issuer signing key.
+  storeTrustConfigMap: tetral-store-trust
+  databaseServerName: tetral-postgres.tetral-system.svc.cluster.local
+  blobServerName: tetral-object-store.tetral-system.svc.cluster.local
+  runtimeDirectTrustConfigMap: tetral-runtime-direct-trust
+  runtimeDirectLeafSecret: tetral-runtime-direct-tls
+  runnerDirectLeafSecret: tetral-runner-direct-tls
+  runtimeServerName: agent-runtime.tetral-agent-runtime.svc.cluster.local
+  # Aggregate server capacity includes rollout surge, both Bun generations and reserve.
+  databaseCapacity: null
+  databaseReserve: 8
+  goPoolMax: 20
+  bunPoolMax: 10
+  externalDatabaseConnections: null
+
+# Resolved against each workload replica/HPA bound in the connection ledger.
+rollout:
+  maxSurge: 1
+
+# Application drains and cancellation joins are bounded inside each Pod grace.
+lifecycle:
+  bridgeDrainMs: 40000
+  runnerDrainMs: 30000
+  sandboxDrainMs: 30000
+  cancelJoinMs: 5000
+  providerDrainMs: 30000
+  providerJoinMs: 5000
+  mcpDrainMs: 30000
+  mcpJoinMs: 5000
+  webDrainMs: 10000
+  queueDrainMs: 10000

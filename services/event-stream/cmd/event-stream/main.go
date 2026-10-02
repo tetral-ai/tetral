@@ -86,7 +86,7 @@ type startupDatabase struct {
 type openStartupFunc func(context.Context) (startupDatabase, error)
 
 func openStartupDatabaseFromEnv(ctx context.Context) (startupDatabase, error) {
-	openResult, err := dbconnect.OpenPlainDSN(ctx, envEventStreamDatabaseURL, os.Getenv(envEventStreamDatabaseURL))
+	openResult, err := dbconnect.OpenProtectedDSN(ctx, os.Getenv(envEventStreamDatabaseURL), os.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), os.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
 		return startupDatabase{}, err
 	}

@@ -229,6 +229,7 @@ function acceptedInput(
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "messages",
@@ -385,6 +386,7 @@ function approvalReviewAcceptedInput(
 		bindingId: "bind_reviewer",
 		bindingGeneration: 1,
 		targetPodUid: "pod_reviewer",
+		runtimeProcessId: "process-test",
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "approval_review",
@@ -943,6 +945,7 @@ function writerFrom(
 				bindingId: envelope.bindingId,
 				bindingGeneration: envelope.bindingGeneration,
 				targetPodUid: envelope.targetPodUid,
+				runtimeProcessId: envelope.runtimeProcessId,
 				writeId: envelope.writeId,
 				event: {
 					type: "span.model_request_end",
@@ -1003,6 +1006,7 @@ function writerFrom(
 					bindingId: envelope.bindingId,
 					bindingGeneration: envelope.bindingGeneration,
 					targetPodUid: envelope.targetPodUid,
+					runtimeProcessId: envelope.runtimeProcessId,
 					writeId: envelope.durableTurnId,
 					event: {
 						type: "session.status_idle",

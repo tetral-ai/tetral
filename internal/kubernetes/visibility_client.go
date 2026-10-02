@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -40,6 +41,26 @@ func NewInClusterVisibilityClient() (*ClientsetVisibilityClient, error) {
 
 func (c *ClientsetVisibilityClient) ListPods(ctx context.Context, namespace string, options metav1.ListOptions) (*corev1.PodList, error) {
 	return c.client.CoreV1().Pods(namespace).List(ctx, options)
+}
+
+// PodObservation contains only the fresh facts required by Runtime arbitration.
+// SDK objects and Kubernetes status decoding remain inside this boundary.
+type PodObservation struct {
+	Namespace, Name, UID, IP         string
+	Absent, Running, Ready, Deleting bool
+}
+
+// GetPod is a fresh, bounded-by-caller observation used outside Session
+// transactions to confirm loss. Watch cache absence is not a GET substitute.
+func (c *ClientsetVisibilityClient) GetPod(ctx context.Context, namespace, name string) (*PodObservation, error) {
+	pod, err := c.client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return &PodObservation{Absent: true}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &PodObservation{Namespace: pod.Namespace, Name: pod.Name, UID: string(pod.UID), IP: pod.Status.PodIP, Running: pod.Status.Phase == corev1.PodRunning, Ready: podReady(*pod), Deleting: pod.DeletionTimestamp != nil}, nil
 }
 
 func (c *ClientsetVisibilityClient) WatchPods(ctx context.Context, namespace string, options metav1.ListOptions) (watch.Interface, error) {

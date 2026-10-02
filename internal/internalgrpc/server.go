@@ -2,6 +2,7 @@ package internalgrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -38,10 +39,16 @@ type Config struct {
 	Register              func(*grpc.Server)
 	OnServing             func()
 	ShutdownTimeout       time.Duration
-	Logger                *slog.Logger
-	Metrics               *workload.GRPCMetrics
-	ServerOptions         []grpc.ServerOption
+	// CancelJoinTimeout reports a forced-cancellation overrun. Run still joins
+	// handlers before returning so callers can safely close their dependencies.
+	CancelJoinTimeout time.Duration
+	Logger            *slog.Logger
+	Metrics           *workload.GRPCMetrics
+	ServerOptions     []grpc.ServerOption
 }
+
+// ErrCancelJoinTimeout reports a forced drain that joined after its budget.
+var ErrCancelJoinTimeout = errors.New("internal grpc cancellation join exceeded its budget")
 
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Logger == nil {
@@ -82,20 +89,55 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
+		var joinErr error
 		select {
 		case <-stopped:
 		case <-timer.C:
-			server.Stop()
+			joinErr = forceStopAndJoin(server, cfg)
 		}
-		return nil
+		<-stopped
+		<-done
+		return joinErr
 	case err := <-done:
-		return err
+		return errors.Join(err, forceStopAndJoin(server, cfg))
+	}
+}
+
+// Stop cancels transports and, with WaitForHandlers, waits for every handler.
+// Budget exhaustion is observable while ownership stays with Run until join.
+func forceStopAndJoin(server *grpc.Server, cfg Config) error {
+	stopped := make(chan struct{})
+	go func() { server.Stop(); close(stopped) }()
+	timeout := cfg.CancelJoinTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	started := time.Now()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+		return nil
+	case <-timer.C:
+		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
+			"operation", "internal.grpc.shutdown", "event.kind", "shutdown", "component", "internal-grpc",
+			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
+			"duration.ms", time.Since(started).Milliseconds())
+		<-stopped
+		return ErrCancelJoinTimeout
 	}
 }
 
 func NewServer(cfg Config) (*grpc.Server, error) {
-	server, _, _, err := buildServer(cfg)
+	server, _, err := NewServerWithHealth(cfg)
 	return server, err
+}
+
+// NewServerWithHealth exposes the readiness owner to services that coordinate
+// admission and resource joins themselves. Health changes before graceful drain.
+func NewServerWithHealth(cfg Config) (*grpc.Server, *health.Server, error) {
+	server, _, readiness, err := buildServer(cfg)
+	return server, readiness, err
 }
 
 func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error) {
@@ -112,6 +154,7 @@ func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error)
 		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
 	}
 	options := append(SessionRPCServerOptions(),
+		grpc.WaitForHandlers(true),
 		grpc.ChainUnaryInterceptor(recoveryUnaryInterceptor(cfg.Logger, cfg.Metrics), authUnaryInterceptor(cfg)),
 		grpc.ChainStreamInterceptor(recoveryStreamInterceptor(cfg.Logger, cfg.Metrics), authStreamInterceptor(cfg)),
 	)

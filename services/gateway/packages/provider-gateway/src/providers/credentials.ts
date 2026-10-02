@@ -1,3 +1,5 @@
+import { asSQLSource } from "@tetral/ts-dbconnect";
+import type { SQLSource } from "@tetral/ts-dbconnect";
 /**
  * @packageDocumentation
  * Resolves a provider turn to one validated session credential or one selected
@@ -204,7 +206,8 @@ interface PlatformProviderKeySQLRow {
  * returning up to two bindings for fail-closed handling by the resolver.
  */
 export class SQLGatewayCredentialStore implements GatewayCredentialStore {
-  constructor(private readonly sql: GatewayCredentialSQL) {}
+  private readonly sqlSource: SQLSource<GatewayCredentialSQL>;
+  constructor(sql: GatewayCredentialSQL | SQLSource<GatewayCredentialSQL>) { this.sqlSource = asSQLSource(sql); }
 
   // A session carries at most one bound provider credential. The query below
   // selects LIMIT 2 (not LIMIT 1) as cheap ambiguity detection: if two or more
@@ -215,55 +218,59 @@ export class SQLGatewayCredentialStore implements GatewayCredentialStore {
     readonly workspaceId: string;
     readonly sessionId: string;
   }): Promise<readonly SessionProviderAuthRow[]> {
-    if (this.sql.begin === undefined) {
-      return [];
-    }
-    const rows = await this.sql.begin(async (tx) => {
-      await setWorkspaceRLS(tx, input.workspaceId);
-      return await tx<readonly SessionProviderAuthSQLRow[]>`
-        SELECT
-          spa.provider_id,
-          spa.vault_id,
-          spa.credential_id,
-          spa.access_mode,
-          c.auth_type,
-          c.provider_id AS credential_provider_id,
-          c.access_mode AS credential_access_mode,
-          c.encrypted_auth,
-          c.archived_at,
-          c.revoked_at
-        FROM session_provider_auth spa
-        LEFT JOIN credentials c
-          ON c.workspace_id = spa.workspace_id
-         AND c.vault_id = spa.vault_id
-         AND c.id = spa.credential_id
-        WHERE spa.workspace_id = ${input.workspaceId}
-          AND spa.session_id = ${input.sessionId}
-          AND spa.deleted_at IS NULL
-        ORDER BY spa.updated_at DESC
-        LIMIT 2
-      `;
+    return await this.sqlSource.withSQL(async (sql) => {
+      if (sql.begin === undefined) {
+        return [];
+      }
+      const rows = await sql.begin(async (tx) => {
+        await setWorkspaceRLS(tx, input.workspaceId);
+        return await tx<readonly SessionProviderAuthSQLRow[]>`
+          SELECT
+            spa.provider_id,
+            spa.vault_id,
+            spa.credential_id,
+            spa.access_mode,
+            c.auth_type,
+            c.provider_id AS credential_provider_id,
+            c.access_mode AS credential_access_mode,
+            c.encrypted_auth,
+            c.archived_at,
+            c.revoked_at
+          FROM session_provider_auth spa
+          LEFT JOIN credentials c
+            ON c.workspace_id = spa.workspace_id
+           AND c.vault_id = spa.vault_id
+           AND c.id = spa.credential_id
+          WHERE spa.workspace_id = ${input.workspaceId}
+            AND spa.session_id = ${input.sessionId}
+            AND spa.deleted_at IS NULL
+          ORDER BY spa.updated_at DESC
+          LIMIT 2
+        `;
+      });
+      return rows.map(sessionProviderAuthRowFromSQL);
     });
-    return rows.map(sessionProviderAuthRowFromSQL);
   }
 
   /** Loads the encrypted platform-key snapshot consumed by the cached pool. */
   async loadPlatformProviderKeyRows(): Promise<readonly EncryptedPlatformProviderKeyRow[]> {
-    const rows = await this.sql<readonly PlatformProviderKeySQLRow[]>`
-      SELECT
-        key_id,
-        provider_id,
-        encrypted_key,
-        weight,
-        priority,
-        cache_scope,
-        status,
-        disabled_reason,
-        updated_at
-      FROM platform_provider_keys
-      ORDER BY provider_id, status, priority, key_id
-    `;
-    return rows.map(platformProviderKeyRowFromSQL);
+    return await this.sqlSource.withSQL(async (sql) => {
+      const rows = await sql<readonly PlatformProviderKeySQLRow[]>`
+        SELECT
+          key_id,
+          provider_id,
+          encrypted_key,
+          weight,
+          priority,
+          cache_scope,
+          status,
+          disabled_reason,
+          updated_at
+        FROM platform_provider_keys
+        ORDER BY provider_id, status, priority, key_id
+      `;
+      return rows.map(platformProviderKeyRowFromSQL);
+    });
   }
 }
 

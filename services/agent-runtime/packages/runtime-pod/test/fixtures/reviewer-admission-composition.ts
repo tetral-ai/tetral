@@ -25,6 +25,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly parentBoundaryEventId: string;
 	readonly beforeTrunkReleasePath?: string;
 	readonly trunkReleasePath?: string;
@@ -252,6 +253,7 @@ function reviewRequest(
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 		runtimeBindingToken: "reviewer-composition-token",
 		modelRequestId: "mreq_reviewer_composition_parent",
 		parentBoundaryEventId: input.parentBoundaryEventId,

@@ -18,18 +18,26 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-runtime
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "agent-runtime") | indent 8 }}
       labels:
         app.kubernetes.io/name: agent-runtime
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: agent-runtime
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 90
       containers:
         - name: agent-runtime
           image: {{ include "tetral.image" (dict "root" . "name" "agent-runtime") }}
@@ -38,10 +46,14 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_RUNTIME_POD_HTTP_ADDR
               value: 0.0.0.0:8080
             - name: TETRAL_RUNTIME_POD_GRPC_PORT
-              value: "9090"
+              value: {{ if eq .Values.transport.profile "hardened" }}"9090"{{ else }}"19090"{{ end }}
             - name: TETRAL_RUNTIME_POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -92,7 +104,7 @@ spec:
             - name: http
               containerPort: 8080
             - name: grpc
-              containerPort: 9090
+              containerPort: {{ if eq .Values.transport.profile "hardened" }}9090{{ else }}19090{{ end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -155,6 +167,9 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    - name: grpc-direct
+      port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
+      targetPort: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -191,7 +206,7 @@ spec:
               app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
-          port: 9090
+          port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
   egress:
     - to:
         - namespaceSelector:

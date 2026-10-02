@@ -320,6 +320,7 @@ describe("ThreadLoop", () => {
 			sessionThreadId: "thread-test",
 			bindingId: "binding-test",
 			bindingGeneration: 1,
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "runtime-binding-token-test",
 			model: { providerId: "fake", modelId: "fake-chat", variant: "" },
 			system: [
@@ -1869,6 +1870,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeInputId: "rin_joined_interrupt_replay",
 			origin: "user" as const,
 		};
@@ -1914,6 +1916,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeInputId: "rin_retryable_joined_recording",
 			origin: "user" as const,
 		};
@@ -1957,6 +1960,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeInputId: "rin_unmatched_joined_interrupt",
 			origin: "user" as const,
 		};
@@ -2215,6 +2219,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_ordinary_subagent_mail",
 			bindingGeneration: 1,
 			targetPodUid: "pod_ordinary_subagent_mail",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "token_ordinary_subagent_mail",
 		});
 		session.state.contextManager.appendEntry(
@@ -2238,6 +2243,7 @@ describe("ThreadState", () => {
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 			runtimeInputId: "agent_mail:delivery_ordinary_subagent_mail",
 			kind: "inter_agent_message",
 			deliveryId: "delivery_ordinary_subagent_mail",
@@ -2302,6 +2308,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_agent_mail_resident_replay",
 			bindingGeneration: 1,
 			targetPodUid: "pod_agent_mail_resident_replay",
+			runtimeProcessId: "process-test",
 			runtimeInputId: "agent_mail:delivery_resident_replay",
 			kind: "inter_agent_message",
 			deliveryId: "delivery_resident_replay",
@@ -2352,6 +2359,7 @@ describe("ThreadState", () => {
 			bindingId: "bind_agent_mail_interrupt_fence",
 			bindingGeneration: 1,
 			targetPodUid: "pod_agent_mail_interrupt_fence",
+			runtimeProcessId: "process-test",
 			runtimeInputId: "agent_mail:delivery_interrupt_fence",
 			kind: "inter_agent_message",
 			deliveryId: "delivery_interrupt_fence",

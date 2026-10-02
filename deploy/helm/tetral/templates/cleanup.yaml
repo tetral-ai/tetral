@@ -37,6 +37,7 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 16 }}
                 - name: TETRAL_DATABASE_URL
                   valueFrom:
                     secretKeyRef:
@@ -44,6 +45,10 @@ spec:
                       key: cleanup-url
                 - name: TETRAL_CLEANUP_CLAIM_LIMIT
                   value: "100"
+              volumeMounts:
+                - name: store-trust
+                  mountPath: /var/run/tetral/store-trust
+                  readOnly: true
               resources:
 {{ toYaml .Values.resources.cleanup | nindent 16 }}
               securityContext:
@@ -53,6 +58,10 @@ spec:
                 capabilities:
                   drop:
                     - ALL
+          volumes:
+            - name: store-trust
+              configMap:
+                name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

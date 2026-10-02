@@ -15,6 +15,7 @@ func TestPostgreSQLBackgroundSettlementParksAfterCommittedControlWithoutCloseRec
 	workload := storagetest.OpenWorkloadDB(t, admin, "sandbox")
 	seedSandboxExecutionStoreFixture(t, admin)
 	seedBackgroundTaskFromExecution(t, workload.DB, admin)
+	registerSandboxFixtureProcess(t, admin, "runtime", "pod_close")
 	// The child is still idle; a committed control input alone does not prove
 	// that the close completed. No terminal Tool Result or close receipt exists.
 	if _, err := admin.Exec(`INSERT INTO session_threads (
@@ -24,8 +25,8 @@ func TestPostgreSQLBackgroundSettlementParksAfterCommittedControlWithoutCloseRec
  WHERE workspace_id='ws_execution_store' AND task_id='task_execution';
  INSERT INTO session_runtime_bindings (
    workspace_id,session_id,binding_id,binding_generation,agent_runtime_namespace,
-   agent_runtime_pod_name,agent_runtime_pod_uid,agent_runtime_pod_ip,bound_at,updated_at
- ) VALUES ('ws_execution_store','sesn_execution_store','bind_close',7,'runtime','runtime-0','pod_close','127.0.0.1',now(),now());
+   agent_runtime_pod_name,agent_runtime_pod_uid,agent_runtime_pod_ip,runtime_process_id,bound_at,updated_at
+ ) VALUES ('ws_execution_store','sesn_execution_store','bind_close',7,'runtime','runtime-0','pod_close','127.0.0.1','process_pod_close',now(),now());
  INSERT INTO session_events (workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,created_at,updated_at)
  VALUES ('ws_execution_store','sesn_execution_store','thr_close_child','evt_close',1,'agent.thread_interrupt_requested',
  '{"root_child_thread_id":"thr_close_child","action":"close","source_tool_use_event_id":"evt_close_source","runtime_input_id":"close_input","disposition":"pending_control"}',now(),now());

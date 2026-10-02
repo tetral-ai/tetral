@@ -7,10 +7,11 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
@@ -126,21 +127,13 @@ type RuntimeRecoveryCommandSender interface {
 	RecoverThread(context.Context, RuntimePodTarget, *agentruntimev1.RecoverThreadRequest) (*agentruntimev1.RecoverThreadResponse, error)
 }
 
-const (
-	// initialMCPManifestListTimeout is the per-call deadline for initial manifest
-	// capture outside queued user messages; a queued user message uses
-	// min(this, mcpInputDiscoveryBudget) as its whole-discovery deadline.
-	initialMCPManifestListTimeout = 180 * time.Second
-	// The production closeout proof measures command admission, Tool Fiber
-	// cancellation/join, durable-operation drain, Tool Result and Request End
-	// persistence, and receipt return together. Thirty seconds is the one
-	// caller wait around that complete path; a non-abandonable closeout that
-	// finishes later converges through receipt replay or exact-lease terminal
-	// arbitration instead of acquiring another timer or Runtime attempt.
-	runtimeInterruptDeliveryTimeout = 30 * time.Second
-)
+// initialMCPManifestListTimeout is the per-call deadline for initial manifest
+// capture outside queued user messages; a queued user message uses
+// min(this, mcpInputDiscoveryBudget) as its whole-discovery deadline.
+const initialMCPManifestListTimeout = 180 * time.Second
 
 type RuntimeCommandPlan struct {
+	placement             *runtimePlacementChoice
 	StaleAccepted         bool
 	DeliveryAuthorityLost bool
 	SettledAccepted       bool
@@ -162,9 +155,10 @@ type RuntimeCommandPlan struct {
 }
 
 type RuntimeAttemptedBinding struct {
-	BindingID    string
-	Generation   int64
-	TargetPodUID string
+	BindingID        string
+	Generation       int64
+	TargetPodUID     string
+	RuntimeProcessID string
 }
 
 func (p RuntimeCommandPlan) hasCommand() bool {
@@ -206,7 +200,15 @@ func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSende
 		response, err := sender.AcceptTaskNotification(ctx, p.Target, p.AcceptTask)
 		return runtimeResultFromAcceptTask(response), err
 	case p.Interrupt != nil:
-		interruptCtx, cancel := context.WithTimeout(ctx, runtimeInterruptDeliveryTimeout)
+		policy := DefaultRuntimeCommandPolicy()
+		if client, ok := sender.(*RuntimePodCommandClient); ok && client.Policy != (RuntimeCommandPolicy{}) {
+			policy = client.Policy
+		}
+		timeout, policyErr := policy.timeout("Interrupt")
+		if policyErr != nil {
+			return RuntimeDeliveryResult{}, policyErr
+		}
+		interruptCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		response, err := sender.Interrupt(interruptCtx, p.Target, p.Interrupt)
 		return runtimeResultFromInterrupt(response), err
@@ -399,11 +401,12 @@ type RuntimeTaskNotificationPlan struct {
 }
 
 type RuntimePodTarget struct {
-	Namespace string
-	PodName   string
-	PodUID    string
-	PodIP     string
-	Port      int
+	Namespace        string
+	PodName          string
+	PodUID           string
+	RuntimeProcessID string
+	PodIP            string
+	Port             int
 }
 
 type RuntimePodDirectDeliverer struct {
@@ -715,6 +718,7 @@ func runtimeDeliveryResultWithAttemptedBinding(
 	result.AttemptedBindingID = attempt.BindingID
 	result.AttemptedBindingGeneration = attempt.Generation
 	result.AttemptedTargetPodUID = attempt.TargetPodUID
+	result.AttemptedRuntimeProcessID = attempt.RuntimeProcessID
 	return result
 }
 
@@ -767,6 +771,7 @@ func runtimeDeliveryResultFromSendError(err error) (RuntimeDeliveryResult, error
 type PostgreSQLRuntimeDeliveryStore struct {
 	Client              *dbconnect.Client
 	Logger              *slog.Logger
+	PlacementMetrics    *RuntimePlacementMetrics
 	RuntimeGRPCPort     int
 	TargetResolver      RuntimeTargetResolver
 	MCPManifestLister   mcpmanifest.Lister
@@ -795,17 +800,21 @@ func NewJobRunnerRuntimeDeliveryStore(
 ) *PostgreSQLRuntimeDeliveryStore {
 	store := NewPostgreSQLRuntimeDeliveryStore(client, cfg.AgentRuntimeGRPCPort)
 	store.Logger = logger
+	store.PlacementMetrics = &RuntimePlacementMetrics{}
 	store.MCPManifestLister = mcpmanifest.NewConnectorLister(cfg.MCPConnectorGRPCAddress, internalgrpcauth.FileTokenSource{
 		Path: cfg.GatewayTokenPath,
 	})
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: bindingSnapshot}
+	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: bindingSnapshot, PlacementPolicy: cfg.PlacementPolicy, ProcessPolicy: cfg.ProcessPolicy, PlacementMetrics: store.PlacementMetrics}
 	return store
 }
 
 const maxRuntimePreparationReentries = 2
 
 func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
-	return s.prepareRuntimeCommand(ctx, job, 0)
+	started := time.Now()
+	plan, err := s.prepareRuntimeCommand(ctx, job, 0)
+	s.logRuntimePlacement(job, plan, err, started)
+	return plan, err
 }
 
 // Preparation can legitimately repair one lost binding and capture one initial
@@ -987,6 +996,34 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 		return nil
 	})
 	if err != nil {
+		var confirmation runtimePodConfirmationRequired
+		if errors.As(err, &confirmation) {
+			resolver, ok := s.TargetResolver.(KubernetesRuntimeTargetResolver)
+			if !ok {
+				return RuntimeCommandPlan{}, err
+			}
+			observation, confirmErr := resolver.confirmRuntimePod(ctx, confirmation.binding)
+			if confirmErr != nil {
+				return RuntimeCommandPlan{}, confirmErr
+			}
+			return s.prepareRuntimeCommand(context.WithValue(ctx, runtimePodObservationKey{}, observation), job, reentries)
+		}
+		var sampleRequired runtimePlacementRequiredError
+		if errors.As(err, &sampleRequired) {
+			resolver, ok := s.TargetResolver.(KubernetesRuntimeTargetResolver)
+			if !ok {
+				return RuntimeCommandPlan{}, err
+			}
+			choice, sampleErr := resolver.sampleRuntimePlacement(ctx, s.Client, job)
+			if sampleErr != nil {
+				return RuntimeCommandPlan{placement: &choice}, sampleErr
+			}
+			plan, prepareErr := s.prepareRuntimeCommand(context.WithValue(ctx, runtimePlacementContextKey{}, choice), job, reentries)
+			plan.placement = &choice
+			return plan, prepareErr
+		}
+	}
+	if err != nil {
 		var initialMCP runtimeInitialMCPManifestRequiredError
 		var lostBinding runtimeBindingLostError
 		if errors.As(err, &lostBinding) {
@@ -1096,7 +1133,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	}
 	if job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" ||
 		(job.InputKind == "agent_mail" && (job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "")) ||
-		attempt.BindingID == "" || attempt.Generation <= 0 || attempt.TargetPodUID == "" {
+		attempt.BindingID == "" || attempt.Generation <= 0 || attempt.TargetPodUID == "" || attempt.RuntimeProcessID == "" {
 		return false, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime job identity is incomplete", Retryable: false}
 	}
 	now := storage.Now()
@@ -1106,6 +1143,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	queueLeaseSettled := false
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		if err := lockRuntimeAttemptProcessTx(ctx, tx, job, attempt); err != nil {
 			return err
 		}
 		if job.InputKind == "agent_mail" {
@@ -1457,7 +1497,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 	result RuntimeDeliveryResult,
 ) (RuntimeDeliveryResult, error) {
 	if job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" ||
-		job.RecoverySourceEventID == "" || job.JobID == "" || job.LeaseToken == "" ||
+		(job.RecoverySourceEventID == "") == (job.RecoveryHandoffID == "") || job.JobID == "" || job.LeaseToken == "" ||
 		job.PartitionKey == "" || job.DedupeKey == "" || result.Status != RuntimeDeliveryRejected ||
 		!runtimeJobFinalAttempt(job) {
 		return RuntimeDeliveryResult{}, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime recovery finalization identity is incomplete", Retryable: false}
@@ -1480,6 +1520,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 		}
 		if !active {
 			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
+			return nil
+		}
+		recoveryPayload := queue.RuntimeRecoveryPayload{SessionID: job.SessionID, SessionThreadID: job.SessionThreadID, SourceEventID: job.RecoverySourceEventID, HandoffID: job.RecoveryHandoffID}
+		if job.Kind != queue.KindRuntimeRecovery || job.PartitionKey != queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID) || job.DedupeKey != runtimecontrol.RecoveryDedupeKey(job.WorkspaceID, recoveryPayload) {
+			return runtimecontrol.InvalidRuntimeFinalizationIdentity("runtime recovery source keys are invalid")
+		}
+		sourceCurrent, err := runtimecontrol.VerifyRecoverySourceTx(ctx, tx, job.WorkspaceID, job.JobID, recoveryPayload)
+		if err != nil {
+			return err
+		}
+		if !sourceCurrent {
+			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
 			return nil
 		}
 		var sessionStatus string
@@ -1509,22 +1561,22 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 			finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate, QueueLeaseSettled: true}
 			return nil
 		}
-		var bindingID, podUID sql.NullString
+		var bindingID, podUID, processID sql.NullString
 		var bindingGeneration sql.NullInt64
 		err = tx.QueryRow(ctx,
-			`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+			`SELECT binding_id, binding_generation, agent_runtime_pod_uid, runtime_process_id
 			   FROM session_runtime_bindings
 			  WHERE workspace_id=$1 AND session_id=$2
 			  FOR UPDATE`,
 			job.WorkspaceID, job.SessionID,
-		).Scan(&bindingID, &bindingGeneration, &podUID)
+		).Scan(&bindingID, &bindingGeneration, &podUID, &processID)
 		if err != nil && !dbconnect.IsNoRows(err) {
 			return err
 		}
 		scope := &bridgev1.RuntimeScope{
 			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
 			Binding: &bridgev1.RuntimeBindingRef{
-				BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
+				BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, RuntimeProcessId: processID.String, TargetPodUid: podUID.String,
 			},
 		}
 		threadScope, err := runtimecontrol.LockThreadMutationRowTx(ctx, tx, scope)
@@ -1541,7 +1593,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 		if err != nil {
 			return err
 		}
-		runtimeWriteID := runtimecontrol.StableRuntimeID("runtime_recovery_exhausted", job.WorkspaceID, job.SessionID, job.RecoverySourceEventID)
+		runtimeWriteID := runtimecontrol.StableRuntimeID("runtime_recovery_exhausted", job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RecoverySourceEventID, job.RecoveryHandoffID)
 		if _, _, err := runtimecontrol.SettleRuntimeTerminationTx(ctx, tx, scope, threadScope, runtimeWriteID, failure, failureJSON, now); err != nil {
 			return err
 		}
@@ -1735,15 +1787,15 @@ func finalizeInterruptDeliveryTerminalTx(
 		return RuntimeDeliveryResult{}, runtimecontrol.InvalidRuntimeFinalizationIdentity("interrupt Inbox custody is not terminalizable")
 	}
 
-	var bindingID, podUID sql.NullString
+	var bindingID, podUID, processID sql.NullString
 	var bindingGeneration sql.NullInt64
 	err := tx.QueryRow(ctx,
-		`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+		`SELECT binding_id, binding_generation, agent_runtime_pod_uid, runtime_process_id
 		   FROM session_runtime_bindings
 		  WHERE workspace_id=$1 AND session_id=$2
 		  FOR UPDATE`,
 		job.WorkspaceID, job.SessionID,
-	).Scan(&bindingID, &bindingGeneration, &podUID)
+	).Scan(&bindingID, &bindingGeneration, &podUID, &processID)
 	if err != nil && !dbconnect.IsNoRows(err) {
 		return RuntimeDeliveryResult{}, err
 	}
@@ -1757,7 +1809,7 @@ func finalizeInterruptDeliveryTerminalTx(
 	scope := &bridgev1.RuntimeScope{
 		WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
 		Binding: &bridgev1.RuntimeBindingRef{
-			BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, TargetPodUid: podUID.String,
+			BindingId: bindingID.String, BindingGeneration: bindingGeneration.Int64, RuntimeProcessId: processID.String, TargetPodUid: podUID.String,
 		},
 	}
 	threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, scope)
@@ -2117,6 +2169,20 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 	return outcome, err
 }
 
+// The Session lock must precede this exact binding/process fence. The shared
+// process row remains locked through the acknowledgement/finalization commit.
+func lockRuntimeAttemptProcessTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, attempt RuntimeAttemptedBinding) error {
+	binding, found, err := runtimecontrol.ReadOptionalRuntimeBindingForDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	if err != nil {
+		return err
+	}
+	if !found || binding.BindingID != attempt.BindingID || binding.BindingGeneration != attempt.Generation || binding.PodUID != attempt.TargetPodUID || binding.RuntimeProcessID != attempt.RuntimeProcessID {
+		return runtimecontrol.InvalidRuntimeFinalizationIdentity("runtime delivery binding/process is stale")
+	}
+	_, err = runtimecontrol.RequireCurrentProcessTx(ctx, tx, runtimecontrol.ProcessIdentity{Namespace: binding.Namespace, PodUID: binding.PodUID, ID: binding.RuntimeProcessID})
+	return err
+}
+
 func validateRuntimeFinalizationBindingTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -2137,8 +2203,8 @@ func validateRuntimeFinalizationBindingTx(
 		}
 		return err
 	}
-	attemptedComplete := result.AttemptedBindingID != "" && result.AttemptedBindingGeneration > 0 && result.AttemptedTargetPodUID != ""
-	attemptedEmpty := result.AttemptedBindingID == "" && result.AttemptedBindingGeneration == 0 && result.AttemptedTargetPodUID == ""
+	attemptedComplete := result.AttemptedBindingID != "" && result.AttemptedBindingGeneration > 0 && result.AttemptedTargetPodUID != "" && result.AttemptedRuntimeProcessID != ""
+	attemptedEmpty := result.AttemptedBindingID == "" && result.AttemptedBindingGeneration == 0 && result.AttemptedTargetPodUID == "" && result.AttemptedRuntimeProcessID == ""
 	switch status {
 	case "queued":
 		if !attemptedEmpty || bindingID.Valid || bindingGeneration.Valid || targetPodUID.Valid {
@@ -2162,6 +2228,11 @@ func validateRuntimeFinalizationBindingTx(
 			!bindingGeneration.Valid || bindingGeneration.Int64 != result.AttemptedBindingGeneration ||
 			!targetPodUID.Valid || targetPodUID.String != result.AttemptedTargetPodUID) {
 			return runtimecontrol.InvalidRuntimeFinalizationIdentity("committed runtime Inbox binding conflicts with delivery attempt")
+		}
+	}
+	if attemptedComplete {
+		if err := lockRuntimeAttemptProcessTx(ctx, tx, job, RuntimeAttemptedBinding{BindingID: result.AttemptedBindingID, Generation: result.AttemptedBindingGeneration, TargetPodUID: result.AttemptedTargetPodUID, RuntimeProcessID: result.AttemptedRuntimeProcessID}); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -2778,8 +2849,8 @@ func runtimeCommandPayloadForJobTx(ctx context.Context, tx *dbconnect.Tx, job Ru
 }
 
 func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputID, contentJSON string, binding runtimecontrol.Binding, port int) (RuntimeCommandPlan, error) {
-	target := RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port}
-	attempt := RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID}
+	target := RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID, PodIP: binding.PodIP, Port: port}
+	attempt := RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID}
 	plan := RuntimeCommandPlan{Target: target, AttemptedBinding: attempt}
 	thread := func() (string, string, string, int64, string) {
 		return job.WorkspaceID, job.SessionID, sessionThreadID, binding.BindingGeneration, binding.PodUID
@@ -2791,7 +2862,7 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 		if err != nil {
 			return RuntimeCommandPlan{}, err
 		}
-		request := &agentruntimev1.ApplyRuntimeConfigRequest{WorkspaceId: workspaceID, SessionId: sessionID, BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID}
+		request := &agentruntimev1.ApplyRuntimeConfigRequest{WorkspaceId: workspaceID, SessionId: sessionID, BindingId: binding.BindingID, BindingGeneration: generation, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: podUID}
 		if job.MCPServerName != "" {
 			request.Config = &agentruntimev1.ApplyRuntimeConfigRequest_McpManifest{McpManifest: &agentruntimev1.RuntimeMcpManifestConfig{McpServerName: job.MCPServerName, Generation: configGeneration, ContentJson: contentJSON}}
 		} else {
@@ -2805,7 +2876,7 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 	}
 	switch job.InputKind {
 	case "messages", "rejection":
-		request := &agentruntimev1.AcceptInputRequest{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID, BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID, RuntimeInputId: runtimeInputID, InputOrder: job.SequenceTo}
+		request := &agentruntimev1.AcceptInputRequest{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID, BindingId: binding.BindingID, BindingGeneration: generation, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: podUID, RuntimeInputId: runtimeInputID, InputOrder: job.SequenceTo}
 		if job.InputKind == "messages" {
 			request.Content = &agentruntimev1.AcceptInputRequest_MessagesJson{MessagesJson: contentJSON}
 		} else {
@@ -2829,7 +2900,7 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 		}
 		plan.Interrupt = &agentruntimev1.InterruptRequest{
 			WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID,
-			BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID,
+			BindingId: binding.BindingID, BindingGeneration: generation, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: podUID,
 			RuntimeInputId: runtimeInputID, Origin: origin,
 			InterruptLeaseRef: &agentruntimev1.InterruptLeaseRef{
 				JobId: job.JobID, LeaseToken: job.LeaseToken,
@@ -2849,7 +2920,7 @@ func runtimeCommandPlanForPayload(job RuntimeJob, sessionThreadID, runtimeInputI
 		if content.Decision == "deny" {
 			decision = agentruntimev1.ToolConfirmationDecision_TOOL_CONFIRMATION_DECISION_DENY
 		}
-		request := &agentruntimev1.ResolveToolConfirmationRequest{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID, BindingId: binding.BindingID, BindingGeneration: generation, TargetPodUid: podUID, RuntimeInputId: runtimeInputID, ToolUseEventId: content.ToolUseEventID, Decision: decision}
+		request := &agentruntimev1.ResolveToolConfirmationRequest{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID, BindingId: binding.BindingID, BindingGeneration: generation, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: podUID, RuntimeInputId: runtimeInputID, ToolUseEventId: content.ToolUseEventID, Decision: decision}
 		if content.DenyMessage != nil {
 			request.DenyMessage = content.DenyMessage
 		}
@@ -2875,7 +2946,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeRecoveryCommandTx(ctx con
 }
 
 func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (active bool, terminal bool, resultErr error) {
-	if job.RecoverySourceEventID == "" || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
+	if (job.RecoverySourceEventID == "") == (job.RecoveryHandoffID == "") || job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" {
 		return false, false, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime recovery identity is incomplete", Retryable: false}
 	}
 	if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
@@ -2901,26 +2972,28 @@ func validateRuntimeRecoveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, j
 	if !live {
 		return false, false, nil
 	}
-	var sourceThreadID, sourceType string
-	if err := tx.QueryRow(ctx,
-		`SELECT session_thread_id, type FROM session_events
-		  WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3 FOR UPDATE`,
-		job.WorkspaceID, job.SessionID, job.RecoverySourceEventID,
-	).Scan(&sourceThreadID, &sourceType); dbconnect.IsNoRows(err) {
-		return false, true, nil
-	} else if err != nil {
+	payload := queue.RuntimeRecoveryPayload{SessionID: job.SessionID, SessionThreadID: job.SessionThreadID, SourceEventID: job.RecoverySourceEventID, HandoffID: job.RecoveryHandoffID}
+	if job.Kind != queue.KindRuntimeRecovery || job.PartitionKey != queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID) || job.DedupeKey != runtimecontrol.RecoveryDedupeKey(job.WorkspaceID, payload) {
+		return false, false, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime recovery keys are invalid", Retryable: false}
+	}
+	found, err := runtimecontrol.VerifyRecoverySourceTx(ctx, tx, job.WorkspaceID, job.JobID, payload)
+	if err != nil {
 		return false, false, err
 	}
-	if sourceThreadID != job.SessionThreadID ||
-		(sourceType != "agent.tool_use" && sourceType != "agent.mcp_tool_use" &&
-			sourceType != "session.status_rescheduled" && sourceType != "session.thread_status_rescheduled" &&
-			sourceType != "span.model_request_end") {
-		return false, false, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime recovery source is invalid", Retryable: false}
+	if !found {
+		return false, true, nil
 	}
+
 	return true, false, nil
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
+	started := time.Now()
+	plan, err := s.activateRuntimeRecovery(ctx, job, 0)
+	s.logRuntimePlacement(job, plan, err, started)
+	return plan, err
+}
+func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Context, job RuntimeJob, reentries int) (RuntimeCommandPlan, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_reconcile_unavailable", Message: "runtime delivery store is unavailable", Retryable: true}
 	}
@@ -2965,12 +3038,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Con
 			return runtimecontrol.PreparationError{Kind: "runtime_binding_unavailable", Message: "runtime residency is unavailable", Retryable: true}
 		}
 		plan = RuntimeCommandPlan{
-			Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, Port: port},
-			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
+			Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID, PodIP: binding.PodIP, Port: port},
+			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
 			RecoverThread: &agentruntimev1.RecoverThreadRequest{
 				WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
-				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: binding.PodUID,
 				SourceEventId: job.RecoverySourceEventID,
+				HandoffId:     job.RecoveryHandoffID,
 				RecoveryLeaseRef: &agentruntimev1.RecoveryLeaseRef{
 					JobId: job.JobID, LeaseToken: job.LeaseToken,
 					PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey,
@@ -2979,6 +3053,44 @@ func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Con
 		}
 		return nil
 	})
+	if err != nil {
+		var confirmation runtimePodConfirmationRequired
+		if errors.As(err, &confirmation) {
+			resolver, ok := s.TargetResolver.(KubernetesRuntimeTargetResolver)
+			if !ok {
+				return RuntimeCommandPlan{}, err
+			}
+			observation, confirmErr := resolver.confirmRuntimePod(ctx, confirmation.binding)
+			if confirmErr != nil {
+				return RuntimeCommandPlan{}, confirmErr
+			}
+			return s.activateRuntimeRecovery(context.WithValue(ctx, runtimePodObservationKey{}, observation), job, reentries)
+		}
+		var sampleRequired runtimePlacementRequiredError
+		if errors.As(err, &sampleRequired) {
+			resolver, ok := s.TargetResolver.(KubernetesRuntimeTargetResolver)
+			if !ok {
+				return RuntimeCommandPlan{}, err
+			}
+			choice, sampleErr := resolver.sampleRuntimePlacement(ctx, s.Client, job)
+			if sampleErr != nil {
+				return RuntimeCommandPlan{placement: &choice}, sampleErr
+			}
+			plan, prepareErr := s.activateRuntimeRecovery(context.WithValue(ctx, runtimePlacementContextKey{}, choice), job, reentries)
+			plan.placement = &choice
+			return plan, prepareErr
+		}
+	}
+	var lost runtimeBindingLostError
+	if errors.As(err, &lost) {
+		if reentries >= maxRuntimePreparationReentries {
+			return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_reconcile_invariant", Message: "Runtime recovery failed to converge after loss repair", Retryable: false}
+		}
+		if repairErr := s.repairLostRuntimeBinding(ctx, job.WorkspaceID, job.SessionID, lost.binding, now); repairErr != nil {
+			return RuntimeCommandPlan{}, repairErr
+		}
+		return s.activateRuntimeRecovery(ctx, job, reentries+1)
+	}
 	return plan, err
 }
 
@@ -3386,10 +3498,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 			PodIP:     binding.PodIP,
 			Port:      port,
 		},
-		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
 		AcceptAgentMail: &agentruntimev1.AcceptAgentMailRequest{
 			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
-			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: binding.PodUID,
 			RuntimeInputId: job.RuntimeInputID, DeliveryId: envelope.DeliveryID, Content: envelope.Content,
 		},
 	}, nil
@@ -3473,10 +3585,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 				PodIP:     binding.PodIP,
 				Port:      port,
 			},
-			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID},
+			AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
 			AcceptTask: &agentruntimev1.AcceptTaskNotificationRequest{
 				WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
-				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, TargetPodUid: binding.PodUID,
+				BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: binding.PodUID,
 				RuntimeInputId: job.RuntimeInputID, InputOrder: job.SequenceTo, NotificationJson: payloadJSON,
 			},
 		}, nil
@@ -3569,6 +3681,7 @@ func runtimeScopeForDeliveryJob(job RuntimeJob, binding runtimecontrol.Binding) 
 			BindingId:         binding.BindingID,
 			BindingGeneration: binding.BindingGeneration,
 			TargetPodUid:      binding.PodUID,
+			RuntimeProcessId:  binding.RuntimeProcessID,
 		},
 	}
 }
@@ -3582,13 +3695,55 @@ func runtimeScopeFromAttempt(job RuntimeJob, attempt RuntimeAttemptedBinding) *b
 			BindingId:         attempt.BindingID,
 			BindingGeneration: attempt.Generation,
 			TargetPodUid:      attempt.TargetPodUID,
+			RuntimeProcessId:  attempt.RuntimeProcessID,
 		},
 	}
 }
 
+func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(job RuntimeJob, plan RuntimeCommandPlan, err error, started time.Time) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	if plan.placement == nil && plan.Target.PodUID == "" {
+		return
+	}
+	outcome := "reused"
+	if err != nil {
+		outcome = "failed"
+	} else if plan.placement != nil {
+		outcome = "committed"
+		if plan.Target.PodUID != plan.placement.Candidate.PodUID || plan.Target.RuntimeProcessID != plan.placement.ProcessID {
+			outcome = "concurrent_binding_reused"
+		}
+	}
+	attrs := []any{slog.String("component", ServiceNameJobRunner), slog.String("event.kind", "runtime_placement"), slog.String("workspace.id", job.WorkspaceID), slog.String("session.id", job.SessionID), slog.String("job.id", job.JobID), slog.String("outcome", outcome), slog.String("kubernetes.uid", plan.Target.PodUID), slog.String("runtime.process.id", plan.Target.RuntimeProcessID), slog.Int64("duration.ms", time.Since(started).Milliseconds())}
+	if plan.placement != nil {
+		choice := plan.placement
+		attrs = append(attrs, slog.Int("runtime.placement.rounds", choice.Rounds), slog.Int("runtime.placement.probes", choice.Probes), slog.String("runtime.placement.sampled_pod_uid", choice.Candidate.PodUID))
+		if choice.Report.MemoryLimit > 0 {
+			attrs = append(attrs, slog.Float64("runtime.load.active_sessions", choice.Report.ActiveSessions), slog.Float64("runtime.load.session_capacity", choice.Report.Capacity), slog.Float64("runtime.load.memory_ratio", choice.Report.MemoryUsage/choice.Report.MemoryLimit))
+		}
+	}
+	if err != nil {
+		kind := "runtime_placement_unavailable"
+		var preparation runtimecontrol.PreparationError
+		if errors.As(err, &preparation) {
+			kind = preparation.Kind
+		}
+		attrs = append(attrs, slog.String("error.class", "runtime_placement"), slog.String("error.code", kind), slog.Bool("retryable", true))
+	}
+	s.Logger.Info("runtime_placement", attrs...)
+}
+
 type KubernetesRuntimeTargetResolver struct {
-	Snapshot func() enginekubernetes.BindingVisibilitySnapshot
-	Clock    func() time.Time
+	Snapshot         func() enginekubernetes.BindingVisibilitySnapshot
+	Clock            func() time.Time
+	PlacementMetrics *RuntimePlacementMetrics
+	PlacementPolicy  RuntimePlacementPolicy
+	LoadClient       *http.Client
+	RandomIndex      func(int) int
+	GetPod           func(context.Context, string, string) (*enginekubernetes.PodObservation, error)
+	ProcessPolicy    runtimecontrol.ProcessPolicy
 }
 
 func (r KubernetesRuntimeTargetResolver) BindingVisibilitySnapshot() enginekubernetes.BindingVisibilitySnapshot {
@@ -3598,55 +3753,13 @@ func (r KubernetesRuntimeTargetResolver) BindingVisibilitySnapshot() enginekuber
 	return r.Snapshot()
 }
 
-type runtimeBindingVisibilityDisposition string
-
-const (
-	runtimeBindingVisibilityReusable     runtimeBindingVisibilityDisposition = "reusable"
-	runtimeBindingVisibilityProvenGone   runtimeBindingVisibilityDisposition = "proven_gone"
-	runtimeBindingVisibilityAvailability runtimeBindingVisibilityDisposition = "availability"
-)
-
-func classifyRuntimeBindingVisibility(state enginekubernetes.BindingVisibilityState) runtimeBindingVisibilityDisposition {
-	switch state {
-	case enginekubernetes.BindingVisibilityReusable:
-		return runtimeBindingVisibilityReusable
-	case enginekubernetes.BindingVisibilityAbsent,
-		enginekubernetes.BindingVisibilityDeleted,
-		enginekubernetes.BindingVisibilityUIDChanged,
-		enginekubernetes.BindingVisibilityIPChanged:
-		return runtimeBindingVisibilityProvenGone
-	case enginekubernetes.BindingVisibilitySnapshotNotReady,
-		enginekubernetes.BindingVisibilityNotReady,
-		enginekubernetes.BindingVisibilityNotServing,
-		enginekubernetes.BindingVisibilityTerminating:
-		return runtimeBindingVisibilityAvailability
-	default:
-		return runtimeBindingVisibilityAvailability
-	}
-}
-
 type runtimeBindingLostError struct {
 	binding runtimecontrol.Binding
 }
 
 func (e runtimeBindingLostError) Error() string { return "runtime binding target is gone" }
 
-// ResolveRuntimeTarget maps each candidate pod's Kubernetes binding visibility
-// to one action, and the partition is load-bearing:
-//
-//	visibility                                    action
-//	reusable                                      reuse the binding row; no new
-//	                                               binding_generation
-//	absent | deleted | uid_changed | ip_changed   PROVEN GONE — choose a fresh
-//	                                               candidate and write the next
-//	                                               binding_generation
-//	snapshot_not_ready | not_ready |              AVAILABILITY only — retry without
-//	  not_serving | terminating                    mutating the binding row
-//
-// The proven-gone set {absent, deleted, uid_changed, ip_changed} is the ONLY
-// proof a pod is gone. An availability state is never such proof: while a target
-// sits in one, cleanup and repair must keep retrying and must NEVER finalize a
-// binding, request sandbox release, or write terminal settlements.
+// ResolveRuntimeTarget shares the process-aware classifier with loss census and cleanup.
 func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (runtimecontrol.Binding, error) {
 	if r.Snapshot == nil {
 		return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "runtime visibility snapshot is unavailable", Retryable: true}
@@ -3660,26 +3773,34 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 		return runtimecontrol.Binding{}, err
 	}
 	if found {
-		visibility := snapshot.VisibilityFor(enginekubernetes.BoundRuntimePod{
-			Namespace: current.Namespace,
-			PodName:   current.PodName,
-			PodUID:    current.PodUID,
-			PodIP:     current.PodIP,
-		})
-		switch classifyRuntimeBindingVisibility(visibility) {
-		case runtimeBindingVisibilityReusable:
+		decision, err := r.runtimeProcessDecisionTx(ctx, tx, current)
+		if err != nil {
+			return runtimecontrol.Binding{}, err
+		}
+		switch decision {
+		case runtimeProcessReuse:
 			return current, nil
-		case runtimeBindingVisibilityProvenGone:
+		case runtimeProcessLoss:
 			return runtimecontrol.Binding{}, runtimeBindingLostError{binding: current}
-		case runtimeBindingVisibilityAvailability:
-			return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "runtime binding is not currently available: " + string(visibility), Retryable: true}
 		default:
-			return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "runtime binding visibility is not reusable", Retryable: true}
+			return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "Runtime process does not admit delivery", Retryable: true}
 		}
 	}
-	candidate, ok := chooseRuntimeBindingCandidate(snapshot.Candidates)
-	if !ok {
-		return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_candidate_unavailable", Message: "runtime binding replacement candidate is unavailable", Retryable: true}
+	choice, ok := ctx.Value(runtimePlacementContextKey{}).(runtimePlacementChoice)
+	if !ok || choice.WorkspaceID != job.WorkspaceID || choice.SessionID != job.SessionID {
+		return runtimecontrol.Binding{}, runtimePlacementRequiredError{}
+	}
+	candidate := choice.Candidate
+	if snapshot.VisibilityFor(enginekubernetes.BoundRuntimePod(candidate)) != enginekubernetes.BindingVisibilityReusable {
+		return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_candidate_unavailable", Message: "sampled Runtime candidate changed before commit", Retryable: true}
+	}
+	processID := choice.ProcessID
+	process, err := runtimecontrol.RequireCurrentProcessTx(ctx, tx, runtimecontrol.ProcessIdentity{Namespace: candidate.Namespace, PodUID: candidate.PodUID, ID: processID})
+	if err != nil {
+		return runtimecontrol.Binding{}, err
+	}
+	if process.Phase != runtimecontrol.ProcessAccepting {
+		return runtimecontrol.Binding{}, runtimecontrol.PreparationError{Kind: "runtime_binding_candidate_unavailable", Message: "sampled Runtime candidate is draining", Retryable: true}
 	}
 	now := storage.Now()
 	if r.Clock != nil {
@@ -3696,12 +3817,13 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 		PodName:           candidate.PodName,
 		PodUID:            candidate.PodUID,
 		PodIP:             candidate.PodIP,
+		RuntimeProcessID:  processID,
 	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO session_runtime_bindings (
 			workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace,
-			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 		ON CONFLICT (workspace_id, session_id) DO UPDATE SET
 			binding_id = EXCLUDED.binding_id,
 			binding_generation = EXCLUDED.binding_generation,
@@ -3709,6 +3831,7 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 			agent_runtime_pod_name = EXCLUDED.agent_runtime_pod_name,
 			agent_runtime_pod_uid = EXCLUDED.agent_runtime_pod_uid,
 			agent_runtime_pod_ip = EXCLUDED.agent_runtime_pod_ip,
+ runtime_process_id=EXCLUDED.runtime_process_id,
 			bound_at = EXCLUDED.bound_at,
 			updated_at = EXCLUDED.updated_at`,
 		job.WorkspaceID,
@@ -3719,26 +3842,13 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 		binding.PodName,
 		binding.PodUID,
 		binding.PodIP,
+		binding.RuntimeProcessID,
 		now,
 	)
 	if err != nil {
 		return runtimecontrol.Binding{}, err
 	}
 	return binding, nil
-}
-
-func chooseRuntimeBindingCandidate(candidates []enginekubernetes.BindingCandidate) (enginekubernetes.BindingCandidate, bool) {
-	if len(candidates) == 0 {
-		return enginekubernetes.BindingCandidate{}, false
-	}
-	sorted := append([]enginekubernetes.BindingCandidate(nil), candidates...)
-	sort.Slice(sorted, func(i, j int) bool {
-		left := sorted[i]
-		right := sorted[j]
-		return strings.Join([]string{left.Namespace, left.PodName, left.PodUID, left.PodIP}, "\x00") <
-			strings.Join([]string{right.Namespace, right.PodName, right.PodUID, right.PodIP}, "\x00")
-	})
-	return sorted[0], true
 }
 
 func markRuntimeInputEventsProcessedByIDTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, eventIDs []string, now time.Time) error {
@@ -3942,13 +4052,107 @@ func claimRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job Runt
 	return nil
 }
 
+type runtimeCommandChannel struct {
+	connection *grpc.ClientConn
+	active     int
+	retired    bool
+}
+
 type RuntimePodCommandClient struct {
 	TokenSource internalgrpcauth.TokenSource
+	Policy      RuntimeCommandPolicy
 	DialOptions []grpc.DialOption
+	mutex       sync.Mutex
+	channels    map[string]*runtimeCommandChannel
+	retired     map[*runtimeCommandChannel]bool
+	closed      bool
 }
 
 func NewRuntimePodCommandClient(tokenSource internalgrpcauth.TokenSource, dialOptions ...grpc.DialOption) *RuntimePodCommandClient {
 	return &RuntimePodCommandClient{TokenSource: tokenSource, DialOptions: append([]grpc.DialOption(nil), dialOptions...)}
+}
+
+// Close is called after all command users join; a closed owner cannot create
+// another connection. Channels retain native TLS generation reload behavior.
+func (c *RuntimePodCommandClient) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	var failures []error
+	for _, channel := range c.channels {
+		failures = append(failures, channel.connection.Close())
+	}
+	for channel := range c.retired {
+		failures = append(failures, channel.connection.Close())
+	}
+	c.retired = nil
+	c.channels = nil
+	return errors.Join(failures...)
+}
+
+// RetireChannels withdraws the old trust generation from future admission.
+// Admitted RPCs retain their own deadlines and are never replayed or interrupted
+// solely because trust changed. Their final release closes the retired channel.
+func (c *RuntimePodCommandClient) RetireChannels() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for address, channel := range c.channels {
+		delete(c.channels, address)
+		channel.retired = true
+		if channel.active == 0 {
+			_ = channel.connection.Close()
+		} else {
+			if c.retired == nil {
+				c.retired = make(map[*runtimeCommandChannel]bool)
+			}
+			c.retired[channel] = true
+		}
+	}
+}
+func (c *RuntimePodCommandClient) channel(target RuntimePodTarget) (*runtimeCommandChannel, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.closed {
+		return nil, errors.New("runtime command client is closed")
+	}
+	address := "passthrough:///" + net.JoinHostPort(target.PodIP, strconv.Itoa(target.Port))
+	if channel := c.channels[address]; channel != nil {
+		channel.active++
+		return channel, nil
+	}
+	options := append([]grpc.DialOption{}, internalgrpc.RuntimeCommandRPCDialOptions()...)
+	options = append(options, grpc.WithDisableRetry())
+	if len(c.DialOptions) == 0 {
+		options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		options = append(options, c.DialOptions...)
+	}
+	options = append(options, grpc.WithPerRPCCredentials(internalgrpcauth.NewServiceAccountTokenCredentials(c.TokenSource)))
+	conn, err := grpc.NewClient(address, options...)
+	if err != nil {
+		return nil, err
+	}
+	channel := &runtimeCommandChannel{connection: conn, active: 1}
+	if c.channels == nil {
+		c.channels = make(map[string]*runtimeCommandChannel)
+	}
+	c.channels[address] = channel
+	return channel, nil
+}
+func (c *RuntimePodCommandClient) releaseChannel(channel *runtimeCommandChannel) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	channel.active--
+	if channel.active == 0 && channel.retired {
+		_ = channel.connection.Close()
+		delete(c.retired, channel)
+	}
 }
 
 func runtimePodCall[Request proto.Message, Response any](ctx context.Context, c *RuntimePodCommandClient, target RuntimePodTarget, request Request, invoke func(agentruntimev1.AgentRuntimePodServiceClient, context.Context, Request) (Response, error)) (Response, error) {
@@ -3965,19 +4169,19 @@ func runtimePodCall[Request proto.Message, Response any](ctx context.Context, c 
 	if _, err := netip.ParseAddr(target.PodIP); err != nil {
 		return zero, errors.New("runtime pod target ip is invalid")
 	}
-	options := append([]grpc.DialOption{}, internalgrpc.RuntimeCommandRPCDialOptions()...)
-	if len(c.DialOptions) == 0 {
-		options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	} else {
-		options = append(options, c.DialOptions...)
-	}
-	options = append(options, grpc.WithPerRPCCredentials(internalgrpcauth.NewServiceAccountTokenCredentials(c.TokenSource)))
-	conn, err := grpc.NewClient("passthrough:///"+net.JoinHostPort(target.PodIP, strconv.Itoa(target.Port)), options...)
+	method := strings.TrimSuffix(string(request.ProtoReflect().Descriptor().Name()), "Request")
+	timeout, err := c.Policy.timeout(method)
 	if err != nil {
 		return zero, err
 	}
-	defer func() { _ = conn.Close() }()
-	client := agentruntimev1.NewAgentRuntimePodServiceClient(conn)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := c.channel(target)
+	if err != nil {
+		return zero, err
+	}
+	defer c.releaseChannel(conn)
+	client := agentruntimev1.NewAgentRuntimePodServiceClient(conn.connection)
 	return invoke(client, ctx, request)
 }
 

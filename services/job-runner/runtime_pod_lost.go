@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strings"
+	"errors"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -365,238 +365,15 @@ func runtimeToolResultPartFromProjection(projectionJSON string) (map[string]any,
 	}, nil
 }
 
-type runtimePodLostAcceptedInput struct {
-	SessionThreadID string
-	RuntimeInputID  string
-	InputKind       string
-	InboxStatus     string
-	EventIDsJSON    string
-	SequenceFrom    sql.NullInt64
-	SequenceTo      sql.NullInt64
-	RejectionReason sql.NullString
-	QueueJobID      sql.NullString
-	QueueStatus     sql.NullString
+// The common custody owner is shared by cooperative release and proven loss.
+type runtimePodLostAcceptedInput = runtimecontrol.AcceptedRuntimeInput
+
+func handOffLostRuntimeAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding runtimecontrol.Binding, now time.Time) (int, error) {
+	return runtimecontrol.HandBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
 }
 
-// handOffLostRuntimeAcceptedInputsTx is the sole transition from proven-lost
-// Runtime custody back to Queue custody. It preserves the original job and its
-// attempt lineage. A delivering interrupt receives its final attempt back only
-// after this proven-loss fence; only already-acknowledged delivery receives a
-// new job, in durable Inbox creation order.
-func handOffLostRuntimeAcceptedInputsTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	binding runtimecontrol.Binding,
-	now time.Time,
-) (int, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT inbox.session_thread_id,
-		        inbox.runtime_input_id,
-		        inbox.input_kind,
-		        inbox.status,
-		        inbox.event_ids_json,
-		        inbox.sequence_from,
-		        inbox.sequence_to,
-		        inbox.rejection_reason_code,
-		        active.id,
-		        active.status
-		   FROM session_runtime_inbox inbox
-		   LEFT JOIN LATERAL (
-		       SELECT job.id, job.status
-		         FROM queue_jobs job
-		        WHERE job.workspace_id = inbox.workspace_id
-		          AND job.kind = 'runtime_input'
-		          AND job.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
-		          AND job.status IN ('pending', 'leased')
-		        ORDER BY job.created_at, job.id
-		        LIMIT 1
-		        FOR UPDATE OF job
-		   ) active ON true
-		  WHERE inbox.workspace_id = $1
-		    AND inbox.session_id = $2
-		    AND inbox.status IN ('delivering', 'accepted')
-		    AND inbox.input_kind <> 'approval_review'
-		    AND inbox.binding_id = $3
-		    AND inbox.binding_generation = $4
-		    AND inbox.target_pod_uid = $5
-		  ORDER BY inbox.created_at, inbox.runtime_input_id
-		  FOR UPDATE OF inbox`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-		binding.BindingGeneration,
-		binding.PodUID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = rows.Close() }()
-	inputs := make([]runtimePodLostAcceptedInput, 0)
-	for rows.Next() {
-		var input runtimePodLostAcceptedInput
-		if err := rows.Scan(
-			&input.SessionThreadID,
-			&input.RuntimeInputID,
-			&input.InputKind,
-			&input.InboxStatus,
-			&input.EventIDsJSON,
-			&input.SequenceFrom,
-			&input.SequenceTo,
-			&input.RejectionReason,
-			&input.QueueJobID,
-			&input.QueueStatus,
-		); err != nil {
-			return 0, err
-		}
-		inputs = append(inputs, input)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-
-	handedOff := 0
-	for _, input := range inputs {
-		if input.InputKind == "" {
-			return 0, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "runtime inbox input kind is missing", Retryable: false}
-		}
-		if input.InboxStatus == "delivering" {
-			if !input.QueueJobID.Valid {
-				return 0, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "delivering runtime input has no active queue custody", Retryable: false}
-			}
-			if input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" {
-				continue
-			}
-		}
-		if input.InboxStatus != "accepted" && input.InboxStatus != "delivering" {
-			continue
-		}
-		if input.QueueJobID.Valid {
-			if input.InboxStatus == "delivering" {
-				if _, err := tx.Exec(ctx,
-					`UPDATE queue_jobs
-					    SET status = 'pending', available_at = $3,
-					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
-					        updated_at = $3
-					  WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'leased')`,
-					workspaceID,
-					input.QueueJobID.String,
-					now,
-				); err != nil {
-					return 0, err
-				}
-			} else if input.QueueStatus.String == queue.StatusLeased {
-				if _, err := tx.Exec(ctx,
-					`UPDATE queue_jobs
-					    SET status = 'pending', available_at = $3,
-					        lease_token = NULL, leased_by = NULL, leased_at = NULL, leased_until = NULL,
-					        updated_at = $3
-					  WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
-					workspaceID,
-					input.QueueJobID.String,
-					now,
-				); err != nil {
-					return 0, err
-				}
-			}
-		} else {
-			request, err := lostRuntimeInputEnqueueRequest(workspaceID, sessionID, input, now)
-			if err != nil {
-				return 0, err
-			}
-			if _, err := queue.EnqueueTx(ctx, tx, request); err != nil {
-				return 0, err
-			}
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_runtime_inbox
-			    SET status = 'queued', binding_id = NULL, binding_generation = NULL,
-			        target_pod_uid = NULL, updated_at = $3
-			  WHERE workspace_id = $1 AND runtime_input_id = $2
-			    AND status IN ('delivering', 'accepted')
-			    AND binding_id = $4 AND binding_generation = $5 AND target_pod_uid = $6`,
-			workspaceID,
-			input.RuntimeInputID,
-			now,
-			binding.BindingID,
-			binding.BindingGeneration,
-			binding.PodUID,
-		); err != nil {
-			return 0, err
-		}
-		handedOff++
-	}
-	return handedOff, nil
-}
-
-func lostRuntimeInputEnqueueRequest(
-	workspaceID string,
-	sessionID string,
-	input runtimePodLostAcceptedInput,
-	now time.Time,
-) (queue.EnqueueRequest, error) {
-	ws := workspace.ID(workspaceID)
-	if input.InputKind == "task_notification" {
-		taskID := strings.TrimPrefix(input.RuntimeInputID, "task_notification:")
-		if taskID == "" || taskID == input.RuntimeInputID {
-			return queue.EnqueueRequest{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "task notification runtime input identity is invalid", Retryable: false}
-		}
-		return queue.NewTaskNotificationRuntimeInputEnqueueRequest(ws, sessionID, input.SessionThreadID, taskID, now)
-	}
-	if input.InputKind == "agent_mail" {
-		deliveryID := strings.TrimPrefix(input.RuntimeInputID, "agent_mail:")
-		if deliveryID == "" || deliveryID == input.RuntimeInputID {
-			return queue.EnqueueRequest{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "agent mail runtime input identity is invalid", Retryable: false}
-		}
-		request, _, err := runtimecontrol.AgentMailWakeEnqueueRequest(workspaceID, sessionID, input.SessionThreadID, deliveryID, now)
-		return request, err
-	}
-	payloadJSON, err := runtimeInputQueuePayloadJSON(workspaceID, sessionID, input)
-	if err != nil {
-		return queue.EnqueueRequest{}, err
-	}
-	return queue.EnqueueRequest{
-		WorkspaceID:    ws,
-		Kind:           queue.KindRuntimeInput,
-		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
-		DedupeKey:      queue.FormatRuntimeInputDedupeKey(ws, sessionID, input.RuntimeInputID),
-		PayloadVersion: 1,
-		PayloadJSON:    payloadJSON,
-		Priority:       runtimeInputPriority(input.InputKind),
-		Now:            now,
-	}, nil
-}
-
-func runtimeInputQueuePayloadJSON(
-	workspaceID string,
-	sessionID string,
-	input runtimePodLostAcceptedInput,
-) ([]byte, error) {
-	if !input.SequenceFrom.Valid || !input.SequenceTo.Valid || input.SequenceFrom.Int64 <= 0 || input.SequenceTo.Int64 < input.SequenceFrom.Int64 {
-		return nil, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "runtime input has an invalid sequence range", Retryable: false}
-	}
-	var eventIDs []string
-	if err := json.Unmarshal([]byte(input.EventIDsJSON), &eventIDs); err != nil || len(eventIDs) == 0 {
-		return nil, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "runtime input has invalid event identities", Retryable: false}
-	}
-	return json.Marshal(runtimecontrol.InputQueuePayload{
-		WorkspaceID:     workspaceID,
-		SessionID:       sessionID,
-		SessionThreadID: input.SessionThreadID,
-		RuntimeInputID:  input.RuntimeInputID,
-		EventIDs:        eventIDs,
-		SequenceFrom:    input.SequenceFrom.Int64,
-		SequenceTo:      input.SequenceTo.Int64,
-		InputKind:       input.InputKind,
-	})
-}
-
-func runtimeInputPriority(inputKind string) int {
-	if inputKind == "interrupt_control" {
-		return 100
-	}
-	return 0
+func lostRuntimeInputEnqueueRequest(workspaceID, sessionID string, input runtimePodLostAcceptedInput, now time.Time) (queue.EnqueueRequest, error) {
+	return runtimecontrol.RuntimeInputEnqueueRequest(workspaceID, sessionID, input, now)
 }
 
 func runtimePodLostAffectedThreadsTx(
@@ -1315,6 +1092,18 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 				return nil
 			}
 		}
+		if resolver, ok := s.TargetResolver.(KubernetesRuntimeTargetResolver); ok {
+			decision, err := resolver.runtimeProcessDecisionTx(ctx, tx, binding)
+			if err != nil {
+				return err
+			}
+			if decision != runtimeProcessLoss {
+				result = runtimePodLossMutationResult{status: runtimePodLossMutationStale, staleReason: "process_not_lost"}
+				return nil
+			}
+		} else {
+			return runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "process-aware Runtime loss classification is unavailable", Retryable: true}
+		}
 		_, count, err := repairLostRuntimeBindingDetailedTx(ctx, tx, workspaceID, sessionID, binding, now)
 		if err != nil {
 			return err
@@ -1343,6 +1132,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 		return nil
 	})
 	if err != nil {
+		var confirmation runtimePodConfirmationRequired
+		if errors.As(err, &confirmation) {
+			resolver := s.TargetResolver.(KubernetesRuntimeTargetResolver)
+			observation, confirmErr := resolver.confirmRuntimePod(ctx, confirmation.binding)
+			if confirmErr != nil {
+				return runtimePodLossMutationResult{}, confirmErr
+			}
+			return s.mutateLostRuntimeBinding(context.WithValue(ctx, runtimePodObservationKey{}, observation), workspaceID, sessionID, binding, now, requireActive)
+		}
 		return runtimePodLossMutationResult{}, err
 	}
 	runtimecontrol.LogRuntimeInputCustodyTransition(s.Logger, ServiceNameJobRunner, &bridgev1.RuntimeScope{
@@ -1750,6 +1548,7 @@ func runtimePodLostRepairScope(workspaceID string, sessionID string, sessionThre
 			BindingId:         binding.BindingID,
 			BindingGeneration: binding.BindingGeneration,
 			TargetPodUid:      binding.PodUID,
+			RuntimeProcessId:  binding.RuntimeProcessID,
 		},
 	}
 }

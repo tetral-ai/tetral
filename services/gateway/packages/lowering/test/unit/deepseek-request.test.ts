@@ -291,6 +291,7 @@ function deepSeekRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequ
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "deepseek", modelId: "deepseek-v4-pro", variant: "" },
     system: [],

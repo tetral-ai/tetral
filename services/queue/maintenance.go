@@ -3,6 +3,7 @@ package tetralqueue
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -21,6 +22,34 @@ type MaintenanceConfig struct {
 }
 
 func RunStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig) {
+	runStalledLeaseMaintenance(ctx, store, cfg, nil)
+}
+
+// maintenanceAdmission closes cycle admission without cancelling a cycle that
+// already owns database work. The service later cancels that work at its drain
+// deadline and joins this loop before returning database ownership to command.
+type maintenanceAdmission struct {
+	mu       sync.Mutex
+	stopping bool
+	stop     chan struct{}
+}
+
+func (a *maintenanceAdmission) close() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.stopping {
+		a.stopping = true
+		close(a.stop)
+	}
+}
+
+func (a *maintenanceAdmission) admit() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.stopping
+}
+
+func runStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig, admission *maintenanceAdmission) {
 	if store == nil {
 		return
 	}
@@ -34,11 +63,20 @@ func RunStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var stop <-chan struct{}
+	if admission != nil {
+		stop = admission.stop
+	}
 	for {
 		select {
+		case <-stop:
+			return
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
+			if ctx.Err() != nil || (admission != nil && !admission.admit()) {
+				return
+			}
 			cfg.Limit = limit
 			runMaintenanceTick(ctx, store, cfg, now)
 		}

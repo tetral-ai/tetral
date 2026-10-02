@@ -37,6 +37,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly sourceToolUseEventId: string;
 	readonly readyPath?: string;
 	readonly resumeResultPath?: string;
@@ -203,6 +204,7 @@ try {
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 	});
 	const checkpoint = extractThreadTurnCheckpoint({
 		contextEntries: loaded.contextEntries,
@@ -229,6 +231,7 @@ try {
 		bindingGeneration: input.bindingGeneration,
 		runtimeBindingToken: loaded.runtimeBindingToken,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 		modelRequestId: "mreq_closed_resume_composition",
 		modelToolCallId: "call_closed_resume_composition",
 		modelOrder: 0,
@@ -248,6 +251,7 @@ try {
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 	});
 	const resumeResult = {
 			result,
@@ -281,6 +285,7 @@ try {
 			},
 		} satisfies RuntimeCleanupController;
 		const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 			ownPod: {
 				namespace: "tetral-agent-runtime",
 				name: "runtime-pod-closed-resume",
@@ -312,6 +317,7 @@ try {
 								bindingId: input.bindingId,
 								bindingGeneration: input.bindingGeneration,
 								targetPodUid: input.targetPodUid,
+								runtimeProcessId: input.runtimeProcessId,
 							})
 							.then((afterAccept) =>
 								writeFile(

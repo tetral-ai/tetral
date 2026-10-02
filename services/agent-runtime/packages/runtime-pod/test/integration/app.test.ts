@@ -1,3 +1,4 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { credentials, Metadata, status } from "@grpc/grpc-js";
 import {
@@ -142,6 +143,12 @@ function validConfig(): RuntimePodConfig {
     mcpConnectorGrpcAddress: "gateway.engine.svc:9091",
     webConnectorGrpcAddress: "gateway.engine.svc:9092",
     providerStreamTimeoutMs: 1_800_000,
+    bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+    transportProfile: "standard-routed",
+    routingProxyRequired: true,
+    maxLocalSessions: 256,
+    maxConcurrentTools: 8,
+    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
     platformModels: {
       approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
     },
@@ -159,6 +166,7 @@ function validCommand(runtimeInputId: string): AcceptInputRequest {
     bindingId: "bind_1",
     bindingGeneration: 42,
     targetPodUid: "uid-a",
+    runtimeProcessId: "process-test",
     runtimeInputId,
     inputOrder: 1,
     messagesJson: "{\"messages\":[]}",
@@ -172,6 +180,7 @@ function validCleanupCommand(cleanupOperationId: string): CleanupSessionRequest 
     bindingId: "bind_1",
     bindingGeneration: 42,
     targetPodUid: "uid-a",
+    runtimeProcessId: "process-test",
     cleanupOperationId,
     reason: CleanupSessionReason.CLEANUP_SESSION_REASON_EXPIRED,
   };

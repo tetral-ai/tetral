@@ -169,15 +169,22 @@ Message mutation history. The Reducer selects the stable next step from the
 checkpoint and separately owned read-only views. Only the exact fact transition
 that first hands external work to ThreadLoop can also emit a dispatch; duplicate
 fact replay and later ordinary input cannot reacquire it.
-Every run exit settles its scope exactly once, by exactly one writer with
-disjoint triggers (`FinishIdle`, terminal commit, pod-loss repair, or the
-cooperative cancellation closeout for internal child scopes on a healthy pod) —
-with two registered, record-bearing exceptions from the closeout-failure path:
-the unrepairable release and the in-place-restart shutdown release. Both release
-the scope to a durable custodian rather than settling at this exit, so the
-durable row may remain `running` with no live run until pod identity changes or
-an operator acts. These two residuals are the only cases where a run exit does
-not itself settle.
+A normal run exit settles its scope exactly once through its owning durable
+operation. Cooperative process replacement instead returns `checkpoint_yield`:
+the current provider step seals its Request End and accepted work remains under
+its original durable IDs. Yield does not fabricate idle, interrupt, completion,
+or a successor wake. Bridge atomically releases the exact binding and creates
+one recoverable handoff descriptor per resident Thread; the Queue and Runner
+then install the continuation under a new process and binding.
+
+A Session checkpoint covers every resident Thread, run, admitted tool,
+reviewer dependency, and control command. An admitted reviewer may complete
+only its captured parent step. Expiry cancels and joins both parent and reviewer,
+then commits failed closeout before release. Accepted Sandbox execution and
+approval waits can discard their local waiter while their durable owner remains
+live. Provider, MCP, and Web calls with unknown external outcomes cannot be
+transferred by retrying the tool. A rejected checkpoint retains custody for
+binding-loss recovery; it never reports successful handoff.
 
 ### Durable-ACK gates
 
@@ -465,7 +472,7 @@ Conformance tests: `core/test/unit/session-manager.test.ts`,
 ### Command boundary
 
 The deployed control caller is `tetral-system/job-runner`; Bridge and the tool
-connectors have no control authority. Every inbound method-specific request must select this exact pod UID, carry a
+connectors have no control authority. Every inbound method-specific request must select this exact Pod UID and boot-scoped Runtime process ID, carry a
 non-empty current binding id and a non-zero binding generation, and authenticate
 through TokenReview to the closed RPC set; a mismatch is a retryable rejection,
 never a processed command. The Runtime Pod does not accept or echo Pod
@@ -474,6 +481,51 @@ namespace, name, or IP as command payload. Anchors:
 (scope binding), `runtime-pod/src/auth.ts` (TokenReview). The pod queries no
 database, calls no sandbox provider, terminates no public HTTP, and holds no
 secret material.
+
+### Process registration and shutdown
+
+Each boot generates one stable process ID and registers it after its owned
+clients, Runtime Core, listeners, and routing proxy are ready. An authenticated
+Bridge registration returns a receipt and server-assigned order; an ACCEPTING
+report must commit before `/readyz` becomes ready. Reports repeat every two
+seconds with a one-second timeout. Ten seconds without a committed report
+withdraws admission and readiness. A newer boot in the same Pod supersedes the
+old boot; old-process commands, tokens, writes, and promotion are stale.
+
+`TETRAL_TRANSPORT_PROFILE=standard-routed` binds `0.0.0.0:19090`.
+`hardened` binds the application to `127.0.0.1:9090`, with the routing proxy's
+external TLS listener on 19443. `TETRAL_ROUTING_PROXY_REQUIRED=true` is mandatory.
+Startup checks the fixed local proxy readiness endpoint. Hardened startup also
+requires successful initial updates for both named direct-listener SDS resources
+through the fixed local Envoy admin endpoint; a listening socket alone is not
+sufficient. Runtime does not read the proxy's private key.
+
+Shutdown withdraws admission immediately and joins command ingress while each
+Session independently reaches its next current-step checkpoint. A committed
+DRAINING report gates binding release. Defaults allocate 60 seconds for current
+steps, 15 seconds for settlement and release, five seconds for local joins, and
+five seconds for proxy joins, within the 90-second Pod grace period. An idle
+Session releases immediately; one slow Session does not delay another Session's
+handoff. No successor provider request starts in the draining process. Owned
+unary calls cancel real handles and join callbacks before channels close.
+
+Lifecycle controls are `TETRAL_RUNTIME_REPORT_INTERVAL_MS`,
+`TETRAL_RUNTIME_PROCESS_FRESHNESS_MS`, `TETRAL_RUNTIME_DRAIN_TIMEOUT_MS`,
+`TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS`, `TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS`,
+and `TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS`. The register/report RPC controls are
+`TETRAL_RUNTIME_REGISTER_TIMEOUT_MS` and `TETRAL_RUNTIME_REPORT_TIMEOUT_MS`;
+report timeout must be shorter than interval, which must be shorter than
+freshness. Session capacity defaults to 256 and concurrent tools to eight.
+
+The exhaustive method policy in `runtime-pod/src/bridge-policy.ts` owns actual
+unary deadlines: reads 30 seconds, durable waits 35 seconds, ordinary writes
+three seconds, registration/release five seconds, and reports one second.
+Each fixed method accepts its `TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` override.
+Attachment reads consume the provider request's remaining absolute deadline.
+Parent cancellation and shutdown deadlines can shorten every budget. Named
+receipt recovery repeats only the unchanged operation; generic unknown-outcome
+retries and whole-turn drain are absent. The generated-method inventory and
+policy projection must remain exhaustive when methods change.
 
 ## Testing guide
 
@@ -536,5 +588,5 @@ one cleanup attempt. The app observes all started drain and listener shutdown
 operations. Programmatic callers retain the original run failure, or the first
 cleanup failure after a successful run. Executable and signal boundaries use
 fixed safe phase/class records and nonzero failure exits without exception text
-or stacks. Diagnostic faults add no stderr-flush wait; existing business drain
+or stacks. Diagnostic faults add no stderr-flush wait; bounded business drain
 settings remain owned by the lifecycle.

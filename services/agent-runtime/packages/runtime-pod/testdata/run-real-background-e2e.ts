@@ -29,6 +29,7 @@ const result = await runner.runTool({
 	bindingGeneration: 1,
 	runtimeBindingToken: "unused-by-bridge-test",
 	targetPodUid: "pod_real_bash",
+	runtimeProcessId: "process-test",
 	modelRequestId: "mreq_real_bash",
 	modelToolCallId: "call_real_bash",
 	modelOrder: 0,

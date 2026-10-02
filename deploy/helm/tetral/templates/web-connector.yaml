@@ -31,17 +31,32 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: {{ .Values.replicas.webConnector }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: web-connector
   template:
     metadata:
+      annotations:
+{{- if eq .Values.transport.profile "hardened" }}
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "web-connector") | indent 8 }}
+{{- else }}
+        sidecar.istio.io/inject: "false"
+{{- end }}
       labels:
         app.kubernetes.io/name: web-connector
         app.kubernetes.io/part-of: tetral
+{{- if eq .Values.transport.profile "hardened" }}
+        istio.io/rev: {{ .Values.routing.revision | quote }}
+{{- end }}
     spec:
       serviceAccountName: web-connector
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       containers:
         - name: web-connector
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -49,6 +64,15 @@ spec:
           command:
             - /usr/local/bin/web-connector
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" false "blob" true "bun" false) | trim | indent 12 }}
+            - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.webDrainMs | quote }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+{{- if eq .Values.transport.profile "hardened" }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
+{{- end }}
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9092
             - name: TETRAL_WEB_CONNECTOR_METRICS_ADDR
@@ -137,10 +161,16 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: web-connector-kubernetes-api
               mountPath: /var/run/secrets/tetral-kubernetes-api
               readOnly: true
       volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
         - name: web-connector-kubernetes-api
           projected:
             sources:

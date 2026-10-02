@@ -37,8 +37,16 @@ public HTTP; it never deletes durable history.
 
 Bridge exposes authenticated gRPC plus health and metrics HTTP. Startup validates
 process diagnostic controls and database schema/runtime role before constructing
-business listeners and clients. Its execution-result listener and attachment GC
-are canceled and joined before its database pool closes. The process diagnostic
+business listeners and clients. Protected PostgreSQL and Blob clients require
+`TETRAL_DATABASE_TLS_CA_PATH` / `TETRAL_DATABASE_TLS_SERVER_NAME` and
+`TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME`. When
+`TETRAL_ROUTING_PROXY_REQUIRED=true`, startup also waits for the local routing
+proxy before admitting business calls. Shutdown withdraws HTTP readiness and
+gRPC health, closes admission, and gives admitted RPCs their configured drain
+budget. Execution-result LISTEN and attachment GC stay available while those
+RPCs settle. After graceful completion or forced cancellation, handlers,
+listeners and maintenance owners join before retained MCP connections, Blob
+resources or the database pool close. The process diagnostic
 owner closes last with a bounded shutdown budget. A healthy idle listener emits
 no periodic successful diagnostic records.
 The shared `internal/workload` diagnostic owner defaults to `info` and validates
@@ -62,8 +70,8 @@ registers and takes its wake snapshot before its first verification read, so a
 commit landing during the read or between the read and blocking forces an
 immediate re-read instead of a missed wake. A hint is never a result: every
 wake leads through the durable verification read. There is no periodic result
-query within a wait. The existing 30-second internal deadline (or an earlier
-caller deadline) still ends the RPC. Runtime rejoins the same accepted execution
+query within a wait. The configured result-wait deadline (30 seconds by default, clipped by an earlier
+caller deadline) ends the RPC. Runtime rejoins the same accepted execution
 after its existing 300 ms retry delay; the new wait begins with a durable read.
 A result missed during a listener outage is therefore observed on reconnect
 catch-up or rejoin. Detecting a half-open listener connection depends on TCP
@@ -74,6 +82,72 @@ delivery guarantee. A healthy idle 30-second wait performs one result
 verification transaction plus the separate entry scope-validation transaction.
 Connection failures are logged before retry; an unexpected listener error return
 is logged as `bridge.execution_result_listener.stopped`. Normal shutdown is quiet.
+
+### Runtime process custody
+
+`RegisterRuntimeProcess` authenticates the Pod and registers one stable boot ID
+as a non-current starting candidate. Bridge allocates its registration order and
+opaque receipt with the database clock; caller timestamps are not trusted.
+Exact registration retry returns the same order and receipt. Only the matching
+receipt-bearing accepting report promotes a candidate. Promotion compares the
+last promoted order, retires the previous process atomically, and schedules old
+binding reconciliation after commit. An unseen or abandoned candidate cannot
+write, receive placement, or displace the current process.
+
+Every Runtime scope carries `runtime_process_id` alongside binding ID,
+generation and target Pod UID. New mutations hold Session arbitration, the exact
+binding row, then the matching current process shared lock until commit or
+rollback. Promotion takes the Pod lock and process update locks without taking a
+Session lock. Ordinary receipt replay may bypass process-current after retirement
+only while its authenticated workspace, Session, Thread and exact binding remain
+unchanged. It returns the stored identity/result without touching timestamps,
+claims or projections. Context, attachment and first-effect authorization reads
+still require current process custody. Once the binding is superseded, ordinary
+receipt replay rejects. Named terminal/frozen-child receipts and cooperative
+release use their separately persisted old-owner proofs.
+
+`ReleaseRuntimeBinding` requires the old current process's acknowledged draining
+phase. Under Session arbitration it checks every resident Thread's reconstructible
+checkpoint, hands back ordinary accepted/delivering input custody, preserves
+committed inputs and accepted executor identities, then atomically removes the old
+binding and writes immutable per-Thread `IDLE` or `RECOVER` dispositions. Recovery
+uses the existing Queue lease and exact handoff identity; only `RECOVER` carries a
+Queue ID. Accepted, uncommitted reviewer input rejects release as not checkpointed.
+Exact release response-loss retry reads the original receipt after unbind; it
+cannot enqueue again or reapply custody transitions.
+The process sink records `runtime.binding.released` or
+`runtime.binding.release_rejected` with exact operation, binding and process
+correlation. Successful release records its handoff ID, Thread `target.count`
+and returned inbox `input.count`; rejection records the owning `grpc.code`.
+
+### Lifecycle settings
+
+Settings are positive milliseconds and resolve once at startup. Registration and
+report budgets share the Runtime contract:
+
+| Setting | Default |
+|---|---:|
+| `TETRAL_RUNTIME_REGISTER_TIMEOUT_MS` | 5000 |
+| `TETRAL_RUNTIME_REPORT_TIMEOUT_MS` | 1000 |
+| `TETRAL_RUNTIME_REPORT_INTERVAL_MS` | 2000 |
+| `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS` | 10000 |
+| `TETRAL_DRAIN_TIMEOUT_MS` | 40000 |
+| `TETRAL_CANCEL_JOIN_TIMEOUT_MS` | 5000 |
+| `TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS` | 3000 |
+| `TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS` | 5000 |
+| `TETRAL_BRIDGE_SANDBOX_RESULT_WAIT_TIMEOUT_MS` | 30000 |
+| `TETRAL_BRIDGE_BACKGROUND_RESULT_WAIT_TIMEOUT_MS` | 30000 |
+| `TETRAL_BRIDGE_MEMORY_PROJECTION_WAIT_TIMEOUT_MS` | 30000 |
+| `TETRAL_BRIDGE_OUTPUT_CAPTURE_WAIT_TIMEOUT_MS` | 30000 |
+
+Report timeout must be shorter than report interval, which must be shorter than
+freshness. Admission and release attempts must fit within the drain budget.
+Admission commits and waits have separate budgets: a successful admission never
+keeps a transaction open while waiting for Sandbox, memory projection, background
+command or output capture. Caller deadlines clip the owning phase; cancellation
+remains distinguishable from deadline expiry. Wait expiry preserves durable
+accepted work for exact rejoin. No proxy or application retry guesses a new
+operation identity.
 
 ### Database connection pool configuration
 
@@ -463,6 +537,14 @@ Bridge carries no Sandbox-provider configuration); no public HTTP termination; a
 never deletes durable history.
 
 ## Testing guide
+
+`TestPostgreSQLRuntimeProcessLiveness` and the registration/report response-loss
+cases exercise real process arbitration. `TestPostgreSQLRuntimeExecutorReceiptRetirement`
+uses authenticated TCP Bridge instances, a same-Pod promotion and complete tenant
+table snapshots to prove stored executor replay has no durable effects, then
+checks ordinary denial after unbind. Integration replica placement, Runtime
+handoff, Bridge recovery and worker drain compose the actual owning services.
+
 
 | Suite | Proves |
 | --- | --- |

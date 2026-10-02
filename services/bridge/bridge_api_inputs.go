@@ -58,7 +58,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		var err error
@@ -96,6 +96,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			}
 			duplicate = true
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if inputKind == "interrupt_control" {

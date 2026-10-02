@@ -16,6 +16,8 @@
  * Web Connector for web tools; MCP Connector for MCP tools; and
  * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
+import { bridgeUnaryCall, ownBridgeClient } from "./bridge-calls.js";
+import type { BridgeMethodPolicies } from "./bridge-policy.js";
 import { createHash } from "node:crypto";
 import type {
 	CallOptions,
@@ -219,6 +221,7 @@ type RunMemoryResult =
  */
 export interface RuntimePodToolRunnerOptions {
 	readonly bridgeAddress: string;
+	readonly methodPolicies?: BridgeMethodPolicies;
 	readonly webAddress: string;
 	readonly mcpConnectorAddress: string;
 	readonly tokenPath: string;
@@ -312,6 +315,26 @@ export class RuntimePodToolRunner {
 	>();
 	private nextChildTaskOperationSequence = 0;
 
+	beginDrain(deadline: number): void {
+		ownBridgeClient(
+			this.bridgeClient as AgentRuntimeBridgeServiceClient,
+		).setDeadline(deadline);
+	}
+
+	async close(): Promise<void> {
+		await Promise.all([
+			ownBridgeClient(
+				this.bridgeClient as AgentRuntimeBridgeServiceClient,
+			).close(),
+			closeToolCalls(this.webClient),
+			closeToolCalls(this.mcpConnectorClient),
+		]);
+		if (this.webClient instanceof ProviderGatewayServiceClient)
+			this.webClient.close();
+		if (this.mcpConnectorClient instanceof McpConnectorServiceClient)
+			this.mcpConnectorClient.close();
+	}
+
 	/**
 	 * Creates a runner with injected adapters when present and dedicated gRPC
 	 * clients for the remaining Bridge, web-connector, and MCP boundaries.
@@ -324,6 +347,10 @@ export class RuntimePodToolRunner {
 				credentials.createInsecure(),
 				bridgeAttachmentGrpcChannelOptions(),
 			);
+		ownBridgeClient(
+			this.bridgeClient as AgentRuntimeBridgeServiceClient,
+			options.methodPolicies,
+		);
 		this.webClient =
 			options.webClient ??
 			new ProviderGatewayServiceClient(
@@ -438,7 +465,9 @@ export class RuntimePodToolRunner {
 					this.bridgeClient,
 					durableRequest,
 					await this.metadata(),
-					request.abortSignal,
+					request.checkpointSignal === undefined
+						? request.abortSignal
+						: AbortSignal.any([request.abortSignal, request.checkpointSignal]),
 				);
 				const result = parseAwaitSandboxExecutionResult(response);
 				if (result.type === "stale") {
@@ -455,7 +484,11 @@ export class RuntimePodToolRunner {
 					withBackgroundTask(result.resultJson, result.taskId),
 				);
 			} catch (error) {
-				if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+				if (
+					isToolRouteAborted(error) ||
+					request.abortSignal.aborted ||
+					request.checkpointSignal?.aborted
+				) {
 					return toolCancelled(
 						request,
 						"Sandbox tool execution was cancelled.",
@@ -815,6 +848,7 @@ export class RuntimePodToolRunner {
 					toolUseEventId: request.toolUseEventId,
 					bindingId: request.bindingId,
 					bindingGeneration: request.bindingGeneration,
+					runtimeProcessId: request.runtimeProcessId,
 					runtimeBindingToken: request.runtimeBindingToken,
 					input: validatedInput.input,
 				},
@@ -890,6 +924,7 @@ export class RuntimePodToolRunner {
 					toolUseEventId: request.toolUseEventId,
 					bindingId: request.bindingId,
 					bindingGeneration: request.bindingGeneration,
+					runtimeProcessId: request.runtimeProcessId,
 					runtimeBindingToken: request.runtimeBindingToken,
 				},
 				await this.metadata(),
@@ -2126,6 +2161,7 @@ export class RuntimePodToolRunner {
 				bindingId: request.bindingId,
 				bindingGeneration: request.bindingGeneration,
 				targetPodUid: request.targetPodUid,
+				runtimeProcessId: request.runtimeProcessId,
 			},
 		};
 	}
@@ -2394,6 +2430,7 @@ function threadControlFromRequest(
 		bindingGeneration:
 			parentScope.binding?.bindingGeneration ?? request.bindingGeneration,
 		targetPodUid: parentScope.binding?.targetPodUid ?? "",
+		runtimeProcessId: parentScope.binding?.runtimeProcessId ?? "",
 	};
 }
 
@@ -2536,26 +2573,14 @@ function acceptSandboxExecution(
 	request: AcceptSandboxExecutionRequest,
 	metadata: Metadata,
 ): Promise<AcceptSandboxExecutionResponse> {
-	const options: CallOptions = {
-		deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
-	};
-	return new Promise((resolve, reject) => {
-		try {
-			client.acceptSandboxExecution(
-				request,
-				metadata,
-				options,
-				(error, response) => {
-					if (error !== null) {
-						reject(error);
-						return;
-					}
-					resolve(response);
-				},
-			);
-		} catch (error) {
-			reject(error);
-		}
+	return bridgeUnaryCall<AcceptSandboxExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"acceptSandboxExecution",
+		request,
+		metadata,
+		{},
+	).catch((error) => {
+		throw error;
 	});
 }
 
@@ -2565,13 +2590,16 @@ function awaitSandboxExecution(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AwaitSandboxExecutionResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AwaitSandboxExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"awaitSandboxExecution",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.awaitSandboxExecution(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function runMemory(
@@ -2580,13 +2608,16 @@ function runMemory(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<RunMemoryResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<RunMemoryResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"runMemory",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.runMemory(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function sendCommandInput(
@@ -2595,13 +2626,16 @@ function sendCommandInput(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<SendCommandInputResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<SendCommandInputResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"sendCommandInput",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.sendCommandInput(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function readCommandResult(
@@ -2610,13 +2644,16 @@ function readCommandResult(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ReadCommandResultResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ReadCommandResultResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"readCommandResult",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.readCommandResult(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function cancelCommand(
@@ -2625,21 +2662,14 @@ function cancelCommand(
 	metadata: Metadata,
 	timeoutMs: number,
 ): Promise<CancelCommandResponse> {
-	const options: CallOptions = {
-		deadline: Date.now() + timeoutMs,
-	};
-	return new Promise((resolve, reject) => {
-		try {
-			client.cancelCommand(request, metadata, options, (error, response) => {
-				if (error !== null) {
-					reject(error);
-					return;
-				}
-				resolve(response);
-			});
-		} catch (error) {
-			reject(error);
-		}
+	return bridgeUnaryCall<CancelCommandResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"cancelCommand",
+		request,
+		metadata,
+		{},
+	).catch((error) => {
+		throw error;
 	});
 }
 
@@ -2649,17 +2679,16 @@ function authorizeWebToolExecution(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AuthorizeWebToolExecutionResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AuthorizeWebToolExecutionResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"authorizeWebToolExecution",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.authorizeWebToolExecution(
-				unaryRequest,
-				unaryMetadata,
-				callback,
-			),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function createSubagentThread(
@@ -2668,13 +2697,16 @@ function createSubagentThread(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<CreateSubagentThreadResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<CreateSubagentThreadResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"createSubagentThread",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.createSubagentThread(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function resolveChildThread(
@@ -2683,13 +2715,16 @@ function resolveChildThread(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ResolveChildThreadResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ResolveChildThreadResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"resolveChildThread",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.resolveChildThread(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function listChildThreads(
@@ -2698,13 +2733,16 @@ function listChildThreads(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<ListChildThreadsResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<ListChildThreadsResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"listChildThreads",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.listChildThreads(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function deliverInterAgentMail(
@@ -2713,13 +2751,16 @@ function deliverInterAgentMail(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<DeliverInterAgentMailResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<DeliverInterAgentMailResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"deliverInterAgentMail",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.deliverInterAgentMail(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function admitChildInterrupt(
@@ -2728,13 +2769,16 @@ function admitChildInterrupt(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AdmitChildInterruptResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AdmitChildInterruptResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"admitChildInterrupt",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.admitChildInterrupt(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function awaitChildInterrupt(
@@ -2743,13 +2787,16 @@ function awaitChildInterrupt(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<AwaitChildInterruptResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<AwaitChildInterruptResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"awaitChildInterrupt",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.awaitChildInterrupt(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function closeChildControl(
@@ -2758,13 +2805,16 @@ function closeChildControl(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<CloseChildControlResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<CloseChildControlResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"closeChildControl",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.closeChildControl(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function markChildThreadActive(
@@ -2773,13 +2823,16 @@ function markChildThreadActive(
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 ): Promise<MarkChildThreadActiveResponse> {
-	return cancellableUnaryCall(
+	return bridgeUnaryCall<MarkChildThreadActiveResponse>(
+		client as AgentRuntimeBridgeServiceClient,
+		"markChildThreadActive",
 		request,
 		metadata,
-		abortSignal,
-		(unaryRequest, unaryMetadata, callback) =>
-			client.markChildThreadActive(unaryRequest, unaryMetadata, callback),
-	);
+		{ signal: abortSignal },
+	).catch((error) => {
+		if (abortSignal.aborted) throw new ToolRouteAborted();
+		throw error;
+	});
 }
 
 function runWeb(
@@ -2789,6 +2842,7 @@ function runWeb(
 	abortSignal: AbortSignal,
 ): Promise<RunWebResponse> {
 	return cancellableUnaryCall(
+		client,
 		request,
 		metadata,
 		abortSignal,
@@ -2804,6 +2858,7 @@ function runMcpTool(
 	abortSignal: AbortSignal,
 ): Promise<RunMcpToolResponse> {
 	return cancellableUnaryCall(
+		client,
 		request,
 		metadata,
 		abortSignal,
@@ -2918,18 +2973,53 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
+const toolCallOwners = new WeakMap<
+	object,
+	{
+		closing: boolean;
+		calls: Map<ClientUnaryCall, Promise<void>>;
+		closed?: Promise<void>;
+	}
+>();
+function toolCallOwner(client: object) {
+	let owner = toolCallOwners.get(client);
+	if (owner === undefined) {
+		owner = { closing: false, calls: new Map() };
+		toolCallOwners.set(client, owner);
+	}
+	return owner;
+}
+function closeToolCalls(client: object): Promise<void> {
+	const owner = toolCallOwner(client);
+	if (owner.closed !== undefined) return owner.closed;
+	owner.closing = true;
+	owner.closed = (async () => {
+		const active = [...owner.calls.entries()];
+		for (const [call] of active) call.cancel();
+		await Promise.all(active.map(([, join]) => join));
+	})();
+	return owner.closed;
+}
+
 function cancellableUnaryCall<Request, Response>(
+	client: object,
 	request: Request,
 	metadata: Metadata,
 	abortSignal: AbortSignal,
 	invoke: UnaryInvoker<Request, Response>,
 ): Promise<Response> {
+	const owner = toolCallOwner(client);
 	return new Promise((resolve, reject) => {
-		if (abortSignal.aborted) {
+		if (abortSignal.aborted || owner.closing) {
 			reject(new ToolRouteAborted());
 			return;
 		}
 		let settled = false;
+		let callbackJoined = false,
+			join!: () => void;
+		const joined = new Promise<void>((resolve) => {
+			join = resolve;
+		});
 		let call: ClientUnaryCall | undefined;
 		const cleanup = (): void => {
 			abortSignal.removeEventListener("abort", abort);
@@ -2952,6 +3042,9 @@ function cancellableUnaryCall<Request, Response>(
 				request,
 				metadata,
 				(error: ServiceError | null, response: Response) => {
+					callbackJoined = true;
+					join();
+					if (call !== undefined) owner.calls.delete(call);
 					if (error !== null) {
 						settle(() => reject(error));
 						return;
@@ -2959,7 +3052,10 @@ function cancellableUnaryCall<Request, Response>(
 					settle(() => resolve(response));
 				},
 			);
+			if (!callbackJoined) owner.calls.set(call, joined);
+			if (abortSignal.aborted || owner.closing) call.cancel();
 		} catch (error) {
+			join();
 			settle(() => reject(error));
 		}
 	});

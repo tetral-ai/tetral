@@ -1,0 +1,41 @@
+{
+  "schema": "tetral.deployment-dependencies/v1",
+  "istio": {
+    "version": "1.31.1",
+    "kubernetes_supported": [
+      "1.32",
+      "1.33",
+      "1.34",
+      "1.35",
+      "1.36"
+    ],
+    "charts": [
+      {
+        "name": "base",
+        "version": "1.31.1",
+        "url": "https://blob.istio.io/istio-release/charts/base-1.31.1.tgz",
+        "sha256": "6a5f3a628e31ea03994f5c8ff44804fcec54ac1b13893f1a3f3c26340c8f2015"
+      },
+      {
+        "name": "istiod",
+        "version": "1.31.1",
+        "url": "https://blob.istio.io/istio-release/charts/istiod-1.31.1.tgz",
+        "sha256": "d49e3ac3100e9c24efbd3a7c26e8e6dd707431f8c06f203182ba54a2e8651a74"
+      }
+    ],
+    "images": [
+      {
+        "component": "proxyv2",
+        "reference": "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9",
+        "top_level_digest": "sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9",
+        "linux_amd64_child_digest": "sha256:dc3e45795272bf93b30b8b1968e279fbfd5dcc05154cc35e0d13734d23c5b524"
+      },
+      {
+        "component": "pilot",
+        "reference": "docker.io/istio/pilot:1.31.1@sha256:212ca088ada22f48be1576e6b688972b8aa7495710abb7c5f1febca856a15577",
+        "top_level_digest": "sha256:212ca088ada22f48be1576e6b688972b8aa7495710abb7c5f1febca856a15577",
+        "linux_amd64_child_digest": "sha256:aeda10476eecca07f7d3a2776eda30d0452c133ea87b40335bc6031fb01de789"
+      }
+    ]
+  }
+}

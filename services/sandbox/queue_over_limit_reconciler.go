@@ -99,9 +99,12 @@ func RunSandboxQueueOverLimitLoop(ctx context.Context, reconciler *SandboxQueueO
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-acquisitionContext(ctx).Done():
 			return
 		case <-ticker.C:
+			if acquisitionContext(ctx).Err() != nil {
+				return
+			}
 			_, _ = reconciler.RunOnce(ctx)
 		}
 	}

@@ -1,3 +1,4 @@
+import type {CallOptions} from "@grpc/grpc-js";
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
 import { ProviderAttachmentRejectionReason } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -84,6 +85,7 @@ describe("BridgeAPIAttachmentResolver", () => {
         binding: {
           bindingId: "bind_1",
           bindingGeneration: 42,
+          runtimeProcessId: "process-test",
           targetPodUid: "pod_uid_runtime",
         },
       },
@@ -261,6 +263,7 @@ describe("BridgeAPIAttachmentResolver", () => {
       resolveTransientAttachment(
         _request: ResolveTransientAttachmentRequest,
         _metadata: Metadata,
+        _options: CallOptions,
         callback: (error: ServiceError | null, response: ResolveTransientAttachmentResponse) => void,
       ): unknown {
         callback(Object.assign(new Error("bridge unavailable"), { code: status.UNAVAILABLE }) as ServiceError, {} as ResolveTransientAttachmentResponse);
@@ -387,6 +390,7 @@ class RecordingBridgeAttachmentClient {
   resolveTransientAttachment(
     request: ResolveTransientAttachmentRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: ServiceError | null, response: ResolveTransientAttachmentResponse) => void,
   ): unknown {
     this.requests.push(request);
@@ -412,6 +416,7 @@ class RecordingMixedBridgeAttachmentClient extends RecordingBridgeAttachmentClie
   resolveFileAttachmentMetadata(
     request: ResolveFileAttachmentMetadataRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: ServiceError | null, response: ResolveFileAttachmentMetadataResponse) => void,
   ): unknown {
     this.callOrder.push(`metadata:${request.attachments.map((attachment) => attachment.fileId).join(",")}`);
@@ -426,6 +431,7 @@ class RecordingMixedBridgeAttachmentClient extends RecordingBridgeAttachmentClie
   readFileAttachmentChunk(
     request: ReadFileAttachmentChunkRequest,
     _metadata: Metadata,
+    _options: CallOptions,
     callback: (error: ServiceError | null, response: ReadFileAttachmentChunkResponse) => void,
   ): unknown {
     this.callOrder.push(`chunk:${request.attachment?.fileId}:${request.offset}:${request.length}`);

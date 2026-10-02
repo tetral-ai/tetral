@@ -32,6 +32,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolName: string;
@@ -58,6 +59,7 @@ const processorWriter: ProviderStreamAccumulatorWriter = {
 			bindingId: input.bindingId,
 			bindingGeneration: input.bindingGeneration,
 			targetPodUid: input.targetPodUid,
+			runtimeProcessId: input.runtimeProcessId,
 			writeId: `rwrite_${input.modelRequestId}_${input.modelToolCallId}`,
 			event,
 			...(modelRequestId === undefined ? {} : { modelRequestId }),
@@ -88,6 +90,7 @@ const processor = new ProviderStreamAccumulator({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	contextOwner: contextManager,
 	writer: processorWriter,
 });
@@ -160,6 +163,7 @@ const request: RuntimeToolExecutionRequest = {
 	bindingGeneration: input.bindingGeneration,
 	runtimeBindingToken: "composition-binding-token",
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
 	modelOrder: job.modelOrder,
@@ -187,6 +191,7 @@ const settlement = await writer.settleToolResult({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	settlement: {
 		toolUseEventId: committed.toolUseEventId,
 		outcome: runtimeToolSettlement(result),

@@ -721,7 +721,7 @@ func (s *bunRuntimeManifestCompositionSender) ApplyRuntimeConfig(ctx context.Con
 			"sessionId":         request.GetSessionId(),
 			"bindingId":         request.GetBindingId(),
 			"bindingGeneration": request.GetBindingGeneration(),
-			"targetPodUid":      request.GetTargetPodUid(),
+			"targetPodUid":      request.GetTargetPodUid(), "runtimeProcessId": request.GetRuntimeProcessId(),
 			"mcpManifest": map[string]any{
 				"mcpServerName": request.GetMcpManifest().GetMcpServerName(),
 				"generation":    request.GetMcpManifest().GetGeneration(),
@@ -785,7 +785,8 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 	enqueueExhaustionJob(t, queueStore, job, now)
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.MCPManifestLister = mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", "pod_oauth_manifest")
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_oauth_manifest", PodIP: "10.0.0.10",
 		}})
@@ -1140,6 +1141,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 		Namespace:         "runtime-ns",
 		PodName:           "runtime-pod",
 		PodUID:            "pod_uid_task_delivery",
+		RuntimeProcessID:  "process_pod_uid_task_delivery",
 		PodIP:             "10.0.0.1",
 	}}
 	store.TargetResolver = resolver
@@ -1307,6 +1309,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 			},
 		)
+		installFixtureRuntimeLoad(t, freshStore)
 		freshStore.Clock = deliveryStore.Clock
 		return &jobrunner.JobRunner{
 			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},

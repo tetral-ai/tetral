@@ -20,6 +20,7 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     model: {
       providerId: "openai",
@@ -94,6 +95,7 @@ export function validRunWebRequest(): RunWebRequest {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     toolUseEventId: "sevt_tool_1",
     input: {

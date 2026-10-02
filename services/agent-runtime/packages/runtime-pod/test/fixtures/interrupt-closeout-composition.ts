@@ -24,6 +24,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly readyPath: string;
 	readonly acceptResultPath: string;
 	readonly toolStartedPath: string;
@@ -189,6 +190,7 @@ const cleanupController = {
 	startCleanup: hosts.cleanupRunHost.handleCleanupSession,
 } satisfies RuntimeCleanupController;
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "tetral-agent-runtime",
 		name: "runtime-pod-interrupt-composition",

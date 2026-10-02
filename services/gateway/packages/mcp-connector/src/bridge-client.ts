@@ -9,10 +9,14 @@
  * results back from Bridge's direct durable facts.
  */
 import { credentials, status } from "@grpc/grpc-js";
-import type { CallOptions, ChannelOptions, Metadata, ServiceError } from "@grpc/grpc-js";
-import {
-  AgentRuntimeBridgeServiceClient,
-} from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type {
+  ClientUnaryCall,
+  CallOptions,
+  ChannelOptions,
+  Metadata,
+  ServiceError,
+} from "@grpc/grpc-js";
+import { AgentRuntimeBridgeServiceClient } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
   McpErrorKind,
   McpRetryStatus,
@@ -32,6 +36,7 @@ import type {
 import { buildOutboundBearerMetadata } from "./auth.js";
 import {
   McpIdempotencyStaleCustodyError,
+  McpIdempotencyOutcomeUnknownError,
   parseStoredRunMcpToolResponse,
   serializePendingRunMcpToolResponse,
 } from "./idempotency.js";
@@ -165,7 +170,15 @@ export class BridgeAPIManifestChangeNotifier {
     this.now = options.now ?? Date.now;
   }
 
-  async notify(input: McpManifestChangedRequest): Promise<BridgeAPIManifestChangeResult> {
+  beginDrain(deadline: Date): void {
+    drainBridgeCalls(this.client, deadline);
+  }
+  close(): Promise<void> {
+    return closeBridgeCalls(this.client);
+  }
+  async notify(
+    input: McpManifestChangedRequest,
+  ): Promise<BridgeAPIManifestChangeResult> {
     let metadata: Metadata;
     try {
       metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -216,6 +229,7 @@ export interface BridgeAPIMcpToolResultIdempotencyStoreOptions {
   readonly client?: BridgeMcpToolResultClient;
   readonly claimTimeoutMs?: number | undefined;
   readonly commitTimeoutMs?: number | undefined;
+  readonly relinquishTimeoutMs?: number | undefined;
   readonly now?: (() => number) | undefined;
   readonly sleep?: ((delayMs: number) => Promise<void>) | undefined;
 }
@@ -234,6 +248,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   private readonly claimTimeoutMs: number;
   private readonly commitTimeoutMs: number;
+  private readonly relinquishTimeoutMs: number;
+  private stopping = false;
   private readonly now: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
 
@@ -242,19 +258,42 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
     this.claimTimeoutMs = options.claimTimeoutMs ?? MCP_CLAIM_RPC_TIMEOUT_MS;
     this.commitTimeoutMs = options.commitTimeoutMs ?? MCP_COMMIT_RPC_TIMEOUT_MS;
+    this.relinquishTimeoutMs =
+      options.relinquishTimeoutMs ?? MCP_COMMIT_RPC_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? sleep;
   }
 
-  async claim(key: IdempotencyKey, context?: McpIdempotencyContext): Promise<IdempotencyClaim> {
+  beginDrain(deadline: Date): void {
+    drainBridgeCalls(this.client, deadline);
+  }
+  close(): Promise<void> {
+    this.stopping = true;
+    return closeBridgeCalls(this.client);
+  }
+  async claim(
+    key: IdempotencyKey,
+    context?: McpIdempotencyContext,
+  ): Promise<IdempotencyClaim> {
     if (context === undefined) {
       throw new Error("mcp tool idempotency context is required");
     }
     let response: ClaimMcpToolResultResponse;
     try {
-      response = await claimMcpToolResult(this.client, claimMcpToolResultRequest(key, context), await this.metadata(), {
-        deadline: new Date(this.now() + this.claimTimeoutMs),
-      });
+      response = await claimMcpToolResult(
+        this.client,
+        claimMcpToolResultRequest(key, context),
+        await this.metadata(),
+        {
+          deadline: new Date(
+            Math.min(
+              this.now() + this.claimTimeoutMs,
+              context.deadline ?? Infinity,
+              context.phaseDeadline?.() ?? Infinity,
+            ),
+          ),
+        },
+      );
     } catch (error) {
       if ((error as Partial<ServiceError>).code === status.ALREADY_EXISTS) {
         return { status: "conflict" };
@@ -306,6 +345,15 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     let committedResponse: RunMcpToolResponse | undefined;
     let outcomeUnknown = false;
     for (let attempt = 0; ; attempt++) {
+      if (
+        this.stopping ||
+        this.now() >=
+          Math.min(
+            context.deadline ?? Infinity,
+            context.phaseDeadline?.() ?? Infinity,
+          )
+      )
+        throw new McpIdempotencyOutcomeUnknownError();
       let metadata: Metadata;
       try {
         metadata = await this.metadata();
@@ -314,14 +362,37 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           this.releaseLocalClaim(key, context);
           throw error;
         }
-        const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
-        await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
+        const delayIndex = Math.min(
+          attempt,
+          MCP_COMMIT_RETRY_BACKOFF_MS.length - 1,
+        );
+        await this.sleep(
+          Math.max(
+            0,
+            Math.min(
+              MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000,
+              (context.deadline ?? Infinity) - this.now(),
+              (context.phaseDeadline?.() ?? Infinity) - this.now(),
+            ),
+          ),
+        );
         continue;
       }
       try {
-        const response = await commitMcpToolResult(this.client, activeRequest, metadata, {
-          deadline: new Date(this.now() + this.commitTimeoutMs),
-        });
+        const response = await commitMcpToolResult(
+          this.client,
+          activeRequest,
+          metadata,
+          {
+            deadline: new Date(
+              Math.min(
+                this.now() + this.commitTimeoutMs,
+                context.deadline ?? Infinity,
+                context.phaseDeadline?.() ?? Infinity,
+              ),
+            ),
+          },
+        );
         try {
           result = parseMcpToolCommitResult(response);
           if (result.type !== "stale") {
@@ -333,8 +404,20 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           // response. Keep the exact immutable request and converge through
           // duplicate replay; relinquishing this claim would invent certainty.
           outcomeUnknown = true;
-          const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
-          await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
+          const delayIndex = Math.min(
+            attempt,
+            MCP_COMMIT_RETRY_BACKOFF_MS.length - 1,
+          );
+          await this.sleep(
+            Math.max(
+              0,
+              Math.min(
+                MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000,
+                (context.deadline ?? Infinity) - this.now(),
+                (context.phaseDeadline?.() ?? Infinity) - this.now(),
+              ),
+            ),
+          );
           continue;
         }
         break;
@@ -356,8 +439,20 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           throw new McpIdempotencyStaleCustodyError();
         }
         outcomeUnknown = true;
-        const delayIndex = Math.min(attempt, MCP_COMMIT_RETRY_BACKOFF_MS.length - 1);
-        await this.sleep(MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000);
+        const delayIndex = Math.min(
+          attempt,
+          MCP_COMMIT_RETRY_BACKOFF_MS.length - 1,
+        );
+        await this.sleep(
+          Math.max(
+            0,
+            Math.min(
+              MCP_COMMIT_RETRY_BACKOFF_MS[delayIndex] ?? 1_000,
+              (context.deadline ?? Infinity) - this.now(),
+              (context.phaseDeadline?.() ?? Infinity) - this.now(),
+            ),
+          ),
+        );
       }
     }
     if (result.type === "stale") {
@@ -376,9 +471,20 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     try {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const response = await relinquishMcpToolResult(this.client, request, await this.metadata(), {
-            deadline: new Date(this.now() + this.commitTimeoutMs),
-          });
+          const response = await relinquishMcpToolResult(
+            this.client,
+            request,
+            await this.metadata(),
+            {
+              deadline: new Date(
+                Math.min(
+                  this.now() + this.relinquishTimeoutMs,
+                  context.deadline ?? Infinity,
+                  context.phaseDeadline?.() ?? Infinity,
+                ),
+              ),
+            },
+          );
           parseMcpToolRelinquishResult(response);
           return;
         } catch (error) {
@@ -432,21 +538,120 @@ function mcpRelinquishTransportRetryable(error: unknown): boolean {
     code === status.INTERNAL || code === status.UNKNOWN;
 }
 
+const bridgeCalls = new WeakMap<
+  object,
+  {
+    stopping: boolean;
+    calls: Map<ClientUnaryCall, Promise<void>>;
+    deadline?: number;
+    timer?: ReturnType<typeof setTimeout>;
+    closed?: Promise<void>;
+  }
+>();
+function callOwner(client: object) {
+  let owner = bridgeCalls.get(client);
+  if (owner === undefined) {
+    owner = { stopping: false, calls: new Map() };
+    bridgeCalls.set(client, owner);
+  }
+  return owner;
+}
+async function trackedBridgeCall<T>(
+  client: object,
+  method: string,
+  request: unknown,
+  metadata: Metadata,
+  options: CallOptions,
+): Promise<T> {
+  const owner = callOwner(client);
+  if (owner.stopping) throw new Error("MCP Bridge client closing");
+  if (owner.deadline !== undefined) {
+    const configured =
+      options.deadline instanceof Date
+        ? options.deadline.getTime()
+        : typeof options.deadline === "number"
+          ? options.deadline
+          : Infinity;
+    options = {
+      ...options,
+      deadline: new Date(Math.min(configured, owner.deadline)),
+    };
+  }
+  let call: ClientUnaryCall | undefined,
+    settled = false,
+    joined!: () => void;
+  const join = new Promise<void>((resolve) => {
+    joined = resolve;
+  });
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const invoke = (
+        client as Record<
+          string,
+          (
+            request: unknown,
+            metadata: Metadata,
+            options: CallOptions,
+            callback: (error: ServiceError | null, response: T) => void,
+          ) => ClientUnaryCall
+        >
+      )[method]!;
+      call = invoke.call(
+        client,
+        request,
+        metadata,
+        options,
+        (error, response) => {
+          settled = true;
+          joined();
+          if (error !== null) reject(error);
+          else resolve(response);
+        },
+      );
+      if (!settled) owner.calls.set(call, join);
+    });
+  } finally {
+    if (call !== undefined) owner.calls.delete(call);
+  }
+}
+function drainBridgeCalls(client: object, deadline: Date): void {
+  const owner = callOwner(client);
+  owner.deadline = Math.min(owner.deadline ?? Infinity, deadline.getTime());
+  if (owner.timer !== undefined) clearTimeout(owner.timer);
+  owner.timer = setTimeout(
+    () => {
+      for (const call of owner.calls.keys()) call.cancel();
+    },
+    Math.max(0, owner.deadline - Date.now()),
+  );
+}
+function closeBridgeCalls(client: object): Promise<void> {
+  const owner = callOwner(client);
+  if (owner.closed !== undefined) return owner.closed;
+  owner.stopping = true;
+  if (owner.timer !== undefined) clearTimeout(owner.timer);
+  owner.closed = (async () => {
+    const active = [...owner.calls.entries()];
+    for (const [call] of active) call.cancel();
+    await Promise.all(active.map(([, join]) => join));
+    if (client instanceof AgentRuntimeBridgeServiceClient) client.close();
+  })();
+  return owner.closed;
+}
+
 function mcpManifestChanged(
   client: BridgeManifestChangedClient,
   request: McpManifestChangedRequest,
   metadata: Metadata,
   options: CallOptions,
 ): Promise<McpManifestChangedResponse> {
-  return new Promise((resolve, reject) => {
-    client.mcpManifestChanged(request, metadata, options, (error: ServiceError | null, response: McpManifestChangedResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
+  return trackedBridgeCall<McpManifestChangedResponse>(
+    client,
+    "mcpManifestChanged",
+    request,
+    metadata,
+    options,
+  );
 }
 
 function claimMcpToolResult(
@@ -455,15 +660,13 @@ function claimMcpToolResult(
   metadata: Metadata,
   options: CallOptions,
 ): Promise<ClaimMcpToolResultResponse> {
-  return new Promise((resolve, reject) => {
-    client.claimMcpToolResult(request, metadata, options, (error: ServiceError | null, response: ClaimMcpToolResultResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
+  return trackedBridgeCall<ClaimMcpToolResultResponse>(
+    client,
+    "claimMcpToolResult",
+    request,
+    metadata,
+    options,
+  );
 }
 
 function commitMcpToolResult(
@@ -472,15 +675,13 @@ function commitMcpToolResult(
   metadata: Metadata,
   options: CallOptions,
 ): Promise<CommitMcpToolResultResponse> {
-  return new Promise((resolve, reject) => {
-    client.commitMcpToolResult(request, metadata, options, (error: ServiceError | null, response: CommitMcpToolResultResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
+  return trackedBridgeCall<CommitMcpToolResultResponse>(
+    client,
+    "commitMcpToolResult",
+    request,
+    metadata,
+    options,
+  );
 }
 
 function relinquishMcpToolResult(
@@ -489,15 +690,13 @@ function relinquishMcpToolResult(
   metadata: Metadata,
   options: CallOptions,
 ): Promise<RelinquishMcpToolResultResponse> {
-  return new Promise((resolve, reject) => {
-    client.relinquishMcpToolResult(request, metadata, options, (error: ServiceError | null, response: RelinquishMcpToolResultResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
+  return trackedBridgeCall<RelinquishMcpToolResultResponse>(
+    client,
+    "relinquishMcpToolResult",
+    request,
+    metadata,
+    options,
+  );
 }
 
 function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyContext): ClaimMcpToolResultRequest {
@@ -509,6 +708,7 @@ function claimMcpToolResultRequest(key: IdempotencyKey, context: McpIdempotencyC
       binding: {
         bindingId: context.bindingId,
         bindingGeneration: context.bindingGeneration,
+        runtimeProcessId: context.runtimeProcessId,
         targetPodUid: context.runtimePodUid,
       },
     },

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -203,6 +204,9 @@ func TestPostgreSQLRuntimePodLossRepairsSiblingWithoutClosingInterruptedThread(t
 
 	now := time.Date(2026, 8, 24, 21, 0, 0, 0, time.UTC)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store.TargetResolver = KubernetesRuntimeTargetResolver{GetPod: fixtureAbsentRuntimePod, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	}}
 	if _, err := store.mutateLostRuntimeBinding(context.Background(), "default", sessionID, binding, now, false); err != nil {
 		t.Fatalf("repair mixed pod-loss Threads: %v", err)
 	}

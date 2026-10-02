@@ -13,6 +13,7 @@ const [
   runtimePodUid = "pod_uid_provider_attachment_composition",
   filename = "gateway_attachment.png",
   sourcePath = "sandbox:gateway_attachment.png",
+  runtimeProcessId = `process_${runtimePodUid}`,
 ] = process.argv.slice(2);
 if (address === undefined || attachmentRef === undefined) {
   throw new Error("address and attachment ref are required");
@@ -27,6 +28,7 @@ const request: ProviderRequest = {
   sessionThreadId,
   bindingId,
   bindingGeneration: 1,
+  runtimeProcessId,
   runtimeBindingToken: "unused-by-attachment-resolver",
   model: undefined,
   system: [],

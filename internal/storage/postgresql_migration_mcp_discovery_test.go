@@ -8,14 +8,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
-func TestMCPDiscoveryMigrationPreservesExistingInput(t *testing.T) {
+func TestInitialSchemaMCPDiscoveryPreservesExistingInput(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	rewindEnvironmentBuildMigration(t, db)
-	// Recreate the V2 boundary, then place a real old-format input in it.
-	if _, err := db.Exec(`ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic;
-		DELETE FROM tetral_schema_migrations WHERE version=3`); err != nil {
-		t.Fatal(err)
-	}
 	seedStorageSchemaSession(t, db, "workspace_discovery_upgrade", "sesn_discovery_upgrade")
 	if _, err := db.Exec(`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at)
 		VALUES ('workspace_discovery_upgrade', 'thr_discovery_upgrade', 'sesn_discovery_upgrade', 'main', 'public', 'idle', NOW(), NOW(), NOW());
@@ -30,11 +24,11 @@ func TestMCPDiscoveryMigrationPreservesExistingInput(t *testing.T) {
 	if err := storage.MigrateSchema(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT (to_jsonb(i)-'mcp_discovery_attempts'-'mcp_discovery_deadline_at'-'mcp_discovery_diagnostic')::text FROM session_runtime_inbox i WHERE runtime_input_id='rin_upgrade'`).Scan(&after); err != nil {
+	if err := db.QueryRow(`SELECT to_jsonb(i)::text FROM session_runtime_inbox i WHERE runtime_input_id='rin_upgrade'`).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if before != after {
-		t.Fatal("upgrade changed existing input identity, status, payload, or timestamps")
+		t.Fatal("current initialization changed existing input identity, status, payload, or timestamps")
 	}
 	var defaults bool
 	if err := db.QueryRow(`SELECT mcp_discovery_attempts=0 AND mcp_discovery_deadline_at IS NULL AND mcp_discovery_diagnostic IS NULL FROM session_runtime_inbox WHERE runtime_input_id='rin_upgrade'`).Scan(&defaults); err != nil {

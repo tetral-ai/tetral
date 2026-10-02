@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -57,13 +58,15 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 					"REVOKE UPDATE ON environments FROM " + pgx.Identifier{declarations.Roles["sandbox"].Name}.Sanitize(),
 					"GRANT SELECT ON queue_jobs TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
 					"GRANT UPDATE ON SEQUENCE session_runtime_binding_generation_seq TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
 				} {
 					if _, err := admin.Exec(statement); err != nil {
 						t.Fatal(err)
 					}
 				}
 				drift := workloadPrivilegeMismatches(t, admin, roleContract, declarations)
-				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE"} {
+				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE"} {
 					if !contains(drift, want) {
 						t.Fatalf("catalog checker missed injected drift %s: %v", want, drift)
 					}
@@ -89,6 +92,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 			_ = connection.Close(context.Background())
 		}
 		assertExactWorkloadPrivileges(t, admin, roleContract, declarations)
+		assertProcessRegistryPrivileges(t, databaseName, admin, declarations)
 		assertGoServingReadinessAcceptsEveryWorkloadRole(t, databaseName, roleContract, declarations)
 		assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles["gateway"])
 		assertGatewayCommandsAcceptOrdinaryRole(t, databaseName, declarations.Roles["gateway"])
@@ -281,6 +285,15 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 			t.Fatal(err)
 		}
 		_ = rows.Close()
+	}
+	var allowed bool
+	for workload, role := range contract.Workloads {
+		if err := admin.QueryRow(`SELECT has_function_privilege($1,'public.tetral_lock_runtime_process(text,text,text)','EXECUTE')`, declarations.Roles[workload].Name).Scan(&allowed); err != nil {
+			t.Fatal(err)
+		}
+		if allowed != contains(role.Functions, "tetral_lock_runtime_process(text, text, text)") {
+			mismatches = append(mismatches, workload+" tetral_lock_runtime_process EXECUTE")
+		}
 	}
 	return mismatches
 }
@@ -577,4 +590,67 @@ func currentDatabase(t *testing.T, admin *sql.DB) string {
 		t.Fatal(err)
 	}
 	return name
+}
+
+func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	bridge := openManagedRoleSQL(t, databaseName, declarations.Roles["bridge"])
+	defer func() {
+		if err := bridge.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "role-boundary-pod", ID: "role-boundary-process"}
+	process, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
+	runner := openManagedRoleSQL(t, databaseName, declarations.Roles["job_runner"])
+	defer func() {
+		if err := runner.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), "runtimecontrol.test_restricted_lock", nil, func(tx *dbconnect.Tx) error {
+		process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
+		if err == nil && process.Phase != runtimecontrol.ProcessAccepting {
+			t.Fatal("restricted lock returned wrong process")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"runtime_processes", "runtime_process_pods"} {
+		for _, statement := range []string{"INSERT INTO " + table + " DEFAULT VALUES", "UPDATE " + table + " SET namespace=namespace", "DELETE FROM " + table} {
+			assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], statement)
+		}
+	}
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "gateway", "git_proxy", "cleanup", "event_stream"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
+	}
+	assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM public.runtime_processes'`)
+	// Only the installer-owned role identifier is concatenated, using pgx's
+	// PostgreSQL identifier quoting; all SQL below is fixed test DDL.
+	//nolint:gosec // G202: the identifier is quoted, not an executable SQL fragment.
+	if _, err := admin.Exec(`CREATE SCHEMA process_shadow;
+ CREATE VIEW process_shadow.runtime_processes AS SELECT namespace,pod_uid,runtime_process_id,registration_order,registration_receipt,'draining'::text phase,is_current,registered_at,reported_at,retired_at FROM public.runtime_processes;
+ CREATE FUNCTION process_shadow.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM process_shadow.runtime_processes';
+ GRANT USAGE ON SCHEMA process_shadow TO ` + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), "runtimecontrol.test_shadow_lock", nil, func(tx *dbconnect.Tx) error {
+		if _, err := tx.Exec(context.Background(), `SET LOCAL search_path=process_shadow,public,pg_catalog`); err != nil {
+			return err
+		}
+		process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
+		if err == nil && process.Phase != runtimecontrol.ProcessAccepting {
+			t.Fatal("search_path shadow changed process lock authority")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

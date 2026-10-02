@@ -45,6 +45,7 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 	) as AttachmentInputFixture;
 	const commands: RuntimeAcceptedInputState[] = [];
 	const service = new RuntimeControlService({
+	runtimeProcessId: fixture.acceptInput.runtimeProcessId,
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod",
@@ -122,6 +123,7 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,
+		runtimeProcessId: command.runtimeProcessId,
 		runtimeBindingToken: "binding-token",
 	});
 	session.state.enqueueAcceptedInput(command);

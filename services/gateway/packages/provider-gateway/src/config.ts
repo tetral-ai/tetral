@@ -1,3 +1,7 @@
+import {
+  ServiceLifecycleDefaults,
+  validServiceLifecycle,
+} from "@tetral/gateway-protocol/src/service-lifecycle.js";
 /**
  * @packageDocumentation
  *
@@ -32,6 +36,12 @@ export interface ProviderGatewayConfig {
   readonly runtimeBindingTokenHMACKey: string;
   readonly databaseUrl: string;
   readonly databasePool: DatabasePoolConfig;
+  readonly databaseTLS?: {
+    readonly caPath: string;
+    readonly serverName: string;
+  };
+  readonly drainTimeoutMs: number;
+  readonly cancelJoinTimeoutMs: number;
   readonly vaultKeyHex: string;
   readonly kubernetesApiServerUrl: string;
   readonly kubernetesApiCaCertPath: string;
@@ -71,6 +81,10 @@ const ConfigSchema = z.strictObject({
   TETRAL_INTERNAL_GRPC_AUDIENCE: z.literal("tetral-internal-grpc"),
   TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: ServiceAccountSchema,
   TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY: z.string().min(32).max(4096),
+  TETRAL_DATABASE_TLS_CA_PATH: AddressSchema.optional(),
+  TETRAL_DATABASE_TLS_SERVER_NAME: AddressSchema.optional(),
+  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: z.string().optional(),
+  TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: z.string().optional(),
   TETRAL_DATABASE_URL: z.string().min(1).max(4096),
   TETRAL_DATABASE_POOL_MAX: z.string().optional(),
   TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS: z.string().optional(),
@@ -94,6 +108,10 @@ const ProviderGatewayEnvKeys = [
   "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
   "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
   "TETRAL_DATABASE_URL",
+  "TETRAL_DATABASE_TLS_CA_PATH",
+  "TETRAL_DATABASE_TLS_SERVER_NAME",
+  "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+  "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
   "TETRAL_DATABASE_POOL_MAX",
   "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
   "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
@@ -126,8 +144,34 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
   if (allowedRuntimePod === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
-  const maxConcurrentTurns = parsePositiveInteger(parsed.data.TETRAL_GATEWAY_MAX_CONCURRENT_TURNS, 8);
-  const databasePool = parseDatabasePoolConfig(parsed.data, { empty: "default" });
+  const maxConcurrentTurns = parsePositiveInteger(
+    parsed.data.TETRAL_GATEWAY_MAX_CONCURRENT_TURNS,
+    8,
+  );
+  const caPath = parsed.data.TETRAL_DATABASE_TLS_CA_PATH,
+    serverName = parsed.data.TETRAL_DATABASE_TLS_SERVER_NAME;
+  const drainTimeoutMs = parsePositiveInteger(
+    parsed.data.TETRAL_SERVICE_DRAIN_TIMEOUT_MS,
+    ServiceLifecycleDefaults.drainTimeoutMs,
+  );
+  const cancelJoinTimeoutMs = parsePositiveInteger(
+    parsed.data.TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS,
+    ServiceLifecycleDefaults.cancelJoinTimeoutMs,
+  );
+  if (
+    cancelJoinTimeoutMs === undefined ||
+    drainTimeoutMs === undefined ||
+    !validServiceLifecycle(drainTimeoutMs, cancelJoinTimeoutMs) ||
+    (caPath === undefined) !== (serverName === undefined) ||
+    drainTimeoutMs === undefined
+  )
+    return {
+      ok: false,
+      error: { kind: "config_error", message: "invalid gateway config" },
+    };
+  const databasePool = parseDatabasePoolConfig(parsed.data, {
+    empty: "default",
+  });
   if (maxConcurrentTurns === undefined || databasePool === undefined) {
     return { ok: false, error: { kind: "config_error", message: "invalid gateway config" } };
   }
@@ -146,6 +190,11 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
       runtimeBindingTokenHMACKey: parsed.data.TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY,
       databaseUrl: parsed.data.TETRAL_DATABASE_URL,
       databasePool,
+      drainTimeoutMs,
+      cancelJoinTimeoutMs,
+      ...(caPath !== undefined && serverName !== undefined
+        ? { databaseTLS: { caPath, serverName } }
+        : {}),
       vaultKeyHex: parsed.data.ENGINE_VAULT_KEY,
       kubernetesApiServerUrl: parsed.data.KUBERNETES_API_SERVER_URL,
       kubernetesApiCaCertPath: parsed.data.KUBERNETES_API_CA_CERT_PATH,

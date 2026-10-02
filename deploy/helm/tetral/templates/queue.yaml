@@ -37,17 +37,32 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: queue
   template:
     metadata:
+      annotations:
+{{- if eq .Values.transport.profile "hardened" }}
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "queue") | indent 8 }}
+{{- else }}
+        sidecar.istio.io/inject: "false"
+{{- end }}
       labels:
         app.kubernetes.io/name: queue
         app.kubernetes.io/part-of: tetral
+{{- if eq .Values.transport.profile "hardened" }}
+        istio.io/rev: {{ .Values.routing.revision | quote }}
+{{- end }}
     spec:
       serviceAccountName: queue
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       containers:
         - name: queue
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -55,6 +70,15 @@ spec:
           command:
             - /usr/local/bin/tetral-queue
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
+            - name: TETRAL_QUEUE_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.queueDrainMs | quote }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+{{- if eq .Values.transport.profile "hardened" }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
+{{- end }}
             - name: TETRAL_QUEUE_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -118,6 +142,10 @@ spec:
             httpGet:
               path: /ready
               port: http
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
 {{ toYaml .Values.resources.queue | nindent 12 }}
           securityContext:
@@ -127,6 +155,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
 apiVersion: v1
 kind: Service

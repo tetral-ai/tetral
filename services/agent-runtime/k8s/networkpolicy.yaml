@@ -33,7 +33,7 @@ spec:
               app.kubernetes.io/name: job-runner
       ports:
         - protocol: TCP
-          port: 9090
+          port: 19090
   egress:
     - to:
         - namespaceSelector:

@@ -197,6 +197,9 @@ func VerifyMainBranchWorkflow(root string) error {
 	) {
 		return fmt.Errorf("main coverage does not prepare its Go integration host")
 	}
+	if !coveragePreparesRenderedTransport(coverage) {
+		return fmt.Errorf("main coverage does not install pinned Helm before rendered transport fixtures")
+	}
 	return nil
 }
 
@@ -258,7 +261,23 @@ func jobChecksOutFullHistory(job *workflowYAMLNode) bool {
 }
 
 func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
-	return jobEvidenceInputEquals(job, "needs-go-test-host", "true")
+	return jobEvidenceInputEquals(job, "needs-go-test-host", "true") &&
+		jobEvidenceInputEquals(job, "needs-helm", "true")
+}
+
+func coveragePreparesRenderedTransport(job *workflowYAMLNode) bool {
+	ready := false
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") &&
+			scalar(mappingValue(mappingValue(step, "with"), "version")) == "v4.2.0" &&
+			mappingValue(step, "if") == nil {
+			ready = true
+		}
+		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-coverage") {
+			return ready
+		}
+	}
+	return false
 }
 
 func jobRunContainsAll(job *workflowYAMLNode, fragments ...string) bool {

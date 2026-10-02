@@ -854,6 +854,7 @@ export function assembleProviderCallRequest(
 		sessionThreadId: input.identity.sessionThreadId,
 		bindingId: input.identity.bindingId,
 		bindingGeneration: input.identity.bindingGeneration,
+		runtimeProcessId: input.identity.runtimeProcessId,
 		runtimeBindingToken: input.identity.runtimeBindingToken,
 		model: {
 			providerId: input.currentModel.providerId,

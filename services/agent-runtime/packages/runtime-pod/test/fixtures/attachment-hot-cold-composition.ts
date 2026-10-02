@@ -44,6 +44,7 @@ const bridgeClient = {
 	loadContext: (
 		_request: unknown,
 		_metadata: Metadata,
+		_options: unknown,
 		callback: (error: Error | null, response?: unknown) => void,
 	) => {
 		callback(null, {
@@ -78,6 +79,7 @@ if (!input.coldOnly) {
 		bindingId: input.acceptedInput.bindingId,
 		bindingGeneration: input.acceptedInput.bindingGeneration,
 		targetPodUid: input.acceptedInput.targetPodUid,
+		runtimeProcessId: input.acceptedInput.runtimeProcessId,
 		runtimeBindingToken: "attachment-composition-binding-token",
 	});
 	hot.state.markPersistentContextLoaded();
@@ -94,6 +96,7 @@ const loaded = await loader.loadThreadContext({
 	bindingId: input.acceptedInput.bindingId,
 	bindingGeneration: input.acceptedInput.bindingGeneration,
 	targetPodUid: input.acceptedInput.targetPodUid,
+	runtimeProcessId: input.acceptedInput.runtimeProcessId,
 });
 const checkpoint = extractThreadTurnCheckpoint({
 	contextEntries: loaded.contextEntries,
@@ -111,6 +114,7 @@ const cold = new ThreadRuntime({
 	bindingId: input.acceptedInput.bindingId,
 	bindingGeneration: input.acceptedInput.bindingGeneration,
 	targetPodUid: input.acceptedInput.targetPodUid,
+	runtimeProcessId: input.acceptedInput.runtimeProcessId,
 	runtimeBindingToken: loaded.runtimeBindingToken,
 });
 cold.state.contextManager.replaceEntries(loaded.contextEntries);

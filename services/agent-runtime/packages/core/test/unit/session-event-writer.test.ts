@@ -14,6 +14,7 @@ function envelope(writeId = "write_1"): SessionEventEnvelope {
 		bindingId: "binding_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		writeId,
 		modelRequestId: "model_request_1",
 		event: {

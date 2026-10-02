@@ -102,8 +102,13 @@
         "memory_versions": ["SELECT", "INSERT", "UPDATE"],
         "session_file_attachment_consumptions": ["SELECT", "INSERT"],
         "skill_versions": ["SELECT"],
-        "tetral_schema_migrations": ["SELECT"]
-      }
+        "tetral_schema_migrations": ["SELECT"],
+        "runtime_process_pods": ["SELECT", "INSERT", "UPDATE"],
+        "runtime_processes": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_handoffs": ["SELECT", "INSERT"],
+        "session_runtime_handoff_threads": ["SELECT", "INSERT"]
+      },
+      "functions": ["tetral_lock_runtime_process(text, text, text)"]
     },
     "cleanup": {
       "tables": {
@@ -176,6 +181,40 @@
         "session_threads": ["SELECT"],
         "session_events": ["SELECT"],
         "session_event_stream_changes": ["SELECT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "job_runner": {
+      "sequences": ["session_runtime_binding_generation_seq"],
+      "functions": ["tetral_lock_runtime_process(text, text, text)"],
+      "tables": {
+        "workspaces": ["SELECT"],
+        "sessions": ["SELECT", "UPDATE"],
+        "session_threads": ["SELECT", "UPDATE"],
+        "agent_versions": ["SELECT"],
+        "session_resources": ["SELECT"],
+        "session_memory_store_resources": ["SELECT"],
+        "session_sandbox_bindings": ["SELECT", "UPDATE", "DELETE"],
+        "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_events": ["SELECT", "INSERT", "UPDATE"],
+        "session_event_stream_changes": ["SELECT", "INSERT"],
+        "session_messages": ["SELECT", "UPDATE"],
+        "session_mcp_manifests": ["SELECT", "INSERT", "UPDATE"],
+        "session_turn_retries": ["SELECT", "UPDATE"],
+        "session_pending_tool_uses": ["SELECT", "UPDATE"],
+        "session_transient_attachments": ["SELECT", "UPDATE", "DELETE"],
+        "session_background_tasks": ["SELECT", "UPDATE", "DELETE"],
+        "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_status": ["SELECT", "UPDATE"],
+        "session_runtime_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_bridge_operations": ["SELECT", "INSERT", "UPDATE"],
+        "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "queue_jobs": ["SELECT", "INSERT", "UPDATE"],
+        "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
+        "runtime_process_pods": ["SELECT"],
+        "runtime_processes": ["SELECT"],
+        "session_runtime_handoffs": ["SELECT"],
+        "session_runtime_handoff_threads": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     }

@@ -35,7 +35,7 @@ that silently permits more than the default did.
 {{- if and .Values.cilium.gitProxyFQDNPolicy (not .Values.cilium.enabled) }}
 {{- fail "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true." }}
 {{- end }}
-{{- range $key := list "bridge" "jobRunner" "providerGateway" "mcpConnector" "webConnector" }}
+{{- range $key := list "api" "auth" "bridge" "jobRunner" "providerGateway" "mcpConnector" "webConnector" }}
 {{- $replicas := get $.Values.replicas $key }}
 {{- if or (not (has (kindOf $replicas) $numericKinds)) (not (regexMatch "^[1-9][0-9]*$" (toString $replicas))) }}
 {{- fail (printf "replicas.%s must be a positive integer." $key) }}
@@ -44,3 +44,38 @@ that silently permits more than the default did.
 {{- if not (kindIs "bool" .Values.autoscaling.providerGateway.enabled) }}
 {{- fail "autoscaling.providerGateway.enabled must be a boolean." }}
 {{- end }}
+{{- if ne .Values.routing.enabled true }}{{ fail "routing.enabled must be true: internal Istiod/Envoy routing is mandatory" }}{{ end }}
+{{- if ne .Values.routing.version "1.31.1" }}{{ fail "routing.version must match the locked Istio release 1.31.1" }}{{ end }}
+{{- if ne .Values.routing.revision "1-31-1" }}{{ fail "routing.revision must match the locked Istio revision" }}{{ end }}
+{{- if not (has .Values.transport.profile (list "standard-routed" "hardened")) }}{{ fail "transport.profile must be standard-routed or hardened" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" .Values.routing.trustDomain) }}{{ fail "routing.trustDomain must be a concrete DNS trust domain" }}{{ end }}
+{{- range $key := list "storeTrustConfigMap" "databaseServerName" "blobServerName" }}
+{{- if not (get $.Values.transport $key) }}{{ fail (printf "transport.%s is required for protected stores" $key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "runtimeDirectTrustConfigMap" "runtimeDirectLeafSecret" "runnerDirectLeafSecret" "runtimeServerName" }}
+{{- if not (get $.Values.transport $key) }}{{ fail (printf "transport.%s is required for the direct protected Runtime endpoint" $key) }}{{ end }}
+{{- end }}{{ end }}
+{{- range $key := list "databaseReserve" "goPoolMax" "bunPoolMax" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.transport $key))) }}{{ fail (printf "transport.%s must be a bounded positive integer" $key) }}{{ end }}
+{{- end }}
+{{- if not (regexMatch "^([1-9][0-9]*|[1-9][0-9]*%)$" (toString .Values.rollout.maxSurge)) }}{{ fail "rollout.maxSurge must be a bounded positive integer or percentage" }}{{ end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.autoscaling.providerGateway.maxReplicas)) }}{{ fail "autoscaling.providerGateway.maxReplicas must be bounded" }}{{ end }}
+{{- if and (ne .Values.transport.databaseCapacity nil) (not (regexMatch "^[1-9][0-9]*$" (toString .Values.transport.databaseCapacity))) }}{{ fail "transport.databaseCapacity must be a bounded positive integer or unknown" }}{{ end }}
+{{- if and (ne .Values.transport.externalDatabaseConnections nil) (not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.transport.externalDatabaseConnections))) }}{{ fail "transport.externalDatabaseConnections must declare a bounded nonnegative count or unknown" }}{{ end }}
+{{- if and (ne .Values.transport.databaseCapacity nil) (ne .Values.transport.externalDatabaseConnections nil) }}
+{{- $required := add (int (include "tetral.databasePoolSlots" .)) (int .Values.transport.databaseReserve) (int .Values.transport.externalDatabaseConnections) }}
+{{- if lt (int .Values.transport.databaseCapacity) (int $required) }}{{ fail (printf "transport.databaseCapacity is below the required aggregate connection budget %d" $required) }}{{ end }}
+{{- end }}
+
+{{- range $key := list "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.lifecycle $key))) }}{{ fail (printf "lifecycle.%s must be a bounded positive number of milliseconds" $key) }}{{ end }}
+{{- end }}
+{{- if gt (add (int .Values.lifecycle.bridgeDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Bridge drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.runnerDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 45000 }}{{ fail "Runner drain, cancellation join, resource/proxy margin must fit 45s Pod grace" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.sandboxDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Sandbox drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
+{{- if ge (add (int .Values.lifecycle.providerDrainMs) (int .Values.lifecycle.providerJoinMs) 5000) 60000 }}{{ fail "Provider Gateway business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
+{{- if ge (add (int .Values.lifecycle.mcpDrainMs) (int .Values.lifecycle.mcpJoinMs) 5000) 60000 }}{{ fail "MCP business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
+{{- if gt (int .Values.lifecycle.webDrainMs) 20000 }}{{ fail "Web drain must leave 10s join/proxy margin inside 30s Pod grace" }}{{ end }}
+{{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must leave 5s join margin inside 30s Pod grace" }}{{ end }}
+{{- if and (eq .Values.transport.profile "hardened") (gt (int .Values.lifecycle.queueDrainMs) 20000) }}{{ fail "Hardened Queue drain must leave 5s join and 5s proxy margin inside 30s Pod grace" }}{{ end }}

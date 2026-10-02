@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -488,7 +490,7 @@ func startProviderFailureRuntimeForBinding(t *testing.T, runtime, admin *sql.DB,
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": bindingGeneration, "targetPodUid": podUID,
+		"bindingGeneration": bindingGeneration, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"readyPath": readyPath, "statePath": process.statePath, "closePath": process.closePath,
 		"toolReleasePath": process.toolReleasePath, "scenario": scenario,
 	})
@@ -825,7 +827,7 @@ func startProviderRecoveryRuntime(
 	inputPath := filepath.Join(tempDir, "input.json")
 	encoded, err := json.Marshal(map[string]any{
 		"serveRecovery": true, "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
-		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID,
+		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"now": now.Format(time.RFC3339Nano), "readyPath": readyPath,
 		"recoveryResultPath": process.resultPath, "closePath": process.closePath,
 		"waitForSandboxObservation": waitForSandboxObservation,
@@ -957,7 +959,8 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 		Namespace: "tetral-agent-runtime", PodName: "runtime-recovered-binding-new",
 		PodUID: newPodUID, PodIP: "10.63.0.10",
 	}
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), replacement.Namespace, replacement.PodUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 	}}
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
@@ -995,7 +998,7 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": listener.Addr().String(),
 		"workspaceId":   "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID,
+		"bindingId": newBindingID, "bindingGeneration": newBindingGeneration, "targetPodUid": newPodUID, "runtimeProcessId": "process_" + newPodUID,
 		"now":         acceptedAt.Add(200 * time.Millisecond).Format(time.RFC3339Nano),
 		"preloadOnly": true, "terminationWriteId": durableTurnID, "terminationReplayCount": 2,
 	})
@@ -1023,13 +1026,20 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	if storedStatus != "idle" || storedBindingID.Valid || storedBindingGeneration.Valid || runningEventsAfter != runningEventsBefore || terminationOperations != 1 || liveBindings != 0 {
 		t.Fatalf("terminal residency status/binding/generation/running Events/operations/live bindings = %s/%v/%v/%d/%d/%d; want idle/null/null/%d/1/0", storedStatus, storedBindingID, storedBindingGeneration, runningEventsAfter, terminationOperations, liveBindings, runningEventsBefore)
 	}
+	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	if replay, replayErr := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
-		Scope: oldScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON,
+		Scope: newScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON,
 	}); replayErr != nil || replay.GetDuplicate() == nil {
 		t.Fatalf("exact termination receipt replay after unbinding = %#v/%v; want duplicate", replay, replayErr)
 	}
-	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
+	if replay, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{Scope: oldScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("previous lost owner obtained another owner's terminal receipt=%v/%v", replay, err)
+	}
+	var operationsAfter, bindingAfter int
+	if err := admin.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_runtime_termination'),(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&operationsAfter, &bindingAfter); err != nil || operationsAfter != terminationOperations || bindingAfter != liveBindings {
+		t.Fatalf("terminal receipt replay changed durable ownership: %d/%d/%v", operationsAfter, bindingAfter, err)
+	}
 	if ordinary, ordinaryErr := (agentruntimebridge.NewBridgeAPIServer(store)).WriteEvent(context.Background(), closeoutWriteEventRequest(newScope, "rwrite_recovered_binding_post_terminal")); ordinaryErr != nil || ordinary.GetStale() == nil {
 		t.Fatalf("ordinary replacement declaration after termination = %#v/%v; want stale", ordinary, ordinaryErr)
 	}
@@ -1263,12 +1273,13 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		Namespace: "tetral-agent-runtime", PodName: "runtime-provider-reschedule-new",
 		PodUID: newPodUID, PodIP: "127.0.0.1",
 	}
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), replacement.Namespace, replacement.PodUID)
 	deliveryStore.RuntimeGRPCPort = runtimeProcess.port
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 	}}
 	sender := &responseLosingRecoveryCommandClient{
-		RuntimePodCommandClient: jobrunner.NewRuntimePodCommandClient(providerRecoveryTokenSource{}), loseFirst: true,
+		RuntimePodCommandClient: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{}), loseFirst: true,
 	}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
@@ -1604,8 +1615,9 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond), false,
 	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", newPodUID)
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-subagent-reschedule-new",
 			PodUID: newPodUID, PodIP: "127.0.0.1",
@@ -1613,7 +1625,7 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(providerRecoveryTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "subagent-reschedule-recovery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	for delivery := 0; delivery < 2; delivery++ {

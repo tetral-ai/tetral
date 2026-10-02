@@ -13,6 +13,9 @@ import (
 )
 
 type BridgeAPIStore interface {
+	ReleaseRuntimeBinding(context.Context, *bridgev1.ReleaseRuntimeBindingRequest) (*bridgev1.ReleaseRuntimeBindingResponse, error)
+	RegisterRuntimeProcess(context.Context, *bridgev1.RegisterRuntimeProcessRequest) (*bridgev1.RegisterRuntimeProcessResponse, error)
+	ReportRuntimeProcess(context.Context, *bridgev1.ReportRuntimeProcessRequest) (*bridgev1.ReportRuntimeProcessResponse, error)
 	LoadContext(context.Context, *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error)
 	RefreshRuntimeBindingToken(context.Context, *bridgev1.RefreshRuntimeBindingTokenRequest) (*bridgev1.RefreshRuntimeBindingTokenResponse, error)
 	CommitInputs(context.Context, *bridgev1.CommitInputsRequest) (*bridgev1.CommitInputsResponse, error)

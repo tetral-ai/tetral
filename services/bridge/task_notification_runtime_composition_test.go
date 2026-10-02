@@ -49,7 +49,8 @@ func TestTaskNotificationCanonicalShapesCrossRuntimeDeclarationBoundary(t *testi
 			request := &agentruntimev1.AcceptTaskNotificationRequest{
 				WorkspaceId: "default", SessionId: "sesn_task_shape", SessionThreadId: "thr_task_shape",
 				BindingId: "bind_task_shape", BindingGeneration: 1, TargetPodUid: "pod_task_shape",
-				RuntimeInputId: "task_notification:" + testCase.taskID, InputOrder: 0,
+				RuntimeProcessId: "process_pod_task_shape",
+				RuntimeInputId:   "task_notification:" + testCase.taskID, InputOrder: 0,
 				NotificationJson: payload,
 			}
 			composed, err := runTaskNotificationRuntimeComposition(context.Background(), t.TempDir()+"/shape.json", request, nil)
@@ -91,9 +92,9 @@ func runTaskNotificationRuntimeComposition(
 		"sessionThreadId":   request.GetSessionThreadId(),
 		"bindingId":         request.GetBindingId(),
 		"bindingGeneration": request.GetBindingGeneration(),
-		"targetPodUid":      request.GetTargetPodUid(),
-		"runtimeInputId":    request.GetRuntimeInputId(),
-		"inputOrder":        request.GetInputOrder(),
+		"targetPodUid":      request.GetTargetPodUid(), "runtimeProcessId": request.GetRuntimeProcessId(),
+		"runtimeInputId": request.GetRuntimeInputId(),
+		"inputOrder":     request.GetInputOrder(),
 	}
 	if commitResponse != nil {
 		var outcome map[string]any

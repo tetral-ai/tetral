@@ -190,6 +190,9 @@ func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testin
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1' WHERE session_id=$1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
 
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-follower-production-key")
@@ -243,14 +246,15 @@ func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testin
 	queueStore := queue.NewPostgreSQLStore(client)
 	newRunner := func(port int, owner string) *jobrunner.JobRunner {
 		deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
-		deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+		deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 				Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 			}})
 		}}
 		return &jobrunner.JobRunner{
 			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 			Config:    jobrunner.JobRunnerConfig{LeaseOwner: owner, MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
 	}
@@ -365,9 +369,10 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 		bridge:                        apiStore,
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
-			Namespace: "engine", PodName: "runtime-accepted-residue", PodUID: podUID, PodIP: "127.0.0.1",
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
 		}})
 	}}
 	direct := jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}
@@ -500,9 +505,10 @@ func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *test
 		bridge:                        apiStore,
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
-			Namespace: "engine", PodName: "runtime-interrupt-queue-order", PodUID: podUID, PodIP: "127.0.0.1",
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
@@ -607,14 +613,15 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("align Runtime binding: %v", err)
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-production-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
@@ -674,7 +681,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	}); err != nil {
 		t.Fatalf("enqueue cleanup during hot Thread run: %v", err)
 	}
-	cleanupSender := &countingCleanupSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})}
+	cleanupSender := &countingCleanupSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})}
 	cleanupRunner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: cleanupSender},
@@ -1035,12 +1042,13 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		t.Fatalf("align joined replay Runtime binding: %v", err)
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
-	baseSender := jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	baseSender := fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})
 	captureSender := &interruptRequestCaptureSender{RuntimeCommandSender: baseSender}
 	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &jobrunner.JobRunner{
@@ -1251,7 +1259,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		t.Fatalf("read pre-loss interrupt identity: %v", err)
 	}
 
-	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	repairStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
@@ -1298,13 +1306,14 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		_ = bridgeListener.Close()
 	})
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", newPodUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	queueStore := queue.NewPostgreSQLStore(client)
-	baseSender := jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	baseSender := fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})
 	recoverySender := &blockingRecoveryCommandSender{
 		RuntimeCommandSender: baseSender,
 		recovery:             baseSender,
@@ -1553,7 +1562,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		t.Fatalf("replay interrupt receipt while durable Turn is open = %#v/%t/%v; want not found", replayed, found, replayErr)
 	}
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
-	repairStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	repairStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
@@ -1591,12 +1600,13 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		_ = bridgeListener.Close()
 	})
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", newPodUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
 	}}
-	baseSender := jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})
+	baseSender := fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})
 	recoverySender := &blockingRecoveryCommandSender{
 		RuntimeCommandSender: baseSender,
 		recovery:             baseSender,
@@ -1821,7 +1831,8 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 		t.Fatalf("align actor Runtime binding: %v", err)
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
@@ -1829,7 +1840,7 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 	queueStore := queue.NewPostgreSQLStore(client)
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-actor-closeout", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
@@ -1969,14 +1980,15 @@ func runPostgreSQLColdInterruptProductionCase(t *testing.T, explicitChild bool) 
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "interrupt-cold-production", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
@@ -2231,7 +2243,7 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": bindingGeneration,
-		"targetPodUid": podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
+		"targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "readyPath": readyPath, "toolStartedPath": paths.toolStarted,
 		"acceptResultPath":              paths.acceptResult,
 		"durableOperationCompletedPath": paths.operationCompleted,
 		"closePath":                     paths.close,

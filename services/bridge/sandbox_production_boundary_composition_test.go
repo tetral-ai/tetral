@@ -142,7 +142,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 	fixtureInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"modelRequestId": modelRequestID, "modelToolCallId": modelToolCallID,
 		"toolName": toolName, "providerInput": json.RawMessage(providerInputJSON),
 	})

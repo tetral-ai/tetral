@@ -343,6 +343,7 @@ function recoveredThreadRunOpeningSource(
 
 /** Tells SessionManager whether one run retains, discards, or releases the thread's hot state. */
 export type ThreadLoopRunResult =
+	| { readonly type: "checkpoint_yield" }
 	| {
 			readonly type: "completed";
 			readonly modelMessageCount: number;
@@ -570,6 +571,8 @@ export interface ThreadLoopRuntimeOptions {
 	readonly runtime: RuntimeDependencies;
 	readonly llmService: LLMServiceInterface;
 	readonly storeOperationTimeoutMs: number;
+	readonly commitAcceptedInputTimeoutMs?: number;
+	readonly phaseDeadline?: () => number | undefined;
 	readonly maxNormalizedTextPreviewBytes?: number;
 	readonly createProcessor?: (
 		options: ProviderStreamAccumulatorOptions,
@@ -1388,6 +1391,9 @@ function runThreadLoopEffect(
 				return { type: "interrupted" };
 			}
 			seedRuntimeModel(session, options);
+			if (session.state.runtimeCheckpointYieldRequested()) {
+				return { type: "checkpoint_yield" };
+			}
 			const recoveredNextStep = interpretThreadTurnNextStep(
 				session.state.threadTurnTransition().nextStep,
 			).nextStep;
@@ -1435,6 +1441,9 @@ function runThreadLoopEffect(
 				return failRecoveredOpenRequest(session);
 			}
 			while (true) {
+				if (session.state.runtimeCheckpointYieldRequested()) {
+					return { type: "checkpoint_yield" };
+				}
 				let acceptedContextCommitted = false;
 				let statusRunningAlreadyAppended = runStatusRunningAppended;
 				if (
@@ -1745,6 +1754,12 @@ function runThreadLoopEffect(
 					options,
 					custody,
 				);
+				if (
+					session.state.runtimeCheckpointYieldRequested() &&
+					pendingApprovalResume.type !== "failed"
+				) {
+					return { type: "checkpoint_yield" };
+				}
 				if (pendingApprovalResume.type === "failed") {
 					return pendingApprovalResume;
 				}
@@ -2124,6 +2139,9 @@ function runThreadLoopEffect(
 				}
 				if (runtimeResult.type === "rescheduled") {
 					pendingProviderRequestReschedule = true;
+					if (session.state.runtimeCheckpointYieldRequested()) {
+						return { type: "checkpoint_yield" };
+					}
 					const waited = yield* waitForProviderRequestRescheduleEffect(
 						session,
 						options,
@@ -2140,6 +2158,9 @@ function runThreadLoopEffect(
 					continue;
 				}
 				if (runtimeResult.type === "context_overflow") {
+					if (session.state.runtimeCheckpointYieldRequested()) {
+						return { type: "checkpoint_yield" };
+					}
 					reactiveContextOverflowPending = true;
 					const compaction = options.compaction;
 					if (compaction === undefined) {
@@ -2204,6 +2225,9 @@ function runThreadLoopEffect(
 				const turnNextStep = interpretThreadTurnNextStep(
 					turnTransition.nextStep,
 				).nextStep;
+				if (session.state.runtimeCheckpointYieldRequested()) {
+					return { type: "checkpoint_yield" };
+				}
 				if (
 					turnNextStep.action === "commit_accepted_input" &&
 					session.state
@@ -2276,6 +2300,9 @@ function runThreadLoopEffect(
 		),
 		Effect.onExit((exit) =>
 			Effect.suspend(() => {
+				if (Exit.isSuccess(exit) && exit.value.type === "checkpoint_yield") {
+					return Effect.void;
+				}
 				// A stale operation result has already revoked execution custody;
 				// no interrupt fallback may issue another durable write afterward.
 				if (
@@ -2484,7 +2511,8 @@ export async function commitAcceptedInputWithRetry(
 					rawAttempt,
 					options.runtime
 						.sleep(
-							SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+							options.commitAcceptedInputTimeoutMs ??
+								SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
 							timeoutController.signal,
 						)
 						.then((elapsed) => ({
@@ -3633,6 +3661,7 @@ function coordinateProviderTurnEffect(
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				contextOwner: session.state.contextManager,
 				...(options.maxNormalizedTextPreviewBytes !== undefined
 					? {
@@ -3960,6 +3989,22 @@ function coordinateProviderTurnEffect(
 						session.state.runtimeShutdownRequested(),
 					),
 				);
+				if (session.state.runtimeCheckpointExpired()) {
+					processor.cancelUndeclaredToolUses();
+					yield* interruptProvider;
+					return yield* closeProviderFailureEffect(
+						session,
+						options,
+						processor,
+						source,
+						request,
+						spanStartAppend.eventId,
+						streamState.modelUsage,
+						runtimeCheckpointExpiryFailure(session.sessionId),
+						turnRetryCounters,
+						streamState,
+					);
+				}
 				if (Exit.isSuccess(streamExit)) {
 					if (
 						streamExit.value.type !== "completed" ||
@@ -4015,6 +4060,21 @@ function coordinateProviderTurnEffect(
 						(barrier) => Deferred.await(barrier),
 						{ concurrency: "unbounded" },
 					);
+					if (session.state.runtimeCheckpointExpired()) {
+						processor.cancelUndeclaredToolUses();
+						return yield* closeProviderFailureEffect(
+							session,
+							options,
+							processor,
+							source,
+							request,
+							spanStartAppend.eventId,
+							streamState.modelUsage,
+							runtimeCheckpointExpiryFailure(session.sessionId),
+							turnRetryCounters,
+							streamState,
+						);
+					}
 					if (declarationOutcomes.some((declared) => !declared)) {
 						const toolResult = yield* joinToolFibersEffect(
 							session,
@@ -4982,6 +5042,7 @@ function resumeRecoveredToolJobEffect(
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeBindingToken: session.identity.runtimeBindingToken,
 				modelRequestId: pending.modelRequestId,
 				modelToolCallId: pending.job.modelToolCallId,
@@ -4990,6 +5051,7 @@ function resumeRecoveredToolJobEffect(
 				entry: pending.entry,
 				input: pending.job.input,
 				retainedContextEntries: session.state.contextManager.entries(),
+				checkpointSignal: session.state.checkpointSignal(),
 				backgroundCancellationIntent: () =>
 					session.state.userInterruptRequested()
 						? "user_interrupt"
@@ -5057,6 +5119,13 @@ function resumeRecoveredToolJobEffect(
 					options.runTool ?? defaultRuntimeToolRunner,
 					ToolRouteCancelJoinTimeoutMs,
 				);
+			}
+			if (
+				ownsSandboxExecution &&
+				session.state.runtimeCheckpointYieldRequested() &&
+				executionResult.type === "cancelled"
+			) {
+				return { type: "settled" as const };
 			}
 			if (executionResult.type === "stale_custody") {
 				return providerTurnInterruptedWithDiscard();
@@ -5141,6 +5210,7 @@ async function commitRecoveredToolSettlement(
 		bindingId: session.identity.bindingId,
 		bindingGeneration: session.identity.bindingGeneration,
 		targetPodUid: session.identity.targetPodUid,
+		runtimeProcessId: session.identity.runtimeProcessId,
 		settlement: declaration,
 	});
 	if (!result.ok) {
@@ -5375,6 +5445,10 @@ function coordinateRuntimeToolJobEffect(
 					),
 				);
 			}
+			const releaseReviewDependency = session.state.beginReviewDependency(
+				modelRequestId,
+				job.modelToolCallId,
+			);
 			const reviewerOutcome = yield* Effect.gen(function* () {
 				if (
 					options.reviewApproval === undefined ||
@@ -5399,6 +5473,7 @@ function coordinateRuntimeToolJobEffect(
 					bindingId: session.identity.bindingId,
 					bindingGeneration: session.identity.bindingGeneration,
 					targetPodUid: session.identity.targetPodUid,
+					runtimeProcessId: session.identity.runtimeProcessId,
 					runtimeBindingToken: session.identity.runtimeBindingToken,
 					modelRequestId,
 					parentBoundaryEventId,
@@ -5424,6 +5499,7 @@ function coordinateRuntimeToolJobEffect(
 					currentModel: session.state.currentModel(),
 				});
 			}).pipe(
+				Effect.ensuring(Effect.sync(releaseReviewDependency)),
 				Effect.catchCause(() =>
 					Effect.succeed({
 						type: "settlement_failed" as const,
@@ -5435,6 +5511,14 @@ function coordinateRuntimeToolJobEffect(
 					}),
 				),
 			);
+			// Cancellation after the checkpoint deadline closes this admitted
+			// step as failed; an unavailable reviewer cannot open user approval.
+			if (session.state.runtimeCheckpointExpired()) {
+				return providerTurnFailed(
+					runtimeCheckpointExpiryFailure(session.sessionId),
+					"event_write_failed",
+				);
+			}
 			if (reviewerOutcome.type === "stale_custody") {
 				return providerTurnInterruptedWithDiscard();
 			}
@@ -5625,6 +5709,7 @@ function coordinateRuntimeToolJobEffect(
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeBindingToken: session.identity.runtimeBindingToken,
 				modelRequestId,
 				modelToolCallId: job.modelToolCallId,
@@ -5633,6 +5718,7 @@ function coordinateRuntimeToolJobEffect(
 				entry,
 				input: job.input,
 				retainedContextEntries: session.state.contextManager.entries(),
+				checkpointSignal: session.state.checkpointSignal(),
 				backgroundCancellationIntent: () =>
 					session.state.userInterruptRequested()
 						? "user_interrupt"
@@ -5709,6 +5795,14 @@ function coordinateRuntimeToolJobEffect(
 								ToolRouteCancelJoinTimeoutMs,
 							)
 						: acceptance;
+			}
+			if (
+				tracksSandboxExecution &&
+				session.state.runtimeCheckpointYieldRequested() &&
+				executionResult.type === "cancelled"
+			) {
+				state.toolScheduler.finishJob(job.id);
+				return providerTurnCompleted();
 			}
 			if (executionResult.type === "stale_custody") {
 				return providerTurnInterruptedWithDiscard();
@@ -5895,6 +5989,17 @@ function handleProviderStreamExhaustedEffect(
 			turnRetryCounters,
 			state,
 		);
+	});
+}
+
+function runtimeCheckpointExpiryFailure(sessionId: string): RuntimeFailure {
+	return normalizeRuntimeFailure({
+		type: "runtime",
+		code: "timeout",
+		reason: "timeout",
+		retryable: false,
+		fatal: false,
+		sessionId,
 	});
 }
 
@@ -7171,6 +7276,7 @@ async function appendModelRequestEndEvent(
 		bindingId: session.identity.bindingId,
 		bindingGeneration: session.identity.bindingGeneration,
 		targetPodUid: session.identity.targetPodUid,
+		runtimeProcessId: session.identity.runtimeProcessId,
 		writeId,
 		modelRequestId,
 		providerContextRetention,
@@ -7683,6 +7789,7 @@ async function appendEventWithWriteId(
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 			writeId,
 			event,
 			...(modelRequestId !== undefined ? { modelRequestId } : {}),
@@ -7719,7 +7826,10 @@ function storeControls(
 ): RuntimeDeclarationOperationControls {
 	return {
 		signal,
-		timeoutMs: options.storeOperationTimeoutMs,
+		timeoutMs: Math.min(
+			options.storeOperationTimeoutMs,
+			Math.max(1, (options.phaseDeadline?.() ?? Infinity) - Date.now()),
+		),
 		sleep: options.runtime.sleep,
 	};
 }

@@ -237,7 +237,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		evidence.Kind = "transaction"
@@ -278,6 +278,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			}
 			duplicate = true
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if interruptRequest != nil {
@@ -924,7 +927,7 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
@@ -948,6 +951,9 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			}
 			duplicate = true
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {

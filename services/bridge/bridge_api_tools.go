@@ -33,19 +33,20 @@ import (
 
 const (
 	sandboxToolExecuteMaxAttempts = 5
-	sandboxExecutionWaitTimeout   = 30 * time.Second
 )
 
 // AcceptSandboxExecution durably transfers one already-authored Tool Use to
 // Sandbox Service. The execution row and refs-only Queue job become visible
 // together, and the ACK returns immediately after that transaction commits.
 func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
+	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	defer cancelAdmission()
 	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
 	}
 	created := false
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.accept_sandbox_execution", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := lockSandboxExecutionThreadTx(ctx, tx, request.GetScope()); err != nil {
@@ -70,6 +71,9 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 				return status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
 			}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -118,7 +122,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if runtimecontrol.IsConversationMutationStaleError(err) {
 			return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionStale{}}}, nil
 		}
-		return nil, err
+		return nil, bridgeContextError(ctx, err)
 	}
 	if created {
 		return &bridgev1.AcceptSandboxExecutionResponse{Outcome: &bridgev1.AcceptSandboxExecutionResponse_Committed{Committed: &bridgev1.SandboxExecutionCommitted{}}}, nil
@@ -145,12 +149,13 @@ func rejectSandboxExecutionAfterReleaseFenceTx(ctx context.Context, tx *dbconnec
 
 // AwaitSandboxExecution reads one accepted execution until Sandbox Service
 // settles it. It never creates an execution row or Queue job.
-func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (response *bridgev1.AwaitSandboxExecutionResponse, err error) {
+	defer func() { err = bridgeContextError(ctx, err) }()
 	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
 	}
 	if err := s.withScopeReadOnlyTx(ctx, request.GetScope(), "agentruntimebridge.await_sandbox_execution", func(tx *dbconnect.Tx) error {
-		return verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope())
+		return verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, request.GetScope())
 	}); err != nil {
 		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.AwaitSandboxExecutionResponse{Outcome: &bridgev1.AwaitSandboxExecutionResponse_Stale{Stale: &bridgev1.SandboxExecutionAwaitStale{}}}, nil
@@ -347,7 +352,7 @@ func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool runtimecon
 // the generation and forces an immediate re-read. PostgreSQL is the only
 // result authority; notification and reconnect catch-up hints schedule re-reads.
 func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (runtimeToolResult, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, sandboxExecutionWaitTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().SandboxResultWait)
 	defer cancel()
 	resultHub := s.executionResultWake()
 	resultKey := sandboxExecutionResultKey(request.GetScope(), request.GetToolUseEventId())
@@ -364,12 +369,12 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 			if err != nil {
 				return err
 			}
-			stored, found, err = readRuntimeToolResultReadOnlyTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId())
+			stored, found, err = readRuntimeToolReceiptReadOnlyTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId())
 			return err
 		})
 		if err != nil {
 			if waitCtx.Err() != nil {
-				return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+				return runtimeToolResult{}, status.FromContextError(waitCtx.Err()).Err()
 			}
 			return runtimeToolResult{}, err
 		}
@@ -386,7 +391,7 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
 		}
 		if err := wake.WaitForWake(waitCtx, snapshot); err != nil {
-			return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+			return runtimeToolResult{}, status.FromContextError(waitCtx.Err()).Err()
 		}
 	}
 }
@@ -413,6 +418,9 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 //     not fanned out and see the change only at their own next materialization
 //     (cold return); this package must not grow a cross-session fan-out.
 func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error) {
+	waitParent := ctx
+	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	defer cancelAdmission()
 	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
 	}
@@ -420,7 +428,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 	var response *bridgev1.RunMemoryResponse
 	phaseTwoDuplicate := false
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_memory", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.tool_use", true)
@@ -443,6 +451,9 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 			}
 			response = duplicateMemoryRunResponse(existing.ResultJSON)
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "memory_execute"); err != nil {
 			return err
@@ -516,10 +527,11 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		if runtimecontrol.IsConversationMutationStaleError(err) {
 			return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Stale{Stale: &bridgev1.MemoryRunStale{}}}, nil
 		}
-		return nil, err
+		return nil, bridgeContextError(ctx, err)
 	}
+	cancelAdmission()
 	if response == nil {
-		response, err := s.completePendingMemoryProjection(ctx, request, phaseTwoDuplicate)
+		response, err := s.completePendingMemoryProjection(waitParent, request, phaseTwoDuplicate)
 		if runtimecontrol.IsScopeSupersededError(err) {
 			return &bridgev1.RunMemoryResponse{Outcome: &bridgev1.RunMemoryResponse_Stale{Stale: &bridgev1.MemoryRunStale{}}}, nil
 		}
@@ -562,7 +574,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
@@ -586,6 +598,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			}
 			duplicate = true
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -775,13 +790,16 @@ func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolNa
 	return "internal_invalid_tool_" + hex.EncodeToString(hash.Sum(nil))
 }
 
-func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, duplicate bool) (*bridgev1.RunMemoryResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, duplicate bool) (response *bridgev1.RunMemoryResponse, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().MemoryProjectionWait)
+	defer cancel()
+	defer func() { err = bridgeContextError(ctx, err) }()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		var response *bridgev1.RunMemoryResponse
 		if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.await_memory_projection", func(tx *dbconnect.Tx) error {
-			if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
+			if err := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
 				return err
 			}
 			existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
@@ -814,7 +832,7 @@ func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.C
 		}
 		select {
 		case <-ctx.Done():
-			return nil, status.Error(codes.DeadlineExceeded, "memory projection result is not ready")
+			return nil, status.FromContextError(ctx.Err()).Err()
 		case <-ticker.C:
 		}
 	}

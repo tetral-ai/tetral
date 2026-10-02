@@ -46,13 +46,17 @@
     "files",
     "memory_stores",
     "memories",
-    "memory_versions"
+    "memory_versions",
+    "session_runtime_handoffs",
+    "session_runtime_handoff_threads"
   ],
   "append_only_workspace_table": "session_file_attachment_consumptions",
   "global_tables": [
     "platform_provider_keys",
     "tetral_schema_migrations",
-    "workspaces"
+    "workspaces",
+    "runtime_process_pods",
+    "runtime_processes"
   ],
   "special_policies": [
     {

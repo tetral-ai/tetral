@@ -58,6 +58,7 @@ const command = {
 	bindingId: "composition_binding",
 	bindingGeneration: 1,
 	targetPodUid: "composition_pod",
+	runtimeProcessId: "process-test",
 };
 
 const loadContext = async (contextJson: string) => {
@@ -69,6 +70,7 @@ const loadContext = async (contextJson: string) => {
 			loadContext: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, response: unknown) => void,
 			) => {
 				callback(null, {

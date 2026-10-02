@@ -658,7 +658,7 @@ func testBaselineDigest(ctx context.Context, db *sql.DB) (string, error) {
 	}
 	return digestBaselineInputs(baselineInputs{
 		helperFormat:       helperFormat,
-		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum + ":" + storage.PostgreSQLSchemaVersionTwoChecksum,
+		schemaChecksum:     storage.PostgreSQLSchemaVersionOneChecksum,
 		postgresqlContract: database.PostgreSQLContractDigest(),
 		roleContract:       database.RoleContractDigest(),
 		seed:               strings.Join([]string{testSeedStatement, string(workspace.DefaultID), testSeedName, testSeedCreatedAt}, "\x00"),
@@ -940,6 +940,7 @@ func cloneSchemaGrantStatements(roleName string) []string {
 		"GRANT USAGE ON SCHEMA public TO " + roleName,
 		"GRANT ALL ON ALL TABLES IN SCHEMA public TO " + roleName,
 		"GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO " + roleName,
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_lock_runtime_process(text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
 	}
 }
 

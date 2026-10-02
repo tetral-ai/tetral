@@ -121,6 +121,7 @@ function interruptStateCommand(
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,
+		runtimeProcessId: command.runtimeProcessId,
 		runtimeInputId: command.runtimeInputId,
 		origin: command.origin,
 	};
@@ -133,6 +134,7 @@ export interface RuntimeCleanupSessionCommand {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly cleanupOperationId: string;
 }
 
@@ -196,6 +198,7 @@ export type AcceptInputResult =
 
 /** Result of a thread preload, interrupt, activation, or close operation. */
 export type RunExitOutcome =
+	| "checkpoint_yield"
 	| "completed_clean"
 	| "interrupt_applied"
 	| "failed_closeout";
@@ -395,7 +398,24 @@ export interface Interface {
 		command: RuntimeThreadAddressState,
 		token: ReviewerExecutionToken,
 	) => Effect.Effect<ReviewerExecutionSnapshotResult>;
+	readonly quiesce: (options: RuntimeQuiesceOptions) => Effect.Effect<void>;
 	readonly shutdownActiveRuns: () => Effect.Effect<void>;
+}
+
+/** Shared process phase deadlines; each Session releases independently after its full hot barrier. */
+export interface RuntimeQuiesceOptions {
+	readonly observe?: (
+		scope: RuntimeThreadAddressState,
+		phase: "expired" | "failed_joined",
+		parentThreadId?: string,
+	) => void;
+	readonly ingressJoined?: Promise<void>;
+	readonly currentStepDeadline: number;
+	readonly settlementDeadline: number;
+	readonly release: (
+		scope: RuntimeThreadAddressState,
+		deadline: number,
+	) => Promise<void>;
 }
 
 /** Dependencies and local capacity limits used to construct SessionManager. */
@@ -530,6 +550,10 @@ interface ThreadEntry {
 	interruptLeaseRef: RuntimeInterruptControlCommand["interruptLeaseRef"] | undefined;
 	bridgeScope: RuntimeThreadAddressState | undefined;
 	lastCompletedReviewerExecutionToken: ReviewerExecutionToken | undefined;
+	reviewDependency?: {
+		readonly parentThreadId: string;
+		readonly targetModelToolCallId: string;
+	};
 	readonly approvalReviewer: AutoApprovalReviewerManager | undefined;
 }
 
@@ -601,6 +625,12 @@ export function layer(
 			const closeoutSleep = options.closeoutSleep ?? defaultCloseoutSleep;
 			const installationScope = yield* Scope.make();
 			let admissionClosed = false;
+			let quiescing: RuntimeQuiesceOptions | undefined;
+			let checkpointExpired = false;
+			const quiesceEntries = new Map<
+				SessionEntry,
+				ThreadRuntime.RuntimeThreadIdentity
+			>();
 			let nextRunId = 0;
 			let nextCloseoutId = 0;
 			const activeCloseouts = new Map<
@@ -709,7 +739,11 @@ export function layer(
 				sessionEntry: SessionEntry,
 				backoffMs: number,
 			): Promise<"elapsed" | "shutdown"> => {
-				if (sessionEntry.runtimeShutdown.requested) {
+				if (
+					sessionEntry.runtimeShutdown.requested ||
+					(quiescing !== undefined &&
+						Date.now() >= quiescing.settlementDeadline)
+				) {
 					return "shutdown";
 				}
 				const controller = new AbortController();
@@ -817,6 +851,7 @@ export function layer(
 				}
 				const entry = createSessionEntry(identity);
 				sessions.set(key, entry);
+				if (quiescing !== undefined) quiesceEntries.set(entry, identity);
 				recordHotStateMetrics();
 				return { entry, created: true };
 			};
@@ -874,6 +909,8 @@ export function layer(
 					installationState,
 				);
 				sessionResult.entry.threads.set(identity.sessionThreadId, threadEntry);
+				if (quiescing !== undefined)
+					quiesceThread(sessionResult.entry, threadEntry);
 				if (sessionResult.created && installationState === "ready") {
 					sessionResult.entry.sharedStateStatus = "ready";
 					sessionResult.entry.completeSharedStateReady(true);
@@ -914,6 +951,7 @@ export function layer(
 				bindingId: command.bindingId,
 				bindingGeneration: command.bindingGeneration,
 				targetPodUid: command.targetPodUid,
+				runtimeProcessId: command.runtimeProcessId,
 				runtimeBindingToken: commandRuntimeBindingToken(command),
 			});
 
@@ -1064,6 +1102,8 @@ export function layer(
 				threadEntry: ThreadEntry,
 			): boolean =>
 				!sessionEntry.runtimeShutdown.requested &&
+				(quiescing === undefined ||
+					reviewerDependencyAllowed(sessionEntry, threadEntry)) &&
 				sessionEntry.threads.get(threadEntry.sessionThreadId) === threadEntry &&
 				threadEntry.status !== "closed_for_runtime" &&
 				threadEntry.status !== "failed" &&
@@ -1268,12 +1308,25 @@ export function layer(
 						return;
 					}
 					yield* closeRunScope(runSlot, exit);
+					if (Exit.isSuccess(exit) && exit.value.type === "checkpoint_yield") {
+						// The durable turn remains owned until the binding-release receipt.
+						// A scheduling yield cannot settle it or start a successor locally.
+						threadEntry.runSlot = undefined;
+						threadEntry.status = "idle";
+						recordHotStateMetrics();
+						yield* completeRunSlot(runSlot, exit);
+						return;
+					}
 					if (sessionEntry.runtimeShutdown.requested) {
 						yield* releaseThreadSubtree(sessionEntry, threadEntry);
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
-					if (Exit.hasFails(exit) || Exit.hasDies(exit)) {
+					if (
+						Exit.hasFails(exit) ||
+						Exit.hasDies(exit) ||
+						(checkpointExpired && Exit.isFailure(exit))
+					) {
 						const closeout = yield* settleFailedRunCloseout(
 							sessionEntry,
 							threadEntry,
@@ -1286,6 +1339,23 @@ export function layer(
 							// No successful input commit can release the accepted fact. Retain the
 							// completed run slot as a loud custody fence until Pod shutdown
 							// transfers ownership through binding-loss reconciliation.
+							yield* completeRunSlot(runSlot, exit);
+							return;
+						}
+						if (
+							checkpointExpired &&
+							closeout === "continuation" &&
+							runSlot.reviewerExecutionToken !== undefined &&
+							threadEntry.runtimeThread.state.threadTurnTransition().checkpoint
+								.executionRunId === undefined
+						) {
+							// The reviewer orchestrator still owns this exact execution
+							// until its failed outcome and close acknowledgement join.
+							threadEntry.lastCompletedReviewerExecutionToken =
+								runSlot.reviewerExecutionToken;
+							runSlot.ownerFiber = undefined;
+							threadEntry.status = "idle";
+							recordHotStateMetrics();
 							yield* completeRunSlot(runSlot, exit);
 							return;
 						}
@@ -1552,6 +1622,20 @@ export function layer(
 								threadResult.threadEntry.runSlot !== undefined
 							) {
 								return { ok: false, sessionId, reason: "thread_busy" };
+							}
+							if (command.kind === "approval_review") {
+								threadResult.threadEntry.reviewDependency = {
+									parentThreadId: command.parentThreadId,
+									targetModelToolCallId: command.targetModelToolCallId,
+								};
+								if (
+									quiescing !== undefined &&
+									!reviewerDependencyAllowed(
+										threadResult.sessionEntry,
+										threadResult.threadEntry,
+									)
+								)
+									return { ok: false, sessionId, reason: "thread_busy" };
 							}
 							const accepted =
 								threadResult.threadEntry.acceptedInputQueue.enqueueAcceptedInput(
@@ -2214,6 +2298,7 @@ export function layer(
 									bindingId: command.bindingId,
 									bindingGeneration: command.bindingGeneration,
 									targetPodUid: command.targetPodUid,
+									runtimeProcessId: command.runtimeProcessId,
 								});
 								if (
 									applied &&
@@ -2307,6 +2392,7 @@ export function layer(
 						bindingId: command.bindingId,
 						bindingGeneration: command.bindingGeneration,
 						targetPodUid: command.targetPodUid,
+						runtimeProcessId: command.runtimeProcessId,
 						runtimeBindingToken: command.runtimeBindingToken,
 					};
 					const threadResult = getOrCreateThreadEntry(
@@ -3406,6 +3492,151 @@ export function layer(
 					};
 				});
 
+			const reviewerDependencyAllowed = (
+				entry: SessionEntry,
+				thread: ThreadEntry,
+			): boolean => {
+				const dependency = thread.reviewDependency;
+				return (
+					!checkpointExpired &&
+					Date.now() < (quiescing?.currentStepDeadline ?? Infinity) &&
+					thread.runtimeThread.identity.threadRole === "approval_reviewer" &&
+					dependency !== undefined &&
+					entry.threads
+						.get(dependency.parentThreadId)
+						?.runtimeThread.state.allowsReviewDependency(
+							dependency.targetModelToolCallId,
+						) === true
+				);
+			};
+			const quiesceThread = (
+				entry: SessionEntry,
+				thread: ThreadEntry,
+			): void => {
+				thread.runtimeThread.state.beginRuntimeQuiesce(() =>
+					reviewerDependencyAllowed(entry, thread),
+				);
+			};
+			const quiesce = (phase: RuntimeQuiesceOptions): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					if (quiescing !== undefined) return;
+					quiescing = phase;
+					const entries = [...sessions.values()].map((entry) => ({
+						entry,
+						scope: [...entry.threads.values()][0]?.runtimeThread.identity,
+					}));
+					for (const { entry, scope } of entries)
+						if (scope !== undefined) quiesceEntries.set(entry, scope);
+					for (const { entry } of entries)
+						for (const thread of entry.threads.values())
+							quiesceThread(entry, thread);
+					const drainEntry = (
+						entry: SessionEntry,
+						scope: ThreadRuntime.RuntimeThreadIdentity,
+					) =>
+						Effect.gen(function* () {
+							let expired = false;
+							const observe = (
+								phaseName: "expired" | "failed_joined",
+							): void => {
+								for (const thread of [...entry.threads.values()].sort(
+									(a, b) =>
+										Number(b.reviewDependency !== undefined) -
+										Number(a.reviewDependency !== undefined),
+								))
+									try {
+										phase.observe?.(
+											thread.runtimeThread.identity,
+											phaseName,
+											thread.reviewDependency?.parentThreadId,
+										);
+									} catch {
+										/* diagnostic isolation */
+									}
+							};
+							if (scope === undefined) return;
+							for (;;) {
+								const threads = [...entry.threads.values()];
+								const busy = threads.some(
+									(thread) =>
+										thread.installation !== undefined ||
+										thread.runSlot !== undefined ||
+										thread.commandChannel.busy(),
+								);
+								if (!busy) break;
+								if (Date.now() >= phase.currentStepDeadline) {
+									checkpointExpired = true;
+									for (const thread of threads)
+										thread.runtimeThread.state.beginRuntimeCheckpointExpiry();
+									if (!expired) {
+										expired = true;
+										observe("expired");
+									}
+									yield* Effect.forEach(
+										threads,
+										(thread) => {
+											const owner =
+												thread.runSlot?.ownerFiber ??
+												thread.installation?.fiber;
+											return owner === undefined
+												? Effect.void
+												: Fiber.interrupt(
+														owner as Fiber.Fiber<unknown, unknown>,
+													).pipe(Effect.asVoid);
+										},
+										{ concurrency: "unbounded", discard: true },
+									);
+								}
+								if (Date.now() >= phase.settlementDeadline)
+									return yield* Effect.die(
+										new Error(
+											"Runtime checkpoint settlement deadline exceeded",
+										),
+									);
+								yield* Effect.sleep("10 millis");
+							}
+							if (expired) observe("failed_joined");
+							// The Bridge validates the durable full-thread barrier and returns one immutable receipt.
+							yield* Effect.promise(() =>
+								phase.release(scope, phase.settlementDeadline),
+							);
+							yield* clearSessionEntry(entry, "durable_custody_handoff");
+						});
+					let ingressDone = phase.ingressJoined === undefined;
+					void phase.ingressJoined?.then(
+						() => {
+							ingressDone = true;
+						},
+						() => {
+							ingressDone = true;
+						},
+					);
+					const drains = new Map<SessionEntry, Fiber.Fiber<void, never>>();
+					for (;;) {
+						for (const [entry, scope] of quiesceEntries)
+							if (!drains.has(entry)) {
+								drains.set(
+									entry,
+									yield* Effect.forkIn(
+										drainEntry(entry, scope),
+										installationScope,
+									),
+								);
+							}
+						if (ingressDone) break;
+						if (Date.now() >= phase.settlementDeadline)
+							return yield* Effect.die(
+								new Error("Runtime command join deadline exceeded"),
+							);
+						yield* Effect.sleep("10 millis");
+					}
+					yield* Effect.forEach([...drains.values()], Fiber.join, {
+						concurrency: "unbounded",
+						discard: true,
+					});
+					admissionClosed = true;
+				});
+
 			const shutdownActiveRuns = (): Effect.Effect<void> =>
 				Effect.gen(function* () {
 					admissionClosed = true;
@@ -3492,6 +3723,7 @@ export function layer(
 				waitReviewerExecution,
 				inspectThread,
 				inspectReviewerExecution,
+				quiesce,
 				shutdownActiveRuns,
 			});
 		}),
@@ -3523,6 +3755,8 @@ function classifyRunExitOutcome(
 			: "interrupt_applied";
 	}
 	switch (exit.value.type) {
+		case "checkpoint_yield":
+			return "checkpoint_yield";
 		case "completed":
 			return "completed_clean";
 		case "interrupted":
@@ -3596,6 +3830,7 @@ function acceptedInputIdentityFromMetadata(
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,
+		runtimeProcessId: command.runtimeProcessId,
 		runtimeBindingToken,
 	};
 }

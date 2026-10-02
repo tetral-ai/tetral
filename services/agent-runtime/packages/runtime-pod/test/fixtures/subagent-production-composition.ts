@@ -28,6 +28,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly taskName: string;
 	readonly prompt: string;
 	readonly forkTurns: string;
@@ -77,6 +78,7 @@ const session = new ThreadRuntime({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	runtimeBindingToken: "subagent-production-binding-token",
 });
 let providerInvocations = 0;

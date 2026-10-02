@@ -11,7 +11,7 @@ import (
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
-var openDatabase = dbconnect.OpenPlainDSNFromEnv
+var openDatabase = dbconnect.OpenProtectedDSNFromEnv
 var runQueueService = tetralqueue.Run
 var listenTCP = net.Listen
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
@@ -58,12 +58,5 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 	if err := store.VerifyReady(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	maintenanceCtx, cancelMaintenance := context.WithCancel(ctx)
-	defer cancelMaintenance()
-	go tetralqueue.RunStalledLeaseMaintenance(maintenanceCtx, store, tetralqueue.MaintenanceConfig{
-		Interval: cfg.LeaseReclaimInterval,
-		Limit:    cfg.LeaseReclaimBatchLimit,
-		Logger:   logger,
-	})
-	return runQueueService(ctx, cfg, store, tetralqueue.RuntimeConfig{Listen: listenTCP, Logger: logger, DBStatsProvider: openResult.Client})
+	return runQueueService(ctx, cfg, store, tetralqueue.RuntimeConfig{Listen: listenTCP, Logger: logger, DBStatsProvider: openResult.Client, MaintenanceStore: store})
 }

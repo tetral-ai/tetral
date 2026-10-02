@@ -24,6 +24,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -521,11 +522,20 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 		t.Fatalf("stored MCP result = kind %q tool %q json %q claim %q owner %+v expires %+v", toolKind, toolName, storedResult, claimStatus, claimOwner, claimExpires)
 	}
 
+	replacementIdentity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "pod_uid_mcp_tool_replacement", ID: "process_pod_uid_mcp_tool_replacement"}
+	registeredReplacement, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(admin), replacementIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(admin), replacementIdentity, registeredReplacement.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
 		    SET binding_id = 'bind_bridge_mcp_tool_replacement',
 		        binding_generation = 2,
 		        agent_runtime_pod_uid = 'pod_uid_mcp_tool_replacement',
+ runtime_process_id='process_pod_uid_mcp_tool_replacement',
 		        updated_at = '2026-01-01T00:00:31Z'
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_tool'`,
 	); err != nil {
@@ -534,6 +544,10 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	staleReplay, err := store.ClaimMcpToolResult(context.Background(), claim)
 	if err != nil || staleReplay.GetStale() == nil {
 		t.Fatalf("ClaimMcpToolResult stale replay = %#v/%v; want stale", staleReplay, err)
+	}
+	commitAfterReplacement, err := store.CommitMcpToolResult(context.Background(), commitRequest)
+	if err != nil || commitAfterReplacement.GetStale() == nil {
+		t.Fatalf("CommitMcpToolResult crossed replacement receipt fence=%v/%v", commitAfterReplacement, err)
 	}
 }
 

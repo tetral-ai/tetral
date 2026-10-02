@@ -64,7 +64,7 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimecontrol.Binding{
 		BindingID: bindingID, BindingGeneration: 1, Namespace: "runtime-ns", PodName: "runtime-pod",
-		PodUID: podUID, PodIP: "10.0.0.1",
+		PodUID: podUID, RuntimeProcessID: "process_" + podUID, PodIP: "10.0.0.1",
 	}}
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || plan.AcceptTask == nil {

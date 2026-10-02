@@ -105,7 +105,7 @@ func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, req
 		"notificationJson": request.GetNotificationJson(), "workspaceId": request.GetWorkspaceId(),
 		"sessionId": request.GetSessionId(), "sessionThreadId": request.GetSessionThreadId(),
 		"bindingId": request.GetBindingId(), "bindingGeneration": request.GetBindingGeneration(),
-		"targetPodUid": request.GetTargetPodUid(), "runtimeInputId": request.GetRuntimeInputId(),
+		"targetPodUid": request.GetTargetPodUid(), "runtimeProcessId": request.GetRuntimeProcessId(), "runtimeInputId": request.GetRuntimeInputId(),
 		"inputOrder": request.GetInputOrder(), "bridgeAddress": bridgeAddress, "readyPath": readyPath,
 		"requestStartRace": requestStartRace,
 	}
@@ -325,7 +325,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 
 	runtimeRequest := &agentruntimev1.AcceptTaskNotificationRequest{
 		WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID,
-		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID, RuntimeProcessId: "process_" + podUID,
 		RuntimeInputId: inputID, InputOrder: 0,
 		NotificationJson: mustCanonicalTaskNotificationPayloadJSON(t, taskID, sourceID, "completed", storedResultJSON),
 	}
@@ -335,7 +335,8 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatalf("align production Runtime visibility snapshot: %v", err)
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runningRuntime.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
@@ -344,7 +345,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		Queue:      tetralqueue.NewServer(queueStore, nil),
 		Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{
-			Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+			Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{}),
 		},
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "task-notification-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -512,7 +513,7 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 	storedResultJSON := `{"status":"completed","exit_code":0,"stdout":{"text":"TASK_NOTIFICATION_SUCCESSOR_CANARY","truncated":false},"stderr":{"text":"","truncated":false}}`
 	runtimeRequest := &agentruntimev1.AcceptTaskNotificationRequest{
 		WorkspaceId: "default", SessionId: sessionID, SessionThreadId: threadID,
-		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID,
+		BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID, RuntimeProcessId: "process_" + podUID,
 		RuntimeInputId: notificationID, InputOrder: 0,
 		NotificationJson: mustCanonicalTaskNotificationPayloadJSON(t, taskID, sourceID, "completed", storedResultJSON),
 	}
@@ -522,14 +523,15 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 		t.Fatalf("align production Runtime visibility snapshot: %v", err)
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), runningRuntime.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "task-request-start-race", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if active, runErr := runner.RunOnceWithActivity(context.Background()); runErr != nil || !active {

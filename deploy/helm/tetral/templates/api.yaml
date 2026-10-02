@@ -39,7 +39,12 @@ metadata:
     app.kubernetes.io/part-of: tetral
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.api }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: api
@@ -60,6 +65,7 @@ spec:
           command:
             - /usr/local/bin/tetral-api
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
             - name: TETRAL_API_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -153,9 +159,15 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: engine-data
               mountPath: /var/tetral
       volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
         - name: engine-data
           emptyDir: {}
 ---
@@ -171,6 +183,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: api

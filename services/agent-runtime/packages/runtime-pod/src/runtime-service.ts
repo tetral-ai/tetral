@@ -94,6 +94,7 @@ export interface RuntimeSessionScope {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 }
 
 /** Current session binding plus the thread selected by a thread-addressed method. */
@@ -160,6 +161,7 @@ export interface RuntimeCleanupCommand extends RuntimeSessionScope {
 
 export interface RuntimeRecoveryCommand extends RuntimeThreadScope {
 	readonly sourceEventId: string;
+	readonly handoffId: string;
 	readonly recoveryLeaseRef: {
 		readonly jobId: string;
 		readonly leaseToken: string;
@@ -360,6 +362,7 @@ export interface RuntimeCommandRunner {
 }
 
 export interface RuntimeControlServiceOptions {
+	readonly runtimeProcessId: string;
 	readonly ownPod: {
 		readonly namespace: string;
 		readonly name: string;
@@ -465,8 +468,8 @@ export class RuntimeControlService {
 			metadata,
 			method: Methods.recoverThread,
 			operation: "RecoverThread",
-			operationId: request.sourceEventId,
-			dedupeKey: `recovery:${request.sessionThreadId}:${request.sourceEventId}:${request.recoveryLeaseRef?.jobId ?? ""}:${request.recoveryLeaseRef?.leaseToken ?? ""}`,
+			operationId: request.handoffId || request.sourceEventId,
+			dedupeKey: `recovery:${request.sessionThreadId}:${request.handoffId ? `handoff:${request.handoffId}` : `event:${request.sourceEventId}`}:${request.recoveryLeaseRef?.jobId ?? ""}:${request.recoveryLeaseRef?.leaseToken ?? ""}`,
 			identity: () => stableIdentity(request),
 			validate: validateRecoverThreadRequest,
 			selectedPodRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_SELECTED_POD_MISMATCH, true),
@@ -482,6 +485,7 @@ export class RuntimeControlService {
 				const result = await handler.call(this.options.runHost, {
 					...scope,
 					sourceEventId: request.sourceEventId,
+					handoffId: request.handoffId,
 					recoveryLeaseRef: {
 						jobId: request.recoveryLeaseRef!.jobId,
 						leaseToken: request.recoveryLeaseRef!.leaseToken,
@@ -1108,6 +1112,9 @@ export class RuntimeControlService {
 				);
 				return response;
 			}
+			if (execution.request.runtimeProcessId !== this.options.runtimeProcessId) {
+				throw new GrpcStatusError(status.FAILED_PRECONDITION, "runtime process is stale");
+			}
 			if (!this.activeBindingMatches(execution.request)) {
 				const response = execution.bindingRejected();
 				recordRejection({ phase: "binding", reason: "binding_mismatch" }, true);
@@ -1383,6 +1390,9 @@ export class RuntimeControlService {
 								: {}),
 							"operation.id": execution.operationId,
 							"binding.id": execution.request.bindingId,
+                            "binding.generation":execution.request.bindingGeneration,
+                            "runtime.process.id":execution.request.runtimeProcessId,
+                            ...("handoffId" in execution.request?{"handoff.id":execution.request.handoffId as string}:{}),
 						}
 					: {}),
 				...(rejection === undefined
@@ -1403,6 +1413,7 @@ function sessionScope(input: RuntimeSessionScope): RuntimeSessionScope {
 		bindingId: input.bindingId,
 		bindingGeneration: input.bindingGeneration,
 		targetPodUid: input.targetPodUid,
+		runtimeProcessId: input.runtimeProcessId,
 	};
 }
 

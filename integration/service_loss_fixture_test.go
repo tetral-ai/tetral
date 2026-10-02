@@ -51,7 +51,7 @@ func repairLostBindingThroughProduction(ctx context.Context, store *jobrunner.Po
 	previousResolver, previousClock := store.TargetResolver, store.Clock
 	defer func() { store.TargetResolver, store.Clock = previousResolver, previousClock }()
 	store.Clock = func() time.Time { return now }
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 		return kubernetes.NewBindingVisibilitySnapshotForTest(true, candidates)
 	}}
 	_, err = store.RepairLostRuntimeBindings(ctx, workspaceID)

@@ -26,6 +26,8 @@ message RecoverThreadRequest {
   reserved 8;
   reserved "recovery_kind";
   RecoveryLeaseRef recovery_lease_ref = 9;
+  string runtime_process_id = 11;
+  string handoff_id = 10;
 }
 
 message RecoveryLeaseRef {
@@ -69,6 +71,7 @@ message AcceptInputRequest {
     string messages_json = 9;
     AcceptInputRejection rejection = 10;
   }
+  string runtime_process_id = 11;
 }
 
 message AcceptInputRejection {
@@ -116,6 +119,7 @@ message AcceptAgentMailRequest {
   string runtime_input_id = 7;
   string delivery_id = 8;
   string content = 9;
+  string runtime_process_id = 10;
 }
 
 message AcceptAgentMailResponse {
@@ -153,6 +157,7 @@ message AcceptTaskNotificationRequest {
   string runtime_input_id = 7;
   int64 input_order = 8;
   string notification_json = 9;
+  string runtime_process_id = 10;
 }
 
 message AcceptTaskNotificationResponse {
@@ -193,6 +198,7 @@ message InterruptRequest {
   reserved "input_order";
   InterruptOrigin origin = 9;
   InterruptLeaseRef interrupt_lease_ref = 10;
+  string runtime_process_id = 11;
 }
 
 message InterruptLeaseRef {
@@ -245,6 +251,7 @@ message ResolveToolConfirmationRequest {
   string tool_use_event_id = 8;
   ToolConfirmationDecision decision = 9;
   optional string deny_message = 10;
+  string runtime_process_id = 11;
 }
 
 enum ToolConfirmationDecision {
@@ -292,6 +299,7 @@ message ApplyRuntimeConfigRequest {
     RuntimeSessionConfig session_config = 6;
     RuntimeMcpManifestConfig mcp_manifest = 7;
   }
+  string runtime_process_id = 8;
 }
 
 message RuntimeSessionConfig {
@@ -340,6 +348,7 @@ message CleanupSessionRequest {
   string target_pod_uid = 5;
   string cleanup_operation_id = 6;
   CleanupSessionReason reason = 7;
+  string runtime_process_id = 8;
 }
 
 enum CleanupSessionReason {

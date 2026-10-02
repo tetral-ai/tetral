@@ -275,10 +275,14 @@ func runtimeTerminationRequestHash(
 	failureJSON string,
 ) (string, error) {
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"failure":           json.RawMessage(failureJSON),
-		"operation_kind":    bridgeOpCommitRuntimeTermination,
-		"runtime_write_id":  request.GetRuntimeWriteId(),
-		"session_thread_id": request.GetScope().GetSessionThreadId(),
+		"failure":            json.RawMessage(failureJSON),
+		"binding_id":         request.GetScope().GetBinding().GetBindingId(),
+		"binding_generation": request.GetScope().GetBinding().GetBindingGeneration(),
+		"pod_uid":            request.GetScope().GetBinding().GetTargetPodUid(),
+		"runtime_process_id": request.GetScope().GetBinding().GetRuntimeProcessId(),
+		"operation_kind":     bridgeOpCommitRuntimeTermination,
+		"runtime_write_id":   request.GetRuntimeWriteId(),
+		"session_thread_id":  request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -1116,15 +1120,15 @@ func declarationApplicationObservationTx(
 	scope *bridgev1.RuntimeScope,
 ) (declarationApplicationObservation, error) {
 	var observation declarationApplicationObservation
-	var podUID string
+	var podUID, processID string
 	err := tx.QueryRow(ctx,
-		`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+		`SELECT binding_id, binding_generation, agent_runtime_pod_uid, runtime_process_id
 		   FROM session_runtime_bindings
 		  WHERE workspace_id = $1
 		    AND session_id = $2`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
-	).Scan(&observation.BindingID, &observation.BindingGeneration, &podUID)
+	).Scan(&observation.BindingID, &observation.BindingGeneration, &podUID, &processID)
 	if dbconnect.IsNoRows(err) {
 		return observation, nil
 	}
@@ -1133,7 +1137,7 @@ func declarationApplicationObservationTx(
 	}
 	if observation.BindingID == scope.GetBinding().GetBindingId() &&
 		observation.BindingGeneration == scope.GetBinding().GetBindingGeneration() &&
-		podUID == scope.GetBinding().GetTargetPodUid() {
+		podUID == scope.GetBinding().GetTargetPodUid() && processID == scope.GetBinding().GetRuntimeProcessId() {
 		observation.Current = true
 	}
 	return observation, nil

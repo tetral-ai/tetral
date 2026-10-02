@@ -1,0 +1,24 @@
+revision: 1-31-1
+image: docker.io/istio/pilot:1.31.1@sha256:212ca088ada22f48be1576e6b688972b8aa7495710abb7c5f1febca856a15577
+replicaCount: 1
+autoscaleEnabled: false
+rollingMaxSurge: 1
+rollingMaxUnavailable: 0
+meshConfig:
+  trustDomain: cluster.local
+  defaultConfig:
+    holdApplicationUntilProxyStarts: true
+    terminationDrainDuration: 5s
+  accessLogFile: /dev/stdout
+  accessLogEncoding: JSON
+global:
+  hub: docker.io/istio
+  tag: 1.31.1
+  proxy:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 2000m
+        memory: 1024Mi

@@ -679,6 +679,7 @@ export interface ProviderRequest {
   attachments: ProviderRequestAttachment[];
   limits: ProviderRequestLimits | undefined;
   outputSchemaJson?: string | undefined;
+  runtimeProcessId: string;
 }
 
 export interface ModelRef {
@@ -868,6 +869,7 @@ export interface RunWebRequest {
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
+  runtimeProcessId: string;
 }
 
 export interface RunWebResponse {
@@ -929,6 +931,7 @@ export interface RunMcpToolRequest {
   bindingId: string;
   bindingGeneration: number;
   runtimeBindingToken: string;
+  runtimeProcessId: string;
 }
 
 export interface RunMcpToolResponse {
@@ -987,6 +990,7 @@ function createBaseProviderRequest(): ProviderRequest {
     attachments: [],
     limits: undefined,
     outputSchemaJson: undefined,
+    runtimeProcessId: "",
   };
 }
 
@@ -1039,6 +1043,9 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     }
     if (message.outputSchemaJson !== undefined) {
       writer.uint32(138).string(message.outputSchemaJson);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(146).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -1178,6 +1185,14 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
           message.outputSchemaJson = reader.string();
           continue;
         }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1253,6 +1268,11 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
         : isSet(object.output_schema_json)
         ? globalThis.String(object.output_schema_json)
         : undefined,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -1306,6 +1326,9 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
     if (message.outputSchemaJson !== undefined) {
       obj.outputSchemaJson = message.outputSchemaJson;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -1334,6 +1357,7 @@ export const ProviderRequest: MessageFns<ProviderRequest> = {
       ? ProviderRequestLimits.fromPartial(object.limits)
       : undefined;
     message.outputSchemaJson = object.outputSchemaJson ?? undefined;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -4354,6 +4378,7 @@ function createBaseRunWebRequest(): RunWebRequest {
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -4382,6 +4407,9 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     }
     if (message.runtimeBindingToken !== "") {
       writer.uint32(66).string(message.runtimeBindingToken);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(74).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -4457,6 +4485,14 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
           message.runtimeBindingToken = reader.string();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4504,6 +4540,11 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
         : isSet(object.runtime_binding_token)
         ? globalThis.String(object.runtime_binding_token)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -4533,6 +4574,9 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     if (message.runtimeBindingToken !== "") {
       obj.runtimeBindingToken = message.runtimeBindingToken;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -4551,6 +4595,7 @@ export const RunWebRequest: MessageFns<RunWebRequest> = {
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -5438,6 +5483,7 @@ function createBaseRunMcpToolRequest(): RunMcpToolRequest {
     bindingId: "",
     bindingGeneration: 0,
     runtimeBindingToken: "",
+    runtimeProcessId: "",
   };
 }
 
@@ -5463,6 +5509,9 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     }
     if (message.runtimeBindingToken !== "") {
       writer.uint32(90).string(message.runtimeBindingToken);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(98).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -5530,6 +5579,14 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
           message.runtimeBindingToken = reader.string();
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5576,6 +5633,11 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
         : isSet(object.runtime_binding_token)
         ? globalThis.String(object.runtime_binding_token)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -5602,6 +5664,9 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     if (message.runtimeBindingToken !== "") {
       obj.runtimeBindingToken = message.runtimeBindingToken;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -5617,6 +5682,7 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.runtimeBindingToken = object.runtimeBindingToken ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };

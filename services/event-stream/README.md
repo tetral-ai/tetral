@@ -40,6 +40,11 @@ SDK repository's compatibility registry
 (`tests/compatibility/compat-cases.json`). This README does not
 restate that matrix.
 
+The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
+`TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
+plaintext fallback. New connections load the current validated trust generation;
+shutdown joins requests/work before closing the database and trust observer.
+
 ## States & lifecycle
 
 ### Discovery failure before model execution

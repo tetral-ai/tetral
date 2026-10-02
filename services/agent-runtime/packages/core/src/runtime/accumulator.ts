@@ -105,7 +105,7 @@ export type {
 export interface FrozenAssistantPartAppend {
 	readonly source: RuntimeProcessorSource;
 	readonly append: RuntimeAssistantContextAppend;
-	readonly event: Promise<SessionEventWriterAppendEvent>;
+	readonly event: Promise<SessionEventWriterAppendEvent | undefined>;
 	readonly distinctProviderInput?: RuntimeJsonValue | undefined;
 	readonly toolRouteCapability?: RuntimeToolRouteCapability | undefined;
 	readonly toolCallId?: string | undefined;
@@ -175,6 +175,7 @@ export interface ProviderStreamAccumulatorOptions {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly contextOwner: {
 		entries(): readonly RuntimeContextEntry[];
 		openRequestDraft(): RuntimeOpenRequestDraft | undefined;
@@ -255,7 +256,9 @@ export class ProviderStreamAccumulator {
 	private readonly reservedToolMembers = new Map<
 		string,
 		{
-			readonly authorize: (event: SessionEventWriterAppendEvent) => void;
+			readonly authorize: (
+				event: SessionEventWriterAppendEvent | undefined,
+			) => void;
 			readonly committed: Promise<ProviderStreamAccumulatorResult>;
 		}
 	>();
@@ -265,6 +268,7 @@ export class ProviderStreamAccumulator {
 		this.memberSequencer = new RequestAssistantMemberSequencer(
 			async (frozen) => {
 				const event = await frozen.event;
+				if (event === undefined) return { ok: true, events: [] };
 				const result = await this.options.writer.appendEvent(
 					event,
 					frozen.source,
@@ -328,6 +332,13 @@ export class ProviderStreamAccumulator {
 		return RuntimeAssistantContextAppendSchema.parse({
 			parts: [...this.pendingPrefix],
 		});
+	}
+
+	/** Joins reserved provider positions without declaring a tool after its gate expires. */
+	cancelUndeclaredToolUses(): void {
+		for (const reserved of this.reservedToolMembers.values())
+			reserved.authorize(undefined);
+		this.reservedToolMembers.clear();
 	}
 
 	discardUncommittedMembers(): void {
@@ -604,10 +615,12 @@ export class ProviderStreamAccumulator {
 		const existing = this.toolParts.get(toolCallId);
 		if (existing === undefined || existing.state.status !== "running")
 			return false;
-		let authorize!: (event: SessionEventWriterAppendEvent) => void;
-		const event = new Promise<SessionEventWriterAppendEvent>((resolve) => {
-			authorize = resolve;
-		});
+		let authorize!: (event: SessionEventWriterAppendEvent | undefined) => void;
+		const event = new Promise<SessionEventWriterAppendEvent | undefined>(
+			(resolve) => {
+				authorize = resolve;
+			},
+		);
 		const tool = parseToolPart({ ...existing, toolEvent });
 		const append = RuntimeAssistantContextAppendSchema.parse({
 			parts: [...this.takePendingPrefix(), tool],
@@ -654,6 +667,7 @@ export class ProviderStreamAccumulator {
 			bindingId: this.options.bindingId,
 			bindingGeneration: this.options.bindingGeneration,
 			targetPodUid: this.options.targetPodUid,
+			runtimeProcessId: this.options.runtimeProcessId,
 			settlement: declaration,
 		});
 		if (!settlementResult.ok) {
@@ -699,6 +713,7 @@ export class ProviderStreamAccumulator {
 				bindingId: this.options.bindingId,
 				bindingGeneration: this.options.bindingGeneration,
 				targetPodUid: this.options.targetPodUid,
+				runtimeProcessId: this.options.runtimeProcessId,
 				modelRequestId,
 				modelToolCallId: toolCallId,
 				toolName: existing.toolName,

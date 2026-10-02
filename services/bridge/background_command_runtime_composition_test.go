@@ -91,7 +91,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	startInput, err := json.Marshal(map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "workspaceId": workspaceID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": 1, "targetPodUid": podUID, "modelRequestId": startRequestID,
+		"bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "modelRequestId": startRequestID,
 		"modelToolCallId": "call_background_start_composition", "toolName": "exec_command",
 		"providerInput": map[string]any{"cmd": "sleep 60", "yield_time_ms": 1000},
 	})
@@ -202,7 +202,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	controlInputValue := map[string]any{
 		"address": bridgeAddress, "tokenPath": tokenPath, "abortPath": abortPath,
 		"workspaceId": workspaceID, "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"runtimeBindingToken": runtimeBindingToken, "modelRequestId": controlRequestID,
 		"modelToolCallId": "call_background_abort_control", "taskId": taskID,
 	}

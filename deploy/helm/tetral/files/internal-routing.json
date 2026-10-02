@@ -1,0 +1,139 @@
+[
+  {
+    "name": "runner-queue",
+    "source": "job-runner",
+    "sourceNamespace": "tetral-system",
+    "destination": "queue",
+    "port": 9090,
+    "timeout": "5s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/job-runner",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/queue",
+    "protectedProfiles": [
+      "hardened"
+    ]
+  },
+  {
+    "name": "sandbox-queue",
+    "source": "sandbox",
+    "sourceNamespace": "tetral-system",
+    "destination": "queue",
+    "port": 9090,
+    "timeout": "5s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/sandbox",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/queue",
+    "protectedProfiles": [
+      "hardened"
+    ]
+  },
+  {
+    "name": "runtime-bridge",
+    "source": "agent-runtime",
+    "sourceNamespace": "tetral-agent-runtime",
+    "destination": "bridge",
+    "port": 9090,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-agent-runtime/sa/agent-runtime",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/bridge",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "runtime-mcp",
+    "source": "agent-runtime",
+    "sourceNamespace": "tetral-agent-runtime",
+    "destination": "mcp-connector",
+    "port": 9091,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-agent-runtime/sa/agent-runtime",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "runner-mcp",
+    "source": "job-runner",
+    "sourceNamespace": "tetral-system",
+    "destination": "mcp-connector",
+    "port": 9091,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/job-runner",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "bridge-mcp",
+    "source": "bridge",
+    "sourceNamespace": "tetral-system",
+    "destination": "mcp-connector",
+    "port": 9091,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/bridge",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "mcp-bridge",
+    "source": "mcp-connector",
+    "sourceNamespace": "tetral-system",
+    "destination": "bridge",
+    "port": 9090,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/bridge",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "runtime-web",
+    "source": "agent-runtime",
+    "sourceNamespace": "tetral-agent-runtime",
+    "destination": "web-connector",
+    "port": 9092,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-agent-runtime/sa/agent-runtime",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/web-connector",
+    "protectedProfiles": [
+      "hardened"
+    ]
+  },
+  {
+    "name": "runtime-provider",
+    "source": "agent-runtime",
+    "sourceNamespace": "tetral-agent-runtime",
+    "destination": "provider-gateway",
+    "port": 9090,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-agent-runtime/sa/agent-runtime",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/provider-gateway",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  },
+  {
+    "name": "provider-bridge",
+    "source": "provider-gateway",
+    "sourceNamespace": "tetral-system",
+    "destination": "bridge",
+    "port": 9090,
+    "timeout": "0s",
+    "sourceURI": "spiffe://cluster.local/ns/tetral-system/sa/provider-gateway",
+    "destinationURI": "spiffe://cluster.local/ns/tetral-system/sa/bridge",
+    "protectedProfiles": [
+      "standard-routed",
+      "hardened"
+    ]
+  }
+]

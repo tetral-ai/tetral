@@ -19,6 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	AgentRuntimeBridgeService_RegisterRuntimeProcess_FullMethodName        = "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess"
+	AgentRuntimeBridgeService_ReportRuntimeProcess_FullMethodName          = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess"
+	AgentRuntimeBridgeService_ReleaseRuntimeBinding_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding"
 	AgentRuntimeBridgeService_LoadContext_FullMethodName                   = "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext"
 	AgentRuntimeBridgeService_RefreshRuntimeBindingToken_FullMethodName    = "/tetral.bridge.v1.AgentRuntimeBridgeService/RefreshRuntimeBindingToken"
 	AgentRuntimeBridgeService_CommitInputs_FullMethodName                  = "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs"
@@ -62,6 +65,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentRuntimeBridgeServiceClient interface {
+	RegisterRuntimeProcess(ctx context.Context, in *RegisterRuntimeProcessRequest, opts ...grpc.CallOption) (*RegisterRuntimeProcessResponse, error)
+	ReportRuntimeProcess(ctx context.Context, in *ReportRuntimeProcessRequest, opts ...grpc.CallOption) (*ReportRuntimeProcessResponse, error)
+	ReleaseRuntimeBinding(ctx context.Context, in *ReleaseRuntimeBindingRequest, opts ...grpc.CallOption) (*ReleaseRuntimeBindingResponse, error)
 	LoadContext(ctx context.Context, in *LoadContextRequest, opts ...grpc.CallOption) (*LoadContextResponse, error)
 	RefreshRuntimeBindingToken(ctx context.Context, in *RefreshRuntimeBindingTokenRequest, opts ...grpc.CallOption) (*RefreshRuntimeBindingTokenResponse, error)
 	CommitInputs(ctx context.Context, in *CommitInputsRequest, opts ...grpc.CallOption) (*CommitInputsResponse, error)
@@ -107,6 +113,36 @@ type agentRuntimeBridgeServiceClient struct {
 
 func NewAgentRuntimeBridgeServiceClient(cc grpc.ClientConnInterface) AgentRuntimeBridgeServiceClient {
 	return &agentRuntimeBridgeServiceClient{cc}
+}
+
+func (c *agentRuntimeBridgeServiceClient) RegisterRuntimeProcess(ctx context.Context, in *RegisterRuntimeProcessRequest, opts ...grpc.CallOption) (*RegisterRuntimeProcessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterRuntimeProcessResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_RegisterRuntimeProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) ReportRuntimeProcess(ctx context.Context, in *ReportRuntimeProcessRequest, opts ...grpc.CallOption) (*ReportRuntimeProcessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportRuntimeProcessResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ReportRuntimeProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) ReleaseRuntimeBinding(ctx context.Context, in *ReleaseRuntimeBindingRequest, opts ...grpc.CallOption) (*ReleaseRuntimeBindingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseRuntimeBindingResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ReleaseRuntimeBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *agentRuntimeBridgeServiceClient) LoadContext(ctx context.Context, in *LoadContextRequest, opts ...grpc.CallOption) (*LoadContextResponse, error) {
@@ -483,6 +519,9 @@ func (c *agentRuntimeBridgeServiceClient) CommitRuntimeTermination(ctx context.C
 // All implementations must embed UnimplementedAgentRuntimeBridgeServiceServer
 // for forward compatibility.
 type AgentRuntimeBridgeServiceServer interface {
+	RegisterRuntimeProcess(context.Context, *RegisterRuntimeProcessRequest) (*RegisterRuntimeProcessResponse, error)
+	ReportRuntimeProcess(context.Context, *ReportRuntimeProcessRequest) (*ReportRuntimeProcessResponse, error)
+	ReleaseRuntimeBinding(context.Context, *ReleaseRuntimeBindingRequest) (*ReleaseRuntimeBindingResponse, error)
 	LoadContext(context.Context, *LoadContextRequest) (*LoadContextResponse, error)
 	RefreshRuntimeBindingToken(context.Context, *RefreshRuntimeBindingTokenRequest) (*RefreshRuntimeBindingTokenResponse, error)
 	CommitInputs(context.Context, *CommitInputsRequest) (*CommitInputsResponse, error)
@@ -530,6 +569,15 @@ type AgentRuntimeBridgeServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAgentRuntimeBridgeServiceServer struct{}
 
+func (UnimplementedAgentRuntimeBridgeServiceServer) RegisterRuntimeProcess(context.Context, *RegisterRuntimeProcessRequest) (*RegisterRuntimeProcessResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RegisterRuntimeProcess not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) ReportRuntimeProcess(context.Context, *ReportRuntimeProcessRequest) (*ReportRuntimeProcessResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportRuntimeProcess not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) ReleaseRuntimeBinding(context.Context, *ReleaseRuntimeBindingRequest) (*ReleaseRuntimeBindingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseRuntimeBinding not implemented")
+}
 func (UnimplementedAgentRuntimeBridgeServiceServer) LoadContext(context.Context, *LoadContextRequest) (*LoadContextResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method LoadContext not implemented")
 }
@@ -661,6 +709,60 @@ func RegisterAgentRuntimeBridgeServiceServer(s grpc.ServiceRegistrar, srv AgentR
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&AgentRuntimeBridgeService_ServiceDesc, srv)
+}
+
+func _AgentRuntimeBridgeService_RegisterRuntimeProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterRuntimeProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).RegisterRuntimeProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_RegisterRuntimeProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).RegisterRuntimeProcess(ctx, req.(*RegisterRuntimeProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_ReportRuntimeProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportRuntimeProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).ReportRuntimeProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_ReportRuntimeProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).ReportRuntimeProcess(ctx, req.(*ReportRuntimeProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_ReleaseRuntimeBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseRuntimeBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).ReleaseRuntimeBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_ReleaseRuntimeBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).ReleaseRuntimeBinding(ctx, req.(*ReleaseRuntimeBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _AgentRuntimeBridgeService_LoadContext_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -1336,6 +1438,18 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "tetral.bridge.v1.AgentRuntimeBridgeService",
 	HandlerType: (*AgentRuntimeBridgeServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterRuntimeProcess",
+			Handler:    _AgentRuntimeBridgeService_RegisterRuntimeProcess_Handler,
+		},
+		{
+			MethodName: "ReportRuntimeProcess",
+			Handler:    _AgentRuntimeBridgeService_ReportRuntimeProcess_Handler,
+		},
+		{
+			MethodName: "ReleaseRuntimeBinding",
+			Handler:    _AgentRuntimeBridgeService_ReleaseRuntimeBinding_Handler,
+		},
 		{
 			MethodName: "LoadContext",
 			Handler:    _AgentRuntimeBridgeService_LoadContext_Handler,

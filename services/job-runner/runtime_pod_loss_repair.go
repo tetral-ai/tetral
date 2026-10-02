@@ -163,7 +163,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) runtimePodLossCensus(ctx context.Contex
 						PodUID:    row.binding.PodUID,
 						PodIP:     row.binding.PodIP,
 					})
-					if classifyRuntimeBindingVisibility(visibility) == runtimeBindingVisibilityProvenGone {
+					var current, registered bool
+					var phase string
+					processErr := tx.QueryRow(ctx, `SELECT is_current,phase FROM runtime_processes WHERE namespace=$1 AND pod_uid=$2 AND runtime_process_id=$3`, row.binding.Namespace, row.binding.PodUID, row.binding.RuntimeProcessID).Scan(&current, &phase)
+					if processErr != nil && !dbconnect.IsNoRows(processErr) {
+						return processErr
+					}
+					registered = processErr == nil
+					if registered && phase != runtimecontrol.ProcessStarting && (!current || visibility != enginekubernetes.BindingVisibilityReusable || phase != runtimecontrol.ProcessAccepting) {
 						census.candidates = append(census.candidates, runtimePodLossCandidate{
 							sessionID:         row.sessionID,
 							bindingID:         row.binding.BindingID,
@@ -205,7 +212,7 @@ func runtimePodLossCensusPageTx(
 		        binding.agent_runtime_namespace,
 		        binding.agent_runtime_pod_name,
 		        binding.agent_runtime_pod_uid,
-		        binding.agent_runtime_pod_ip
+		        binding.agent_runtime_pod_ip, binding.runtime_process_id
 		   FROM session_runtime_bindings binding
 		   JOIN session_runtime_status runtime
 		     ON runtime.workspace_id = binding.workspace_id
@@ -254,6 +261,7 @@ func runtimePodLossCensusPageTx(
 			&row.binding.PodName,
 			&row.binding.PodUID,
 			&row.binding.PodIP,
+			&row.binding.RuntimeProcessID,
 		); err != nil {
 			return nil, err
 		}

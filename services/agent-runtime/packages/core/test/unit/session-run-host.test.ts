@@ -66,6 +66,7 @@ function controlInputScope(sessionId: string, runtimeInputId: string) {
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 	};
 }
@@ -120,6 +121,7 @@ function runtimeConfigCommand(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		configIdentity: `session:${generation}`,
 		generation,
 		contentJson: JSON.stringify({ config_generation: generation }),
@@ -135,6 +137,7 @@ function cleanupCommand(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		cleanupOperationId: `cleanup_${sessionId}`,
 	};
 }
@@ -450,6 +453,7 @@ function fakeManagerLayer(
 						entries: [],
 					};
 				}),
+			quiesce: () => Effect.void,
 			shutdownActiveRuns: () =>
 				Effect.sync(() => {
 					calls.push({ method: "shutdownActiveRuns", args: [] });
@@ -909,6 +913,7 @@ describe("SessionRunHost", () => {
 			"handleToolConfirmation",
 			"handleWaitReviewerExecution",
 			"handleWaitThread",
+			"quiesce",
 			"shutdownActiveRuns",
 		]);
 	});

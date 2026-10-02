@@ -1,0 +1,106 @@
+{{- if eq .Values.transport.profile "hardened" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tetral-runtime-direct-sds
+  namespace: tetral-agent-runtime
+data:
+  leaf.yaml: |
+    resources:
+      - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+        name: tetral.runtime.direct_leaf
+        tls_certificate:
+          certificate_chain:
+            filename: /var/run/tetral/runtime-direct/leaf/tls.crt
+          private_key:
+            filename: /var/run/tetral/runtime-direct/leaf/tls.key
+          watched_directory:
+            path: /var/run/tetral/runtime-direct/leaf
+  validation.yaml: |
+    resources:
+      - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+        name: tetral.runtime.direct_validation
+        validation_context:
+          trusted_ca:
+            filename: /var/run/tetral/runtime-direct/trust/ca.crt
+          watched_directory:
+            path: /var/run/tetral/runtime-direct/trust
+          match_typed_subject_alt_names:
+            - san_type: URI
+              matcher:
+                exact: {{ printf "spiffe://%s/ns/tetral-system/sa/job-runner" .Values.routing.trustDomain }}
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: tetral-runtime-direct-tls
+  namespace: tetral-agent-runtime
+spec:
+  workloadSelector:
+    labels:
+      app.kubernetes.io/name: agent-runtime
+  configPatches:
+    - applyTo: LISTENER
+      match:
+        context: SIDECAR_INBOUND
+      patch:
+        operation: ADD
+        value:
+          name: tetral.runtime.direct_tls
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 19443
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  require_client_certificate: true
+                  disable_stateless_session_resumption: true
+                  disable_stateful_session_resumption: true
+                  common_tls_context:
+                    tls_params:
+                      tls_minimum_protocol_version: TLSv1_3
+                    alpn_protocols: [h2]
+                    tls_certificate_sds_secret_configs:
+                      - name: tetral.runtime.direct_leaf
+                        sds_config:
+                          path_config_source:
+                            path: /var/run/tetral/runtime-direct/sds/leaf.yaml
+                            watched_directory:
+                              path: /var/run/tetral/runtime-direct/sds
+                    validation_context_sds_secret_config:
+                      name: tetral.runtime.direct_validation
+                      sds_config:
+                        path_config_source:
+                          path: /var/run/tetral/runtime-direct/sds/validation.yaml
+                          watched_directory:
+                            path: /var/run/tetral/runtime-direct/sds
+              filters:
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: runtime_direct
+                    cluster: tetral.runtime.loopback
+                    max_connect_attempts: 1
+                    idle_timeout: 0s
+    - applyTo: CLUSTER
+      match:
+        context: SIDECAR_INBOUND
+      patch:
+        operation: ADD
+        value:
+          name: tetral.runtime.loopback
+          type: STATIC
+          connect_timeout: 1s
+          load_assignment:
+            cluster_name: tetral.runtime.loopback
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 9090
+{{- end }}

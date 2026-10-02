@@ -84,6 +84,7 @@ function providerConfig(url: string): ProviderGatewayConfig {
 		allowedRuntimePod: { namespace: "tetral", serviceAccount: "runtime" },
 		runtimeBindingTokenHMACKey: "x".repeat(32),
 		databaseUrl: url,
+		drainTimeoutMs: 30000,cancelJoinTimeoutMs:5000,
 		databasePool: { max: 2, idleTimeout: 1, maxLifetime: 10, connectionTimeout: 2, statementTimeoutMs: 5_000 },
 		vaultKeyHex: "01".repeat(32),
 		kubernetesApiServerUrl: "https://kubernetes.default.svc",

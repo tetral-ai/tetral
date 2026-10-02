@@ -94,7 +94,7 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 	job := readTransportRuntimeJob(t, adminDB, sessionID)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	sender := &settlingTransportSender{
-		transport: jobrunner.NewRuntimePodCommandClient(fixedTransportTokenSource{}),
+		transport: fixtureRuntimeCommandClient(t, fixedTransportTokenSource{}),
 		bridge:    bridgeStore,
 		threadID:  threadID,
 		bindingID: bindingID,
@@ -207,6 +207,7 @@ func (s *settlingTransportSender) AcceptInput(
 			BindingId:         s.bindingID,
 			BindingGeneration: request.GetBindingGeneration(),
 			TargetPodUid:      s.podUID,
+			RuntimeProcessId:  request.GetRuntimeProcessId(),
 		},
 	}
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
@@ -253,6 +254,7 @@ func (s *settlingTransportSender) AcceptInput(
 
 func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string) {
 	t.Helper()
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(db), "engine", podUID)
 	agentID := "agent_" + sessionID
 	environmentID := "env_" + sessionID
 	statements := []struct {
@@ -266,7 +268,7 @@ func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID s
 		{`INSERT INTO sessions (workspace_id, id, main_thread_id, type, status, lifecycle_state, agent_id, agent_version, environment_id, installed_tools_json, created_at, updated_at) VALUES ('default', $1, $2, 'session', 'idle', 'active', $3, 1, $4, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, threadID, agentID, environmentID}},
 		{`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at) VALUES ('default', $1, $2, 'main', 'public', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{threadID, sessionID}},
 		{`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at) VALUES ('default', $1, 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID}},
-		{`INSERT INTO session_runtime_bindings (workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at) VALUES ('default', $1, $2, 1, 'engine', 'runtime-pod-a', $3, '127.0.0.1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, bindingID, podUID}},
+		{`INSERT INTO session_runtime_bindings (workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at) VALUES ('default', $1, $2, 1, 'engine', 'runtime-pod-a', $3, '127.0.0.1', 'process_' || $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, bindingID, podUID}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(context.Background(), statement.query, statement.args...); err != nil {
@@ -373,7 +375,7 @@ func startTransportRuntimePodHarness(t *testing.T) int {
 	runtimeRoot := filepath.Join("..", "services", "agent-runtime")
 	command := exec.CommandContext(ctx, "bun", "run", "packages/runtime-pod/test/harness/grpc-harness.ts")
 	command.Dir = runtimeRoot
-	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_POD_IP=127.0.0.1")
+	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_POD_IP=127.0.0.1", "TETRAL_TEST_RUNTIME_PROCESS_ID=process_uid-a")
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatalf("Runtime Pod harness stdout: %v", err)

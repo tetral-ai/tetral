@@ -84,6 +84,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 		t.Fatalf("producer custody = Inbox %q / Queue %q; want queued / pending", initialInboxStatus, initialQueueStatus)
 	}
 
+	seedFixtureRuntimeProcess(t, client, "tetral-agent-runtime", podUID)
 	candidate := enginekubernetes.BindingCandidate{
 		Namespace: "tetral-agent-runtime",
 		PodName:   "runtime-pod-0",
@@ -98,6 +99,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},
 	)
+	installFixtureRuntimeLoad(t, deliveryStore)
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	runner := &jobrunner.JobRunner{
 		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
@@ -208,7 +210,7 @@ func assertAttachmentHotColdComposition(
 		"acceptedInput": map[string]any{
 			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
 			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
-			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(), "runtimeProcessId": accepted.GetRuntimeProcessId(),
 			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
 			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
 		},
@@ -264,7 +266,7 @@ func assertColdAttachmentRequestCount(
 		"acceptedInput": map[string]any{
 			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
 			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
-			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(), "runtimeProcessId": accepted.GetRuntimeProcessId(),
 			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
 			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
 		},
@@ -321,7 +323,7 @@ func assertAttachmentOnlyRuntimeInputFixture(t *testing.T, accepted *agentruntim
 		"acceptInput": map[string]any{
 			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
 			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
-			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(),
+			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(), "runtimeProcessId": accepted.GetRuntimeProcessId(),
 			"runtimeInputId": "rin_attachment_input", "inputOrder": accepted.GetInputOrder(),
 			"messagesJson": accepted.GetMessagesJson(),
 		},

@@ -485,6 +485,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer",
 		});
 		session.state.enqueueAcceptedInput(approvalReviewAcceptedInput());
@@ -595,6 +596,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_reviewer_receipt",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer_receipt",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer-receipt",
 		});
 		const reviewerInput = {
@@ -605,6 +607,7 @@ describe("ThreadLoop", () => {
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 		};
 		expect(session.state.enqueueAcceptedInput(reviewerInput)).toBe("applied");
 		expect(session.state.threadTurnTransition().nextStep).toEqual({
@@ -692,6 +695,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_reviewer_tools",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer_tools",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer-tools",
 		});
 		session.state.enqueueAcceptedInput(
@@ -769,6 +773,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-before-commit",
 		});
 		session.state.recordLastRequestCompletion(
@@ -2385,6 +2390,7 @@ describe("ThreadLoop", () => {
 			bindingId: session.identity.bindingId,
 			bindingGeneration: session.identity.bindingGeneration,
 			targetPodUid: session.identity.targetPodUid,
+			runtimeProcessId: session.identity.runtimeProcessId,
 			runtimeInputId: "agent_mail:delivery_mixed_agent_mail",
 			kind: "inter_agent_message",
 			deliveryId: "delivery_mixed_agent_mail",
@@ -3235,6 +3241,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "runtime-token",
 		});
 		const firstSession = new ThreadRuntime(
@@ -6551,6 +6558,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -6688,6 +6696,7 @@ describe("ThreadLoop", () => {
 					bindingId: session.identity.bindingId,
 					bindingGeneration: session.identity.bindingGeneration,
 					targetPodUid: session.identity.targetPodUid,
+					runtimeProcessId: session.identity.runtimeProcessId,
 					runtimeInputId: `rin_partial_${decision}`,
 					toolUseEventId: toolUseEventIds[0]!,
 					decision,
@@ -6862,6 +6871,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_cold",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -7714,6 +7724,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_1",
 				toolUseEventId: "sevt_tool_1",
 				decision: "allow",
@@ -7735,6 +7746,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_confirm_2",
 				toolUseEventId: "sevt_tool_2",
 				decision: "allow",
@@ -7883,6 +7895,7 @@ describe("ThreadLoop", () => {
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				runtimeInputId: "rin_provider_failure_confirm",
 				toolUseEventId: pendingToolUseEventId!,
 				decision: "allow",

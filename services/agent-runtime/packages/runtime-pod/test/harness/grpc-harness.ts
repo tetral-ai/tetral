@@ -51,6 +51,7 @@ class HarnessCleanupController implements RuntimeCleanupController {
 }
 
 const service = new RuntimeControlService({
+	runtimeProcessId: process.env.TETRAL_TEST_RUNTIME_PROCESS_ID ?? "process-test",
   ownPod: {
     namespace: "engine",
     name: "runtime-pod-a",

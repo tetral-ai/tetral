@@ -3373,6 +3373,7 @@ function validReviewRequest(
 		bindingId: "bind_1",
 		bindingGeneration: 7,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeBindingToken: "rtbt_1",
 		modelRequestId: "mreq_1",
 		parentBoundaryEventId: "sevt_request_start_1",

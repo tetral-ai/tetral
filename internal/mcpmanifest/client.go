@@ -3,6 +3,7 @@ package mcpmanifest
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	internalgrpc "github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
@@ -59,6 +60,9 @@ type ConnectorLister struct {
 	Address     string
 	TokenSource internalgrpcauth.TokenSource
 	DialOptions []grpc.DialOption
+	mu          sync.Mutex
+	connection  *grpc.ClientConn
+	closed      bool
 }
 
 func NewConnectorLister(address string, tokenSource internalgrpcauth.TokenSource, dialOptions ...grpc.DialOption) *ConnectorLister {
@@ -69,15 +73,10 @@ func (l *ConnectorLister) ListMCPTools(ctx context.Context, request ListRequest)
 	if l == nil || l.Address == "" || l.TokenSource == nil {
 		return ListResult{}, ListerUnavailableError()
 	}
-	options := append([]grpc.DialOption{}, internalgrpc.MCPConnectorRPCDialOptions()...)
-	options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	options = append(options, l.DialOptions...)
-	options = append(options, grpc.WithPerRPCCredentials(internalgrpcauth.NewServiceAccountTokenCredentials(l.TokenSource)))
-	conn, err := grpc.NewClient(l.Address, options...)
+	conn, err := l.channel()
 	if err != nil {
 		return ListResult{}, err
 	}
-	defer func() { _ = conn.Close() }()
 	var trailers metadata.MD
 	response, err := providergatewayv1.NewMcpConnectorServiceClient(conn).ListMcpTools(ctx, &providergatewayv1.ListMcpToolsRequest{
 		WorkspaceId:   request.WorkspaceID,
@@ -96,6 +95,42 @@ func (l *ConnectorLister) ListMCPTools(ctx context.Context, request ListRequest)
 		})
 	}
 	return ListResult{ManifestETag: response.GetManifestEtag(), Tools: tools}, nil
+}
+
+// Close is owned by the caller after its admitted discovery work has joined.
+func (l *ConnectorLister) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
+	if l.connection != nil {
+		err := l.connection.Close()
+		l.connection = nil
+		return err
+	}
+	return nil
+}
+func (l *ConnectorLister) channel() (*grpc.ClientConn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, status.Error(codes.Unavailable, "mcp manifest channel is closed")
+	}
+	if l.connection != nil {
+		return l.connection, nil
+	}
+	options := append([]grpc.DialOption{}, internalgrpc.MCPConnectorRPCDialOptions()...)
+	options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDisableRetry())
+	options = append(options, l.DialOptions...)
+	options = append(options, grpc.WithPerRPCCredentials(internalgrpcauth.NewServiceAccountTokenCredentials(l.TokenSource)))
+	conn, err := grpc.NewClient(l.Address, options...)
+	if err != nil {
+		return nil, err
+	}
+	l.connection = conn
+	return conn, nil
 }
 
 func classifyMCPManifestListError(err error, trailers metadata.MD) error {

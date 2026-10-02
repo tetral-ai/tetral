@@ -5,6 +5,7 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
+import { readFileSync } from "node:fs";
 import type {
 	RuntimeCleanupCommandOutcome,
 	RuntimeContextLoadOperation,
@@ -16,6 +17,42 @@ import type {
 } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
+
+/** Container values share one cgroup scope; an unlimited/unknown limit cannot advertise headroom. */
+export interface ContainerMemoryObservation {
+	readonly usageBytes: number;
+	readonly limitBytes: number;
+}
+export function containerMemoryObservation(
+	read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): ContainerMemoryObservation | undefined {
+	for (const [usagePath, limitPath] of [
+		["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"],
+		[
+			"/sys/fs/cgroup/memory/memory.usage_in_bytes",
+			"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+		],
+	]) {
+		try {
+			const usage = read(usagePath!).trim(),
+				limit = read(limitPath!).trim();
+			if (!/^[0-9]+$/.test(usage) || !/^[1-9][0-9]*$/.test(limit))
+				return undefined;
+			const usageBytes = Number(usage),
+				limitBytes = Number(limit);
+			if (
+				!Number.isSafeInteger(usageBytes) ||
+				!Number.isSafeInteger(limitBytes) ||
+				limitBytes >= 2 ** 60
+			)
+				return undefined;
+			return { usageBytes, limitBytes };
+		} catch {
+			/* Try the other cgroup ABI only when its files are unavailable. */
+		}
+	}
+	return undefined;
+}
 
 interface Observation {
 	count: number;
@@ -191,11 +228,53 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
 export function runtimePodMetricsText(
 	lifecycle: RuntimePodLifecycle,
 	runtimeMetrics: RuntimePodMetricsSource = EmptyRuntimePodMetrics,
+	readContainerMemory: () =>
+		| ContainerMemoryObservation
+		| undefined = containerMemoryObservation,
 ): string {
 	const snapshot = lifecycle.metricsSnapshot();
 	const runtimeSnapshot = runtimeMetrics.snapshot();
 	const memory = process.memoryUsage();
+	let container: ContainerMemoryObservation | undefined;
+	try {
+		container = readContainerMemory();
+	} catch {
+		/* unknown remains ineligible */
+	}
+	const validContainer =
+		container !== undefined &&
+		Number.isSafeInteger(container.usageBytes) &&
+		container.usageBytes >= 0 &&
+		Number.isSafeInteger(container.limitBytes) &&
+		container.limitBytes > 0;
+	const capacity = lifecycle.sessionCapacity();
 	return [
+		...(capacity === undefined
+			? []
+			: [
+					metric(
+						"runtimepod_session_capacity",
+						"Configured local Session capacity.",
+						"gauge",
+						capacity,
+					),
+				]),
+		...(validContainer
+			? [
+					metric(
+						"runtimepod_container_memory_usage_bytes",
+						"Current container cgroup memory usage.",
+						"gauge",
+						container!.usageBytes,
+					),
+					metric(
+						"runtimepod_container_memory_limit_bytes",
+						"Finite container cgroup memory limit.",
+						"gauge",
+						container!.limitBytes,
+					),
+				]
+			: ["# runtimepod_container_memory_state unknown_or_unlimited\n"]),
 		metric(
 			"runtimepod_ready",
 			"Runtime Pod readiness state.",

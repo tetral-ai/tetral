@@ -311,7 +311,7 @@ describe("session run static boundaries", () => {
 		);
 	});
 
-	test("string-keyed maps are limited to residency, reviewer memo, and pure checkpoint extraction", async () => {
+	test("string-keyed maps are limited to residency, reviewer memo, admitted reviewer dependencies, and pure checkpoint extraction", async () => {
 		const managerSource = await readFile(
 			sourceUrl("src/session/session-manager.ts"),
 			"utf8",
@@ -347,6 +347,7 @@ describe("session run static boundaries", () => {
 		expect(mapOwners).toEqual([
 			"src/session/approval-reviewer-manager.ts",
 			"src/session/session-manager.ts",
+            "src/thread-loop/thread-state.ts",
 			"src/thread-loop/turn/load.ts",
 		]);
 		expect(normalizedManager).toContain("interfaceThreadRunSlot{");

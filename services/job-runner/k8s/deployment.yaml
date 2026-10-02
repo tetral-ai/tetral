@@ -8,17 +8,30 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: job-runner
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/nativeSidecar: "true"
+        sidecar.istio.io/proxyImage: "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9"
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'
+        traffic.sidecar.istio.io/excludeOutboundPorts: "19090"
       labels:
         app.kubernetes.io/name: job-runner
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: "1-31-1"
     spec:
       serviceAccountName: job-runner
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
       containers:
         - name: job-runner
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -26,17 +39,35 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_BLOB_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/object-store-ca.crt
+            - name: TETRAL_BLOB_TLS_SERVER_NAME
+              value: "tetral-object-store.tetral-system.svc.cluster.local"
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: "30000"
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: "standard-routed"
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR
               value: :8081
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
-              value: local
+              value: "local"
             - name: TETRAL_SERVICE_VERSION
-              value: dev
+              value: "dev"
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: tetral-database
-                  key: bridge-url
+                  name: "tetral-database"
+                  key: job-runner-url
             - name: TETRAL_QUEUE_GRPC_ADDR
               value: queue.tetral-system.svc.cluster.local:9090
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
@@ -54,7 +85,7 @@ spec:
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
               value: app.kubernetes.io/name=agent-runtime
             - name: TETRAL_AGENT_RUNTIME_GRPC_PORT
-              value: '9090'
+              value: "19090"
             - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
             - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
@@ -64,27 +95,27 @@ spec:
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: endpoint
             - name: TETRAL_BLOB_REGION
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: region
             - name: TETRAL_BLOB_BUCKET
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: bucket
             - name: TETRAL_BLOB_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: access-key
             - name: TETRAL_BLOB_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: secret-key
           ports:
             - name: http-job
@@ -98,14 +129,15 @@ spec:
               path: /ready
               port: http-job
           resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-              ephemeral-storage: 128Mi
+
             limits:
               cpu: 500m
-              memory: 512Mi
               ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              ephemeral-storage: 128Mi
+              memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -114,6 +146,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: bridge-runtime-pod-token
               mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
               readOnly: true
@@ -124,6 +159,9 @@ spec:
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
       volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
         - name: bridge-runtime-pod-token
           projected:
             sources:

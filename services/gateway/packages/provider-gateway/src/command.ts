@@ -1,3 +1,5 @@
+import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
+import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
 import { createDiagnosticStreamSink, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
@@ -40,7 +42,7 @@ export interface ProviderGatewayCommandDependencies {
   readonly tokenReviewClient: GatewayTokenReviewClient;
   readonly app: ProviderGatewayApp;
   readonly credentialResolver: ProviderCredentialResolver;
-  readonly close?: () => Promise<void>;
+  readonly close?: (deadline?: Date) => Promise<void>;
 }
 
 /** Defines process-runner overrides for logging, dependency composition, waiting, and signal registration. */
@@ -79,11 +81,26 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
   };
   let logger: GatewayLogger | undefined;
-  const report = (record: GatewayLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
-  const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
+  const report = (record: GatewayLogRecord): void => {
+    try {
+      logger?.error(record);
+    } catch {
+      /* observability does not own lifecycle */
+    }
+  };
+  let drainTimeoutMs: number = ServiceLifecycleDefaults.drainTimeoutMs,
+    cancelJoinTimeoutMs: number = ServiceLifecycleDefaults.cancelJoinTimeoutMs;
+  let shutdownDeadline: Date | undefined;
+  let drainDeadline: Date | undefined;
+  const closes: {
+    phase: ProcessFailurePhase;
+    close: () => void | Promise<void>;
+  }[] = [];
   let stopping: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     if (stopping !== undefined) return stopping;
+    drainDeadline = new Date(Date.now() + drainTimeoutMs);
+    shutdownDeadline = new Date(drainDeadline.getTime() + cancelJoinTimeoutMs);
     let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
     stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
     void (async () => {
@@ -122,6 +139,8 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
       deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion,
     });
     registerDiagnosticCleanup(logger);
+    drainTimeoutMs = config.config.drainTimeoutMs;
+    cancelJoinTimeoutMs = config.config.cancelJoinTimeoutMs;
     phase = "dependency";
     let dependencies: ProviderGatewayCommandDependencies;
     try { dependencies = await (options.dependencyBuilder ?? buildProviderGatewayCommandDependencies)({ config: config.config, logger }); }
@@ -130,9 +149,18 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
       report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
       throw new Error("gateway service startup error");
     }
-    closes.push({ phase: "database", close: () => dependencies.close?.() });
-    closes.push({ phase: "app", close: () => dependencies.app.shutdown() });
-    releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);
+    closes.push({
+      phase: "database",
+      close: () => dependencies.close?.(shutdownDeadline),
+    });
+    closes.push({
+      phase: "app",
+      close: () => dependencies.app.shutdown(shutdownDeadline, drainDeadline),
+    });
+    releaseSignals =
+      options.registerSignalHandlers === undefined
+        ? registerProcessSignalHandlers(shutdown)
+        : options.registerSignalHandlers(shutdown);
     phase = "listener";
     await dependencies.app.start();
     phase = "wait";
@@ -172,13 +200,56 @@ export async function buildProviderGatewayCommandDependencies(input: {
       reviewerTokenPath: input.config.tokenReviewReviewerTokenPath,
       apiServerCaCertPath: input.config.kubernetesApiCaCertPath,
     });
-  const sqlOptions = databasePoolOptions(input.config);
-  const sql = input.builderOptions?.sqlFactory?.(sqlOptions) ?? new Bun.SQL(sqlOptions);
+  let schemaFailure: unknown;
+  let sql;
   try {
-    await (input.builderOptions?.schemaVerifier ?? verifyPostgreSQLReadiness)(sql);
+    sql = await openPostgresSQLOwner({
+      url: input.config.databaseUrl,
+      pool: input.config.databasePool,
+      observe: (event) => {
+        if (event.kind !== "reload_failed" && event.kind !== "reload_recovered")
+          return;
+        const failed = event.kind === "reload_failed";
+        try {
+          input.logger[failed ? "error" : "info"]({
+            event: failed
+              ? "transport.credential_reload_failed"
+              : "transport.credential_reload_recovered",
+            "event.kind": failed
+              ? "transport.credential_reload_failed"
+              : "transport.credential_reload_recovered",
+            component: "database",
+            "transport.stage": "credential_reload",
+            "transport.outcome": failed ? "invalid_generation" : "recovered",
+            "failed.count": event.failedCount ?? 0,
+          });
+        } catch {
+          /* sink failure cannot alter SQL generation custody */
+        }
+      },
+      ...(input.config.databaseTLS !== undefined
+        ? { tls: input.config.databaseTLS }
+        : {}),
+      ...(input.builderOptions?.sqlFactory !== undefined
+        ? {
+            sqlFactory: input.builderOptions.sqlFactory as unknown as (
+              options: Bun.SQL.PostgresOrMySQLOptions,
+            ) => Bun.SQL,
+          }
+        : {}),
+      verify: async (actual) => {
+        try {
+          await (
+            input.builderOptions?.schemaVerifier ?? verifyPostgreSQLReadiness
+          )(actual);
+        } catch (error) {
+          schemaFailure = error;
+          throw error;
+        }
+      },
+    });
   } catch (error) {
-    await closeSQLAfterStartupFailure(sql);
-    throw error;
+    throw schemaFailure ?? error;
   }
   const credentialStore = new SQLGatewayCredentialStore(sql);
   const platformPool = new CachedPlatformCredentialPool({
@@ -237,8 +308,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
     app,
     tokenReviewClient,
     credentialResolver,
-    close: async () => {
-      await sql.close?.({ timeout: 1 });
+    close: async (deadline) => {
+      await attachmentResolver.close();
+      await sql.close({ deadline: deadline ?? new Date(Date.now() + 5000) });
     },
   };
 }

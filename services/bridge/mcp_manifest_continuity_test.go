@@ -387,9 +387,17 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 		`[{"name":"github_issue","description":"github_issue","input_schema":{"type":"object"}}]`); err != nil {
 		t.Fatalf("advance accepted manifest: %v", err)
 	}
+	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "pod_mcp_cold_2", ID: "process_pod_mcp_cold_2"}
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(admin), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(admin), identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
-		    SET binding_id = 'bind_mcp_cold_2', binding_generation = 2, agent_runtime_pod_uid = 'pod_mcp_cold_2', updated_at = '2026-01-01T00:00:02Z'
+		    SET binding_id = 'bind_mcp_cold_2', binding_generation = 2, agent_runtime_pod_uid = 'pod_mcp_cold_2', runtime_process_id='process_pod_mcp_cold_2', updated_at = '2026-01-01T00:00:02Z'
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_cold'`); err != nil {
 		t.Fatalf("replace runtime binding: %v", err)
 	}

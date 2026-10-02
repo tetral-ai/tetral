@@ -27,6 +27,7 @@ export interface RuntimeBindingRequestIdentity {
   readonly sessionThreadId: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
+  readonly runtimeProcessId: string;
 }
 
 /**
@@ -58,6 +59,7 @@ interface RuntimeBindingTokenPayload {
   readonly binding_id: string;
   readonly binding_generation: number;
   readonly runtime_pod_uid: string;
+  readonly runtime_process_id: string;
   readonly exp: number;
 }
 
@@ -91,7 +93,7 @@ function verifyRuntimeBindingToken(input: {
   readonly hmacKey: string;
   readonly now: Date;
 }): boolean {
-  if (input.runtimePodUid === "") {
+  if (input.runtimePodUid === "" || !input.request.runtimeProcessId) {
     return false;
   }
   const [prefix, payloadPart, signaturePart, extra] = input.runtimeBindingToken.split(".");
@@ -110,7 +112,8 @@ function verifyRuntimeBindingToken(input: {
     payload.session_thread_id === input.request.sessionThreadId &&
     payload.binding_id === input.request.bindingId &&
     payload.binding_generation === input.request.bindingGeneration &&
-    payload.runtime_pod_uid === input.runtimePodUid;
+    payload.runtime_pod_uid === input.runtimePodUid &&
+    payload.runtime_process_id === input.request.runtimeProcessId;
 }
 
 function signatureMatches(payloadPart: string, signaturePart: string, hmacKey: string): boolean {
@@ -130,6 +133,7 @@ function decodePayload(payloadPart: string): RuntimeBindingTokenPayload | undefi
       typeof parsed.binding_id !== "string" ||
       typeof parsed.binding_generation !== "number" ||
       typeof parsed.runtime_pod_uid !== "string" ||
+      typeof parsed.runtime_process_id !== "string" || parsed.runtime_process_id.length === 0 ||
       typeof parsed.exp !== "number"
     ) {
       return undefined;

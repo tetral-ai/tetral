@@ -1,3 +1,5 @@
+import {Metadata} from "@grpc/grpc-js";
+import {validProviderRequest} from "./fixtures.js";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { Socket } from "node:net";
@@ -9,6 +11,34 @@ import { createJsonLogger } from "../../src/logger.js";
 import { commandEnv, commandFixture, failureSentinel } from "../fixtures/command-process.js";
 
 describe("ProviderGateway command failure ownership", () => {
+  test("actual app worker joins before command SQL closes even after cancellation deadline", async () => {
+    const events:string[]=[];
+    let release!:()=>void,entered!:()=>void;
+    const held=new Promise<void>(resolve=>{release=resolve;});
+    const admission=new Promise<void>(resolve=>{entered=resolve;});
+    let app:ReturnType<typeof createProviderGatewayApp>|undefined;
+    let worker:Promise<unknown>|undefined;
+    await withEnv(async()=>{
+      process.env.TETRAL_SERVICE_DRAIN_TIMEOUT_MS="200";
+      process.env.TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS="1000";
+      const command=runProviderGatewayCommand({logger:{info:()=>undefined,error:()=>undefined},
+        dependencyBuilder:async input=>{
+          const dependencies=await commandFixture("none").options.dependencyBuilder!(input);
+          app=createProviderGatewayApp({config:input.config,logger:input.logger,bootstrap:async()=>undefined,tokenReviewClient:{createTokenReview:async()=>{entered();await held;events.push("worker.released");return {authenticated:true,audiences:["tetral-internal-grpc"],username:"system:serviceaccount:tetral-agent-runtime:agent-runtime",podUid:"fixture"};}}});
+          return {...dependencies,app,close:async()=>{events.push("database.close");}};
+        },registerSignalHandlers:()=>undefined,
+        waitForever:async()=>{const metadata=new Metadata();metadata.set("authorization","Bearer fixture");worker=(async()=>{for await(const _event of app!.service.streamProviderRequest(validProviderRequest(),metadata)){}})().catch(error=>error);await Promise.race([admission,worker.then(error=>{throw error;})]);return undefined as never;},
+      });
+      const outcome=command.catch(error=>error);
+      await Promise.race([admission,outcome.then(error=>{throw error;})]);
+      await new Promise(resolve=>setTimeout(resolve,1250));
+      expect(events).not.toContain("database.close");
+      expect(app?.ready()).toEqual({ready:false});
+      release();await worker;
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(events).toEqual(["worker.released","database.close"]);
+    });
+  });
   test("listener, wait and cleanup failures preserve errors and attempt each later close once", async () => {
     for (const mode of ["listener", "wait", "wait_both_cleanup", "app", "database", "both_cleanup"]) {
       const events: string[] = [], lines: string[] = [];

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -17,28 +18,22 @@ import (
 
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/storage/catalogtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
 func TestRunPreparesSchemaAndServingRoles(t *testing.T) {
 	for _, existing := range []bool{false, true} {
-		t.Run(fmt.Sprintf("existing_v1=%t", existing), func(t *testing.T) {
+		t.Run(fmt.Sprintf("matching_current=%t", existing), func(t *testing.T) {
 			admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
 			declarations := testRoleDeclarations(t)
 			defer cleanupInstalledRoles(t, admin, declarations)
-			wantVersions := "[1 2 3 4]"
+			wantVersions := "[1]"
 			var originalStamp time.Time
 			if existing {
-				// The historical-baseline test owns V1 SQL equivalence. This fixture
-				// isolates the command boundary: a V1 catalog already owned by the
-				// installed migration role, upgraded through the admin connection.
+				// Repeating the matching initial schema preserves its stamp and
+				// catalog ownership; predecessor schemas are rejected separately.
 				if err := storage.MigrateSchema(context.Background(), admin); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := admin.Exec(`ALTER TABLE environment_artifacts DROP COLUMN build_started_at, DROP COLUMN build_warn_at, DROP COLUMN build_deadline_at, DROP COLUMN build_warned_at, DROP COLUMN provider_build_ref, DROP COLUMN provider_build_state;
-DELETE FROM tetral_schema_migrations WHERE version=4;
-ALTER TABLE session_runtime_inbox DROP COLUMN mcp_discovery_attempts, DROP COLUMN mcp_discovery_deadline_at, DROP COLUMN mcp_discovery_diagnostic; DELETE FROM tetral_schema_migrations WHERE version=3; ALTER TABLE session_github_repository_resources DROP COLUMN git_identity_name, DROP COLUMN git_identity_email;
-DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 					t.Fatal(err)
 				}
 				conn, err := pgx.Connect(context.Background(), storagetest.AdminDatabaseURL(t, admin))
@@ -53,7 +48,7 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 				if err := admin.QueryRow(`SELECT applied_at FROM tetral_schema_migrations WHERE version=1`).Scan(&originalStamp); err != nil {
 					t.Fatal(err)
 				}
-				wantVersions = "[2 3 4]"
+				wantVersions = "[]"
 			}
 			payload, err := json.Marshal(declarations)
 			if err != nil {
@@ -66,7 +61,7 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 				return storagetest.AdminDatabaseURL(t, admin)
 			}
 			var logs bytes.Buffer
-			if err := run(context.Background(), getenv, bytes.NewReader(payload), &logs); err != nil {
+			if err := runLocalPreparationFixture(context.Background(), getenv, bytes.NewReader(payload), &logs); err != nil {
 				t.Fatalf("install roles on empty database: %v", err)
 			}
 
@@ -94,8 +89,8 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 			if err := admin.QueryRow(`SELECT count(*) FROM tetral_schema_migrations`).Scan(&stamps); err != nil {
 				t.Fatal(err)
 			}
-			if tables == 0 || stamps != 4 {
-				t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and four stamps", tables, stamps)
+			if tables == 0 || stamps != 1 {
+				t.Fatalf("installed catalog tables=%d stamps=%d; want nonempty catalog and one current stamp", tables, stamps)
 			}
 			if existing {
 				var stamp time.Time
@@ -108,7 +103,7 @@ DELETE FROM tetral_schema_migrations WHERE version=2`); err != nil {
 				}
 			}
 			logs.Reset()
-			if err := run(context.Background(), getenv, bytes.NewReader(payload), &logs); err != nil {
+			if err := runLocalPreparationFixture(context.Background(), getenv, bytes.NewReader(payload), &logs); err != nil {
 				t.Fatalf("repeat database preparation: %v", err)
 			}
 			if strings.Contains(logs.String(), "schema.migration.started") || !strings.Contains(logs.String(), "database.prepare.completed") {
@@ -252,7 +247,7 @@ func testRoleDeclarations(t *testing.T) database.RoleDeclarations {
 func TestRunRejectsInvalidRolesBeforeMigrating(t *testing.T) {
 	admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	var logs bytes.Buffer
-	err := run(context.Background(), func(key string) string {
+	err := runLocalPreparationFixture(context.Background(), func(key string) string {
 		if key == adminDatabaseURLEnv {
 			return storagetest.AdminDatabaseURL(t, admin)
 		}
@@ -273,9 +268,9 @@ func TestRunRejectsInvalidRolesBeforeMigrating(t *testing.T) {
 
 func TestRunLogsMigrationFailureBeforeInstallingRoles(t *testing.T) {
 	admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	if _, err := admin.Exec(`CREATE FUNCTION reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
+	if _, err := admin.Exec(`CREATE FUNCTION pg_temp.reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'private-command-migration-message' USING ERRCODE = '42501', DETAIL = 'private-command-migration-detail'; END $$;
-CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION reject_migration()`); err != nil {
+CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION pg_temp.reject_migration()`); err != nil {
 		t.Fatal(err)
 	}
 	declarations := testRoleDeclarations(t)
@@ -285,7 +280,7 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE 
 	}
 	dsn := storagetest.AdminDatabaseURL(t, admin)
 	var logs bytes.Buffer
-	err = run(context.Background(), func(key string) string {
+	err = runLocalPreparationFixture(context.Background(), func(key string) string {
 		if key == adminDatabaseURLEnv {
 			return dsn
 		}
@@ -355,7 +350,7 @@ func TestRunRejectsNonSuperuserBeforeMigrating(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	err = run(context.Background(), func(key string) string {
+	err = runLocalPreparationFixture(context.Background(), func(key string) string {
 		if key == adminDatabaseURLEnv {
 			return dsn.String()
 		}
@@ -395,7 +390,7 @@ func TestRunLogsRoleConflictAfterCommittedMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	err = run(context.Background(), func(key string) string {
+	err = runLocalPreparationFixture(context.Background(), func(key string) string {
 		if key == adminDatabaseURLEnv {
 			return storagetest.AdminDatabaseURL(t, admin)
 		}
@@ -412,7 +407,88 @@ func TestRunLogsRoleConflictAfterCommittedMigration(t *testing.T) {
 	if err := admin.QueryRow("SELECT count(*) FROM tetral_schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 4 {
+	if versions != 1 {
 		t.Fatalf("role failure changed migration history: %d versions", versions)
+	}
+}
+
+// Schema and role transaction tests use their isolated plaintext PostgreSQL
+// fixture through an explicit connector. Production run always constructs the
+// verified TLS owner; protected-store integration exercises that real transport.
+func runLocalPreparationFixture(ctx context.Context, getenv func(string) string, input io.Reader, stderr io.Writer) error {
+	return runWithConnection(ctx, getenv, input, stderr, func(_ context.Context, getenv func(string) string) (preparationConnection, error) {
+		config, err := pgx.ParseConfig(getenv(adminDatabaseURLEnv))
+		return preparationConnection{config: config, refresh: func(context.Context, *pgx.ConnConfig) error { return nil }, close: func() error { return nil }}, err
+	})
+}
+
+func TestRunRequiresProtectedDatabaseTransportBeforeConnecting(t *testing.T) {
+	payload, err := json.Marshal(testRoleDeclarations(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err = run(context.Background(), func(key string) string {
+		if key == adminDatabaseURLEnv {
+			return "postgres://private-user:private-password@127.0.0.1:1/private-db?sslmode=disable"
+		}
+		return ""
+	}, bytes.NewReader(payload), &logs)
+	if err == nil {
+		t.Fatal("accepted missing database trust")
+	}
+	assertPreparationFailure(t, logs.String(), "configure_transport", "requires valid CA trust and server name")
+	if strings.Contains(logs.String(), "private-") {
+		t.Fatal("database connection details escaped")
+	}
+}
+
+func TestRunRejectsPredecessorWithoutChangingCatalogOrRoles(t *testing.T) {
+	admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	// This stamp identifies the retired initial schema. It is a rejection
+	// fixture, never an initializer or compatibility implementation.
+	if _, err := admin.Exec(`CREATE TABLE tetral_schema_migrations (version BIGINT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);
+INSERT INTO tetral_schema_migrations (version,checksum) VALUES (1,'d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6');
+CREATE TABLE predecessor_data (value TEXT NOT NULL); INSERT INTO predecessor_data VALUES ('preserve-me')`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := catalogtest.Snapshot(context.Background(), admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declarations := testRoleDeclarations(t)
+	payload, err := json.Marshal(declarations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	err = runLocalPreparationFixture(context.Background(), func(key string) string {
+		if key == adminDatabaseURLEnv {
+			return storagetest.AdminDatabaseURL(t, admin)
+		}
+		return ""
+	}, bytes.NewReader(payload), &logs)
+	if err == nil {
+		t.Fatal("predecessor schema was accepted")
+	}
+	after, err := catalogtest.Snapshot(context.Background(), admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected predecessor catalog changed")
+	}
+	var value string
+	if err := admin.QueryRow(`SELECT value FROM predecessor_data`).Scan(&value); err != nil || value != "preserve-me" {
+		t.Fatalf("predecessor data changed: %q %v", value, err)
+	}
+	for _, role := range declarations.Roles {
+		var exists bool
+		if err := admin.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)`, role.Name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatal("predecessor rejection installed a role")
+		}
 	}
 }

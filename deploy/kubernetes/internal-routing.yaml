@@ -1,0 +1,2831 @@
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runner-queue
+  namespace: tetral-system
+spec:
+  host: queue.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: DISABLE
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-sandbox-queue
+  namespace: tetral-system
+spec:
+  host: queue.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: DISABLE
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runtime-bridge
+  namespace: tetral-agent-runtime
+spec:
+  host: bridge.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/bridge"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runtime-mcp
+  namespace: tetral-agent-runtime
+spec:
+  host: mcp-connector.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9091
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runner-mcp
+  namespace: tetral-system
+spec:
+  host: mcp-connector.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9091
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-bridge-mcp
+  namespace: tetral-system
+spec:
+  host: mcp-connector.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9091
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/mcp-connector"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-mcp-bridge
+  namespace: tetral-system
+spec:
+  host: bridge.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/bridge"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runtime-web
+  namespace: tetral-agent-runtime
+spec:
+  host: web-connector.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9092
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: DISABLE
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-runtime-provider
+  namespace: tetral-agent-runtime
+spec:
+  host: provider-gateway.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/provider-gateway"
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-provider-bridge
+  namespace: tetral-system
+spec:
+  host: bridge.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: ISTIO_MUTUAL
+          subjectAltNames:
+            - "spiffe://cluster.local/ns/tetral-system/sa/bridge"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runner-queue
+  namespace: tetral-system
+spec:
+  hosts: ["queue.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: job-runner
+      timeout: 5s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: queue.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-sandbox-queue
+  namespace: tetral-system
+spec:
+  hosts: ["queue.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: sandbox
+      timeout: 5s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: queue.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runtime-bridge
+  namespace: tetral-agent-runtime
+spec:
+  hosts: ["bridge.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - name: loadcontext
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: refreshruntimebindingtoken
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RefreshRuntimeBindingToken"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinputs
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: committasknotificationresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitTaskNotificationResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writeevent
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: settletoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writerequestend
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: finishidle
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: createsubagentthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateSubagentThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewertrunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerTrunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewersidecar
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerSidecar"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitapprovalreviewinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitApprovalReviewInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvechildthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: listchildthreads
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: deliverinteragentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/DeliverInterAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readagentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closechildcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseChildControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closeapprovalreviewer
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseApprovalReviewer"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: markchildthreadactive
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: acceptsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readcommandresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: sendcommandinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: cancelcommand
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: authorizewebtoolexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: runmemory
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvetransientattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvefileattachmentmetadata
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readfileattachmentchunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadFileAttachmentChunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: mcpmanifestchanged
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: claimmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ClaimMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: relinquishmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinternaltoolrepair
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitruntimetermination
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitRuntimeTermination"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: registerruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: reportruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: releaseruntimebinding
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runtime-mcp
+  namespace: tetral-agent-runtime
+spec:
+  hosts: ["mcp-connector.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9091
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: mcp-connector.tetral-system.svc.cluster.local
+            port:
+              number: 9091
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runner-mcp
+  namespace: tetral-system
+spec:
+  hosts: ["mcp-connector.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9091
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: job-runner
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: mcp-connector.tetral-system.svc.cluster.local
+            port:
+              number: 9091
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-bridge-mcp
+  namespace: tetral-system
+spec:
+  hosts: ["mcp-connector.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9091
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: bridge
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: mcp-connector.tetral-system.svc.cluster.local
+            port:
+              number: 9091
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-mcp-bridge
+  namespace: tetral-system
+spec:
+  hosts: ["bridge.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - name: loadcontext
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: refreshruntimebindingtoken
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RefreshRuntimeBindingToken"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinputs
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: committasknotificationresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitTaskNotificationResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writeevent
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: settletoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writerequestend
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: finishidle
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: createsubagentthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateSubagentThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewertrunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerTrunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewersidecar
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerSidecar"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitapprovalreviewinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitApprovalReviewInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvechildthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: listchildthreads
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: deliverinteragentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/DeliverInterAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readagentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closechildcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseChildControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closeapprovalreviewer
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseApprovalReviewer"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: markchildthreadactive
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: acceptsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readcommandresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: sendcommandinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: cancelcommand
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: authorizewebtoolexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: runmemory
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvetransientattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvefileattachmentmetadata
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readfileattachmentchunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadFileAttachmentChunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: mcpmanifestchanged
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: claimmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ClaimMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: relinquishmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinternaltoolrepair
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitruntimetermination
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitRuntimeTermination"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: registerruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: reportruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: releaseruntimebinding
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runtime-web
+  namespace: tetral-agent-runtime
+spec:
+  hosts: ["web-connector.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9092
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: web-connector.tetral-system.svc.cluster.local
+            port:
+              number: 9092
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-runtime-provider
+  namespace: tetral-agent-runtime
+spec:
+  hosts: ["provider-gateway.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: provider-gateway.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-provider-bridge
+  namespace: tetral-system
+spec:
+  hosts: ["bridge.tetral-system.svc.cluster.local"]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+    - name: loadcontext
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: refreshruntimebindingtoken
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RefreshRuntimeBindingToken"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinputs
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: committasknotificationresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitTaskNotificationResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writeevent
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: settletoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: writerequestend
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: finishidle
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: createsubagentthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateSubagentThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewertrunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerTrunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: ensureapprovalreviewersidecar
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerSidecar"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitapprovalreviewinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitApprovalReviewInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvechildthread
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: listchildthreads
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: deliverinteragentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/DeliverInterAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readagentmail
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadAgentMail"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitchildinterrupt
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closechildcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseChildControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: closeapprovalreviewer
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseApprovalReviewer"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: markchildthreadactive
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: acceptsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: awaitsandboxexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readcommandresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: sendcommandinput
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: cancelcommand
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: authorizewebtoolexecution
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: runmemory
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvetransientattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolvefileattachmentmetadata
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: readfileattachmentchunk
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadFileAttachmentChunk"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: mcpmanifestchanged
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: claimmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ClaimMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: relinquishmcptoolresult
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitinternaltoolrepair
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: commitruntimetermination
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitRuntimeTermination"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: registerruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: reportruntimeprocess
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: releaseruntimebinding
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100

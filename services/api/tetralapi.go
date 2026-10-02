@@ -5,15 +5,18 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
@@ -75,10 +78,17 @@ type Application struct {
 
 // Close releases application-owned resources.
 func (a *Application) Close() error {
-	if a == nil || a.Client == nil {
+	if a == nil {
 		return nil
 	}
-	return a.Client.Close()
+	var handlerErr, databaseErr error
+	if closer, ok := a.Handler.(io.Closer); ok {
+		handlerErr = closer.Close()
+	}
+	if a.Client != nil {
+		databaseErr = a.Client.Close()
+	}
+	return errors.Join(handlerErr, databaseErr)
 }
 
 // StartupDatabase is the opened DB state used during production bootstrap.
@@ -100,7 +110,7 @@ type StartupOpenFunc func(context.Context) (StartupDatabase, error)
 
 // OpenStartupDatabaseFromEnv opens the configured PostgreSQL database.
 func OpenStartupDatabaseFromEnv(ctx context.Context) (StartupDatabase, error) {
-	openResult, err := dbconnect.OpenPlainDSNFromEnv(ctx)
+	openResult, err := dbconnect.OpenProtectedDSNFromEnv(ctx)
 	if err != nil {
 		return StartupDatabase{}, err
 	}
@@ -170,8 +180,10 @@ type osEnv struct{}
 
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
-// BuildRouter constructs the production public API router.
-func BuildRouter(ctx context.Context, cfg RouterConfig) (http.Handler, error) {
+// BuildRouter constructs the production public API router. The returned handler
+// implements io.Closer for owned object-store resources; close it after joining
+// HTTP requests. An explicitly supplied BlobStore remains caller-owned.
+func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, resultErr error) {
 	if err := validatePublicAPIConfig(cfg.VaultKey); err != nil {
 		return nil, err
 	}
@@ -220,6 +232,15 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	var ownedBlob io.Closer
+	if cfg.BlobStore == nil {
+		ownedBlob, _ = blobStore.(io.Closer)
+	}
+	defer func() {
+		if resultErr != nil && ownedBlob != nil {
+			_ = ownedBlob.Close()
+		}
+	}()
 	var fileStore *files.PostgreSQLFileStore
 	if blobStore != nil {
 		fileStore = files.NewPostgreSQLStore(cfg.RuntimeClient, blobStore)
@@ -307,7 +328,24 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (http.Handler, error) {
 	if fileHandler != nil {
 		routerOpts = append(routerOpts, httpapi.WithFileHandler(fileHandler))
 	}
-	return httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...), nil
+	return &ownedRouter{Handler: httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...), resources: ownedBlob}, nil
+}
+
+// ownedRouter keeps object-client cleanup at the composition that created it.
+type ownedRouter struct {
+	http.Handler
+	resources io.Closer
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (r *ownedRouter) Close() error {
+	r.closeOnce.Do(func() {
+		if r.resources != nil {
+			r.closeErr = r.resources.Close()
+		}
+	})
+	return r.closeErr
 }
 
 // asStartupConfigError re-expresses a config-VALIDATION error from a foreign
@@ -378,7 +416,7 @@ func buildOptionalBlobStore(ctx context.Context, suppliedBlobStore blob.BlobStor
 	if err := cfg.AssertProductionReady(); err != nil {
 		return nil, asStartupConfigError(err)
 	}
-	blobStore, err := blob.NewS3BlobStore(ctx, cfg)
+	blobStore, err := blob.NewProtectedS3BlobStore(ctx, cfg)
 	if err != nil {
 		// Bucket D: client construction. Stays class-only (not converted).
 		return nil, fmt.Errorf("blob store: %w", err)

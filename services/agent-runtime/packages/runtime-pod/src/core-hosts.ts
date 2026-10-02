@@ -62,6 +62,7 @@ export interface RuntimeCoreHosts {
 	readonly commandRunHost: RuntimeSessionRunHost;
 	readonly subAgentRunHost: RuntimeSubAgentRunHost;
 	readonly cleanupRunHost: RuntimeCoreCleanupHost;
+	readonly quiesce: (options: SessionManager.RuntimeQuiesceOptions) => Promise<void>;
 	readonly shutdownActiveRuns: () => Promise<void>;
 	readonly close: () => Promise<void>;
 }
@@ -386,7 +387,11 @@ export async function buildRuntimeCoreHosts(
 				const result = await Effect.runPromise(
 					host.handleEnsureThreadInstalled(command, {
 						startPendingWork: true,
-						loadOptions: { recovery: command.recoveryLeaseRef },
+						loadOptions: {
+							recovery: command.recoveryLeaseRef,
+							sourceEventId: command.sourceEventId,
+							handoffId: command.handoffId,
+						},
 					}),
 				);
 				return result.ok
@@ -619,6 +624,7 @@ export async function buildRuntimeCoreHosts(
 					bindingId: command.bindingId,
 					bindingGeneration: command.bindingGeneration,
 					targetPodUid: command.targetPodUid,
+					runtimeProcessId: command.runtimeProcessId,
 					writeId: `rwrite_${event.review_id}_decision`,
 					event,
 				}),
@@ -630,6 +636,7 @@ export async function buildRuntimeCoreHosts(
 					bindingId: command.bindingId,
 					bindingGeneration: command.bindingGeneration,
 					targetPodUid: command.targetPodUid,
+					runtimeProcessId: command.runtimeProcessId,
 					writeId: `rwrite_${event.review_id}_failure`,
 					event,
 				}),
@@ -640,6 +647,7 @@ export async function buildRuntimeCoreHosts(
 					host.handleCleanupSession(scope.sessionId, scope),
 				),
 		},
+		quiesce: async (options) => { await Effect.runPromise(host.quiesce(options)); },
 		shutdownActiveRuns: async () => {
 			await Effect.runPromise(host.shutdownActiveRuns());
 		},
@@ -732,6 +740,7 @@ function runtimeAcceptedInputFromCommand(
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,
+		runtimeProcessId: command.runtimeProcessId,
 		runtimeInputId: command.runtimeInputId,
 		inputOrder: command.inputOrder,
 		kind: "messages",

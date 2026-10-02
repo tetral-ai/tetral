@@ -12,7 +12,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -34,6 +33,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Con
 		PodName:           claim.PodName,
 		PodUID:            claim.PodUID,
 		PodIP:             claim.PodIP,
+		RuntimeProcessID:  claim.RuntimeProcessID,
 	})
 }
 
@@ -47,6 +47,7 @@ type cleanupSessionClaim struct {
 	BindingID          string
 	BindingGeneration  int64
 	PodUID             string
+	RuntimeProcessID   string
 	PodIP              string
 	PodName            string
 	Namespace          string
@@ -260,11 +261,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareSessionDeleteCleanupCommandTx(ct
 		return RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
 	return RuntimeCommandPlan{
-		Target:           RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, Port: port},
-		AttemptedBinding: RuntimeAttemptedBinding{BindingID: state.Binding.BindingID, Generation: state.Binding.BindingGeneration, TargetPodUID: state.Binding.PodUID},
+		Target:           RuntimePodTarget{Namespace: state.Binding.Namespace, PodName: state.Binding.PodName, PodUID: state.Binding.PodUID, RuntimeProcessID: state.Binding.RuntimeProcessID, PodIP: state.Binding.PodIP, Port: port},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: state.Binding.BindingID, Generation: state.Binding.BindingGeneration, TargetPodUID: state.Binding.PodUID, RuntimeProcessID: state.Binding.RuntimeProcessID},
 		CleanupSession: &agentruntimev1.CleanupSessionRequest{
 			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: state.Binding.BindingID,
-			BindingGeneration: state.Binding.BindingGeneration, TargetPodUid: state.Binding.PodUID,
+			BindingGeneration: state.Binding.BindingGeneration, TargetPodUid: state.Binding.PodUID, RuntimeProcessId: state.Binding.RuntimeProcessID,
 			CleanupOperationId: job.DeleteCleanupID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_OPERATOR_REQUESTED,
 		},
 	}, nil
@@ -317,16 +318,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareCleanupSessionCommandTx(ctx cont
 	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{
-			Namespace: claim.Namespace,
-			PodName:   claim.PodName,
-			PodUID:    claim.PodUID,
-			PodIP:     claim.PodIP,
-			Port:      port,
+			Namespace:        claim.Namespace,
+			PodName:          claim.PodName,
+			PodUID:           claim.PodUID,
+			PodIP:            claim.PodIP,
+			RuntimeProcessID: claim.RuntimeProcessID,
+			Port:             port,
 		},
-		AttemptedBinding: RuntimeAttemptedBinding{BindingID: claim.BindingID, Generation: claim.BindingGeneration, TargetPodUID: claim.PodUID},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: claim.BindingID, Generation: claim.BindingGeneration, TargetPodUID: claim.PodUID, RuntimeProcessID: claim.RuntimeProcessID},
 		CleanupSession: &agentruntimev1.CleanupSessionRequest{
 			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, BindingId: claim.BindingID,
-			BindingGeneration: claim.BindingGeneration, TargetPodUid: claim.PodUID,
+			BindingGeneration: claim.BindingGeneration, TargetPodUid: claim.PodUID, RuntimeProcessId: claim.RuntimeProcessID,
 			CleanupOperationId: job.CleanupJobID, Reason: agentruntimev1.CleanupSessionReason_CLEANUP_SESSION_REASON_EXPIRED,
 		},
 	}, nil
@@ -504,6 +506,7 @@ func claimCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob
 		BindingID:          binding.BindingID,
 		BindingGeneration:  binding.BindingGeneration,
 		PodUID:             binding.PodUID,
+		RuntimeProcessID:   binding.RuntimeProcessID,
 		PodIP:              binding.PodIP,
 		PodName:            binding.PodName,
 		Namespace:          binding.Namespace,
@@ -655,7 +658,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 				WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: state.SessionThreadID,
 				CleanupJobID: job.DeleteCleanupID, IdleStreamPosition: streamPosition,
 				BindingID: state.Binding.BindingID, BindingGeneration: state.Binding.BindingGeneration,
-				PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, PodName: state.Binding.PodName,
+				PodUID: state.Binding.PodUID, RuntimeProcessID: state.Binding.RuntimeProcessID, PodIP: state.Binding.PodIP, PodName: state.Binding.PodName,
 				Namespace: state.Binding.Namespace,
 			}
 			if err := expireCleanupSandboxExecutionsTx(ctx, tx, claim, now); err != nil {
@@ -933,6 +936,7 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 				BindingId:         claim.BindingID,
 				BindingGeneration: claim.BindingGeneration,
 				TargetPodUid:      claim.PodUID,
+				RuntimeProcessId:  claim.RuntimeProcessID,
 			},
 		}
 		eventID, settled, err := runtimecontrol.ToolResultForToolUseExistsTx(ctx, tx, claim.WorkspaceID, claim.SessionID, execution.ThreadID, execution.EventType, execution.ToolUseEventID)
@@ -1005,36 +1009,18 @@ func finalizeCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, claim clean
 	return nil
 }
 
-func (r KubernetesRuntimeTargetResolver) CleanupTargetProvenGone(_ context.Context, _ *dbconnect.Tx, _ RuntimeJob, binding runtimecontrol.Binding) (bool, error) {
-	if r.Snapshot == nil {
-		return false, runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "runtime visibility snapshot is unavailable", Retryable: true}
+func (r KubernetesRuntimeTargetResolver) CleanupTargetProvenGone(ctx context.Context, tx *dbconnect.Tx, _ RuntimeJob, binding runtimecontrol.Binding) (bool, error) {
+	decision, err := r.runtimeProcessDecisionTx(ctx, tx, binding)
+	if err != nil {
+		return false, err
 	}
-	snapshot := r.Snapshot()
-	if !snapshot.Ready {
-		return false, runtimecontrol.PreparationError{Kind: "runtime_visibility_not_ready", Message: "runtime pod visibility is not ready", Retryable: true}
-	}
-	visibility := snapshot.VisibilityFor(enginekubernetes.BoundRuntimePod{
-		Namespace: binding.Namespace,
-		PodName:   binding.PodName,
-		PodUID:    binding.PodUID,
-		PodIP:     binding.PodIP,
-	})
-	switch visibility {
-	case enginekubernetes.BindingVisibilityReusable:
+	if decision == runtimeProcessReuse {
 		return false, nil
-	case enginekubernetes.BindingVisibilityAbsent,
-		enginekubernetes.BindingVisibilityDeleted,
-		enginekubernetes.BindingVisibilityUIDChanged,
-		enginekubernetes.BindingVisibilityIPChanged:
-		return true, nil
-	case enginekubernetes.BindingVisibilitySnapshotNotReady,
-		enginekubernetes.BindingVisibilityNotReady,
-		enginekubernetes.BindingVisibilityNotServing,
-		enginekubernetes.BindingVisibilityTerminating:
-		return false, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "runtime cleanup target is not currently available: " + string(visibility), Retryable: true}
-	default:
-		return false, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "runtime cleanup target visibility is not reusable", Retryable: true}
 	}
+	if decision == runtimeProcessLoss {
+		return true, nil
+	}
+	return false, runtimecontrol.PreparationError{Kind: "runtime_binding_not_available", Message: "Runtime cleanup target has no confirmed loss or accepting process", Retryable: true}
 }
 
 // Session cleanup owns these claimed attachment rows until deletion completes.

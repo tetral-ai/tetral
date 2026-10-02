@@ -21,6 +21,22 @@ const RuntimePodUid = "pod_uid_mcp_connector";
 const BindingTokenKey = "gateway-runtime-binding-token-test-key-32";
 
 describe("McpConnectorServiceShell", () => {
+  test("shutdown rejects an unjoined list worker and keeps its completion owned", async () => {
+    let release!: () => void;
+    const held=new Promise<void>(resolve=>{release=resolve;});
+    const client=new RecordingMcpClient();
+    const original=client.listTools.bind(client);
+    client.listTools=async (...args)=>{await held;return original(...args);};
+    const service=createService(client);
+    const worker=service.listMcpTools(validListRequest(),new Metadata());
+    await new Promise(resolve=>setTimeout(resolve,1));
+    let completed=false;
+    const shutdown=service.shutdown(new Date(Date.now()+30));
+    const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
+    await new Promise(resolve=>setTimeout(resolve,45));expect(completed).toBe(false);
+    release();expect(await observed).toBeInstanceOf(Error);await worker;
+    await service.shutdown(new Date(Date.now()+30));
+  });
   test("refuses non-catalog server names before client I/O", async () => {
     const client = new RecordingMcpClient();
     const service = createService(client);
@@ -326,11 +342,13 @@ describe("McpConnectorServiceShell", () => {
       sessionThreadId: "thrd_1",
       bindingId: "bind_2",
       bindingGeneration: 43,
+      runtimeProcessId: "process-test",
     };
 
     const response = await service.runMcpTool(validRunRequest({
       bindingId: replacementIdentity.bindingId,
       bindingGeneration: replacementIdentity.bindingGeneration,
+      runtimeProcessId: replacementIdentity.runtimeProcessId,
       runtimeBindingToken: signedRuntimeBindingToken(replacementIdentity, RuntimePodUid),
     }), new Metadata());
 
@@ -1071,6 +1089,7 @@ function validRunRequest(overrides: Partial<RunMcpToolRequest> = {}): RunMcpTool
     toolUseEventId: "sevt_tool_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: signedRuntimeBindingToken(validRunIdentity(), RuntimePodUid),
     ...overrides,
   };
@@ -1089,6 +1108,7 @@ function validRunIdentity(): RuntimeBindingRequestIdentity {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 42,
+    runtimeProcessId: "process-test",
   };
 }
 
@@ -1101,6 +1121,7 @@ function signedRuntimeBindingToken(request: RuntimeBindingRequestIdentity, runti
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   };
   const payloadPart = Buffer.from(JSON.stringify(payload)).toString("base64url");

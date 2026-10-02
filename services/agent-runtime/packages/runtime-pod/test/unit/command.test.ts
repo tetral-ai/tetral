@@ -1,3 +1,4 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -72,6 +73,12 @@ describe("Runtime Pod command entrypoint", () => {
 			config: {
 				...validConfig(),
 				providerStreamTimeoutMs: 765_432,
+				bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+				transportProfile: "standard-routed",
+				routingProxyRequired: true,
+				maxLocalSessions: 256,
+				maxConcurrentTools: 8,
+				lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
 			},
 			logger: { info: () => undefined, error: () => undefined },
 			builderOptions: {
@@ -1350,6 +1357,8 @@ describe("Runtime Pod command entrypoint", () => {
 			config,
 			logger: { info: () => undefined, error: () => undefined },
 			builderOptions: {
+                routingProxyReady:async()=>undefined,
+                runtimeProcessFactory:()=>({runtimeProcessId:"process-test",register:async()=>undefined,report:async()=>undefined,release:async()=>{throw new Error("unexpected release");},close:async()=>undefined}),
 				coreHostsFactory: async (options) =>
 					await buildRuntimeCoreHosts({
 						...options,
@@ -1424,6 +1433,7 @@ describe("Runtime Pod command entrypoint", () => {
 			const records: unknown[] = [];
 			const dependencies = await buildRuntimePodCommandDependencies({
 				config: fixture.config,
+                builderOptions:{routingProxyReady:async()=>undefined},
 				logger: {
 					info: () => undefined,
 					error: (record) => records.push(record),
@@ -1452,6 +1462,7 @@ describe("Runtime Pod command entrypoint", () => {
 					expect(serialized, scenario.name).not.toContain(forbidden);
 				}
 			} finally {
+                await dependencies.app.shutdown().catch(()=>undefined);
 				await dependencies.coreHosts.close();
 			}
 		}
@@ -1514,7 +1525,7 @@ function validEnv(): Record<string, string> {
 		TETRAL_RUNTIME_POD_NAME: "runtime-pod-a",
 		TETRAL_RUNTIME_POD_UID: "uid-a",
 		TETRAL_RUNTIME_POD_IP: "10.0.0.1",
-		TETRAL_RUNTIME_POD_GRPC_PORT: "9090",
+		TETRAL_RUNTIME_POD_GRPC_PORT: "19090",
 		TETRAL_RUNTIME_POD_HTTP_ADDR: "127.0.0.1:0",
 		TETRAL_DEPLOYMENT_ENVIRONMENT: "test",
 		TETRAL_SERVICE_VERSION: "test",
@@ -1610,6 +1621,7 @@ function validInterrupt(
 		bindingId: "bind_1",
 		bindingGeneration: 42,
 		targetPodUid: "uid-a",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_1",
 		origin: InterruptOrigin.INTERRUPT_ORIGIN_USER,
 		interruptLeaseRef: {
@@ -1770,6 +1782,7 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
 					cleaned: false,
 				}),
 			},
+			quiesce: async () => undefined,
 			shutdownActiveRuns: async () => undefined,
 			close: async () => {
 				records.push("core.close");

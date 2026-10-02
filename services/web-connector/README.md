@@ -29,6 +29,8 @@ module, following the `bridge` precedent); the binary is at
 | `TETRAL_WEB_API_KEYS` | Ordered JSON array of platform backend keys (pool order) |
 | `TETRAL_WEB_CONNECTOR_GRPC_ADDR` | gRPC listen address (default `0.0.0.0:9092`) |
 | `TETRAL_WEB_CONNECTOR_METRICS_ADDR` | Prometheus / health listen address (default `0.0.0.0:9464`) |
+| `TETRAL_SERVICE_DRAIN_TIMEOUT_MS` | gRPC drain, default10000ms, range1..20000ms; leaves10s for joins and proxy shutdown inside the30s Pod grace |
+| `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` | Required object-store trust bundle and exact DNS identity; production uses native verified HTTPS |
 | `TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY` | HMAC key for runtime binding-token verification |
 
 Constants that govern behavior are fixed source values, not free knobs, and are
@@ -45,6 +47,30 @@ timeout 30 s, fetch token budget 262144, and key cooldowns 60 s (rate-limited)
 and 3600 s (quota-exhausted) live in `backend.go`. The 7-day cache TTL is the
 bucket lifecycle rule, provisioned outside this repository.
 
+## Process ownership
+
+SIGTERM/SIGINT withdraw readiness and gRPC health, then close new request
+admission. Accepted work retains its request context for the configured drain.
+At expiry the process cancels backend/object calls, force-stops gRPC and joins
+all handlers and listeners before returning to the command. The command then
+closes its backend HTTP transport and protected blob owner. It does not write
+a user cancellation or repeat an uncertain backend operation during shutdown.
+
+Three instances can share the same scoped snapshot bucket. Search may first
+create a stub; materializing it is a backend operation. Once a complete page is
+stored, another instance can open/find that reference without another fetch.
+The stored job receipt, scope triple and canonical input preserve replay and
+conflict behavior across replicas.
+
+The owning metrics surface is `/metrics`: `web_requests_active`, `web_draining`,
+`web_requests_total`, `web_backend_calls_total` and
+`web_request_duration_seconds` distinguish active/draining work, persisted
+reads and external calls. Dashboard queries group bounded operation/status/API
+labels; replica identity comes from scrape labels. `web.drain.started` and
+`web.drain.joined` logs expose phase and active count. Local compositions check
+these fields and zero active work after join; remote scrape/Grafana wiring and
+alert thresholds are deployment preparation work.
+
 ## States & lifecycle
 
 ### Request pipeline (`RunWeb`)
@@ -60,7 +86,7 @@ returns and stops.
 | Caller identity | gRPC peer authenticates as the `agent-runtime` service account in namespace `tetral-agent-runtime` with a pod UID; no other caller, no public bearer tokens (`MethodAuthorizer`) | gRPC `Unauthenticated` / `PermissionDenied` (out of band, not a tool result) | none |
 | Semantic envelope | scope triple + `tool_use_event_id` present; input not all-empty; ≤ 8 items | in-band `tool_error` | none |
 | Structural envelope | fields within size bounds; each `open` item sets exactly one of `url` / `ref_id` | gRPC `InvalidArgument` (malformed internal request) | none |
-| Binding token | `rtbt_v1` HMAC token verifies against this scope triple, `binding_id`, `binding_generation`, caller pod UID; not expired (`BindingVerifier.Verify`) | gRPC status error | none |
+| Binding token | `rtbt_v1` HMAC token verifies against this scope triple, `binding_id`, `binding_generation`, caller pod UID and exact `runtime_process_id`; not expired (`BindingVerifier.Verify`) | gRPC status error | none |
 | Idempotency | key = `tool_use_event_id` + canonical-input hash; read job record first | matching hash replays stored response verbatim; mismatched hash is `runtime_error` "tool delivery conflict", never re-executed | none |
 | Execution | run `search_query`, then `open`, then `find` in field order | per-operation `tool_error` / `runtime_error` in the composed result | stub / snapshot writes as each operation dictates |
 | Settlement | write the create-only job record | — | see result-class table below |

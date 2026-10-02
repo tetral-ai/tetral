@@ -39,7 +39,12 @@ metadata:
     app.kubernetes.io/part-of: tetral
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.auth }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: auth
@@ -60,6 +65,7 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
             - name: TETRAL_AUTH_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -118,6 +124,10 @@ spec:
             httpGet:
               path: /ready
               port: http
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
 {{ toYaml .Values.resources.auth | nindent 12 }}
           securityContext:
@@ -127,6 +137,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -140,6 +154,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: auth

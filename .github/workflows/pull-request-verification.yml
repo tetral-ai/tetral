@@ -84,6 +84,7 @@ jobs:
           artifact-prefix: pr-evidence
           shard-index: ${{ matrix.shard }}
           shard-count: '4'
+          needs-helm: 'true'
           needs-bun: 'true'
           needs-buf: 'true'
           needs-go-test-host: 'true'

@@ -683,6 +683,7 @@ type ProviderRequest struct {
 	Attachments         []*ProviderRequestAttachment `protobuf:"bytes,15,rep,name=attachments,proto3" json:"attachments,omitempty"`
 	Limits              *ProviderRequestLimits       `protobuf:"bytes,16,opt,name=limits,proto3" json:"limits,omitempty"`
 	OutputSchemaJson    *string                      `protobuf:"bytes,17,opt,name=output_schema_json,json=outputSchemaJson,proto3,oneof" json:"output_schema_json,omitempty"`
+	RuntimeProcessId    string                       `protobuf:"bytes,18,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -825,6 +826,13 @@ func (x *ProviderRequest) GetLimits() *ProviderRequestLimits {
 func (x *ProviderRequest) GetOutputSchemaJson() string {
 	if x != nil && x.OutputSchemaJson != nil {
 		return *x.OutputSchemaJson
+	}
+	return ""
+}
+
+func (x *ProviderRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -2855,6 +2863,7 @@ type RunWebRequest struct {
 	BindingId           string                 `protobuf:"bytes,6,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,7,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,8,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
+	RuntimeProcessId    string                 `protobuf:"bytes,9,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -2941,6 +2950,13 @@ func (x *RunWebRequest) GetBindingGeneration() int64 {
 func (x *RunWebRequest) GetRuntimeBindingToken() string {
 	if x != nil {
 		return x.RuntimeBindingToken
+	}
+	return ""
+}
+
+func (x *RunWebRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -3446,6 +3462,7 @@ type RunMcpToolRequest struct {
 	BindingId           string                 `protobuf:"bytes,9,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
 	BindingGeneration   int64                  `protobuf:"varint,10,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
 	RuntimeBindingToken string                 `protobuf:"bytes,11,opt,name=runtime_binding_token,json=runtimeBindingToken,proto3" json:"runtime_binding_token,omitempty"`
+	RuntimeProcessId    string                 `protobuf:"bytes,12,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -3525,6 +3542,13 @@ func (x *RunMcpToolRequest) GetBindingGeneration() int64 {
 func (x *RunMcpToolRequest) GetRuntimeBindingToken() string {
 	if x != nil {
 		return x.RuntimeBindingToken
+	}
+	return ""
+}
+
+func (x *RunMcpToolRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
 	}
 	return ""
 }
@@ -3909,7 +3933,7 @@ var File_tetral_provider_gateway_v1_provider_gateway_proto protoreflect.FileDesc
 
 const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\n" +
-	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\xb8\a\n" +
+	"1tetral/provider_gateway/v1/provider_gateway.proto\x12\x1atetral.provider_gateway.v1\"\xe6\a\n" +
 	"\x0fProviderRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12(\n" +
@@ -3930,7 +3954,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x05tools\x18\x0e \x03(\v21.tetral.provider_gateway.v1.RuntimeToolDefinitionR\x05tools\x12W\n" +
 	"\vattachments\x18\x0f \x03(\v25.tetral.provider_gateway.v1.ProviderRequestAttachmentR\vattachments\x12I\n" +
 	"\x06limits\x18\x10 \x01(\v21.tetral.provider_gateway.v1.ProviderRequestLimitsR\x06limits\x121\n" +
-	"\x12output_schema_json\x18\x11 \x01(\tH\x00R\x10outputSchemaJson\x88\x01\x01B\x15\n" +
+	"\x12output_schema_json\x18\x11 \x01(\tH\x00R\x10outputSchemaJson\x88\x01\x01\x12,\n" +
+	"\x12runtime_process_id\x18\x12 \x01(\tR\x10runtimeProcessIdB\x15\n" +
 	"\x13_output_schema_jsonJ\x04\b\a\x10\bR\x10parent_thread_id\"`\n" +
 	"\bModelRef\x12\x1f\n" +
 	"\vprovider_id\x18\x01 \x01(\tR\n" +
@@ -4084,7 +4109,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x0eretry_after_ms\x18\x06 \x01(\x05R\fretryAfterMs\"|\n" +
 	"\x14ProviderErrorPayload\x12?\n" +
 	"\x05error\x18\x01 \x01(\v2).tetral.provider_gateway.v1.ProviderErrorR\x05error\x12#\n" +
-	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\xea\x02\n" +
+	"\rmetadata_json\x18\x02 \x01(\tR\fmetadataJson\"\x98\x03\n" +
 	"\rRunWebRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -4095,7 +4120,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\n" +
 	"binding_id\x18\x06 \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\a \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\b \x01(\tR\x13runtimeBindingToken\"\x84\x03\n" +
+	"\x15runtime_binding_token\x18\b \x01(\tR\x13runtimeBindingToken\x12,\n" +
+	"\x12runtime_process_id\x18\t \x01(\tR\x10runtimeProcessId\"\x84\x03\n" +
 	"\x0eRunWebResponse\x12@\n" +
 	"\x06status\x18\x01 \x01(\x0e2(.tetral.provider_gateway.v1.RunWebStatusR\x06status\x12\x1f\n" +
 	"\vresult_text\x18\x02 \x01(\tR\n" +
@@ -4147,7 +4173,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x06_titleB\r\n" +
 	"\v_line_startB\v\n" +
 	"\t_line_endB\x0e\n" +
-	"\f_total_lines\"\xfa\x02\n" +
+	"\f_total_lines\"\xa8\x03\n" +
 	"\x11RunMcpToolRequest\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x1d\n" +
 	"\n" +
@@ -4158,7 +4184,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"binding_id\x18\t \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\n" +
 	" \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingTokenJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
+	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\x12,\n" +
+	"\x12runtime_process_id\x18\f \x01(\tR\x10runtimeProcessIdJ\x04\b\x01\x10\x02J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tR\n" +
 	"request_idR\x0fmcp_server_nameR\ttool_nameR\n" +
 	"input_json\"\xab\x03\n" +
 	"\x12RunMcpToolResponse\x12D\n" +

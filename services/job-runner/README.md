@@ -3,7 +3,7 @@
 ## Responsibilities
 
 Job Runner is an independent Deployment and ServiceAccount that consumes
-`runtime_input`, `runtime_config_update`, `cleanup_session` and
+`runtime_input`, `runtime_recovery`, `runtime_config_update`, `cleanup_session` and
 `session_delete_cleanup` Queue jobs. It declares and replaces Session Runtime
 bindings, delivers commands directly to their bound Pod, reconciles lost Pod
 custody, and finalizes hot-state cleanup. It has no inbound business gRPC
@@ -15,9 +15,15 @@ RPC acceptance, receipts and durable context reads.
 `cmd/job-runner` owns its database pool, Queue client, Kubernetes visibility
 watches, Queue wake listener, polling workers and outbound Runtime/MCP clients.
 Startup validates configuration, schema, runtime role and inbox capacities
-before opening listeners or business clients. Cancellation joins polling and
-Queue-listener workers, then visibility watches (including replacements),
-before closing the process pool. Bridge cancellation does not stop these
+before opening listeners or business clients. Shutdown closes acquisition first.
+Already running jobs keep their Queue heartbeats and settlement clients through
+`TETRAL_DRAIN_TIMEOUT_MS` (30000 by default). At expiry their work contexts are
+cancelled, then workers and Queue notifications join before native channels,
+Blob/database clients and visibility watches close. A Lease response racing
+shutdown returns every observed capability through Queue Defer and starts no
+new Runtime command. `TETRAL_CANCEL_JOIN_TIMEOUT_MS` defaults to 5000; exceeding
+it reports a failed process termination bound and still requires the actual join
+before resource closure. Bridge cancellation does not stop these
 resources. Health readiness depends on synchronized Pod/EndpointSlice visibility.
 
 The process uses shared `internal/workload` diagnostics: `info` by default;
@@ -50,16 +56,61 @@ credentials.
 
 ### The binding fence and pod visibility
 
-The Job Runner decides which pod owns a session — claim, verify, replace
-under a session-scoped lock. It classifies the bound pod through
-`internal/kubernetes` visibility and splits **proven gone** from **merely
-unavailable**:
+The binding names the Pod UID and the registered `runtime_process_id` for
+one process boot. Session arbitration, the exact binding row and a shared
+process-row lock fence each mutation. Promotion holds the matching process row
+until earlier admitted mutations commit or roll back. The installer grants
+Runner SELECT on the global process tables and EXECUTE on the fixed lock-only
+function; Bridge owns registration and promotion writes.
 
-| `BindingVisibility*` | Meaning | Disposition |
-| --- | --- | --- |
-| `Reusable` | Live, ready, same UID/IP | Deliver |
-| `Absent` / `Deleted` / `UIDChanged` / `IPChanged` | Proven gone | Repair, then replace the binding |
-| `SnapshotNotReady` / `NotReady` / `NotServing` / `Terminating` | Merely unavailable | Retry; never finalize |
+Delivery, placement, cleanup and proactive loss repair share one process-aware
+classifier:
+
+| Rechecked evidence | Action |
+| --- | --- |
+| Matching committed release | Continue its handoff receipt; no loss settlement |
+| Promoted accepting replacement process on the same Pod | Fence and repair the old process binding |
+| Fresh GET proves old Pod absent or UID replaced | Fenced loss repair |
+| Current accepting process and reusable Kubernetes target | Reuse, including an expired heartbeat |
+| Draining/deleting or temporarily unready current process with fresh heartbeat | Keep custody pending; no new placement |
+| Non-reusable target, expired matching heartbeat, confirming GET remains non-reusable | Fenced loss repair after locked liveness recheck |
+| Missing registration, unsynchronized watcher or failed confirming GET | Retry without inferring loss |
+
+A cached deletion timestamp, IP change or missing cache entry alone cannot
+prove loss. Confirming GET runs outside Session transactions with a two-second
+bound. The subsequent transaction rechecks exact binding/process and heartbeat;
+a newer report or release wins over an earlier census observation.
+
+New placement samples two distinct eligible Pods uniformly, probes their native
+PodIP:8080 `/metrics` concurrently and chooses the lower resident Session count.
+One valid report suffices; ties use a uniform draw. If both fail, one further
+round uses unprobed Pods. The bounded policy defaults are one second per probe,
+two seconds total and at most two rounds/four distinct Pods; shorter caller
+deadlines win. The owning environment keys are
+`TETRAL_RUNTIME_LOAD_PROBE_TIMEOUT_MS`, `TETRAL_RUNTIME_PLACEMENT_TIMEOUT_MS`,
+`TETRAL_RUNTIME_PLACEMENT_ROUNDS`, `TETRAL_RUNTIME_LOAD_MAX_BYTES` (262144) and
+`TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF` (0.8). Required scalar samples must be
+unique, finite and valid: `runtimepod_active_sessions`,
+`runtimepod_session_capacity`, `runtimepod_container_memory_usage_bytes`,
+`runtimepod_container_memory_limit_bytes`, `runtimepod_ready` and
+`runtimepod_accepting_commands`. Unknown/unlimited container limits, full
+capacity, usage at the cutoff, nonready or nonaccepting state exclude a candidate.
+A real zero resident count is valid. Redirects, excess bytes and malformed
+reports fail closed. There are no automatic HTTP retries.
+
+Sampling follows rollback of the initial preparation transaction. Commit then
+rechecks Kubernetes identity and current accepting process under Session
+arbitration; a concurrent committed binding is reused. Existing valid bindings
+perform no load probe. The single `runtime_placement` attempt record identifies
+committed/reused custody and observed load without payloads or credentials.
+Its `kubernetes.uid` and `runtime.process.id` identify the binding winner;
+`runtime.placement.sampled_pod_uid` identifies the sampled choice, which can
+differ when another Runner commits first. `runtime.placement.rounds` and
+`runtime.placement.probes` record the bounded work, and
+`runtime.load.active_sessions`, `runtime.load.session_capacity` and
+`runtime.load.memory_ratio` retain the validated choice's finite load values.
+`runtime_placement_probe_total`, `runtime_placement_total` and their duration
+counters use only finite outcome labels.
 
 For `runtime_input` the runner reconciles referenced events first — all
 already processed → stale with no command; superseded by a processed
@@ -79,7 +130,7 @@ the database snapshot exists, and keyset-pages binding identities in batches of
 32. The read transaction closes before any candidate mutation. Running Runtime
 status or a rescheduling Session admits proactive closeout; an idle retained
 binding remains for the next input to replace through the same Session lock and
-binding-generation fence. Errors are isolated across repair and Queue phases,
+binding-generation/process fence. Each proposed repair confirms and rechecks the current owner outside the frozen membership snapshot. Errors are isolated across repair and Queue phases,
 with runner cancellation as the only early stop.
 
 Under the Session arbitration owner and binding fence, durable evidence is
@@ -201,6 +252,26 @@ Sandbox rows. Job Runner never performs the provider call.
   [completion_mail_delivery_test.go](../../integration/completion_mail_delivery_test.go),
   [runtime_pod_lost_delivery_repair_test.go](../../integration/runtime_pod_lost_delivery_repair_test.go).
 
+## Direct command transport and policy
+
+Standard routing uses native PodIP:19090; hardened routing uses PodIP:19443
+with the fixed Runtime Service DNS and exact Runtime URI SAN from mounted trust.
+`TETRAL_TRANSPORT_PROFILE` selects `standard-routed` or `hardened`; the configured
+port must match. Captured Queue/MCP business traffic retains its mesh transport.
+Mandatory proxy readiness precedes admission when
+`TETRAL_ROUTING_PROXY_REQUIRED=true`.
+
+The process retains channels until its users join. A valid trust-bundle change
+withdraws old channels from new admission, lets admitted RPCs finish under their
+own bounds, then closes them. Leaf-only renewal preserves admitted work. Each
+direct command has one attempt; Queue owns later delivery and receipt recovery.
+The descriptor-complete policy covers AcceptInput, RecoverThread, AcceptAgentMail,
+AcceptTaskNotification, Interrupt, ResolveToolConfirmation, ApplyRuntimeConfig
+and CleanupSession. Each initial attempt bound is 30000ms and can be configured
+with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and lease deadlines
+remain shorter where applicable. The interrupt plan and native client consume
+that same typed policy rather than separate fixed limits.
+
 ## Manifest discovery
 
 Initial and restoration discovery is Runner-owned; hot change acceptance is
@@ -214,8 +285,8 @@ workload; no provider gateway business package is imported.
   120-second deadline. Job Runner reserves attempts in `session_runtime_inbox`
   before external I/O; process restart and Queue lease replay cannot replenish
   them. Once delivery may have reached Runtime, existing custody reconciliation
-  applies instead of retroactively failing that input for discovery. PostgreSQL migration V3 adds these counters, deadline and safe diagnostic
-  fields without changing the baseline migration. Connector authentication
+  applies instead of retroactively failing that input for discovery. The fresh canonical schema includes these counters, deadline and safe diagnostic
+  fields. Connector authentication
   refresh consumes the same wall-clock budget. Validation and the final 256 KiB
   canonical cap are part of discovery acceptance. All discovery errors, including
   internal/protocol failures, consume this finite budget.
@@ -253,8 +324,9 @@ workload; no provider gateway business package is imported.
   import the Kubernetes client libraries only for TokenReview authentication.
 - **Lifecycle.** The runner's readiness depends on the cache being synced;
   `SyncAndWatch` primes it and keeps it current. The snapshot classifies the
-  bound pod into the `BindingVisibility*` set that drives the proven-gone vs
-  merely-unavailable split (see the binding fence table).
+  bound pod into the `BindingVisibility*` observations consumed by the shared
+  process-aware classifier. `ClientsetVisibilityClient.GetPod` supplies its
+  outside-transaction confirming observation (see the binding fence table).
 - **Invariants a replacement must preserve.** Visibility is read-only — it never
   mutates pods or bindings; proven-gone must be distinguishable from merely-
   unavailable, because only the former is allowed to replace a binding; a
@@ -285,3 +357,10 @@ before listeners and clients; Kubernetes lifecycle tests prove watch workers
 join before Stop returns. Run repository `make test-affected` for the declared
 owner closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
+
+New process/placement/lifecycle controls include `runtime_visibility_test.go`,
+`runtime_placement_test.go`, `runtime_load_probe_test.go`,
+`runtime_command_policy_test.go`, `queue_client_test.go`, and the real
+`integration/replica_placement_test.go` PostgreSQL composition. Process freshness
+uses the shared `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS` setting (10000), validated
+with the registration/report interval policy consumed by Runtime and Bridge.

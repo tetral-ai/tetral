@@ -629,6 +629,7 @@ function providerRequest(): ProviderRequest {
     sessionThreadId: "thr_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "binding-token",
     model: { providerId: "openai", modelId: "gpt-5.5", variant: "" },
     system: [{

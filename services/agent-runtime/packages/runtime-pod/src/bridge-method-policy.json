@@ -1,0 +1,242 @@
+[
+  {
+    "method": "LoadContext",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext",
+    "timeoutMs": 30000,
+    "kind": "fixed"
+  },
+  {
+    "method": "RefreshRuntimeBindingToken",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/RefreshRuntimeBindingToken",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CommitInputs",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInputs",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CommitTaskNotificationResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitTaskNotificationResult",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "WriteEvent",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteEvent",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "SettleToolResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/SettleToolResult",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "WriteRequestEnd",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/WriteRequestEnd",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "FinishIdle",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/FinishIdle",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CreateSubagentThread",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CreateSubagentThread",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "EnsureApprovalReviewerTrunk",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerTrunk",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "EnsureApprovalReviewerSidecar",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/EnsureApprovalReviewerSidecar",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AdmitApprovalReviewInput",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitApprovalReviewInput",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ResolveChildThread",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ListChildThreads",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "DeliverInterAgentMail",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/DeliverInterAgentMail",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ReadAgentMail",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadAgentMail",
+    "timeoutMs": 30000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AdmitChildInterrupt",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AwaitChildInterrupt",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CloseChildControl",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseChildControl",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CloseApprovalReviewer",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CloseApprovalReviewer",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "MarkChildThreadActive",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AcceptSandboxExecution",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AwaitSandboxExecution",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ReadCommandResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "SendCommandInput",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CancelCommand",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AuthorizeWebToolExecution",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "RunMemory",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory",
+    "timeoutMs": 35000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ResolveTransientAttachment",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment",
+    "timeoutMs": null,
+    "kind": "remaining_provider_budget"
+  },
+  {
+    "method": "ResolveFileAttachmentMetadata",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata",
+    "timeoutMs": null,
+    "kind": "remaining_provider_budget"
+  },
+  {
+    "method": "ReadFileAttachmentChunk",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadFileAttachmentChunk",
+    "timeoutMs": null,
+    "kind": "remaining_provider_budget"
+  },
+  {
+    "method": "McpManifestChanged",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged",
+    "timeoutMs": 5000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ClaimMcpToolResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ClaimMcpToolResult",
+    "timeoutMs": 10000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CommitMcpToolResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitMcpToolResult",
+    "timeoutMs": 10000,
+    "kind": "fixed"
+  },
+  {
+    "method": "RelinquishMcpToolResult",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/RelinquishMcpToolResult",
+    "timeoutMs": 10000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CommitInternalToolRepair",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitInternalToolRepair",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CommitRuntimeTermination",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CommitRuntimeTermination",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "RegisterRuntimeProcess",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess",
+    "timeoutMs": 5000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ReportRuntimeProcess",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess",
+    "timeoutMs": 1000,
+    "kind": "fixed"
+  },
+  {
+    "method": "ReleaseRuntimeBinding",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding",
+    "timeoutMs": 5000,
+    "kind": "fixed"
+  }
+]

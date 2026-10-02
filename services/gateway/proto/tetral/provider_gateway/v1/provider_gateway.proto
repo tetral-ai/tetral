@@ -134,6 +134,7 @@ message ProviderRequest {
   repeated ProviderRequestAttachment attachments = 15;
   ProviderRequestLimits limits = 16;
   optional string output_schema_json = 17;
+  string runtime_process_id = 18;
 }
 
 message ModelRef {
@@ -336,6 +337,7 @@ message RunWebRequest {
   string binding_id = 6;
   int64 binding_generation = 7;
   string runtime_binding_token = 8;
+  string runtime_process_id = 9;
 }
 
 message RunWebResponse {
@@ -399,6 +401,7 @@ message RunMcpToolRequest {
   string binding_id = 9;
   int64 binding_generation = 10;
   string runtime_binding_token = 11;
+  string runtime_process_id = 12;
 }
 
 message RunMcpToolResponse {

@@ -37,7 +37,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	openResult, err := dbconnect.OpenPlainDSNFromEnv(ctx)
+	openResult, err := dbconnect.OpenProtectedDSNFromEnv(ctx)
 	if err != nil {
 		return err
 	}

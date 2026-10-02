@@ -24,6 +24,7 @@ export interface RuntimeThreadIdentity {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
   readonly runtimeBindingToken: string;
 }
 
@@ -67,6 +68,7 @@ function defaultRuntimeThreadIdentity(sessionId: string): RuntimeThreadIdentity 
     bindingId: "binding-test",
     bindingGeneration: 1,
     targetPodUid: "pod-test",
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "runtime-binding-token-test",
   };
 }

@@ -36,6 +36,22 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("ProviderGatewayServiceShell", () => {
+  test("shutdown rejects an unjoined authentication worker and keeps its completion owned", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve=>{release=resolve;});
+    const auth = new RecordingAuthenticator();
+    const service=createService({authenticate:async (...args)=>{await held;return auth.authenticate(...args);}});
+    const worker=collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId:""},metadata()));
+    const outcome=worker.catch(error=>error);
+    await Promise.resolve();
+    let completed=false;
+    const shutdown=service.shutdown(new Date(Date.now()+30));
+    const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
+    await new Promise(resolve=>setTimeout(resolve,45));expect(completed).toBe(false);
+    release();expect(await observed).toBeInstanceOf(Error);
+    expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
+    await service.shutdown(new Date(Date.now()+30));
+  });
   test("authorizes before request validation or provider-unavailable response construction", async () => {
     const authenticator = new RecordingAuthenticator({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
     const service = createService(authenticator);
@@ -1799,7 +1815,7 @@ describe("ProviderGatewayServiceShell", () => {
         resolveTransientAttachment: () => {
           throw new Error("unexpected transient attachment resolution");
         },
-        resolveFileAttachmentMetadata: (_request, _metadata, callback) => {
+        resolveFileAttachmentMetadata: (_request, _metadata, _options, callback) => {
           callback(Object.assign(new Error("bridge internal"), {
             code: status.INTERNAL,
             details: "bridge internal",
@@ -2267,6 +2283,7 @@ function signedRuntimeBindingToken(request: RuntimeBindingRequestIdentity, runti
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   });
   const payloadPart = Buffer.from(payload, "utf8").toString("base64url");

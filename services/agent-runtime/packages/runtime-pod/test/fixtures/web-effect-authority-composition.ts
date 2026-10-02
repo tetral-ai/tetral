@@ -21,6 +21,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeBindingToken: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
@@ -47,6 +48,7 @@ const request: RuntimeToolExecutionRequest = {
 	bindingGeneration: input.bindingGeneration,
 	runtimeBindingToken: input.runtimeBindingToken,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
 	modelOrder: 0,

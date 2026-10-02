@@ -35,7 +35,7 @@ func TestPostgreSQLVersionOneCurrentStateConvergesOnSecondApplication(t *testing
 	db := stdlib.OpenDB(*config)
 	defer func() { _ = db.Close() }()
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := executePostgreSQLSchemaSteps(ctx, db, postgresqlBaselineSteps()); err != nil {
+		if err := MigrateSchema(ctx, db); err != nil {
 			t.Fatalf("apply current Version 1 state attempt %d: %v", attempt+1, err)
 		}
 	}

@@ -740,6 +740,25 @@ func NewRuntimeRecoveryEnqueueRequest(workspaceID workspace.ID, sessionID string
 	}, nil
 }
 
+// A handoff receipt is a control-plane source, distinct from public events.
+func FormatRuntimeHandoffDedupeKey(workspaceID workspace.ID, sessionID, sessionThreadID, handoffID string) string {
+	return formatQueueDedupeKey(KindRuntimeRecovery, workspaceID, sessionID, "handoff:"+sessionThreadID+":"+handoffID)
+}
+
+func NewRuntimeHandoffEnqueueRequest(workspaceID workspace.ID, sessionID, sessionThreadID, handoffID string, now time.Time) (EnqueueRequest, error) {
+	payload, err := json.Marshal(struct {
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		HandoffID       string `json:"handoff_id"`
+	}{sessionID, sessionThreadID, handoffID})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	return EnqueueRequest{ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeRecovery,
+		PartitionKey: FormatSessionPartitionKey(workspaceID, sessionID), DedupeKey: FormatRuntimeHandoffDedupeKey(workspaceID, sessionID, sessionThreadID, handoffID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now}, nil
+}
+
 func FormatTaskNotificationRuntimeInputID(taskID string) string {
 	if taskID == "" {
 		return ""
@@ -925,17 +944,16 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 	}
 	switch request.Kind {
 	case KindRuntimeRecovery:
-		if err := validatePayloadKeys(rawPayload, "session_id", "session_thread_id", "source_event_id"); err != nil {
-			return err
-		}
-		sessionID, sourceEventID, err := requiredPayloadTokens(payload, "session_id", "source_event_id")
+		recovery, err := DecodeRuntimeRecoveryPayload(request.PayloadJSON)
 		if err != nil {
 			return err
 		}
-		if _, err := requiredPayloadToken(payload, "session_thread_id"); err != nil {
-			return err
+		dedupe := FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, recovery.SessionID, recovery.SourceEventID)
+		if recovery.HandoffID != "" {
+			dedupe = FormatRuntimeHandoffDedupeKey(request.WorkspaceID, recovery.SessionID, recovery.SessionThreadID, recovery.HandoffID)
 		}
-		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeRecoveryDedupeKey(request.WorkspaceID, sessionID, sourceEventID))
+		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, recovery.SessionID), dedupe)
+
 	case KindRuntimeInput:
 		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind"}
 		if err := validatePayloadKeys(rawPayload, runtimeInputKeys...); err != nil {

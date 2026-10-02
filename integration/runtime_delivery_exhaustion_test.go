@@ -215,6 +215,7 @@ func retryableExhaustionResultForBinding(bindingID string, bindingGeneration int
 	result.AttemptedBindingID = bindingID
 	result.AttemptedBindingGeneration = bindingGeneration
 	result.AttemptedTargetPodUID = podUID
+	result.AttemptedRuntimeProcessID = "process_" + podUID
 	return result
 }
 

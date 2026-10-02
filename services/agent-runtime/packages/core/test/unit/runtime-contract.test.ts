@@ -59,6 +59,7 @@ function writerBinding() {
 		bindingId: "binding-1",
 		bindingGeneration: 1,
 		targetPodUid: "pod-1",
+		runtimeProcessId: "process-test",
 	} as const;
 }
 
@@ -442,6 +443,7 @@ describe("runtime boundary contracts", () => {
 			bindingId: "binding-1",
 			bindingGeneration: 1,
 			targetPodUid: "pod-1",
+			runtimeProcessId: "process-test",
 		};
 		expect(
 			SessionEventWriterToolSettlementEnvelopeSchema.safeParse({

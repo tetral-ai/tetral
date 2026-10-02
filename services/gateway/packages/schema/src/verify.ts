@@ -21,23 +21,10 @@ import postgresqlContractJSON from "../../../../../database/postgresql.json";
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6";
-
-/** Pins the additive Git identity migration. */
-export const PostgreSQLSchemaVersionTwoChecksum =
-	"36b50e4c53b62e8a7b38b8d91b3128400ff06394bf71dcd3e1d992df32b55458";
-
-/** Pins durable input discovery budgets. */
-export const PostgreSQLSchemaVersionThreeChecksum = "be73f97aa7ebc41ec39ad270aed25a2b9d5228eb8ab49e814032283cb9dbd90f";
-
-/** Pins durable Environment build observation and deadlines. */
-export const PostgreSQLSchemaVersionFourChecksum = "ce7bda672824e406b569caaea79723ca0932150bd54f5d153b9f781ee426bb19";
+	"693b9bab2fd21c94698ca73959c9c83cdcc87460dbcde29b1ee77477922b91ae";
 
 const PostgreSQLSchemaRegistry = [
 	PostgreSQLSchemaVersionOneChecksum,
-	PostgreSQLSchemaVersionTwoChecksum,
-	PostgreSQLSchemaVersionThreeChecksum,
-	PostgreSQLSchemaVersionFourChecksum,
 ] as const;
 
 /** Enumerates the public-safe failure classifications produced by schema verification. */

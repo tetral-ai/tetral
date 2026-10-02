@@ -89,6 +89,8 @@ func TestPostgreSQLSeparatedOwnersResourceLifecycle(t *testing.T) {
 			var release sync.Once
 			t.Cleanup(func() { release.Do(func() { close(sender.release) }) })
 			worker := f.worker(sender)
+			worker.Config.DrainTimeout = 150 * time.Millisecond
+			worker.Config.CancelJoinTimeout = time.Second
 			// The already observed real lease enters the real Runner loop; every
 			// transition and heartbeat still calls the real Queue service.
 			worker.Queue = &issuedLeaseQueueFixture{QueueClient: worker.Queue, job: cleanupQueueJobProto(lease)}

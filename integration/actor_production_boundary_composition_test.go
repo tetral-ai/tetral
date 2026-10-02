@@ -104,7 +104,7 @@ func runSubagentProductionComposition(
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default",
 		"sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"taskName": taskName, "prompt": prompt, "forkTurns": forkTurns,
 	})
 	if err != nil {
@@ -294,7 +294,7 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
 		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1,
-		"targetPodUid": podUID, "taskName": taskName,
+		"targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "taskName": taskName,
 	})
 	if err != nil {
 		t.Fatalf("encode child control composition: %v", err)

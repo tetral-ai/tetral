@@ -285,8 +285,8 @@ func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
 		t.Fatalf("interrupt send error = %v; want deadline exceeded", err)
 	}
 	remaining := sender.interruptDeadline.Sub(started)
-	if remaining < runtimeInterruptDeliveryTimeout-time.Second || remaining > runtimeInterruptDeliveryTimeout+time.Second {
-		t.Fatalf("interrupt deadline = %s; want %s bound", remaining, runtimeInterruptDeliveryTimeout)
+	if remaining < DefaultRuntimeCommandPolicy().Interrupt-time.Second || remaining > DefaultRuntimeCommandPolicy().Interrupt+time.Second {
+		t.Fatalf("interrupt deadline = %s; want %s bound", remaining, DefaultRuntimeCommandPolicy().Interrupt)
 	}
 	if len(sender.requests) != 1 || sender.requests[0] != request {
 		t.Fatalf("bounded interrupt requests = %#v; want one exact command", sender.requests)

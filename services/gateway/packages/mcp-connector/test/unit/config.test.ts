@@ -1,7 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { loadMcpConnectorConfigFromEnv } from "../../src/config.js";
+import { McpBridgePolicyDefaults, McpClientPolicyDefaults, loadMcpConnectorConfigFromEnv } from "../../src/config.js";
 
 describe("MCP connector config", () => {
+  test("preserves configured business drain and separate join within Pod grace",()=>{
+    const result=loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:"1000"});
+    expect(result.ok).toBe(true);if(result.ok){expect(result.config.drainTimeoutMs).toBe(200);expect(result.config.cancelJoinTimeoutMs).toBe(1000);}
+    for(const join of ["0","-1","55000","bad"])expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:join}).ok).toBe(false);
+  });
+
+  test("Bridge policy defaults match the owning Runtime descriptor and preserve discovery", async () => {
+    const descriptor = await Bun.file(new URL("../../../../../agent-runtime/packages/runtime-pod/src/bridge-method-policy.json", import.meta.url)).json() as Array<{method:string;timeoutMs:number}>;
+    for (const [method, timeout] of Object.entries(McpBridgePolicyDefaults)) {
+      expect(descriptor.find(entry => entry.method === method[0]!.toUpperCase()+method.slice(1))?.timeoutMs).toBe(timeout);
+    }
+    expect(McpClientPolicyDefaults.discoveryTimeoutMs).toBe(120000);
+    const configured = loadMcpConnectorConfigFromEnv({...validEnv(), TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS:"7000", TETRAL_MCP_CONNECT_TIMEOUT_MS:"8000", TETRAL_MCP_DISCOVERY_TIMEOUT_MS:"45000"});
+    expect(configured.ok).toBe(true);
+    if (configured.ok) {
+      expect(configured.config.bridgePolicies.claimMcpToolResult).toBe(7000);
+      expect(configured.config.clientPolicies.connectTimeoutMs).toBe(8000);
+      expect(configured.config.clientPolicies.discoveryTimeoutMs).toBe(45000);
+    }
+  });
+
   test("projects only connector-owned environment", () => {
     const config = loadMcpConnectorConfigFromEnv({
       ...validEnv(),

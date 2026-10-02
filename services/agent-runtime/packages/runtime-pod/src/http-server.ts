@@ -8,6 +8,7 @@ import { diagnosticMetricsText } from "@tetral/ts-observability";
 import type { RuntimePodLogger } from "./logger.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
 import { runtimePodMetricsText } from "./metrics.js";
+import type { ContainerMemoryObservation } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
 
 /** Identifies the bound operational endpoint and provides a forceful listener stop. */
@@ -22,6 +23,7 @@ export function createRuntimeHttpServer(
   lifecycle: RuntimePodLifecycle,
   runtimeMetrics?: RuntimePodMetricsSource,
   logger?: RuntimePodLogger,
+  readContainerMemory?: ()=>ContainerMemoryObservation|undefined,
 ): RuntimeHttpServer {
   const bind = parseBindAddress(address);
   const server = Bun.serve({
@@ -37,7 +39,7 @@ export function createRuntimeHttpServer(
         return Response.json({ ready }, { status: ready ? 200 : 503 });
       }
       if (path === "/metrics") {
-        return new Response(runtimePodMetricsText(lifecycle, runtimeMetrics) + (logger ? diagnosticMetricsText(logger) : ""), {
+        return new Response(runtimePodMetricsText(lifecycle, runtimeMetrics, readContainerMemory) + (logger ? diagnosticMetricsText(logger) : ""), {
           status: 200,
           headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
         });

@@ -19,6 +19,11 @@ lives in the `internal/auth` package; the service package
 only wires config, database, signer, and router. The binary is at
 `cmd/tetral-auth`.
 
+The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
+`TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
+plaintext fallback. New connections load the current validated trust generation;
+shutdown joins requests/work before closing the database and trust observer.
+
 ## States & lifecycle
 
 ### Request surfaces
@@ -79,7 +84,10 @@ so the predicate is one clause repeated verbatim, not two independent filters.
 
 ### Bootstrap refresh (`auth.RefreshBootstrap` → `APIKeyStore.UpsertBootstrap`)
 
-Idempotent against the one `key_kind = 'bootstrap'` row:
+Idempotent against the one `key_kind = 'bootstrap'` row. A PostgreSQL transaction locks the existing workspace row before its bootstrap
+upsert, so both the workspace bootstrap and global digest unique indexes are
+serialized during concurrent startup. Replicas with
+identical configuration converge on one row without a startup race:
 
 | Existing bootstrap row | Action |
 |------------------------|--------|

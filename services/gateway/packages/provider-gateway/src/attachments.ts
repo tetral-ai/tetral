@@ -19,7 +19,13 @@
  * ownership of them.
  */
 import { credentials, status } from "@grpc/grpc-js";
-import type { ChannelOptions, Metadata, ServiceError } from "@grpc/grpc-js";
+import type {
+  CallOptions,
+  ClientUnaryCall,
+  ChannelOptions,
+  Metadata,
+  ServiceError,
+} from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceClient,
   FileAttachmentRejectionReason as BridgeFileAttachmentRejectionReason,
@@ -102,16 +108,19 @@ export interface BridgeAttachmentClient {
   resolveTransientAttachment(
     request: ResolveTransientAttachmentRequest,
     metadata: Metadata,
+    options: CallOptions,
     callback: (error: ServiceError | null, response: ResolveTransientAttachmentResponse) => void,
   ): unknown;
   resolveFileAttachmentMetadata?(
     request: ResolveFileAttachmentMetadataRequest,
     metadata: Metadata,
+    options: CallOptions,
     callback: (error: ServiceError | null, response: ResolveFileAttachmentMetadataResponse) => void,
   ): unknown;
   readFileAttachmentChunk?(
     request: ReadFileAttachmentChunkRequest,
     metadata: Metadata,
+    options: CallOptions,
     callback: (error: ServiceError | null, response: ReadFileAttachmentChunkResponse) => void,
   ): unknown;
 }
@@ -123,11 +132,77 @@ export interface BridgeAttachmentClient {
  */
 export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
   private readonly client: BridgeAttachmentClient;
+  private readonly calls = new Map<ClientUnaryCall, Promise<void>>();
+  private closing = false;
+  private closed: Promise<void> | undefined;
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
 
   constructor(private readonly options: BridgeAPIAttachmentResolverOptions) {
     this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeAttachmentGrpcChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
+  }
+
+  close(): Promise<void> {
+    if (this.closed !== undefined) return this.closed;
+    this.closing = true;
+    this.closed = (async () => {
+      const active = [...this.calls.entries()];
+      for (const [call] of active) call.cancel();
+      await Promise.all(active.map(([, join]) => join));
+      if (this.client instanceof AgentRuntimeBridgeServiceClient)
+        this.client.close();
+    })();
+    return this.closed;
+  }
+
+  private async call<Response>(
+    method: keyof BridgeAttachmentClient,
+    request: unknown,
+    metadata: Metadata,
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (this.closing) throw new Error("Bridge attachment client closing");
+    signal?.throwIfAborted();
+    if (!Number.isFinite(deadline) || deadline <= Date.now())
+      throw new Error("Provider attachment deadline exhausted");
+    let call: ClientUnaryCall | undefined,
+      settled = false,
+      joined!: () => void;
+    const join = new Promise<void>((resolve) => {
+      joined = resolve;
+    });
+    const cancel = () => call?.cancel();
+    try {
+      return await new Promise<Response>((resolve, reject) => {
+        const invoke = this.client[method] as unknown as (
+          request: unknown,
+          metadata: Metadata,
+          options: CallOptions,
+          callback: (error: ServiceError | null, response: Response) => void,
+        ) => ClientUnaryCall;
+        if (invoke === undefined)
+          throw new Error("Bridge attachment method unavailable");
+        call = invoke.call(
+          this.client,
+          request,
+          metadata,
+          { deadline },
+          (error, response) => {
+            settled = true;
+            joined();
+            if (error !== null) reject(error);
+            else resolve(response);
+          },
+        );
+        if (!settled) this.calls.set(call, join);
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) cancel();
+      });
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+      if (call !== undefined) this.calls.delete(call);
+    }
   }
 
   /** Resolves all request attachments in order and validates every returned origin and byte count. */
@@ -139,6 +214,8 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     } |
     { readonly ok: false; readonly error: ProviderErrorInput }
   > {
+    const deadline =
+      input.deadline ?? Date.now() + (input.request.limits?.timeoutMs ?? 30000);
     let metadata: Metadata;
     try {
       metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -153,10 +230,18 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     if (fileAttachments.length > 0) {
       input.abortSignal?.throwIfAborted();
       try {
-        const response = await resolveFileAttachmentMetadata(this.client, {
-          scope,
-          attachments: fileAttachments.map((attachment) => attachment.fileBacked!),
-        }, metadata);
+        const response = await this.call<ResolveFileAttachmentMetadataResponse>(
+          "resolveFileAttachmentMetadata",
+          {
+            scope,
+            attachments: fileAttachments.map(
+              (attachment) => attachment.fileBacked!,
+            ),
+          },
+          metadata,
+          deadline,
+          input.abortSignal,
+        );
         fileMetadata = response.attachments;
       } catch (error) {
         return { ok: false, error: classifyAttachmentBridgeError(error) };
@@ -186,7 +271,13 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     for (const attachment of input.request.attachments) {
       input.abortSignal?.throwIfAborted();
       if (attachment.transient !== undefined) {
-        const transientResult = await this.resolveTransient(scope, attachment, metadata, input.abortSignal);
+        const transientResult = await this.resolveTransient(
+          scope,
+          attachment,
+          metadata,
+          input.abortSignal,
+          deadline,
+        );
         if (!transientResult.ok) {
           return transientResult;
         }
@@ -208,7 +299,14 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
         });
         continue;
       }
-      const fileResult = await this.readFile(scope, attachment, metadataEntry.metadata!.sizeBytes, metadata, input.abortSignal);
+      const fileResult = await this.readFile(
+        scope,
+        attachment,
+        metadataEntry.metadata!.sizeBytes,
+        metadata,
+        input.abortSignal,
+        deadline,
+      );
       if (!fileResult.ok) {
         return fileResult;
       }
@@ -226,6 +324,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     attachment: ProviderRequestAttachment,
     metadata: Metadata,
     abortSignal: AbortSignal | undefined,
+    deadline: number,
   ): Promise<
     {
       readonly ok: true;
@@ -245,10 +344,16 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     }
     let response: ResolveTransientAttachmentResponse;
     try {
-      response = await resolveTransientAttachment(this.client, {
-        scope,
-        attachmentRef: transient.attachmentRef,
-      }, metadata);
+      response = await this.call<ResolveTransientAttachmentResponse>(
+        "resolveTransientAttachment",
+        {
+          scope,
+          attachmentRef: transient.attachmentRef,
+        },
+        metadata,
+        deadline,
+        abortSignal,
+      );
     } catch (error) {
       return { ok: false, error: classifyAttachmentBridgeError(error) };
     }
@@ -287,6 +392,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
     sizeBytes: number,
     metadata: Metadata,
     abortSignal: AbortSignal | undefined,
+    deadline: number,
   ): Promise<
     { readonly ok: true; readonly type: "attachment"; readonly data: Uint8Array } |
     { readonly ok: true; readonly type: "rejection"; readonly rejection: ProviderAttachmentRejection } |
@@ -301,12 +407,18 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
       const length = Math.min(FileAttachmentChunkBytes, sizeBytes - offset);
       let response: ReadFileAttachmentChunkResponse;
       try {
-        response = await readFileAttachmentChunk(this.client, {
-          scope,
-          attachment: attachment.fileBacked,
-          offset,
-          length,
-        }, metadata);
+        response = await this.call<ReadFileAttachmentChunkResponse>(
+          "readFileAttachmentChunk",
+          {
+            scope,
+            attachment: attachment.fileBacked,
+            offset,
+            length,
+          },
+          metadata,
+          deadline,
+          abortSignal,
+        );
       } catch (error) {
         return { ok: false, error: classifyAttachmentBridgeError(error) };
       }
@@ -337,62 +449,6 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
   }
 }
 
-function resolveTransientAttachment(
-  client: BridgeAttachmentClient,
-  request: ResolveTransientAttachmentRequest,
-  metadata: Metadata,
-): Promise<ResolveTransientAttachmentResponse> {
-  return new Promise((resolve, reject) => {
-    client.resolveTransientAttachment(request, metadata, (error: ServiceError | null, response: ResolveTransientAttachmentResponse) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-function resolveFileAttachmentMetadata(
-  client: BridgeAttachmentClient,
-  request: ResolveFileAttachmentMetadataRequest,
-  metadata: Metadata,
-): Promise<ResolveFileAttachmentMetadataResponse> {
-  return new Promise((resolve, reject) => {
-    if (client.resolveFileAttachmentMetadata === undefined) {
-      reject(new Error("Bridge file metadata RPC unavailable"));
-      return;
-    }
-    client.resolveFileAttachmentMetadata(request, metadata, (error, response) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-function readFileAttachmentChunk(
-  client: BridgeAttachmentClient,
-  request: ReadFileAttachmentChunkRequest,
-  metadata: Metadata,
-): Promise<ReadFileAttachmentChunkResponse> {
-  return new Promise((resolve, reject) => {
-    if (client.readFileAttachmentChunk === undefined) {
-      reject(new Error("Bridge file chunk RPC unavailable"));
-      return;
-    }
-    client.readFileAttachmentChunk(request, metadata, (error, response) => {
-      if (error !== null) {
-        reject(error);
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
 function bridgeScope(request: ProviderRequest, runtimePodUid: string): RuntimeScope {
   return {
     workspaceId: request.workspaceId,
@@ -402,6 +458,7 @@ function bridgeScope(request: ProviderRequest, runtimePodUid: string): RuntimeSc
       bindingId: request.bindingId,
       bindingGeneration: request.bindingGeneration,
       targetPodUid: runtimePodUid,
+      runtimeProcessId: request.runtimeProcessId,
     },
   };
 }

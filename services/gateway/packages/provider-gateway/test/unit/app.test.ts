@@ -148,6 +148,7 @@ function validConfig(): ProviderGatewayConfig {
     },
     runtimeBindingTokenHMACKey: BindingTokenKey,
     databaseUrl: "postgres://gateway-readonly.example/tetral",
+    drainTimeoutMs: 30000,cancelJoinTimeoutMs:5000,
     databasePool: {
       max: 10,
       idleTimeout: 30,
@@ -285,6 +286,7 @@ function signedRuntimeBindingToken(request: {
     binding_id: request.bindingId,
     binding_generation: request.bindingGeneration,
     runtime_pod_uid: runtimePodUid,
+    runtime_process_id: "process-test",
     exp: Math.floor(new Date(expiresAt).getTime() / 1000),
   });
   const payloadPart = Buffer.from(payload, "utf8").toString("base64url");

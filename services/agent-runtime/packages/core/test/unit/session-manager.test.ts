@@ -133,6 +133,7 @@ function acceptedInput(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "messages",
@@ -155,6 +156,7 @@ function approvalReviewInput(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 		inputOrder: 1,
 		kind: "approval_review",
@@ -191,6 +193,7 @@ function agentMailInput(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 		kind: "inter_agent_message",
 		deliveryId: runtimeInputId.replace("agent_mail:", ""),
@@ -211,6 +214,7 @@ function threadControl(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		runtimeInputId,
 		origin: "user",
 		interruptLeaseRef: {
@@ -229,6 +233,7 @@ function runtimeConfigScope(sessionId: string, configIdentity: string) {
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		configIdentity,
 	};
 }
@@ -243,6 +248,7 @@ function cleanupControl(
 		bindingId: `bind_${sessionId}`,
 		bindingGeneration: 1,
 		targetPodUid: `pod_${sessionId}`,
+		runtimeProcessId: `process_${sessionId}`,
 		cleanupOperationId,
 	};
 }
@@ -5596,6 +5602,7 @@ describe("SessionManager", () => {
 					workspaceId: "wksp_other",
 					bindingId: "bind_workspace_b",
 					targetPodUid: "pod_workspace_b",
+					runtimeProcessId: "process-test",
 				};
 				expect(
 					await Effect.runPromise(manager.acceptInput(workspaceA)),
@@ -5645,6 +5652,7 @@ describe("SessionManager", () => {
 							workspaceId: "wksp_other",
 							bindingId: "bind_workspace_b",
 							targetPodUid: "pod_workspace_b",
+							runtimeProcessId: "process-test",
 						}),
 					);
 					if (!cleanupB.ok) {
@@ -7559,6 +7567,109 @@ describe("SessionManager", () => {
 		}
 	});
 
+	test("quiesce releases idle Sessions independently and waits for every resident child callback", async () => {
+		const loop = makeControlledThreadLoop();
+		await withSessionManager(sessionManagerLayer(loop), async (manager) => {
+			await Effect.runPromise(manager.acceptInput(acceptedInput("held")));
+			await Effect.runPromise(
+				manager.acceptInput(acceptedInput("held", "rin_child", "thrd_child")),
+			);
+			await waitForRuns(loop, 2);
+			await Effect.runPromise(
+				manager.preloadThread({
+					...threadControl("idle"),
+					runtimeBindingToken: "binding-token",
+					contextEntries: [],
+				}),
+			);
+			const released: string[] = [];
+			const drain = Effect.runPromise(
+				manager.quiesce({
+					currentStepDeadline: Date.now() + 1000,
+					settlementDeadline: Date.now() + 2000,
+					release: async (scope) => {
+						released.push(scope.sessionId);
+					},
+				}),
+			);
+			await waitForCondition(
+				() => released.includes("idle"),
+				"idle independent release",
+			);
+			expect(released).toEqual(["idle"]);
+			loop.runs[0]!.release({ type: "checkpoint_yield" });
+			await new Promise((resolve) => setTimeout(resolve, 15));
+			expect(released).toEqual(["idle"]);
+			loop.runs[1]!.release({ type: "checkpoint_yield" });
+			await drain;
+			expect(released).toEqual(["idle", "held"]);
+			expect(loop.runs).toHaveLength(2);
+		});
+	});
+
+	test("checkpoint expiry joins parent and reviewer and lands both failed closeouts before release", async () => {
+		const closed: string[] = [];
+		const loop = makeControlledThreadLoop({
+			closeFailedRun: (session) =>
+				Effect.sync(() => {
+					closed.push(session.identity.sessionThreadId);
+					return { type: "landed", disposition: "continuation" };
+				}),
+		});
+		await withSessionManager(sessionManagerLayer(loop), async (manager) => {
+			await Effect.runPromise(manager.acceptInput(acceptedInput("expiry")));
+			const reviewer = await Effect.runPromise(
+				manager.acceptInput(
+					approvalReviewInput(
+						"expiry",
+						"rin_review",
+						"thrd_review",
+						"thrd_expiry",
+					),
+				),
+			);
+			if (!reviewer.ok || reviewer.reviewerExecutionToken === undefined)
+				throw new Error("reviewer execution token missing");
+			await waitForRuns(loop, 2);
+			const releaseFacts: string[][] = [];
+			const drain = Effect.runPromise(
+				manager.quiesce({
+					currentStepDeadline: Date.now() + 10,
+					settlementDeadline: Date.now() + 500,
+					release: async () => {
+						releaseFacts.push([...closed].sort());
+					},
+				}),
+			);
+			const control = threadControl(
+				"expiry",
+				"rin_review_close",
+				"thrd_review",
+			);
+			expect(
+				await Effect.runPromise(
+					manager.waitReviewerExecution(
+						control,
+						reviewer.reviewerExecutionToken,
+						undefined,
+					),
+				),
+			).toMatchObject({ ok: true, terminal: true, status: "idle" });
+			expect(releaseFacts).toEqual([]);
+			expect(
+				await Effect.runPromise(
+					manager.releaseReviewerExecution(
+						control,
+						reviewer.reviewerExecutionToken,
+					),
+				),
+			).toMatchObject({ ok: true, applied: true, terminal: true });
+			await drain;
+			expect(releaseFacts).toEqual([["thrd_expiry", "thrd_review"]]);
+			expect(loop.runs).toHaveLength(2);
+		});
+	});
+
 	test("manager layer exposes only the contract command surface", async () => {
 		const threadLoop = makeControlledThreadLoop();
 		const keys = await withSessionManager(
@@ -7580,6 +7691,7 @@ describe("SessionManager", () => {
 			"markThreadActive",
 			"markThreadClosed",
 			"preloadThread",
+			"quiesce",
 			"releaseReviewerExecution",
 			"resolveToolConfirmation",
 			"shutdownActiveRuns",

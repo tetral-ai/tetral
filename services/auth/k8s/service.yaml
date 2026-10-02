@@ -10,6 +10,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     tetral.ai/exposure: public
 spec:
+  sessionAffinity: None
   type: ClusterIP
   selector:
     app.kubernetes.io/name: auth

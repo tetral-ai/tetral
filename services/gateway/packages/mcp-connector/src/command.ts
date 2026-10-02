@@ -1,3 +1,5 @@
+import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
+import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
 import { createDiagnosticStreamSink, diagnosticMetricsText, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
@@ -67,12 +69,28 @@ export async function runMcpConnectorCommand(options: {
     try { if ("flush" in owner && typeof owner.flush === "function") diagnosticReleases.push(owner.flush.bind(owner)); } catch { /* best effort */ }
   };
   let logger: McpConnectorLogger | undefined;
-  const report = (record: McpConnectorLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
-  const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
-  let ready = false, stopping: Promise<void> | undefined;
+  const report = (record: McpConnectorLogRecord): void => {
+    try {
+      logger?.error(record);
+    } catch {
+      /* observability does not own lifecycle */
+    }
+  };
+  let drainTimeoutMs: number = ServiceLifecycleDefaults.drainTimeoutMs,
+    cancelJoinTimeoutMs: number = ServiceLifecycleDefaults.cancelJoinTimeoutMs;
+  let shutdownDeadline: Date | undefined;
+  let drainDeadline: Date | undefined;
+  const closes: {
+    phase: ProcessFailurePhase;
+    close: () => void | Promise<void>;
+  }[] = [];
+  let ready = false,
+    stopping: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     ready = false;
     if (stopping !== undefined) return stopping;
+    drainDeadline = new Date(Date.now() + drainTimeoutMs);
+    shutdownDeadline = new Date(drainDeadline.getTime() + cancelJoinTimeoutMs);
     let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
     stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
     void (async () => {
@@ -112,27 +130,131 @@ export async function runMcpConnectorCommand(options: {
     const metrics = new McpConnectorMetricsRegistry();
     const configuredLogger = logger;
     let service: McpConnectorServiceShell;
-    const sqlOptions = databasePoolOptions(config.config);
-    const sql = options.sql ?? options.sqlFactory?.(sqlOptions) ?? new Bun.SQL(sqlOptions);
-    let schemaVerified = false;
-    closes.push({ phase: "database", close: () => schemaVerified ? sql.close?.() : sql.close?.({ timeout: 1 }) });
-    await (options.schemaVerifier ?? verifyPostgreSQLReadiness)(sql);
-    schemaVerified = true;
-    const client = options.client ?? new McpSDKClient({
-      credentialResolver: new SQLGitHubMcpCredentialResolver(
-        sql, config.config.vaultKeyHex, undefined, undefined, undefined, undefined,
-        (event) => recordMcpOAuthRefreshCompleted(configuredLogger, (outcome) => metrics.recordRefreshAttempt(outcome), event),
-      ),
-      logger,
-      onToolsListChanged: async (input) => {
-        await service.handleToolsListChangedNotification(input);
-      },
+    drainTimeoutMs = config.config.drainTimeoutMs;
+    cancelJoinTimeoutMs = config.config.cancelJoinTimeoutMs;
+    let schemaFailure: unknown;
+    let sql;
+    try {
+      sql = await openPostgresSQLOwner({
+        url: config.config.databaseUrl,
+        pool: config.config.databasePool,
+        observe: (event) => {
+          if (
+            event.kind !== "reload_failed" &&
+            event.kind !== "reload_recovered"
+          )
+            return;
+          const failed = event.kind === "reload_failed";
+          try {
+            logger?.[failed ? "error" : "info"]({
+              event: failed
+                ? "transport.credential_reload_failed"
+                : "transport.credential_reload_recovered",
+              "event.kind": failed
+                ? "transport.credential_reload_failed"
+                : "transport.credential_reload_recovered",
+              component: "database",
+              "transport.stage": "credential_reload",
+              "transport.outcome": failed ? "invalid_generation" : "recovered",
+              "failed.count": event.failedCount ?? 0,
+            });
+          } catch {
+            /* sink failure cannot alter SQL generation custody */
+          }
+        },
+        ...(config.config.databaseTLS !== undefined
+          ? { tls: config.config.databaseTLS }
+          : {}),
+        ...(options.sql !== undefined
+          ? {
+              sqlFactory: (() => options.sql) as unknown as (
+                options: Bun.SQL.PostgresOrMySQLOptions,
+              ) => Bun.SQL,
+            }
+          : options.sqlFactory !== undefined
+            ? {
+                sqlFactory: options.sqlFactory as unknown as (
+                  options: Bun.SQL.PostgresOrMySQLOptions,
+                ) => Bun.SQL,
+              }
+            : {}),
+        verify: async (actual) => {
+          try {
+            await (options.schemaVerifier ?? verifyPostgreSQLReadiness)(actual);
+          } catch (error) {
+            schemaFailure = error;
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      throw schemaFailure ?? error;
+    }
+    closes.push({
+      phase: "database",
+      close: () =>
+        sql.close({
+          deadline: shutdownDeadline ?? new Date(Date.now() + 5000),
+        }),
     });
-    if (client instanceof McpSDKClient) closes.push({ phase: "mcp_clients", close: () => client.closeAll() });
+    const client =
+      options.client ??
+      new McpSDKClient({
+        ...config.config.clientPolicies,
+        credentialResolver: new SQLGitHubMcpCredentialResolver(
+          sql,
+          config.config.vaultKeyHex,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (event) =>
+            recordMcpOAuthRefreshCompleted(
+              configuredLogger,
+              (outcome) => metrics.recordRefreshAttempt(outcome),
+              event,
+            ),
+        ),
+        logger,
+        onToolsListChanged: async (input) => {
+          await service.handleToolsListChangedNotification(input);
+        },
+      });
+    if (client instanceof McpSDKClient)
+      closes.push({
+        phase: "mcp_clients",
+        close: () =>
+          client.closeAll(shutdownDeadline ?? new Date(Date.now() + 5000)),
+      });
     const tokenReviewClient = new KubernetesTokenReviewClient({
       apiServerUrl: config.config.kubernetesApiServerUrl,
       reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
       apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
+    });
+    const idempotencyStore = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: config.config.bridgeApiGrpcAddress,
+      tokenPath: config.config.bridgeTokenPath,
+      claimTimeoutMs: config.config.bridgePolicies.claimMcpToolResult,
+      commitTimeoutMs: config.config.bridgePolicies.commitMcpToolResult,
+      relinquishTimeoutMs: config.config.bridgePolicies.relinquishMcpToolResult,
+    });
+    const manifestChangeNotifier =
+      options.manifestChangeNotifier ??
+      new BridgeAPIManifestChangeNotifier({
+        address: config.config.bridgeApiGrpcAddress,
+        tokenPath: config.config.bridgeTokenPath,
+        timeoutMs: config.config.bridgePolicies.mcpManifestChanged,
+      });
+    closes.push({
+      phase: "grpc",
+      close: async () => {
+        await Promise.all([
+          idempotencyStore.close(),
+          ...(manifestChangeNotifier instanceof BridgeAPIManifestChangeNotifier
+            ? [manifestChangeNotifier.close()]
+            : []),
+        ]);
+      },
     });
     service = new McpConnectorServiceShell({
       ready: () => ready,
@@ -142,15 +264,9 @@ export async function runMcpConnectorCommand(options: {
         hmacKey: config.config.runtimeBindingTokenHMACKey,
       }),
       metrics,
-      idempotencyStore: new BridgeAPIMcpToolResultIdempotencyStore({
-        address: config.config.bridgeApiGrpcAddress,
-        tokenPath: config.config.bridgeTokenPath,
-      }),
+      idempotencyStore,
       activeSessionCount: () => typeof client.connectionCount === "function" ? client.connectionCount() : 0,
-      manifestChangeNotifier: options.manifestChangeNotifier ?? new BridgeAPIManifestChangeNotifier({
-        address: config.config.bridgeApiGrpcAddress,
-        tokenPath: config.config.bridgeTokenPath,
-      }),
+      manifestChangeNotifier,
       authenticator: {
         authenticate: async ({ metadata, method }) =>
           await authenticateMcpCaller({
@@ -167,8 +283,13 @@ export async function runMcpConnectorCommand(options: {
           }),
       },
     });
-    const server = (options.serverFactory ?? createMcpConnectorGrpcServer)(service);
-    closes.push({ phase: "grpc", close: () => server.shutdown() });
+    const server = (options.serverFactory ?? createMcpConnectorGrpcServer)(
+      service,
+    );
+    closes.push({
+      phase: "grpc",
+      close: () => server.shutdown(shutdownDeadline),
+    });
     let httpServer: ReturnType<typeof createMcpConnectorHttpServer> | undefined;
     await (options.reviewerMaterialValidator ?? validateKubernetesTokenReviewReviewerMaterial)({
       reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
@@ -182,6 +303,17 @@ export async function runMcpConnectorCommand(options: {
       metricsText: () => service.metricsText() + diagnosticMetricsText(configuredLogger),
     });
     closes.push({ phase: "http", close: () => httpServer?.stop() });
+    closes.push({
+      phase: "app",
+      close: () => {
+        const deadline =
+          shutdownDeadline ?? new Date(Date.now() + drainTimeoutMs);
+        idempotencyStore.beginDrain(deadline);
+        if (manifestChangeNotifier instanceof BridgeAPIManifestChangeNotifier)
+          manifestChangeNotifier.beginDrain(deadline);
+        return service.shutdown(deadline, drainDeadline);
+      },
+    });
     ready = true;
     logWorkloadStarted(logger);
     releaseSignals = options.registerSignalHandlers === undefined ? registerProcessSignalHandlers(shutdown) : options.registerSignalHandlers(shutdown);

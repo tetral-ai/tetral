@@ -4,7 +4,9 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -12,6 +14,7 @@ import (
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -23,7 +26,9 @@ import (
 
 var runWorkload = workload.Run
 var listenTCP = net.Listen
-var openDatabase = dbconnect.OpenPlainDSN
+var openDatabase = func(ctx context.Context, _ string, dsn string) (dbconnect.OpenResult, error) {
+	return dbconnect.OpenProtectedDSN(ctx, dsn, os.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), os.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
+}
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 
 type osEnv struct{}
@@ -37,6 +42,10 @@ func main() {
 }
 
 func run(ctx context.Context, env jobrunner.Env) error {
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	resourcesCtx, cancelResources := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelResources()
 	diagnosticConfig, err := workload.DiagnosticConfigFromEnv(env.Getenv)
 	owner := workload.NewProcessLogger(os.Stderr, jobrunner.ServiceNameJobRunner, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnosticConfig)
 	defer owner.CloseWithBudget()
@@ -67,6 +76,39 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err := jobrunner.ValidateRuntimeInboxEventRefBounds(ctx, database.Client, workspaceStore); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
+	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
+		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
+	}
+	var directTLS *transportsecurity.Owner
+	var directDial []grpc.DialOption
+	if cfg.TransportProfile == "hardened" {
+		directTLS, err = transportsecurity.OpenFromEnv(ctx, env.Getenv, "runtime-direct")
+		if err != nil {
+			return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
+		}
+		defer func() {
+			if closeErr := directTLS.Close(); closeErr != nil {
+				logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_direct_tls", "error.class", "resource_shutdown", "error.code", "runtime_direct_tls_close_failed")
+			}
+		}()
+		credentials, credentialsErr := directTLS.GRPCClientCredentials(cfg.RuntimeDirectServerName, cfg.RuntimeDirectPeerURI)
+		if credentialsErr != nil {
+			return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, credentialsErr)
+		}
+		directDial = append(directDial, grpc.WithTransportCredentials(credentials))
+	}
+	commandClient := jobrunner.NewRuntimePodCommandClient(internalgrpcauth.FileTokenSource{Path: cfg.RuntimePodTokenPath}, directDial...)
+	commandClient.Policy = cfg.CommandPolicy
+	if directTLS != nil {
+		if err := directTLS.SetTrustActivationObserver(commandClient.RetireChannels); err != nil {
+			return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
+		}
+	}
+	defer func() {
+		if closeErr := commandClient.Close(); closeErr != nil {
+			logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_command_channels", "error.class", "resource_shutdown", "error.code", "runtime_command_channels_close_failed")
+		}
+	}()
 	listener, err := listenTCP("tcp", cfg.HTTPAddress)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err))
@@ -90,7 +132,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	watchHandles, err := enginekubernetes.SyncAndWatch(ctx, kubernetesClient, enginekubernetes.Config{
+	watchHandles, err := enginekubernetes.SyncAndWatch(resourcesCtx, kubernetesClient, enginekubernetes.Config{
 		Namespace:                 visibilityConfig.Namespace,
 		AgentRuntimeLabelSelector: visibilityConfig.AgentRuntimeLabelSelector,
 		AgentRuntimeServiceName:   visibilityConfig.AgentRuntimeServiceName,
@@ -108,37 +150,51 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err := blobConfig.AssertProductionReady(); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	blobStore, err := blob.NewS3BlobStore(ctx, blobConfig)
+	blobStore, err := blob.NewProtectedS3BlobStore(ctx, blobConfig)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
+	defer func() {
+		if closeErr := blobStore.Close(); closeErr != nil {
+			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
+		}
+	}()
 	deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(
 		database.Client,
 		logger,
 		cfg,
 		kubernetesCache.BindingVisibilitySnapshot,
 	)
+	if closer, ok := deliveryStore.MCPManifestLister.(interface{ Close() error }); ok {
+		defer func() {
+			if closeErr := closer.Close(); closeErr != nil {
+				logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
+			}
+		}()
+	}
+	resolver := deliveryStore.TargetResolver.(jobrunner.KubernetesRuntimeTargetResolver)
+	resolver.GetPod = kubernetesClient.GetPod
+	deliveryStore.TargetResolver = resolver
 	deliveryStore.AttachmentBlobStore = blobStore
-	loopCtx, cancelLoop := context.WithCancel(ctx)
+	acquisitionCtx, closeAcquisition := context.WithCancel(ctx)
+	defer closeAcquisition()
 	var loopWorkers sync.WaitGroup
-	defer func() { cancelLoop(); loopWorkers.Wait() }()
+	defer func() { closeAcquisition(); loopWorkers.Wait() }()
 	queueWake := queue.NewWakeSignal()
 	loopWorkers.Add(1)
 	go func() {
 		defer loopWorkers.Done()
-		_ = queue.RunNotificationListener(loopCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassJobRunner, queueWake, logger)
+		_ = queue.RunNotificationListener(acquisitionCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassJobRunner, queueWake, logger)
 	}()
 	loopWorkers.Add(1)
 	go func() {
 		defer loopWorkers.Done()
-		_ = jobrunner.RunJobRunnerLoop(loopCtx, &jobrunner.JobRunner{
+		_ = jobrunner.RunJobRunnerLoop(acquisitionCtx, &jobrunner.JobRunner{
 			Queue:      jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
 			Workspaces: workspaceStore,
 			Deliverer: jobrunner.RuntimePodDirectDeliverer{
-				Store: deliveryStore,
-				Sender: jobrunner.NewRuntimePodCommandClient(internalgrpcauth.FileTokenSource{
-					Path: cfg.RuntimePodTokenPath,
-				}),
+				Store:  deliveryStore,
+				Sender: commandClient,
 			},
 			Config: cfg,
 		}, logger, queueWake)
@@ -155,6 +211,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
+			workload.WithMetricsCollector("placement", deliveryStore.PlacementMetrics.Collector()),
 			workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.Client)),
 		),
 		Readiness: readiness,

@@ -97,7 +97,7 @@ func TestPostgreSQLRuntimeWebFirstEffectAuthority(t *testing.T) {
 			"mode": mode, "bridgeAddress": bridgeAddress, "webAddress": webAddress,
 			"tokenPath": tokenPath, "workspaceId": workspaceID, "sessionId": sessionID,
 			"sessionThreadId": threadID, "bindingId": bindingID, "bindingGeneration": 1,
-			"targetPodUid": podUID, "runtimeBindingToken": runtimeBindingToken,
+			"targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "runtimeBindingToken": runtimeBindingToken,
 			"modelRequestId": requestID, "modelToolCallId": callID,
 			"toolUseEventId": toolUseEventID, "query": query,
 		})

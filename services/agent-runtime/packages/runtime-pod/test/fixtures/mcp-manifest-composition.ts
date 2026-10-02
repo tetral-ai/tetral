@@ -143,6 +143,7 @@ async function proveNextProviderToolVisibility(
 		bindingId: "bind_manifest_composition",
 		bindingGeneration: 1,
 		targetPodUid: "pod_manifest_composition",
+		runtimeProcessId: "process-test",
 		runtimeBindingToken: "runtime-binding-token",
 	});
 	const result = await Effect.runPromise(
@@ -259,6 +260,7 @@ async function loadReplacement(
 				loadContext: (
 					_request: unknown,
 					_metadata: Metadata,
+					_options: unknown,
 					callback: (error: Error | null, response: unknown) => void,
 				) => {
 					callback(null, {
@@ -378,6 +380,7 @@ function runtimeControlService(
 			),
 	} as unknown as RuntimeSessionRunHost;
 	return new RuntimeControlService({
+	runtimeProcessId: request.runtimeProcessId,
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod-composition",
@@ -448,6 +451,7 @@ function addressState(input: CompositionInput) {
 		bindingId: "bind_manifest_composition",
 		bindingGeneration: 1,
 		targetPodUid: "pod_manifest_composition",
+		runtimeProcessId: "process-test",
 	};
 }
 

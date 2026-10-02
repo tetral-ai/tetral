@@ -124,8 +124,8 @@ rather than dead-lettering a notification before its dependents can be settled.
 Timeout stops Engine observation; it does not cancel the provider build. Existing
 failed artifacts and already-settled tool results are not reopened, even if the
 provider later becomes Active. No historical recovery or implicit replay is
-performed. Migration V4 adds nullable observation fields without rewriting old
-terminal records.
+performed. The fresh canonical schema includes nullable observation fields;
+serving startup rejects predecessor schema identities rather than upgrading them.
 
 Logs distinguish `submitted`, `waiting`, `ready`, `provider_failed`,
 `observation_failed`, `waiting_overdue`, and `timed_out`, including the safe
@@ -138,7 +138,7 @@ Tests use real PostgreSQL and the actual Queue server/store, builder, adapter,
 and artifact/activation writers, with deterministic Daytona responses and
 controlled scheduling time. `environment_build_integration_test.go` proves
 waiting beyond the failure budget, deadline persistence, late-response rejection,
-query recovery, first-claim custom timing, pre-V4 live-build handoff, terminal
+query recovery, first-claim custom timing, already-submitted live-build handoff, terminal
 redelivery, and stale lease rejection. The artifact-store tests own same-input
 reuse and isolation of changed input. Driver tests prove
 state classification and the single-submission guard. MinIO and live Daytona
@@ -358,6 +358,36 @@ Sandbox Tool family to one provider-neutral error text block containing exactly
 Sandbox architecture, route envelopes, partial output, attempt counts, and
 Runtime error codes are not projected into public Tool Results.
 
+## Process shutdown
+
+Startup validates schema and typed configuration, constructs protected PostgreSQL
+and Blob clients, and waits for the mandatory local routing proxy when
+`TETRAL_ROUTING_PROXY_REQUIRED=true`. PostgreSQL and Blob use their explicit
+`TETRAL_DATABASE_TLS_CA_PATH` / `TETRAL_DATABASE_TLS_SERVER_NAME` and
+`TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` trust settings.
+
+SIGTERM closes acquisition and readiness immediately. Every Queue family uses
+that acquisition boundary: no waiting worker slot or new Lease starts work after
+quiesce. If a committed Lease reply arrives late, only its observed exact job IDs
+and lease tokens are deferred, and none of those jobs execute. An admitted worker
+retains its work context and heartbeat while finishing its current provider or
+settlement operation. Its 120-second Queue lease and 15-second heartbeat serve
+custody; they are separate from Pod shutdown budgets.
+
+`TETRAL_DRAIN_TIMEOUT_MS` defaults to 30000 and
+`TETRAL_CANCEL_JOIN_TIMEOUT_MS` to 5000, both positive milliseconds. At the drain
+cutoff the process cancels unfinished workers, then joins their cleanup together
+with consumer loops, maintenance, notifications and HTTP handlers. Owned Queue
+channels, provider/Blob resources and database pools close only after their users
+join. A missed cancellation-join budget is an error; it does not authorize closing
+a pool beneath a live worker.
+
+A replacement worker continues the durable external command reference without a
+second submission. If submission may have happened but no reference committed,
+recovery records the preserved unknown outcome. Queue lease expiry/reclaim and
+exact settlement authority govern takeover; Runtime process promotion does not
+invalidate independently accepted Sandbox execution.
+
 ## Configuration
 
 The service requires PostgreSQL, Queue, a Daytona Tier 3 or higher account,
@@ -437,6 +467,14 @@ level. Both are read once at boot. Successful Lease and heartbeat polling is
 quiet at the default Info level.
 
 ## Testing
+
+`TestSandboxConsumerAcquisitionAndJoinedDrain` checks waiting contenders,
+late Lease replies and joined cancellation. `TestPostgreSQLReplicaSandboxTakeover`
+uses two independent production consumers and Queue endpoints to drain one worker
+while the other processes six executions, then takes over at both command-reference
+persistence boundaries through actual lease expiry. `TestPostgreSQLReplicaWorkerDrain`
+keeps actual Runtime/Gateway work alive across Job Runner shutdown and replacement.
+
 
 Helper tests that access runtime state use a private temporary root for
 payloads, task records and sweeping, foreground-command state, diagnostics,

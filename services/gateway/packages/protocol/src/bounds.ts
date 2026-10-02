@@ -147,6 +147,7 @@ export function validateProviderRequest(
 		["session_id", request.sessionId],
 		["session_thread_id", request.sessionThreadId],
 		["binding_id", request.bindingId],
+		["runtime_process_id", request.runtimeProcessId],
 	] as const) {
 		if (invalidBytes(value, MaxIdBytes)) {
 			return invalidRequest("invalid_identifier", member);

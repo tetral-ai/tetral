@@ -9,6 +9,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -52,13 +53,21 @@ const defaultJobRunnerPollInterval = time.Second
 
 const defaultJobRunnerHTTPAddress = ":8081"
 
-const defaultAgentRuntimeGRPCPort = 9090
+const defaultAgentRuntimeGRPCPort = 19090
 
 type Env interface {
 	Getenv(string) string
 }
 
 type JobRunnerConfig struct {
+	CommandPolicy             RuntimeCommandPolicy
+	TransportProfile          string
+	RuntimeDirectServerName   string
+	RuntimeDirectPeerURI      string
+	DrainTimeout              time.Duration
+	CancelJoinTimeout         time.Duration
+	ProcessPolicy             runtimecontrol.ProcessPolicy
+	PlacementPolicy           RuntimePlacementPolicy
 	HTTPAddress               string
 	QueueGRPCAddress          string
 	LeaseOwner                string
@@ -81,18 +90,28 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	if env == nil {
 		return JobRunnerConfig{}, workload.NewConfigError("environment is required")
 	}
+	placementPolicy, placementErr := RuntimePlacementPolicyFromEnv(env.Getenv)
+	if placementErr != nil {
+		return JobRunnerConfig{}, placementErr
+	}
 	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	cfg := JobRunnerConfig{
-		HTTPAddress:           valueOrDefault(env.Getenv(EnvJobRunnerHTTPAddress), defaultJobRunnerHTTPAddress),
-		QueueGRPCAddress:      strings.TrimSpace(env.Getenv(EnvQueueGRPCAddress)),
-		LeaseOwner:            valueOrDefault(env.Getenv(EnvJobRunnerLeaseOwner), defaultJobRunnerLeaseOwner),
-		LeaseDuration:         defaultJobRunnerLeaseDuration,
-		MaxJobs:               defaultJobRunnerMaxJobs,
-		PollInterval:          defaultJobRunnerPollInterval,
-		DeploymentEnvironment: resource.DeploymentEnvironment,
-		ServiceVersion:        resource.ServiceVersion,
-		DatabaseURL:           strings.TrimSpace(env.Getenv(EnvDatabaseURL)),
-		KubernetesNamespace:   strings.TrimSpace(env.Getenv(EnvKubernetesNamespace)),
+		PlacementPolicy:         placementPolicy,
+		TransportProfile:        valueOrDefault(env.Getenv("TETRAL_TRANSPORT_PROFILE"), "standard-routed"),
+		RuntimeDirectServerName: strings.TrimSpace(env.Getenv("TETRAL_RUNTIME_DIRECT_TLS_SERVER_NAME")),
+		RuntimeDirectPeerURI:    strings.TrimSpace(env.Getenv("TETRAL_RUNTIME_DIRECT_TLS_PEER_URI")),
+		DrainTimeout:            30 * time.Second,
+		CancelJoinTimeout:       5 * time.Second,
+		HTTPAddress:             valueOrDefault(env.Getenv(EnvJobRunnerHTTPAddress), defaultJobRunnerHTTPAddress),
+		QueueGRPCAddress:        strings.TrimSpace(env.Getenv(EnvQueueGRPCAddress)),
+		LeaseOwner:              valueOrDefault(env.Getenv(EnvJobRunnerLeaseOwner), defaultJobRunnerLeaseOwner),
+		LeaseDuration:           defaultJobRunnerLeaseDuration,
+		MaxJobs:                 defaultJobRunnerMaxJobs,
+		PollInterval:            defaultJobRunnerPollInterval,
+		DeploymentEnvironment:   resource.DeploymentEnvironment,
+		ServiceVersion:          resource.ServiceVersion,
+		DatabaseURL:             strings.TrimSpace(env.Getenv(EnvDatabaseURL)),
+		KubernetesNamespace:     strings.TrimSpace(env.Getenv(EnvKubernetesNamespace)),
 		AgentRuntimeLabelSelector: strings.TrimSpace(
 			env.Getenv(EnvAgentRuntimeLabelSelector),
 		),
@@ -165,11 +184,44 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	if err := queue.ValidateLeaseOwner(cfg.LeaseOwner); err != nil {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvJobRunnerLeaseOwner + " " + err.Error())
 	}
+	if cfg.TransportProfile != "standard-routed" && cfg.TransportProfile != "hardened" {
+		return JobRunnerConfig{}, workload.NewConfigError("TETRAL_TRANSPORT_PROFILE must be standard-routed or hardened")
+	}
+	if cfg.TransportProfile == "hardened" {
+		cfg.AgentRuntimeGRPCPort = 19443
+		if cfg.RuntimeDirectServerName == "" || cfg.RuntimeDirectPeerURI == "" {
+			return JobRunnerConfig{}, workload.NewConfigError("hardened Runtime direct transport requires server DNS and exact peer URI")
+		}
+	}
 	if raw := env.Getenv(EnvAgentRuntimeGRPCPort); raw != "" {
 		cfg.AgentRuntimeGRPCPort, err = parsePositiveInt(raw, EnvAgentRuntimeGRPCPort)
 		if err != nil {
 			return JobRunnerConfig{}, err
 		}
+	}
+	expectedPort := 19090
+	if cfg.TransportProfile == "hardened" {
+		expectedPort = 19443
+	}
+	if cfg.AgentRuntimeGRPCPort != expectedPort {
+		return JobRunnerConfig{}, workload.NewConfigError("Runtime direct port does not match transport profile")
+	}
+	for _, setting := range []struct {
+		name   string
+		target *time.Duration
+	}{{"TETRAL_DRAIN_TIMEOUT_MS", &cfg.DrainTimeout}, {"TETRAL_CANCEL_JOIN_TIMEOUT_MS", &cfg.CancelJoinTimeout}} {
+		if raw := env.Getenv(setting.name); raw != "" {
+			*setting.target, err = parsePositiveMilliseconds(raw, setting.name)
+			if err != nil {
+				return JobRunnerConfig{}, err
+			}
+		}
+	}
+	if cfg.CommandPolicy, err = RuntimeCommandPolicyFromEnv(env.Getenv); err != nil {
+		return JobRunnerConfig{}, err
+	}
+	if cfg.ProcessPolicy, err = runtimecontrol.ProcessPolicyFromEnv(env.Getenv); err != nil {
+		return JobRunnerConfig{}, err
 	}
 	return cfg, nil
 }

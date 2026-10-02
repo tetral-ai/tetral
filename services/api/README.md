@@ -20,6 +20,25 @@ PostgreSQL transaction as the business rows. The HTTP layer lives in
 under `services/api/internal/`; this service wires them together but does
 not own their trees.
 
+### Replica and request lifetime
+
+API replicas use the same durable database and object store with independent
+client pools. A Session created or updated through one replica is visible
+through another after commit; the signed principal and database workspace
+scope determine access on every request. The existing event append
+`Idempotency-Key` contract preserves the same event/inbox/Queue identity after
+a response is lost. It does not add replay rights to ordinary writes such as
+Session creation. An uncertain ordinary write must be reconciled through its
+existing read surface rather than automatically submitted again.
+
+Shutdown removes readiness and new HTTP admission, lets admitted requests
+finish within the service budget, then cancels and joins remaining handlers
+before closing shared-store clients. An event append canceled before commit
+rolls back its event, inbox and Queue writes together. The replica composition
+uses the pinned SDK, two Auth/API instances and independent database
+observations to exercise these boundaries; cluster routing remains deployment
+validation.
+
 ### Boot requirements
 
 Booting requires `TETRAL_DATABASE_URL`, `ENGINE_VAULT_KEY`,
@@ -29,7 +48,9 @@ as noted.
 
 | Variable | Purpose |
 |----------|---------|
-| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. TLS settings are honored verbatim; the engine never overrides `sslmode`. PostgreSQL 18 is the tested target. |
+| `TETRAL_DATABASE_URL` | PostgreSQL DSN for the restricted API serving role. Production connections require verified TLS with the explicit CA and server name; a DSN cannot enable plaintext fallback. PostgreSQL 18 is the tested target. |
+| `TETRAL_DATABASE_TLS_CA_PATH` / `TETRAL_DATABASE_TLS_SERVER_NAME` | Required public CA bundle path and expected database DNS name. New connections use validated mounted trust. |
+| `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` | Required public CA bundle and expected endpoint name when production object storage is configured. |
 | `TETRAL_TEST_DATABASE_URL` | Test-only administrative DSN for focused `go test`; not read by the running server. The helper clones one immutable schema template into a private database and unique NOBYPASSRLS login per test. |
 | `ENGINE_DATA_DIR` | Optional; defaults to `/var/tetral`. Local filesystem state root — control-plane records never live here, so moving it migrates no SQL data. |
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
@@ -580,3 +601,8 @@ The command follows the shared [Go process diagnostic contract](../../internal/w
 for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
 suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
+
+The production application closes its database and object-client trust observers
+after HTTP requests join. A router returned by `BuildRouter` implements
+`io.Closer` for object clients it created; explicitly supplied test clients remain
+caller-owned. Construction failure closes any newly created object client.

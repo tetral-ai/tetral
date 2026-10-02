@@ -352,7 +352,7 @@ func TestFinalArchitectureServiceLocalMetricsSurfacesStayInternal(t *testing.T) 
 		`path === "/metrics"`,
 		`text/plain; version=0.0.4; charset=utf-8`,
 		"runtimeMetrics?: RuntimePodMetricsSource",
-		"runtimePodMetricsText(lifecycle, runtimeMetrics)",
+		"runtimePodMetricsText(lifecycle, runtimeMetrics, readContainerMemory)",
 	} {
 		if !strings.Contains(runtimeHTTP, required) {
 			t.Fatalf("Runtime Pod HTTP ops plane missing metrics guard token %q", required)
@@ -732,6 +732,14 @@ func finalArchitectureIsGRPCOrProtobufImport(importPath string) bool {
 }
 
 func finalArchitectureAllowsGRPCOrProtobuf(rel string) bool {
+	// The native credential owner implements gRPC handshakes without owning
+	// business RPCs. These exact local fixture files execute and measure the
+	// actual proxy boundary; they do not widen production adapter ownership.
+	if rel == "internal/transportsecurity/credentials.go" ||
+		rel == "integration/transporttest/cmd/backend/main.go" ||
+		rel == "integration/transporttest/measurements.go" {
+		return true
+	}
 	for _, prefix := range []string{
 		"internal/gen/",
 		"internal/internalgrpc/",

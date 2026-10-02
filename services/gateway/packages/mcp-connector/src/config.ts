@@ -1,3 +1,7 @@
+import {
+  ServiceLifecycleDefaults,
+  validServiceLifecycle,
+} from "@tetral/gateway-protocol/src/service-lifecycle.js";
 /**
  * @packageDocumentation
  *
@@ -36,10 +40,99 @@ interface McpConnectorConfig {
   readonly runtimeBindingTokenHMACKey: string;
   readonly databaseUrl: string;
   readonly databasePool: DatabasePoolConfig;
+  readonly databaseTLS?: {
+    readonly caPath: string;
+    readonly serverName: string;
+  };
+  readonly drainTimeoutMs: number;
+  readonly cancelJoinTimeoutMs: number;
+  readonly bridgePolicies: McpBridgePolicies;
+  readonly clientPolicies: McpClientPolicies;
   readonly vaultKeyHex: string;
   readonly kubernetesApiServerUrl: string;
   readonly kubernetesApiCaCertPath: string;
   readonly tokenReviewReviewerTokenPath: string;
+}
+
+/** Checked against the Runtime-owned descriptor projection by boundary tests. */
+export const McpBridgePolicyDefaults = Object.freeze({
+  mcpManifestChanged: 5000,
+  claimMcpToolResult: 10000,
+  commitMcpToolResult: 10000,
+  relinquishMcpToolResult: 10000,
+});
+export const McpClientPolicyDefaults = Object.freeze({
+  callTimeoutMs: 120000,
+  credentialTimeoutMs: 15000,
+  connectTimeoutMs: 10000,
+  idleTimeoutMs: 1800000,
+  discoveryTimeoutMs: 120000,
+});
+export type McpBridgePolicies = Readonly<
+  Record<keyof typeof McpBridgePolicyDefaults, number>
+>;
+export type McpClientPolicies = Readonly<
+  Record<keyof typeof McpClientPolicyDefaults, number>
+>;
+const lifecyclePolicyKeys = {
+  mcpManifestChanged: "TETRAL_BRIDGE_MCP_MANIFEST_CHANGED_TIMEOUT_MS",
+  claimMcpToolResult: "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
+  commitMcpToolResult: "TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS",
+  relinquishMcpToolResult:
+    "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+  callTimeoutMs: "TETRAL_MCP_CALL_TIMEOUT_MS",
+  credentialTimeoutMs: "TETRAL_MCP_CREDENTIAL_TIMEOUT_MS",
+  connectTimeoutMs: "TETRAL_MCP_CONNECT_TIMEOUT_MS",
+  idleTimeoutMs: "TETRAL_MCP_SESSION_IDLE_TIMEOUT_MS",
+  discoveryTimeoutMs: "TETRAL_MCP_DISCOVERY_TIMEOUT_MS",
+} as const;
+function parseLifecyclePolicies(
+  env: Readonly<Record<string, string | undefined>>,
+):
+  | {
+      readonly bridgePolicies: McpBridgePolicies;
+      readonly clientPolicies: McpClientPolicies;
+    }
+  | undefined {
+  const parsed: Record<string, number> = {
+    ...McpBridgePolicyDefaults,
+    ...McpClientPolicyDefaults,
+  };
+  for (const [method, key] of Object.entries(lifecyclePolicyKeys)) {
+    const raw = env[key];
+    if (raw === undefined) continue;
+    if (
+      !/^[1-9][0-9]*$/.test(raw) ||
+      !Number.isSafeInteger(Number(raw)) ||
+      Number(raw) > 2147483647
+    )
+      return undefined;
+    parsed[method] = Number(raw);
+  }
+  // One 180s claim lease includes credential/connect/execution and the commit reserve.
+  if (
+    parsed.credentialTimeoutMs! +
+      parsed.connectTimeoutMs! +
+      parsed.callTimeoutMs! +
+      parsed.commitMcpToolResult! >=
+    180000
+  )
+    return undefined;
+  return {
+    bridgePolicies: {
+      mcpManifestChanged: parsed.mcpManifestChanged!,
+      claimMcpToolResult: parsed.claimMcpToolResult!,
+      commitMcpToolResult: parsed.commitMcpToolResult!,
+      relinquishMcpToolResult: parsed.relinquishMcpToolResult!,
+    },
+    clientPolicies: {
+      callTimeoutMs: parsed.callTimeoutMs!,
+      credentialTimeoutMs: parsed.credentialTimeoutMs!,
+      connectTimeoutMs: parsed.connectTimeoutMs!,
+      idleTimeoutMs: parsed.idleTimeoutMs!,
+      discoveryTimeoutMs: parsed.discoveryTimeoutMs!,
+    },
+  };
 }
 
 /** Describes either a complete validated startup configuration or a safe failure. */
@@ -49,6 +142,7 @@ export type McpConnectorConfigResult =
 
 const ConfigKeys = [
   ...diagnosticEnvKeys,
+  ...Object.values(lifecyclePolicyKeys),
   "TETRAL_MCP_CONNECTOR_GRPC_ADDR",
   "TETRAL_MCP_CONNECTOR_HTTP_ADDR",
   ...workloadResourceEnvKeys,
@@ -59,6 +153,10 @@ const ConfigKeys = [
   "TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH",
   "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
   "TETRAL_DATABASE_URL",
+  "TETRAL_DATABASE_TLS_CA_PATH",
+  "TETRAL_DATABASE_TLS_SERVER_NAME",
+  "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+  "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
   "TETRAL_DATABASE_POOL_MAX",
   "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
   "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
@@ -92,6 +190,34 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
   const allowedDiscoveryCallers = parseDiscoveryServiceAccounts(env.TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS ?? "");
   const diagnostics = parseDiagnosticConfig(env);
   const resource = parseWorkloadResourceConfig(env, 4096);
+  const caPath = env.TETRAL_DATABASE_TLS_CA_PATH,
+    serverName = env.TETRAL_DATABASE_TLS_SERVER_NAME;
+  const drainValue =
+    env.TETRAL_SERVICE_DRAIN_TIMEOUT_MS ??
+    String(ServiceLifecycleDefaults.drainTimeoutMs);
+  const drainTimeoutMs = /^[1-9][0-9]*$/.test(drainValue)
+    ? Number(drainValue)
+    : undefined;
+  const joinValue =
+    env.TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS ??
+    String(ServiceLifecycleDefaults.cancelJoinTimeoutMs);
+  const cancelJoinTimeoutMs = /^[1-9][0-9]*$/.test(joinValue)
+    ? Number(joinValue)
+    : undefined;
+  if (
+    cancelJoinTimeoutMs === undefined ||
+    drainTimeoutMs === undefined ||
+    !validServiceLifecycle(drainTimeoutMs, cancelJoinTimeoutMs) ||
+    (caPath === undefined) !== (serverName === undefined) ||
+    (caPath !== undefined && (!nonEmpty(caPath) || !nonEmpty(serverName))) ||
+    drainTimeoutMs === undefined ||
+    !Number.isSafeInteger(drainTimeoutMs)
+  )
+    return {
+      ok: false,
+      error: { kind: "config_error", message: "invalid mcp connector config" },
+    };
+  const policies = parseLifecyclePolicies(env);
   const databasePool = parseDatabasePoolConfig(env, { empty: "reject" });
   if (
     !nonEmpty(env.TETRAL_MCP_CONNECTOR_GRPC_ADDR) ||
@@ -102,6 +228,7 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
     allowedRuntimePod === undefined ||
     allowedDiscoveryCallers === undefined ||
     databasePool === undefined ||
+    policies === undefined ||
     diagnostics === undefined ||
     resource === undefined ||
     !nonEmpty(env.TETRAL_BRIDGE_API_GRPC_ADDR) ||
@@ -130,6 +257,12 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
       runtimeBindingTokenHMACKey: env.TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY,
       databaseUrl: env.TETRAL_DATABASE_URL,
       databasePool,
+      drainTimeoutMs,
+      cancelJoinTimeoutMs,
+      ...policies,
+      ...(caPath !== undefined && serverName !== undefined
+        ? { databaseTLS: { caPath, serverName } }
+        : {}),
       vaultKeyHex: env.ENGINE_VAULT_KEY,
       kubernetesApiServerUrl: env.KUBERNETES_API_SERVER_URL,
       kubernetesApiCaCertPath: env.KUBERNETES_API_CA_CERT_PATH,

@@ -135,7 +135,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	trunkReleasePath := tempDir + "/release-trunk"
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default", "sessionId": sessionID,
-		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"sessionThreadId": parentID, "bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"parentBoundaryEventId":  parentBoundaryEventID,
 		"beforeTrunkReleasePath": beforeTrunkReleasePath, "trunkReleasePath": trunkReleasePath,
 	})

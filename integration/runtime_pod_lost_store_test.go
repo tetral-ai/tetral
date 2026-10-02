@@ -368,6 +368,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		PodUID:    "pod_uid_pod_loss_new",
 		PodIP:     "10.0.0.11",
 	}
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), newCandidate.Namespace, newCandidate.PodUID)
 	snapshot := enginekubernetes.NewBindingVisibilitySnapshotStateWithCandidatesForTest(
 		true,
 		oldBound,
@@ -377,8 +378,10 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
 	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
-		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
-		Clock:    store.Clock,
+		Snapshot:   func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
+		GetPod:     fixtureConfirmedMissingRuntimePod,
+		LoadClient: fixtureRuntimeLoadClient(t),
+		Clock:      store.Clock,
 	}
 	job := jobrunner.RuntimeJob{
 		JobID:           "qjob_pod_loss_later",
@@ -678,12 +681,13 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				Namespace: "tetral-agent-runtime", PodName: "runtime-recovery-" + suffix,
 				PodUID: "pod-recovery-" + suffix, PodIP: "127.0.0.1",
 			}
+			seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), replacement.Namespace, replacement.PodUID)
 			runtimeProcess := startProviderRecoveryRuntime(
 				t, bridgeAddress, sessionID, threadID, replacement.PodUID,
 				time.Date(2026, 1, 1, 0, 5, 1, 0, time.UTC), false,
 			)
 			deliveryStore.RuntimeGRPCPort = runtimeProcess.port
-			deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{replacement})
 			}}
 			settle := func(scope *bridgev1.RuntimeScope) {
@@ -696,7 +700,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 					t.Fatalf("settle Tool route under replacement custody = %#v/%v; want committed", response, settleErr)
 				}
 			}
-			sender := &settlingRecoveryCommandClient{RuntimePodCommandClient: jobrunner.NewRuntimePodCommandClient(providerRecoveryTokenSource{})}
+			sender := &settlingRecoveryCommandClient{RuntimePodCommandClient: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{})}
 			if testCase.settleBeforeWake {
 				sender.beforeRecover = func(request *agentruntimev1.RecoverThreadRequest) error {
 					settle(bridgeAPIScope(sessionID, threadID, request.GetBindingId(), request.GetBindingGeneration(), request.GetTargetPodUid()))

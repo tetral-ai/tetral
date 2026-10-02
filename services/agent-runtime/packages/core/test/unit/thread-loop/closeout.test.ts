@@ -2493,6 +2493,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_1",
 			bindingGeneration: 1,
 			targetPodUid: "pod_1",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "runtime-binding-token",
 		});
 		const releaseFinishIdle = deferred<void>();
@@ -3385,6 +3386,7 @@ describe("ThreadLoop", () => {
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token-reviewer",
 		});
 		session.state.enqueueAcceptedInput(

@@ -59,7 +59,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), runtimecontrol.OperationCommitTaskNotificationResult, key); err != nil {
@@ -97,6 +97,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			}
 			duplicate = true
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -482,6 +485,9 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	kind string,
 	maxOutputTokens int,
 ) (commandOperationResult, error) {
+	waitParent := ctx
+	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	defer cancelAdmission()
 	if kind != "poll" && kind != "stdin" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command kind is invalid")
 	}
@@ -492,13 +498,10 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	result := commandOperationResult{}
 	now := s.now()
 	err := s.withScopeTx(ctx, scope, "agentruntimebridge.accept_background_command", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-			return err
-		}
-		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
 		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, scope, toolUseEventID, "agent.tool_use", true)
@@ -547,6 +550,12 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		if !dbconnect.IsNoRows(err) {
 			return err
 		}
+		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
+			return err
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, scope); err != nil {
+			return err
+		}
 		if err := lockExecutableToolRouteTx(ctx, tx, scope, toolUseEventID, "background_command"); err != nil {
 			return err
 		}
@@ -586,10 +595,12 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 		}
 		return enqueueBackgroundCommandTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), taskID, requestID, now)
 	})
+	err = bridgeContextError(ctx, err)
+	cancelAdmission()
 	if err != nil || result.ResultJSON != "" {
 		return result, err
 	}
-	waited, err := s.waitForBackgroundCommandResult(ctx, scope, toolUseEventID)
+	waited, err := s.waitForBackgroundCommandResult(waitParent, scope, toolUseEventID)
 	waited.Duplicate = result.Duplicate
 	return waited, err
 }
@@ -602,6 +613,9 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	toolUseEventID string,
 	reason string,
 ) (commandOperationResult, error) {
+	waitParent := ctx
+	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	defer cancelAdmission()
 	requestID := operationID
 	if requestID == "" || toolUseEventID == "" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background cancellation identity is incomplete")
@@ -618,13 +632,10 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	result := commandOperationResult{}
 	now := s.now()
 	err = s.withScopeTx(ctx, scope, "agentruntimebridge.accept_background_cancel", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, scope); err != nil {
 			return err
 		}
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-			return err
-		}
-		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
 			return err
 		}
 		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID, "")
@@ -675,6 +686,12 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if !dbconnect.IsNoRows(err) {
 			return err
 		}
+		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
+			return err
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, scope); err != nil {
+			return err
+		}
 		state := "pending"
 		var storedResult any
 		var digest any
@@ -700,10 +717,12 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		}
 		return enqueueBackgroundCommandTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), taskID, requestID, now)
 	})
+	err = bridgeContextError(ctx, err)
+	cancelAdmission()
 	if err != nil || result.ResultJSON != "" {
 		return result, err
 	}
-	waited, err := s.waitForBackgroundResult(ctx, scope, receiptID)
+	waited, err := s.waitForBackgroundResult(waitParent, scope, receiptID)
 	waited.Duplicate = result.Duplicate
 	return waited, err
 }
@@ -769,7 +788,10 @@ func backgroundCommandReceiptID(requestID string) string {
 	return "background_receipt:" + requestID
 }
 
-func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (commandOperationResult, error) {
+func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (result commandOperationResult, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().BackgroundResultWait)
+	defer cancel()
+	defer func() { err = bridgeContextError(ctx, err) }()
 	// This background-command result wait keeps its own 25 ms poll; it is
 	// outside the Sandbox execution-result notification scope.
 	ticker := time.NewTicker(backgroundCommandResultPollInterval)
@@ -778,6 +800,9 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 		var result commandOperationResult
 		var terminal bool
 		err := s.withScopeReadOnlyTx(ctx, scope, "agentruntimebridge.await_background_command", func(tx *dbconnect.Tx) error {
+			if err := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, scope); err != nil {
+				return err
+			}
 			var operationState string
 			var resultJSON sql.NullString
 			var writeSequence sql.NullInt64

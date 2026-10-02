@@ -431,13 +431,14 @@ func TestSubagentFirstMailPreparationExhaustionSettlesCustodyAtomically(t *testi
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
 	baseStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	baseStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, client, "tetral-agent-runtime", fixture.podUID)
+	baseStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
-			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: fixture.podUID, PodIP: "127.0.0.1",
+			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: fixture.podUID, PodIP: "10.0.0.10",
 		}})
 	}}
 	failedStore := &agentMailPreparationFailureStore{PostgreSQLRuntimeDeliveryStore: baseStore}
-	sender := &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	sender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: failedStore, Sender: sender},
@@ -496,7 +497,7 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 	)
 	lostRunner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, lostRuntime.port, fixture.sessionID, fixture.podUID,
-		nil, jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
+		nil, fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{}),
 	)
 	type runnerResult struct {
 		active bool
@@ -513,7 +514,7 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 		t.Fatalf("first_mail Runtime did not reach CommitInputs cut: %s", lostRuntime.output.String())
 	}
 	lostRuntime.kill(t)
-	repairStore := runtimePodLossSweepStore(fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	repairStore := runtimePodLossSweepStore(t, fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
@@ -554,7 +555,7 @@ func TestSubagentFirstMailPodLossBeforeCommitReturnsOriginalCustodyThenExecutesO
 		fixture.bindingID, 2, replacementPodUID,
 	)
 	lostStartResponse := &lostResponseAfterRequestStartSender{
-		RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
+		RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{}),
 		admin:                fixture.admin, sessionID: fixture.sessionID, childID: fixture.childID,
 	}
 	replacementRunner := newSubagentRuntimeQueueRunner(
@@ -815,7 +816,7 @@ func TestSubagentFirstMailHotAdmissionAcknowledgesBeforeRequestStart(t *testing.
 
 	runtimeProcess.kill(t)
 	close(barrierBridge.release)
-	repairStore := runtimePodLossSweepStore(fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	repairStore := runtimePodLossSweepStore(t, fixture.runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), workspace.DefaultID.String()); err != nil || repaired != 1 {
@@ -906,7 +907,7 @@ func TestSubagentMailFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 		queue.RetryPolicy{BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 }},
 	), nil)
 	observedQueue := &retryObservingQueueClient{QueueClient: baseQueue}
-	countedSender := &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	countedSender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	nPlusOneRunner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		observedQueue, countedSender,
@@ -923,7 +924,7 @@ func TestSubagentMailFinalizerCrashUsesClampedNPlusOne(t *testing.T) {
 	}
 
 	expireAndReclaimQueueJob(t, fixture.runtimeDB, fixture.admin, fixture.jobID)
-	countedSender = &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	countedSender = &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	runFinalizer := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		nil, countedSender,
@@ -1066,7 +1067,7 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-first_mail_interrupted_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
 	wantFacts := map[string]bool{
@@ -1208,7 +1209,7 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 	resumed := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-post_compaction_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
 	compactionRunningID := compactionRunning.GetCommitted().GetEventId()
@@ -1281,7 +1282,7 @@ func TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest(t *testing.T) {
 	first := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-no_work_close_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": firstResumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": firstResumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, first)
 
@@ -1302,7 +1303,7 @@ func TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest(t *testing.T) {
 	second := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-no_work_close_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": secondResumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": secondResumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, second)
 
@@ -1354,7 +1355,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-terminal_tool_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 		"providerScenario": "terminal-tool",
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
@@ -1402,7 +1403,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 	finalResume := runClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-terminal_tool_resume", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": finalResumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": finalResumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, finalResume)
 	retainedJSON, err := json.Marshal(finalResume.ContextEntries)
@@ -1550,7 +1551,7 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	resumedRuntime, resumed := startClosedThreadResumeProductionComposition(t, fixture.runtimeDB, map[string]any{
 		"workspaceId": "default", "sessionId": fixture.sessionID, "parentThreadId": parentID,
 		"childThreadId": fixture.childID, "childTaskName": "worker-close_before_start", "bindingId": fixture.bindingID,
-		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "sourceToolUseEventId": resumeSourceID,
+		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
 	if len(resumed.ContextEntries) != 0 || len(resumed.TurnFacts.Events) != 0 {
@@ -1605,7 +1606,7 @@ func TestSubagentFirstMailLeaseTakeoverFencesStaleRunner(t *testing.T) {
 	client := dbconnect.NewClientForTesting(fixture.runtimeDB)
 	queueStore := queue.NewPostgreSQLStore(client)
 	baseQueue := tetralqueue.NewServer(queueStore, nil)
-	countedSender := &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	countedSender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	runner := newSubagentRuntimeQueueRunner(
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		baseQueue, countedSender,
@@ -1667,7 +1668,7 @@ func TestSubagentFirstMailLeaseTakeoverAfterFenceConvergesSameIDOnce(t *testing.
 	queueStore := queue.NewPostgreSQLStore(client)
 	baseQueue := tetralqueue.NewServer(queueStore, nil)
 	blockingSender := &blockingAgentMailSender{
-		RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}),
+		RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{}),
 		entered:              make(chan struct{}), release: make(chan struct{}),
 	}
 	runner := newSubagentRuntimeQueueRunner(
@@ -1798,7 +1799,7 @@ func TestLaterSubagentMailNPlusOneFailsOnlyExactChild(t *testing.T) {
 	}
 	rejectingRuntime.kill(t)
 	expireAndReclaimQueueJob(t, fixture.runtimeDB, fixture.admin, jobID)
-	countedSender := &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	countedSender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	finalizer := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, countedSender)
 	if active, err := finalizer.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("ordinary N+1 finalizer = active:%t err:%v", active, err)
@@ -1990,7 +1991,7 @@ func prepareOrdinaryAgentMailNPlusOnePending(t *testing.T, suffix string) ordina
 	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(clientForStore, queue.RetryPolicy{
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
-	sender := &countingAgentMailSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})}
+	sender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	preparedRunner := newSubagentRuntimeQueueRunner(t, fixture.runtimeDB, fixture.admin, rejectingRuntime.port, fixture.sessionID, fixture.podUID, nil, sender)
 	return ordinaryAgentMailFinalizationFixture{
 		subagentMailFixture: fixture, runtimeInputID: runtimeInputID, jobID: jobID, maxAttempts: maxAttempts,
@@ -2489,7 +2490,8 @@ func newSubagentRuntimeQueueRunner(
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
@@ -2498,7 +2500,7 @@ func newSubagentRuntimeQueueRunner(
 		queueClient = tetralqueue.NewServer(queueStore, nil)
 	}
 	if sender == nil {
-		sender = jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})
+		sender = fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})
 	}
 	return &jobrunner.JobRunner{
 		Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID},

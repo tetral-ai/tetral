@@ -368,6 +368,8 @@ function startupCauseClass(cause: unknown): string {
 /** Builds a typed shutdown failure record for active-run settlement or drain timeout failure. */
 export function shutdownFailureLogRecord(input: {
 	readonly event:
+		| "runtime_process_report_failed"
+      | "runtime_checkpoint_expired"
 		| "shutdown_active_run_settlement_failed"
 		| "shutdown_drain_timeout";
 	readonly message: string;

@@ -102,6 +102,7 @@ export interface RuntimeToolExecutionRequest {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeBindingToken: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
@@ -119,6 +120,7 @@ export interface RuntimeToolExecutionRequest {
 	readonly backgroundCancellationIntent?:
 		| (() => "user_interrupt" | "custody_handoff")
 		| undefined;
+	readonly checkpointSignal?: AbortSignal | undefined;
 	readonly abortSignal: AbortSignal;
 }
 
@@ -210,6 +212,7 @@ export interface RuntimeApprovalReviewRequest {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeBindingToken: string;
 	readonly modelRequestId: string;
 	readonly parentBoundaryEventId: string;

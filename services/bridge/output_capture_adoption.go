@@ -60,6 +60,8 @@ type adoptedOutputCapture struct {
 }
 
 func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Context, request *bridgev1.FinishIdleRequest, sourceKind string, key string, declarationDigest string, now time.Time) (finishIdleCapture, error) {
+	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	defer cancelAdmission()
 	var capture finishIdleCapture
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.ensure_output_capture", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
@@ -68,7 +70,7 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(ctx, tx, request.GetScope(), bridgeOpFinishIdle, sourceKind, key); err != nil {
@@ -78,6 +80,9 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 				return status.Error(codes.AlreadyExists, "finish idle idempotency conflict")
 			}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -149,10 +154,13 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		capture = finishIdleCapture{Generation: generation, State: "pending"}
 		return nil
 	})
-	return capture, err
+	return capture, bridgeContextError(ctx, err)
 }
 
-func (s *PostgreSQLBridgeAPIStore) waitForFinishIdleOutputCapture(ctx context.Context, scope *bridgev1.RuntimeScope, key string, capture finishIdleCapture) (finishIdleCapture, error) {
+func (s *PostgreSQLBridgeAPIStore) waitForFinishIdleOutputCapture(ctx context.Context, scope *bridgev1.RuntimeScope, key string, capture finishIdleCapture) (result finishIdleCapture, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().OutputCaptureWait)
+	defer cancel()
+	defer func() { err = bridgeContextError(ctx, err) }()
 	if capture.Generation == 0 || capture.State == "staged" || capture.State == "skipped_unavailable" || capture.State == "adopted" {
 		return capture, nil
 	}
@@ -196,7 +204,7 @@ func (s *PostgreSQLBridgeAPIStore) waitForFinishIdleOutputCapture(ctx context.Co
 		}
 		select {
 		case <-ctx.Done():
-			return capture, status.Error(codes.DeadlineExceeded, "output capture result is not ready")
+			return capture, status.FromContextError(ctx.Err()).Err()
 		case <-ticker.C:
 		}
 	}

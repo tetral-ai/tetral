@@ -221,6 +221,7 @@ function kimiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest 
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "moonshotai", modelId: "kimi-k3", variant: "" },
     system: [{ kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE, text: "You are concise.", cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE }],

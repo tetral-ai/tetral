@@ -165,6 +165,7 @@ export async function closeFailedThreadRun(
 		bindingId: session.identity.bindingId,
 		bindingGeneration: session.identity.bindingGeneration,
 		targetPodUid: session.identity.targetPodUid,
+		runtimeProcessId: session.identity.runtimeProcessId,
 		writeId: durableTurnId,
 		failure,
 	});
@@ -277,6 +278,7 @@ export async function appendIdleEvent(
 						bindingId: session.identity.bindingId,
 						bindingGeneration: session.identity.bindingGeneration,
 						targetPodUid: session.identity.targetPodUid,
+						runtimeProcessId: session.identity.runtimeProcessId,
 						durableTurnId,
 						stopReason,
 						...(declaredCompletionMail === undefined
@@ -406,6 +408,7 @@ export async function closeFailedRunDurably(
 				bindingId: session.identity.bindingId,
 				bindingGeneration: session.identity.bindingGeneration,
 				targetPodUid: session.identity.targetPodUid,
+				runtimeProcessId: session.identity.runtimeProcessId,
 				writeId: durableTurnId,
 				failure,
 			});
@@ -490,6 +493,7 @@ export async function closeFailedRunDurably(
 					bindingId: session.identity.bindingId,
 					bindingGeneration: session.identity.bindingGeneration,
 					targetPodUid: session.identity.targetPodUid,
+					runtimeProcessId: session.identity.runtimeProcessId,
 					durableTurnId,
 					stopReason: { type: "end_turn" },
 				}),

@@ -25,7 +25,9 @@ import (
 
 const awaitTraceVerificationRead = "FROM session_runtime_tool_results"
 
-const awaitTraceEntryValidation = "FROM session_runtime_bindings"
+// Admission validation has its own transaction; per-wake binding proof is
+// embedded in the existing result read, not a new validation transaction.
+const awaitTraceEntryValidation = "/* runtime receipt scope validation */"
 
 const awaitTraceListen = "LISTEN " + sandboxmodel.ExecutionResultNotificationChannel
 
@@ -776,7 +778,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionBoundedIdleLoad(t *testing
 		t.Fatalf("AwaitSandboxExecution idle wait error = %v; want DeadlineExceeded", err)
 	}
 	elapsed := time.Since(started)
-	if elapsed < sandboxExecutionWaitTimeout || elapsed > sandboxExecutionWaitTimeout+5*time.Second {
+	if elapsed < DefaultBridgeLifecyclePolicy().SandboxResultWait || elapsed > DefaultBridgeLifecyclePolicy().SandboxResultWait+5*time.Second {
 		t.Fatalf("idle wait elapsed = %s; want the existing 30s internal deadline", elapsed)
 	}
 	reads := tracer.countSQL(awaitTraceVerificationRead)

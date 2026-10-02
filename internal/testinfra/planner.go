@@ -401,7 +401,10 @@ func separatedServiceContractChange(paths []string) bool {
 	for _, path := range paths {
 		for _, owner := range []string{
 			"internal/runtimeconfig", "internal/mcpmanifest", "internal/runtimecontrol",
-			"internal/internalgrpc",
+			"internal/schemaidentity",
+			"internal/internalgrpc", "internal/transportsecurity", "internal/dbconnect", "internal/blob", "internal/ts-dbconnect",
+			"services/agent-runtime/packages/core", "services/queue", "services/sandbox", "internal/kubernetes",
+			"deploy/istio",
 			"services/bridge", "services/job-runner",
 			"services/web-connector",
 			"services/agent-runtime/k8s", "services/gateway/k8s",
@@ -409,12 +412,19 @@ func separatedServiceContractChange(paths []string) bool {
 			"services/agent-runtime/packages/protocol", "services/agent-runtime/proto",
 			"services/gateway/packages/provider-gateway", "services/gateway/packages/mcp-connector",
 			"services/gateway/packages/protocol", "services/gateway/proto",
+			"services/gateway/packages/schema",
 		} {
 			if path == owner || strings.HasPrefix(path, owner+"/") {
 				return true
 			}
 		}
-		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") {
+		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
+			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||
+			strings.HasPrefix(path, "integration/transport") || path == "integration/runtime_direct_tls_test.go" ||
+			path == "integration/protected_store_test.go" ||
+			path == "integration/protected_object_store_test.go" ||
+			path == "internal/storage/postgresql_runtime_schema.go" ||
+			path == "deploy/dependencies.lock.json" {
 			return true
 		}
 	}

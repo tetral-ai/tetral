@@ -7,6 +7,8 @@
  */
 import type { RuntimeTokenReviewClient, ServiceAccountIdentity } from "./auth.js";
 import { authenticateRuntimeCaller } from "./auth.js";
+import type { RuntimeQuiesceOptions } from "@tetral/agent-runtime-core/src/session/session-manager.js";
+import type { RuntimeProcessPort } from "./runtime-process.js";
 import { RuntimePodLifecycle } from "./lifecycle.js";
 import { createRuntimeGrpcServer } from "./grpc-server.js";
 import { createRuntimeHttpServer } from "./http-server.js";
@@ -19,6 +21,7 @@ import type { RuntimeAuthenticator, RuntimeControlInputCommitter, RuntimeSession
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodConfig } from "./config.js";
 import type { RuntimePodLogger } from "./logger.js";
+import type { ContainerMemoryObservation } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
 
 /**
@@ -27,6 +30,11 @@ import type { RuntimePodMetricsSource } from "./metrics.js";
  * bootstrap stages and commit adapters without introducing process-global state.
  */
 export interface RuntimePodAppOptions {
+  readonly readContainerMemory?: () => ContainerMemoryObservation | undefined;
+  readonly runtimeProcessId?: string;
+  readonly runtimeProcess?: RuntimeProcessPort;
+  readonly quiesce?: (options: RuntimeQuiesceOptions) => Promise<void>;
+  readonly closeClients?: () => Promise<void>;
   readonly config: RuntimePodConfig;
   readonly logger: RuntimePodLogger;
   readonly tokenReviewClient: RuntimeTokenReviewClient;
@@ -58,12 +66,19 @@ export interface RuntimePodApp {
  * through the lifecycle drain fence, and exposes only operational HTTP endpoints alongside the
  * internal command gRPC service.
  */
-export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodApp {
+export function createRuntimePodApp(
+  options: RuntimePodAppOptions,
+): RuntimePodApp {
+  const runtimeProcessId =
+    options.runtimeProcess?.runtimeProcessId ??
+    options.runtimeProcessId ??
+    crypto.randomUUID();
   const authenticator = runtimeAuthenticator(options.tokenReviewClient, {
     namespace: options.config.jobRunner.namespace,
     name: options.config.jobRunner.serviceAccount,
   });
   const service = new RuntimeControlService({
+    runtimeProcessId,
     ownPod: options.config.ownPod,
     allowedJobRunner: { namespace: options.config.jobRunner.namespace, name: options.config.jobRunner.serviceAccount },
     authenticator,
@@ -80,7 +95,11 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
   let grpcServer: RuntimeGrpcServer | undefined;
   let httpServer: RuntimeHttpServer | undefined;
   let boundGrpcPort: number | undefined;
+  let stopping: Promise<void> | undefined;
   const lifecycle = new RuntimePodLifecycle({
+    ...(options.runtimeProcess !== undefined
+      ? { runtimeProcess: options.runtimeProcess }
+      : {}),
     config: { ok: true, config: options.config },
     logger: options.logger,
     ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
@@ -91,12 +110,21 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
       grpc: async () => {
         grpcServer = createRuntimeGrpcServer(service);
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
-        httpServer = createRuntimeHttpServer(options.config.httpBindAddress, lifecycle, options.metrics, options.logger);
+        httpServer = createRuntimeHttpServer(
+          options.config.httpBindAddress,
+          lifecycle,
+          options.metrics,
+          options.logger,
+          options.readContainerMemory,
+        );
         await options.bootstrap?.grpc?.();
       },
     },
     shutdownHooks: {
-      ...(options.shutdownActiveRuns !== undefined ? { shutdownActiveRuns: options.shutdownActiveRuns } : {}),
+      ...(options.quiesce !== undefined ? { quiesce: options.quiesce } : {}),
+      ...(options.shutdownActiveRuns !== undefined
+        ? { shutdownActiveRuns: options.shutdownActiveRuns }
+        : {}),
     },
   });
 
@@ -114,23 +142,37 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
       }
       return { grpcPort: boundGrpcPort, httpUrl };
     },
-    shutdown: async () => {
-      service.beginShutdown();
-      // Retain concurrent drain/listener shutdown, attach rejection handlers
-      // immediately, and join every started operation even if one fails.
-      let failed = false, firstFailure: unknown;
-      const observe = async (close: () => unknown): Promise<void> => {
-        try { await close(); } catch (error) {
-          if (!failed) firstFailure = error;
-          failed = true;
-        }
-      };
-      await Promise.all([
-        observe(() => lifecycle.shutdown()),
-        observe(() => grpcServer?.shutdown()),
-        observe(() => httpServer?.stop()),
-      ]);
-      if (failed) throw firstFailure;
+    shutdown: () => {
+      if (stopping !== undefined) return stopping;
+      stopping = (async () => {
+        service.beginShutdown();
+        // Retain concurrent drain/listener shutdown, attach rejection handlers
+        // immediately, and join every started operation even if one fails.
+        let failed = false,
+          firstFailure: unknown;
+        const observe = async (close: () => unknown): Promise<void> => {
+          try {
+            await close();
+          } catch (error) {
+            if (!failed) firstFailure = error;
+            failed = true;
+          }
+        };
+        await observe(() => lifecycle.shutdown());
+        await observe(() => options.closeClients?.());
+        await Promise.all([
+          observe(() =>
+            grpcServer?.shutdown(
+              new Date(
+                Date.now() + options.config.lifecycle.proxyJoinTimeoutMs,
+              ),
+            ),
+          ),
+          observe(() => httpServer?.stop()),
+        ]);
+        if (failed) throw firstFailure;
+      })();
+      return stopping;
     },
   };
 }

@@ -19,14 +19,8 @@ const (
 	// cross-connection serialization contract.
 	PostgreSQLSchemaAdvisoryLockID int64 = 0x7465_7472_616c_7363 // "tetralsc"
 
-	// PostgreSQLSchemaVersionOneChecksum pins the immutable Alpha 1 baseline.
+	// PostgreSQLSchemaVersionOneChecksum pins the exact current initial schema.
 	PostgreSQLSchemaVersionOneChecksum = schemaidentity.PostgreSQLSchemaVersionOneChecksum
-
-	// PostgreSQLSchemaVersionTwoChecksum pins the additive Git identity migration.
-	PostgreSQLSchemaVersionTwoChecksum = schemaidentity.PostgreSQLSchemaVersionTwoChecksum
-
-	// PostgreSQLSchemaVersionThreeChecksum pins durable input discovery budgets.
-	PostgreSQLSchemaVersionThreeChecksum = schemaidentity.PostgreSQLSchemaVersionThreeChecksum
 
 	createPostgreSQLSchemaMigrationsTable = `CREATE TABLE tetral_schema_migrations (
 		version BIGINT PRIMARY KEY,
@@ -40,17 +34,18 @@ const (
 type SchemaErrorKind string
 
 const (
-	SchemaErrorMissing       SchemaErrorKind = "schema_missing"
-	SchemaErrorBehind        SchemaErrorKind = "schema_behind"
-	SchemaErrorAhead         SchemaErrorKind = "schema_ahead"
-	SchemaErrorMalformed     SchemaErrorKind = "schema_history_malformed"
-	SchemaErrorGap           SchemaErrorKind = "schema_history_gap"
-	SchemaErrorDuplicate     SchemaErrorKind = "schema_history_duplicate"
-	SchemaErrorChecksumDrift SchemaErrorKind = "schema_checksum_drift"
-	SchemaErrorRLSDrift      SchemaErrorKind = "schema_rls_drift"
-	SchemaErrorLock          SchemaErrorKind = "schema_lock_failed"
-	SchemaErrorApply         SchemaErrorKind = "schema_apply_failed"
-	SchemaErrorCanceled      SchemaErrorKind = "schema_operation_canceled"
+	SchemaErrorUnexpectedState SchemaErrorKind = "schema_unexpected_state"
+	SchemaErrorMissing         SchemaErrorKind = "schema_missing"
+	SchemaErrorBehind          SchemaErrorKind = "schema_behind"
+	SchemaErrorAhead           SchemaErrorKind = "schema_ahead"
+	SchemaErrorMalformed       SchemaErrorKind = "schema_history_malformed"
+	SchemaErrorGap             SchemaErrorKind = "schema_history_gap"
+	SchemaErrorDuplicate       SchemaErrorKind = "schema_history_duplicate"
+	SchemaErrorChecksumDrift   SchemaErrorKind = "schema_checksum_drift"
+	SchemaErrorRLSDrift        SchemaErrorKind = "schema_rls_drift"
+	SchemaErrorLock            SchemaErrorKind = "schema_lock_failed"
+	SchemaErrorApply           SchemaErrorKind = "schema_apply_failed"
+	SchemaErrorCanceled        SchemaErrorKind = "schema_operation_canceled"
 )
 
 // SchemaMigrationError is safe to return through startup and logging
@@ -65,6 +60,8 @@ type SchemaMigrationError struct {
 
 func (e *SchemaMigrationError) Error() string {
 	switch e.Kind {
+	case SchemaErrorUnexpectedState:
+		return "postgresql schema is not empty and has no current identity"
 	case SchemaErrorMissing:
 		return "postgresql schema registry is missing"
 	case SchemaErrorBehind:
@@ -105,29 +102,12 @@ type postgresqlMigrationQueryer interface {
 }
 
 func postgresqlMigrationRegistry() []postgresqlMigration {
-	identities := schemaidentity.History()
-	registry := make([]postgresqlMigration, len(identities))
-	for i, identity := range identities {
-		var steps []postgresqlSchemaStep
-		switch identity.Version {
-		case 1:
-			steps = postgresqlBaselineSteps()
-		case 2:
-			steps = postgresqlGitIdentitySteps()
-		case 3:
-			steps = postgresqlMCPDiscoverySteps()
-		case 4:
-			steps = postgresqlEnvironmentBuildSteps()
-		}
-		// An identity without matching DDL fails registry checksum validation.
-		registry[i] = postgresqlMigration{version: identity.Version, checksum: identity.Checksum, steps: steps}
-	}
-	return registry
+	return []postgresqlMigration{{version: 1, checksum: schemaidentity.PostgreSQLSchemaVersionOneChecksum, steps: postgresqlBaselineSteps()}}
 }
 
-// MigrateSchema serializes migration owners on one pinned PostgreSQL
-// connection, rejects invalid history before mutation, and applies each
-// pending migration and its stamp in one transaction on that connection.
+// MigrateSchema initializes only an empty schema or verifies the exact current
+// identity. It never upgrades a predecessor schema. The pinned connection and
+// advisory lock serialize owners before inspection and atomic initialization.
 func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 	diagnostics := newMigrationDiagnostics(ctx)
 	defer func() {
@@ -169,6 +149,23 @@ func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 		diagnostics.step = "validate_history"
 		if historyErr := validateAppliedPostgreSQLMigrations(history, registry); historyErr != nil {
 			return historyErr
+		}
+		if len(history) != len(registry) {
+			return newSchemaMigrationError(SchemaErrorMalformed, 0, nil)
+		}
+		if err := verifyPostgreSQLRLSContract(ctx, conn); err != nil {
+			return err
+		}
+	} else {
+		diagnostics.step = "verify_empty_schema"
+		var occupied bool
+		if err := conn.QueryRowContext(ctx, `SELECT
+          EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema())
+          OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema())`).Scan(&occupied); err != nil {
+			return newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		}
+		if occupied {
+			return newSchemaMigrationError(SchemaErrorUnexpectedState, 0, nil)
 		}
 	}
 

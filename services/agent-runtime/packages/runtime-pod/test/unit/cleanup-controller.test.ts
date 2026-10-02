@@ -7,6 +7,7 @@ const scope = {
   bindingId: "bind_cleanup",
   bindingGeneration: 1,
   targetPodUid: "pod_cleanup",
+  runtimeProcessId: "process-test",
   cleanupOperationId: "cleanup_operation",
 };
 

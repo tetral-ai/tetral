@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
@@ -1566,6 +1568,7 @@ func TestSessionRuntimeBindingsSchemaShapeAndRLS(t *testing.T) {
 		"agent_runtime_pod_name",
 		"agent_runtime_pod_uid",
 		"agent_runtime_pod_ip",
+		"runtime_process_id",
 		"bound_at",
 		"updated_at",
 	}
@@ -2057,11 +2060,11 @@ func TestSessionRuntimeBindingsWorkspaceIsolation(t *testing.T) {
 		result, err := tx.ExecContext(context.Background(),
 			`INSERT INTO session_runtime_bindings (
 				workspace_id, session_id, binding_id, binding_generation,
-				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip,
+				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id,
 				bound_at, updated_at
 			 )
 			 VALUES ('workspace_binding_b', 'sesn_binding_b', 'bind_b_cross', 3,
-				'runtime-ns', 'agent-runtime-b', 'uid-b', '10.0.0.6',
+				'runtime-ns', 'agent-runtime-b', 'uid-b', '10.0.0.6','process_uid-b',
 				'2026-06-09T10:01:00Z', '2026-06-09T10:01:00Z')
 			 ON CONFLICT (workspace_id, session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at`)
 		if err == nil {
@@ -2244,6 +2247,7 @@ func mustInsertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) {
 
 func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error {
 	t.Helper()
+	seedSchemaBindingProcess(t, db, row)
 	_, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_bindings (
 			workspace_id,
@@ -2254,9 +2258,10 @@ func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error
 			agent_runtime_pod_name,
 			agent_runtime_pod_uid,
 			agent_runtime_pod_ip,
+ runtime_process_id,
 			bound_at,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $11, $9, $10)`,
 		row.workspaceID,
 		row.sessionID,
 		nullableString(row.bindingID, row.bindingIDPresent),
@@ -2267,12 +2272,14 @@ func insertSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) error
 		nullableString(row.podIP, row.podIPPresent),
 		nullableString(row.boundAt, row.boundAtPresent),
 		row.updatedAt,
+		"process_"+row.podUID,
 	)
 	return err
 }
 
 func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) {
 	t.Helper()
+	seedSchemaBindingProcess(t, db, row)
 	result, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_bindings (
 			workspace_id,
@@ -2283,9 +2290,10 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 			agent_runtime_pod_name,
 			agent_runtime_pod_uid,
 			agent_runtime_pod_ip,
+ runtime_process_id,
 			bound_at,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $11, $9, $10)
 		ON CONFLICT (workspace_id, session_id) DO UPDATE SET
 			binding_id = EXCLUDED.binding_id,
 			binding_generation = EXCLUDED.binding_generation,
@@ -2293,6 +2301,7 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 			agent_runtime_pod_name = EXCLUDED.agent_runtime_pod_name,
 			agent_runtime_pod_uid = EXCLUDED.agent_runtime_pod_uid,
 			agent_runtime_pod_ip = EXCLUDED.agent_runtime_pod_ip,
+ runtime_process_id = EXCLUDED.runtime_process_id,
 			bound_at = EXCLUDED.bound_at,
 			updated_at = EXCLUDED.updated_at`,
 		row.workspaceID,
@@ -2305,6 +2314,7 @@ func mustReplaceSessionRuntimeBinding(t *testing.T, db *sql.DB, row bindingRow) 
 		row.podIP,
 		row.boundAt,
 		row.updatedAt,
+		"process_"+row.podUID,
 	)
 	if err != nil {
 		t.Fatalf("replace session runtime binding: %v", err)
@@ -2413,6 +2423,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"queue_jobs",
 		"queue_partition_counters",
 		"request_usage_details",
+		"runtime_process_pods", "runtime_processes",
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",
@@ -2434,6 +2445,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_resource_prefix_gc",
 		"session_resources",
 		"session_runtime_bindings",
+		"session_runtime_handoffs", "session_runtime_handoff_threads",
 		"session_runtime_inbox",
 		"session_runtime_status",
 		"session_runtime_tool_results",
@@ -2878,4 +2890,19 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func seedSchemaBindingProcess(t *testing.T, db *sql.DB, row bindingRow) {
+	t.Helper()
+	if row.namespace == "" || row.podUID == "" {
+		return
+	}
+	identity := runtimecontrol.ProcessIdentity{Namespace: row.namespace, PodUID: row.podUID, ID: "process_" + row.podUID}
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(db), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(db), identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -38,6 +38,8 @@ import {
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolApprovalMode } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import type { RuntimePodApp } from "./app.js";
+import { BridgeRuntimeProcess } from "./runtime-process.js";
+import { waitForRoutingProxy } from "./routing-proxy.js";
 import { createRuntimePodApp } from "./app.js";
 import {
 	createRuntimeApprovalReviewer,
@@ -113,6 +115,11 @@ export interface RuntimePodCommandOptions {
  * the complete production object graph.
  */
 export interface RuntimePodDependencyBuilderOptions {
+	readonly runtimeProcessFactory?: (
+		id: string,
+		config: RuntimePodConfig,
+	) => import("./runtime-process.js").RuntimeProcessPort;
+	readonly routingProxyReady?: typeof waitForRoutingProxy;
 	readonly coreHostsFactory?: typeof buildRuntimeCoreHosts;
 	readonly tokenReviewClientFactory?: (
 		config: RuntimePodConfig,
@@ -241,6 +248,7 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const metrics = new RuntimePodMetricsRegistry();
 	const bridgeContextLoader = new BridgeAPIContextLoader({
 		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
 		metadataFactory: outboundMetadataFactory,
 		logger: input.logger,
@@ -257,17 +265,20 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const approvalReviewerThreadCreator =
 		new BridgeAPIApprovalReviewerThreadCreator({
 			address: input.config.bridgeApiGrpcAddress,
+			methodPolicies: input.config.bridgeMethodPolicies,
 			tokenPath: input.config.outboundInternalGrpcTokenPath,
 			metadataFactory: outboundMetadataFactory,
 		});
 	const internalToolRepairCommitter = new BridgeAPIInternalToolRepairCommitter({
 		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
 		metadataFactory: outboundMetadataFactory,
 	});
 	let subAgentRunHost: RuntimeCoreHosts["subAgentRunHost"] | undefined;
 	const toolRunner = new RuntimePodToolRunner({
 		bridgeAddress: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
 		webAddress: input.config.webConnectorGrpcAddress,
 		mcpConnectorAddress: input.config.mcpConnectorGrpcAddress,
 		tokenPath: input.config.outboundInternalGrpcTokenPath,
@@ -277,11 +288,18 @@ export async function buildRuntimePodCommandDependencies(input: {
 	const streamTimeoutOptions = providerStreamTimeoutOptions(input.config);
 	const createRuntimeId = (prefix: string): string =>
 		`${prefix}_${crypto.randomUUID()}`;
+	const eventWriter = new BridgeAPIEventWriter({
+		address: input.config.bridgeApiGrpcAddress,
+		methodPolicies: input.config.bridgeMethodPolicies,
+		tokenPath: input.config.outboundInternalGrpcTokenPath,
+		metadataFactory: outboundMetadataFactory,
+	});
+	let phaseDeadline: number | undefined;
 	const coreHosts = await (
 		input.builderOptions?.coreHostsFactory ?? buildRuntimeCoreHosts
 	)({
-		maxLocalSessions: 256,
-		maxConcurrentTools: 8,
+		maxLocalSessions: input.config.maxLocalSessions,
+		maxConcurrentTools: input.config.maxConcurrentTools,
 		now: () => new Date().toISOString(),
 		contextLoader: bridgeContextLoader,
 		logger: input.logger,
@@ -315,11 +333,7 @@ export async function buildRuntimePodCommandDependencies(input: {
 			internalToolRepairStore: new BridgeInternalToolRepairStore(
 				internalToolRepairCommitter,
 			),
-			sessionEventWriter: new BridgeAPIEventWriter({
-				address: input.config.bridgeApiGrpcAddress,
-				tokenPath: input.config.outboundInternalGrpcTokenPath,
-				metadataFactory: outboundMetadataFactory,
-			}),
+			sessionEventWriter: eventWriter,
 			runtime: {
 				now: () => new Date().toISOString(),
 				monotonicMs: () => Date.now(),
@@ -345,7 +359,16 @@ export async function buildRuntimePodCommandDependencies(input: {
 				gatewayClient,
 				runtimeProviderStreamObserver(input.logger),
 			),
-			storeOperationTimeoutMs: 5_000,
+			storeOperationTimeoutMs: Math.max(
+				...Object.values(input.config.bridgeMethodPolicies).map((policy) =>
+					policy.kind === "fixed" ? policy.timeoutMs : 0,
+				),
+			),
+			commitAcceptedInputTimeoutMs:
+				input.config.bridgeMethodPolicies.commitInputs.kind === "fixed"
+					? input.config.bridgeMethodPolicies.commitInputs.timeoutMs
+					: 3000,
+			phaseDeadline: () => phaseDeadline,
 			recordProviderReschedule: (event) => {
 				input.logger.info(providerRescheduleSelectedLogRecord(event));
 			},
@@ -413,10 +436,48 @@ export async function buildRuntimePodCommandDependencies(input: {
 		}) ??
 		new BridgeAPIControlInputCommitter({
 			address: input.config.bridgeApiGrpcAddress,
+			methodPolicies: input.config.bridgeMethodPolicies,
 			tokenPath: input.config.outboundInternalGrpcTokenPath,
 			metadataFactory: outboundMetadataFactory,
 		});
+	const processId = crypto.randomUUID();
+	const runtimeProcess =
+		input.builderOptions?.runtimeProcessFactory?.(processId, input.config) ??
+		new BridgeRuntimeProcess(processId, {
+			address: input.config.bridgeApiGrpcAddress,
+			tokenPath: input.config.outboundInternalGrpcTokenPath,
+			policies: input.config.bridgeMethodPolicies,
+			metadataFactory: outboundMetadataFactory,
+		});
 	const app = createRuntimePodApp({
+		runtimeProcess,
+		quiesce: async (options) => {
+			phaseDeadline = options.settlementDeadline;
+			for (const adapter of [
+				eventWriter,
+				bridgeContextLoader,
+				approvalReviewerThreadCreator,
+				internalToolRepairCommitter,
+			])
+				adapter.beginDrain(options.settlementDeadline);
+			toolRunner.beginDrain(options.settlementDeadline);
+			if (controlInputCommitter instanceof BridgeAPIControlInputCommitter)
+				controlInputCommitter.beginDrain(options.settlementDeadline);
+			await coreHosts.quiesce(options);
+		},
+		closeClients: async () => {
+			await Promise.all([
+				gatewayClient.close(),
+				toolRunner.close(),
+				bridgeContextLoader.close(),
+				eventWriter.close(),
+				approvalReviewerThreadCreator.close(),
+				internalToolRepairCommitter.close(),
+				...(controlInputCommitter instanceof BridgeAPIControlInputCommitter
+					? [controlInputCommitter.close()]
+					: []),
+			]);
+		},
 		config: input.config,
 		logger: input.logger,
 		tokenReviewClient,
@@ -426,9 +487,10 @@ export async function buildRuntimePodCommandDependencies(input: {
 		shutdownActiveRuns: coreHosts.shutdownActiveRuns,
 		metrics,
 		bootstrap: {
-			runtime: async () => {
-				return;
-			},
+			runtime: () =>
+				(input.builderOptions?.routingProxyReady ?? waitForRoutingProxy)(
+					input.config.transportProfile,
+				),
 			core: async () => undefined,
 			authClient: async () => {
 				await validateKubernetesTokenReviewReviewerMaterial({

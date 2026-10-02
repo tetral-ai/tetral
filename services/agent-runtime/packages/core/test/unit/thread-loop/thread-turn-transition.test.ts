@@ -588,6 +588,7 @@ describe("Thread-turn reducer", () => {
 				bindingId: "binding_dispatch_owner",
 				bindingGeneration: 1,
 				targetPodUid: "pod_dispatch_owner",
+				runtimeProcessId: "process-test",
 				runtimeInputId: "input_after_request_start",
 				inputOrder: 2,
 				kind: "messages",

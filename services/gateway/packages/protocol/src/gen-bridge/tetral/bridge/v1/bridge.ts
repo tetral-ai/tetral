@@ -387,6 +387,91 @@ export function approvalReviewerCloseSettlementKindToJSON(object: ApprovalReview
   }
 }
 
+/** Process identity comes from one boot; Pod authority comes from authentication. */
+export enum RuntimeProcessPhase {
+  RUNTIME_PROCESS_PHASE_UNSPECIFIED = 0,
+  RUNTIME_PROCESS_PHASE_STARTING = 1,
+  RUNTIME_PROCESS_PHASE_ACCEPTING = 2,
+  RUNTIME_PROCESS_PHASE_DRAINING = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function runtimeProcessPhaseFromJSON(object: any): RuntimeProcessPhase {
+  switch (object) {
+    case 0:
+    case "RUNTIME_PROCESS_PHASE_UNSPECIFIED":
+      return RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_UNSPECIFIED;
+    case 1:
+    case "RUNTIME_PROCESS_PHASE_STARTING":
+      return RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_STARTING;
+    case 2:
+    case "RUNTIME_PROCESS_PHASE_ACCEPTING":
+      return RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_ACCEPTING;
+    case 3:
+    case "RUNTIME_PROCESS_PHASE_DRAINING":
+      return RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_DRAINING;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RuntimeProcessPhase.UNRECOGNIZED;
+  }
+}
+
+export function runtimeProcessPhaseToJSON(object: RuntimeProcessPhase): string {
+  switch (object) {
+    case RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_UNSPECIFIED:
+      return "RUNTIME_PROCESS_PHASE_UNSPECIFIED";
+    case RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_STARTING:
+      return "RUNTIME_PROCESS_PHASE_STARTING";
+    case RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_ACCEPTING:
+      return "RUNTIME_PROCESS_PHASE_ACCEPTING";
+    case RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_DRAINING:
+      return "RUNTIME_PROCESS_PHASE_DRAINING";
+    case RuntimeProcessPhase.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum RuntimeHandoffDisposition {
+  RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED = 0,
+  RUNTIME_HANDOFF_DISPOSITION_IDLE = 1,
+  RUNTIME_HANDOFF_DISPOSITION_RECOVER = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function runtimeHandoffDispositionFromJSON(object: any): RuntimeHandoffDisposition {
+  switch (object) {
+    case 0:
+    case "RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED":
+      return RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "RUNTIME_HANDOFF_DISPOSITION_IDLE":
+      return RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_IDLE;
+    case 2:
+    case "RUNTIME_HANDOFF_DISPOSITION_RECOVER":
+      return RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RuntimeHandoffDisposition.UNRECOGNIZED;
+  }
+}
+
+export function runtimeHandoffDispositionToJSON(object: RuntimeHandoffDisposition): string {
+  switch (object) {
+    case RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED:
+      return "RUNTIME_HANDOFF_DISPOSITION_UNSPECIFIED";
+    case RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_IDLE:
+      return "RUNTIME_HANDOFF_DISPOSITION_IDLE";
+    case RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER:
+      return "RUNTIME_HANDOFF_DISPOSITION_RECOVER";
+    case RuntimeHandoffDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface RuntimeContextDelta {
   parts: RuntimeContextPart[];
 }
@@ -461,6 +546,7 @@ export interface RuntimeBindingRef {
   bindingId: string;
   bindingGeneration: number;
   targetPodUid: string;
+  runtimeProcessId: string;
 }
 
 export interface RuntimeScope {
@@ -473,6 +559,8 @@ export interface RuntimeScope {
 export interface LoadContextRequest {
   scope: RuntimeScope | undefined;
   recoveryLeaseRef: RecoveryLeaseRef | undefined;
+  sourceEventId: string;
+  handoffId: string;
 }
 
 export interface RecoveryLeaseRef {
@@ -1401,6 +1489,50 @@ export interface MemoryRunDuplicate {
 }
 
 export interface MemoryRunStale {
+}
+
+export interface RegisterRuntimeProcessRequest {
+  runtimeProcessId: string;
+}
+
+export interface RegisterRuntimeProcessResponse {
+  runtimeProcessId: string;
+  registrationOrder: number;
+  registrationReceipt: string;
+}
+
+export interface ReportRuntimeProcessRequest {
+  runtimeProcessId: string;
+  registrationReceipt: string;
+  phase: RuntimeProcessPhase;
+}
+
+export interface ReportRuntimeProcessResponse {
+  runtimeProcessId: string;
+  phase: RuntimeProcessPhase;
+  current: boolean;
+}
+
+export interface ReleaseRuntimeBindingRequest {
+  workspaceId: string;
+  sessionId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  runtimeProcessId: string;
+  operationId: string;
+}
+
+export interface ReleaseRuntimeBindingResponse {
+  operationId: string;
+  handoffId: string;
+  releasedBinding: RuntimeBindingRef | undefined;
+  threads: RuntimeHandoffThread[];
+}
+
+export interface RuntimeHandoffThread {
+  sessionThreadId: string;
+  disposition: RuntimeHandoffDisposition;
+  queueJobId: string;
 }
 
 function createBaseRuntimeContextDelta(): RuntimeContextDelta {
@@ -2559,7 +2691,7 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
 };
 
 function createBaseRuntimeBindingRef(): RuntimeBindingRef {
-  return { bindingId: "", bindingGeneration: 0, targetPodUid: "" };
+  return { bindingId: "", bindingGeneration: 0, targetPodUid: "", runtimeProcessId: "" };
 }
 
 export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
@@ -2572,6 +2704,9 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
     }
     if (message.targetPodUid !== "") {
       writer.uint32(26).string(message.targetPodUid);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(34).string(message.runtimeProcessId);
     }
     return writer;
   },
@@ -2607,6 +2742,14 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
           message.targetPodUid = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2633,6 +2776,11 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
         : isSet(object.target_pod_uid)
         ? globalThis.String(object.target_pod_uid)
         : "",
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
     };
   },
 
@@ -2647,6 +2795,9 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
     if (message.targetPodUid !== "") {
       obj.targetPodUid = message.targetPodUid;
     }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
     return obj;
   },
 
@@ -2658,6 +2809,7 @@ export const RuntimeBindingRef: MessageFns<RuntimeBindingRef> = {
     message.bindingId = object.bindingId ?? "";
     message.bindingGeneration = object.bindingGeneration ?? 0;
     message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
     return message;
   },
 };
@@ -2785,7 +2937,7 @@ export const RuntimeScope: MessageFns<RuntimeScope> = {
 };
 
 function createBaseLoadContextRequest(): LoadContextRequest {
-  return { scope: undefined, recoveryLeaseRef: undefined };
+  return { scope: undefined, recoveryLeaseRef: undefined, sourceEventId: "", handoffId: "" };
 }
 
 export const LoadContextRequest: MessageFns<LoadContextRequest> = {
@@ -2795,6 +2947,12 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     }
     if (message.recoveryLeaseRef !== undefined) {
       RecoveryLeaseRef.encode(message.recoveryLeaseRef, writer.uint32(18).fork()).join();
+    }
+    if (message.sourceEventId !== "") {
+      writer.uint32(26).string(message.sourceEventId);
+    }
+    if (message.handoffId !== "") {
+      writer.uint32(34).string(message.handoffId);
     }
     return writer;
   },
@@ -2822,6 +2980,22 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
           message.recoveryLeaseRef = RecoveryLeaseRef.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceEventId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.handoffId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2839,6 +3013,16 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
         : isSet(object.recovery_lease_ref)
         ? RecoveryLeaseRef.fromJSON(object.recovery_lease_ref)
         : undefined,
+      sourceEventId: isSet(object.sourceEventId)
+        ? globalThis.String(object.sourceEventId)
+        : isSet(object.source_event_id)
+        ? globalThis.String(object.source_event_id)
+        : "",
+      handoffId: isSet(object.handoffId)
+        ? globalThis.String(object.handoffId)
+        : isSet(object.handoff_id)
+        ? globalThis.String(object.handoff_id)
+        : "",
     };
   },
 
@@ -2849,6 +3033,12 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     }
     if (message.recoveryLeaseRef !== undefined) {
       obj.recoveryLeaseRef = RecoveryLeaseRef.toJSON(message.recoveryLeaseRef);
+    }
+    if (message.sourceEventId !== "") {
+      obj.sourceEventId = message.sourceEventId;
+    }
+    if (message.handoffId !== "") {
+      obj.handoffId = message.handoffId;
     }
     return obj;
   },
@@ -2864,6 +3054,8 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     message.recoveryLeaseRef = (object.recoveryLeaseRef !== undefined && object.recoveryLeaseRef !== null)
       ? RecoveryLeaseRef.fromPartial(object.recoveryLeaseRef)
       : undefined;
+    message.sourceEventId = object.sourceEventId ?? "";
+    message.handoffId = object.handoffId ?? "";
     return message;
   },
 };
@@ -18322,8 +18514,800 @@ export const MemoryRunStale: MessageFns<MemoryRunStale> = {
   },
 };
 
+function createBaseRegisterRuntimeProcessRequest(): RegisterRuntimeProcessRequest {
+  return { runtimeProcessId: "" };
+}
+
+export const RegisterRuntimeProcessRequest: MessageFns<RegisterRuntimeProcessRequest> = {
+  encode(message: RegisterRuntimeProcessRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(10).string(message.runtimeProcessId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterRuntimeProcessRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterRuntimeProcessRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RegisterRuntimeProcessRequest {
+    return {
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RegisterRuntimeProcessRequest): unknown {
+    const obj: any = {};
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterRuntimeProcessRequest>, I>>(base?: I): RegisterRuntimeProcessRequest {
+    return RegisterRuntimeProcessRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterRuntimeProcessRequest>, I>>(
+    object: I,
+  ): RegisterRuntimeProcessRequest {
+    const message = createBaseRegisterRuntimeProcessRequest();
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    return message;
+  },
+};
+
+function createBaseRegisterRuntimeProcessResponse(): RegisterRuntimeProcessResponse {
+  return { runtimeProcessId: "", registrationOrder: 0, registrationReceipt: "" };
+}
+
+export const RegisterRuntimeProcessResponse: MessageFns<RegisterRuntimeProcessResponse> = {
+  encode(message: RegisterRuntimeProcessResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(10).string(message.runtimeProcessId);
+    }
+    if (message.registrationOrder !== 0) {
+      writer.uint32(16).int64(message.registrationOrder);
+    }
+    if (message.registrationReceipt !== "") {
+      writer.uint32(26).string(message.registrationReceipt);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RegisterRuntimeProcessResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRegisterRuntimeProcessResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.registrationOrder = longToNumber(reader.int64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.registrationReceipt = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RegisterRuntimeProcessResponse {
+    return {
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      registrationOrder: isSet(object.registrationOrder)
+        ? globalThis.Number(object.registrationOrder)
+        : isSet(object.registration_order)
+        ? globalThis.Number(object.registration_order)
+        : 0,
+      registrationReceipt: isSet(object.registrationReceipt)
+        ? globalThis.String(object.registrationReceipt)
+        : isSet(object.registration_receipt)
+        ? globalThis.String(object.registration_receipt)
+        : "",
+    };
+  },
+
+  toJSON(message: RegisterRuntimeProcessResponse): unknown {
+    const obj: any = {};
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.registrationOrder !== 0) {
+      obj.registrationOrder = Math.round(message.registrationOrder);
+    }
+    if (message.registrationReceipt !== "") {
+      obj.registrationReceipt = message.registrationReceipt;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RegisterRuntimeProcessResponse>, I>>(base?: I): RegisterRuntimeProcessResponse {
+    return RegisterRuntimeProcessResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RegisterRuntimeProcessResponse>, I>>(
+    object: I,
+  ): RegisterRuntimeProcessResponse {
+    const message = createBaseRegisterRuntimeProcessResponse();
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.registrationOrder = object.registrationOrder ?? 0;
+    message.registrationReceipt = object.registrationReceipt ?? "";
+    return message;
+  },
+};
+
+function createBaseReportRuntimeProcessRequest(): ReportRuntimeProcessRequest {
+  return { runtimeProcessId: "", registrationReceipt: "", phase: 0 };
+}
+
+export const ReportRuntimeProcessRequest: MessageFns<ReportRuntimeProcessRequest> = {
+  encode(message: ReportRuntimeProcessRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(10).string(message.runtimeProcessId);
+    }
+    if (message.registrationReceipt !== "") {
+      writer.uint32(18).string(message.registrationReceipt);
+    }
+    if (message.phase !== 0) {
+      writer.uint32(24).int32(message.phase);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReportRuntimeProcessRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReportRuntimeProcessRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.registrationReceipt = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.phase = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReportRuntimeProcessRequest {
+    return {
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      registrationReceipt: isSet(object.registrationReceipt)
+        ? globalThis.String(object.registrationReceipt)
+        : isSet(object.registration_receipt)
+        ? globalThis.String(object.registration_receipt)
+        : "",
+      phase: isSet(object.phase) ? runtimeProcessPhaseFromJSON(object.phase) : 0,
+    };
+  },
+
+  toJSON(message: ReportRuntimeProcessRequest): unknown {
+    const obj: any = {};
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.registrationReceipt !== "") {
+      obj.registrationReceipt = message.registrationReceipt;
+    }
+    if (message.phase !== 0) {
+      obj.phase = runtimeProcessPhaseToJSON(message.phase);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReportRuntimeProcessRequest>, I>>(base?: I): ReportRuntimeProcessRequest {
+    return ReportRuntimeProcessRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReportRuntimeProcessRequest>, I>>(object: I): ReportRuntimeProcessRequest {
+    const message = createBaseReportRuntimeProcessRequest();
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.registrationReceipt = object.registrationReceipt ?? "";
+    message.phase = object.phase ?? 0;
+    return message;
+  },
+};
+
+function createBaseReportRuntimeProcessResponse(): ReportRuntimeProcessResponse {
+  return { runtimeProcessId: "", phase: 0, current: false };
+}
+
+export const ReportRuntimeProcessResponse: MessageFns<ReportRuntimeProcessResponse> = {
+  encode(message: ReportRuntimeProcessResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(10).string(message.runtimeProcessId);
+    }
+    if (message.phase !== 0) {
+      writer.uint32(16).int32(message.phase);
+    }
+    if (message.current !== false) {
+      writer.uint32(24).bool(message.current);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReportRuntimeProcessResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReportRuntimeProcessResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.phase = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.current = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReportRuntimeProcessResponse {
+    return {
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      phase: isSet(object.phase) ? runtimeProcessPhaseFromJSON(object.phase) : 0,
+      current: isSet(object.current) ? globalThis.Boolean(object.current) : false,
+    };
+  },
+
+  toJSON(message: ReportRuntimeProcessResponse): unknown {
+    const obj: any = {};
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.phase !== 0) {
+      obj.phase = runtimeProcessPhaseToJSON(message.phase);
+    }
+    if (message.current !== false) {
+      obj.current = message.current;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReportRuntimeProcessResponse>, I>>(base?: I): ReportRuntimeProcessResponse {
+    return ReportRuntimeProcessResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReportRuntimeProcessResponse>, I>>(object: I): ReportRuntimeProcessResponse {
+    const message = createBaseReportRuntimeProcessResponse();
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.phase = object.phase ?? 0;
+    message.current = object.current ?? false;
+    return message;
+  },
+};
+
+function createBaseReleaseRuntimeBindingRequest(): ReleaseRuntimeBindingRequest {
+  return { workspaceId: "", sessionId: "", bindingId: "", bindingGeneration: 0, runtimeProcessId: "", operationId: "" };
+}
+
+export const ReleaseRuntimeBindingRequest: MessageFns<ReleaseRuntimeBindingRequest> = {
+  encode(message: ReleaseRuntimeBindingRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(26).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(32).int64(message.bindingGeneration);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(42).string(message.runtimeProcessId);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(50).string(message.operationId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReleaseRuntimeBindingRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReleaseRuntimeBindingRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReleaseRuntimeBindingRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ReleaseRuntimeBindingRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReleaseRuntimeBindingRequest>, I>>(base?: I): ReleaseRuntimeBindingRequest {
+    return ReleaseRuntimeBindingRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReleaseRuntimeBindingRequest>, I>>(object: I): ReleaseRuntimeBindingRequest {
+    const message = createBaseReleaseRuntimeBindingRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.operationId = object.operationId ?? "";
+    return message;
+  },
+};
+
+function createBaseReleaseRuntimeBindingResponse(): ReleaseRuntimeBindingResponse {
+  return { operationId: "", handoffId: "", releasedBinding: undefined, threads: [] };
+}
+
+export const ReleaseRuntimeBindingResponse: MessageFns<ReleaseRuntimeBindingResponse> = {
+  encode(message: ReleaseRuntimeBindingResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.operationId !== "") {
+      writer.uint32(10).string(message.operationId);
+    }
+    if (message.handoffId !== "") {
+      writer.uint32(18).string(message.handoffId);
+    }
+    if (message.releasedBinding !== undefined) {
+      RuntimeBindingRef.encode(message.releasedBinding, writer.uint32(26).fork()).join();
+    }
+    for (const v of message.threads) {
+      RuntimeHandoffThread.encode(v!, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReleaseRuntimeBindingResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReleaseRuntimeBindingResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.handoffId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.releasedBinding = RuntimeBindingRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.threads.push(RuntimeHandoffThread.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReleaseRuntimeBindingResponse {
+    return {
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
+      handoffId: isSet(object.handoffId)
+        ? globalThis.String(object.handoffId)
+        : isSet(object.handoff_id)
+        ? globalThis.String(object.handoff_id)
+        : "",
+      releasedBinding: isSet(object.releasedBinding)
+        ? RuntimeBindingRef.fromJSON(object.releasedBinding)
+        : isSet(object.released_binding)
+        ? RuntimeBindingRef.fromJSON(object.released_binding)
+        : undefined,
+      threads: globalThis.Array.isArray(object?.threads)
+        ? object.threads.map((e: any) => RuntimeHandoffThread.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ReleaseRuntimeBindingResponse): unknown {
+    const obj: any = {};
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
+    if (message.handoffId !== "") {
+      obj.handoffId = message.handoffId;
+    }
+    if (message.releasedBinding !== undefined) {
+      obj.releasedBinding = RuntimeBindingRef.toJSON(message.releasedBinding);
+    }
+    if (message.threads?.length) {
+      obj.threads = message.threads.map((e) => RuntimeHandoffThread.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReleaseRuntimeBindingResponse>, I>>(base?: I): ReleaseRuntimeBindingResponse {
+    return ReleaseRuntimeBindingResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReleaseRuntimeBindingResponse>, I>>(
+    object: I,
+  ): ReleaseRuntimeBindingResponse {
+    const message = createBaseReleaseRuntimeBindingResponse();
+    message.operationId = object.operationId ?? "";
+    message.handoffId = object.handoffId ?? "";
+    message.releasedBinding = (object.releasedBinding !== undefined && object.releasedBinding !== null)
+      ? RuntimeBindingRef.fromPartial(object.releasedBinding)
+      : undefined;
+    message.threads = object.threads?.map((e) => RuntimeHandoffThread.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseRuntimeHandoffThread(): RuntimeHandoffThread {
+  return { sessionThreadId: "", disposition: 0, queueJobId: "" };
+}
+
+export const RuntimeHandoffThread: MessageFns<RuntimeHandoffThread> = {
+  encode(message: RuntimeHandoffThread, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sessionThreadId !== "") {
+      writer.uint32(10).string(message.sessionThreadId);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(16).int32(message.disposition);
+    }
+    if (message.queueJobId !== "") {
+      writer.uint32(26).string(message.queueJobId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeHandoffThread {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeHandoffThread();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.queueJobId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeHandoffThread {
+    return {
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      disposition: isSet(object.disposition) ? runtimeHandoffDispositionFromJSON(object.disposition) : 0,
+      queueJobId: isSet(object.queueJobId)
+        ? globalThis.String(object.queueJobId)
+        : isSet(object.queue_job_id)
+        ? globalThis.String(object.queue_job_id)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeHandoffThread): unknown {
+    const obj: any = {};
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = runtimeHandoffDispositionToJSON(message.disposition);
+    }
+    if (message.queueJobId !== "") {
+      obj.queueJobId = message.queueJobId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeHandoffThread>, I>>(base?: I): RuntimeHandoffThread {
+    return RuntimeHandoffThread.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeHandoffThread>, I>>(object: I): RuntimeHandoffThread {
+    const message = createBaseRuntimeHandoffThread();
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.disposition = object.disposition ?? 0;
+    message.queueJobId = object.queueJobId ?? "";
+    return message;
+  },
+};
+
 export type AgentRuntimeBridgeServiceService = typeof AgentRuntimeBridgeServiceService;
 export const AgentRuntimeBridgeServiceService = {
+  registerRuntimeProcess: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/RegisterRuntimeProcess" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RegisterRuntimeProcessRequest): Buffer =>
+      Buffer.from(RegisterRuntimeProcessRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RegisterRuntimeProcessRequest => RegisterRuntimeProcessRequest.decode(value),
+    responseSerialize: (value: RegisterRuntimeProcessResponse): Buffer =>
+      Buffer.from(RegisterRuntimeProcessResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RegisterRuntimeProcessResponse =>
+      RegisterRuntimeProcessResponse.decode(value),
+  },
+  reportRuntimeProcess: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReportRuntimeProcess" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ReportRuntimeProcessRequest): Buffer =>
+      Buffer.from(ReportRuntimeProcessRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ReportRuntimeProcessRequest => ReportRuntimeProcessRequest.decode(value),
+    responseSerialize: (value: ReportRuntimeProcessResponse): Buffer =>
+      Buffer.from(ReportRuntimeProcessResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ReportRuntimeProcessResponse => ReportRuntimeProcessResponse.decode(value),
+  },
+  releaseRuntimeBinding: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReleaseRuntimeBinding" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ReleaseRuntimeBindingRequest): Buffer =>
+      Buffer.from(ReleaseRuntimeBindingRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ReleaseRuntimeBindingRequest => ReleaseRuntimeBindingRequest.decode(value),
+    responseSerialize: (value: ReleaseRuntimeBindingResponse): Buffer =>
+      Buffer.from(ReleaseRuntimeBindingResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ReleaseRuntimeBindingResponse => ReleaseRuntimeBindingResponse.decode(value),
+  },
   loadContext: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/LoadContext" as const,
     requestStream: false as const,
@@ -18746,6 +19730,9 @@ export const AgentRuntimeBridgeServiceService = {
 } as const;
 
 export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplementation {
+  registerRuntimeProcess: handleUnaryCall<RegisterRuntimeProcessRequest, RegisterRuntimeProcessResponse>;
+  reportRuntimeProcess: handleUnaryCall<ReportRuntimeProcessRequest, ReportRuntimeProcessResponse>;
+  releaseRuntimeBinding: handleUnaryCall<ReleaseRuntimeBindingRequest, ReleaseRuntimeBindingResponse>;
   loadContext: handleUnaryCall<LoadContextRequest, LoadContextResponse>;
   refreshRuntimeBindingToken: handleUnaryCall<RefreshRuntimeBindingTokenRequest, RefreshRuntimeBindingTokenResponse>;
   commitInputs: handleUnaryCall<CommitInputsRequest, CommitInputsResponse>;
@@ -18795,6 +19782,51 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
 }
 
 export interface AgentRuntimeBridgeServiceClient extends Client {
+  registerRuntimeProcess(
+    request: RegisterRuntimeProcessRequest,
+    callback: (error: ServiceError | null, response: RegisterRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  registerRuntimeProcess(
+    request: RegisterRuntimeProcessRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RegisterRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  registerRuntimeProcess(
+    request: RegisterRuntimeProcessRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RegisterRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  reportRuntimeProcess(
+    request: ReportRuntimeProcessRequest,
+    callback: (error: ServiceError | null, response: ReportRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  reportRuntimeProcess(
+    request: ReportRuntimeProcessRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ReportRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  reportRuntimeProcess(
+    request: ReportRuntimeProcessRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ReportRuntimeProcessResponse) => void,
+  ): ClientUnaryCall;
+  releaseRuntimeBinding(
+    request: ReleaseRuntimeBindingRequest,
+    callback: (error: ServiceError | null, response: ReleaseRuntimeBindingResponse) => void,
+  ): ClientUnaryCall;
+  releaseRuntimeBinding(
+    request: ReleaseRuntimeBindingRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ReleaseRuntimeBindingResponse) => void,
+  ): ClientUnaryCall;
+  releaseRuntimeBinding(
+    request: ReleaseRuntimeBindingRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ReleaseRuntimeBindingResponse) => void,
+  ): ClientUnaryCall;
   loadContext(
     request: LoadContextRequest,
     callback: (error: ServiceError | null, response: LoadContextResponse) => void,

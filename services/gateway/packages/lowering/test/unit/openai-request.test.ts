@@ -408,6 +408,7 @@ function openAIRequest(overrides: Partial<ProviderRequest> = {}): ProviderReques
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "openai", modelId: "gpt-5.5", variant: "" },
     system: [],

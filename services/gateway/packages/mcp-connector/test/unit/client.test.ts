@@ -21,6 +21,48 @@ type RecordingSDKTool = Awaited<ReturnType<SDKClientLike["listTools"]>>["tools"]
 };
 
 describe("McpSDKClient", () => {
+  test("shutdown closes an opening client once and joins its cancelled initialize callback", async () => {
+    const sdk = new RecordingSDKClient();
+    const initialize = deferred<void>();
+    sdk.connectGate = initialize.promise;
+    const client = new McpSDKClient({credentialResolver:new RotatingCredentialResolver(["token-a"]),onToolsListChanged:async()=>undefined,createClient:()=>sdk,createTransport:input=>input,setTimer:fakeSetTimer,clearTimer:()=>undefined});
+    const listing = client.listTools(validIdentity());
+    void listing.catch(()=>undefined);
+    while (sdk.connects === 0) await Promise.resolve();
+    let joined = false;
+    const closed = client.closeAll(new Date(Date.now()+1000)).then(()=>{joined=true;});
+    await expect(listing).rejects.toBeDefined();
+    await Promise.resolve();
+    expect(sdk.closeCount).toBe(1);
+    expect(joined).toBe(false);
+    initialize.resolve();
+    await closed;
+    expect(joined).toBe(true);
+    expect(client.connectionCount()).toBe(0);
+    await client.closeAll();
+    expect(sdk.closeCount).toBe(1);
+  });
+
+  test("shutdown retains a reconnect-exhausted raw call until its callback joins", async () => {
+    const sdk = new RecordingSDKClient();
+    const call = deferred<void>();
+    sdk.callToolGate = call.promise;
+    const client = new McpSDKClient({credentialResolver:new RotatingCredentialResolver(["token-a"]),onToolsListChanged:async()=>undefined,createClient:()=>sdk,createTransport:input=>input,setTimer:fakeSetTimer,clearTimer:()=>undefined});
+    const result = client.callTool({...validIdentity(),sessionThreadId:"thrd_1",toolName:"create_issue",input:{}});
+    void result.catch(()=>undefined);
+    while (sdk.callToolOptions.length === 0) await Promise.resolve();
+    sdk.onerror?.(new Error("Maximum reconnection attempts (3) exceeded."));
+    await expect(result).rejects.toMatchObject({retryStatus:"exhausted"});
+    expect(client.connectionCount()).toBe(0);
+    let joined=false;
+    const closing=client.closeAll(new Date(Date.now()+1000)).then(()=>{joined=true;});
+    await Promise.resolve();
+    expect(joined).toBe(false);
+    call.resolve();
+    await closing;
+    expect(sdk.closeCount).toBe(1);
+  });
+
   test("carries the catalog toolset selection header beside bearer authorization", () => {
     const options = streamableHTTPTransportOptions({ token: "token-a", toolsets: "default,actions" });
     expect(options.requestInit).toEqual({
@@ -788,7 +830,7 @@ describe("McpSDKClient", () => {
       toolName: "create_issue",
       input: {},
     })).rejects.toMatchObject({ code: "mcp_timeout", retryStatus: undefined });
-    expect(sdk.callToolOptions).toEqual([{ timeout: 1234 }]);
+    expect(sdk.callToolOptions).toEqual([{ timeout: 1234, signal: expect.any(AbortSignal) }]);
   });
 
   test("bounds credential resolution and classifies its deadline as mcp_timeout", async () => {
@@ -960,8 +1002,8 @@ class RecordingSDKClient implements SDKClientLike {
 	callToolError: unknown;
 	callToolGate: Promise<void> | undefined;
 	listToolsGate: Promise<void> | undefined;
-  callToolOptions: Array<{ readonly timeout?: number } | undefined> = [];
-  listToolsOptions: Array<{ readonly timeout?: number } | undefined> = [];
+  callToolOptions: Array<{ readonly timeout?: number; readonly signal?: AbortSignal } | undefined> = [];
+  listToolsOptions: Array<{ readonly timeout?: number; readonly signal?: AbortSignal } | undefined> = [];
   callToolParams: Array<{ readonly name: string; readonly arguments?: Record<string, unknown> | undefined }> = [];
   tools: RecordingSDKTool[] = [
     { name: "create_issue", description: "Create an issue.", inputSchema: { type: "object" as const } },
@@ -978,7 +1020,7 @@ class RecordingSDKClient implements SDKClientLike {
     }
   }
 
-  async listTools(_params?: unknown, options?: { readonly timeout?: number }) {
+  async listTools(_params?: unknown, options?: { readonly timeout?: number; readonly signal?: AbortSignal }) {
     this.listToolsOptions.push(options);
 		if (this.listToolsGate !== undefined) {
 			await this.listToolsGate;
@@ -991,7 +1033,7 @@ class RecordingSDKClient implements SDKClientLike {
     };
   }
 
-  async callTool(params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined }, _resultSchema?: unknown, options?: { readonly timeout?: number }) {
+  async callTool(params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined }, _resultSchema?: unknown, options?: { readonly timeout?: number; readonly signal?: AbortSignal }) {
     this.callToolParams.push(params);
     this.callToolOptions.push(options);
 		if (this.callToolGate !== undefined) {

@@ -97,6 +97,7 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *tes
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "evt_exhaust_delivering", 1, "user.message", `{"type":"user.message"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", `["evt_exhaust_delivering"]`, "delivering", "bind_exhaust_delivering", "pod_exhaust_delivering", 1, 1)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_exhaust_delivering", "bind_exhaust_delivering", 1, "pod_exhaust_delivering")
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", []string{"evt_exhaust_delivering"})
 
@@ -470,6 +471,7 @@ func retryableExhaustionResultForBinding(bindingID string, bindingGeneration int
 	result.AttemptedBindingID = bindingID
 	result.AttemptedBindingGeneration = bindingGeneration
 	result.AttemptedTargetPodUID = podUID
+	result.AttemptedRuntimeProcessID = "process_" + podUID
 	return result
 }
 

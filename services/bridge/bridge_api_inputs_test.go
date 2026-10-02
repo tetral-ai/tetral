@@ -163,11 +163,20 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	) {
 		t.Fatalf("CommitInputs lost-ACK replay = %#v; want identical durable delta", replay)
 	}
+	replacementIdentity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "pod_uid_commit_replacement", ID: "process_pod_uid_commit_replacement"}
+	registeredReplacement, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(admin), replacementIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(admin), replacementIdentity, registeredReplacement.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_bindings
 		    SET binding_id = 'bind_bridge_commit_replacement',
 		        binding_generation = 2,
 		        agent_runtime_pod_uid = 'pod_uid_commit_replacement',
+ runtime_process_id='process_pod_uid_commit_replacement',
 		        updated_at = '2026-01-01T00:00:01Z'
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_commit'`,

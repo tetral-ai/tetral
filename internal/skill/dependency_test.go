@@ -12,8 +12,9 @@ import (
 // TestSkillIsTheOnlyYAMLConsumer pins the YAML parser confinement rule:
 // production use of gopkg.in/yaml.v3 must remain inside the Skill
 // package/frontmatter parser or the single repository workflow parser. The
-// one test-only exception performs object-level YAML parsing to validate Helm
-// chart equivalence. Other Engine packages must continue to follow
+// exact test/fixture exceptions perform object-level YAML parsing to validate
+// deployment equivalence, immutable Istiod rendering and the actual rendered
+// Runtime listener. Other Engine packages must continue to follow
 // engine/CLAUDE.md's stdlib-first dependency rule.
 //
 // The test walks every Go source file under engine/ and asserts that
@@ -23,7 +24,12 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	const yamlImport = `"gopkg.in/yaml.v3"`
 	const allowedDir = "internal/skill"
 	const allowedWorkflowParser = "internal/testinfra/workflow_yaml.go"
-	const allowedChartTest = "deploy/helm/chart_test.go"
+	allowedDeploymentParsers := map[string]bool{
+		"deploy/helm/chart_test.go":             true,
+		"deploy/istio/render_test.go":           true,
+		"integration/transporttest/runtime.go":  true,
+		"services/sandbox/k8s_manifest_test.go": true,
+	}
 
 	engineRoot := engineRootDir(t)
 	violations := []string{}
@@ -46,7 +52,7 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 			return relErr
 		}
 		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, allowedDir+"/") || rel == allowedChartTest || rel == allowedWorkflowParser {
+		if strings.HasPrefix(rel, allowedDir+"/") || allowedDeploymentParsers[rel] || rel == allowedWorkflowParser {
 			return nil
 		}
 		body, readErr := os.ReadFile(path) //nolint:gosec // engine source path, walked from root

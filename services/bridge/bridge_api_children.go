@@ -51,7 +51,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId()); err != nil {
@@ -63,6 +63,9 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			}
 			response = &bridgev1.CreateSubagentThreadResponse{Outcome: &bridgev1.CreateSubagentThreadResponse_Duplicate{Duplicate: &bridgev1.CreateSubagentThreadDuplicate{ChildThreadId: result.ChildThreadID}}}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -120,7 +123,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceReviewerTrunk, request.GetEnsureOperationId()); err != nil {
@@ -132,6 +135,9 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 			}
 			response = &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerTrunkDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -172,7 +178,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceReviewerSidecar, request.GetReviewId()); err != nil {
@@ -184,6 +190,9 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 			}
 			response = &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerSidecarDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -430,7 +439,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpDeliverInterAgentMail, request.GetDeliveryId()); err != nil {
@@ -441,6 +450,9 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 			}
 			response = &bridgev1.DeliverInterAgentMailResponse{Outcome: &bridgev1.DeliverInterAgentMailResponse_Duplicate{Duplicate: &bridgev1.DeliverInterAgentMailDuplicate{}}}
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -757,7 +769,7 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED
 			}
 			child := &bridgev1.ChildLifecycleResult{ChildThreadId: threadID, Disposition: disposition}
-			resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: threadID, Disposition: disposition.String()})
+			resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: threadID, Disposition: disposition.String(), OwnerBindingID: scope.GetBinding().GetBindingId(), OwnerBindingGeneration: scope.GetBinding().GetBindingGeneration(), OwnerPodUID: scope.GetBinding().GetTargetPodUid(), OwnerProcessID: scope.GetBinding().GetRuntimeProcessId()})
 			if err != nil {
 				return err
 			}
@@ -960,7 +972,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		childThreadID = request.GetTargetChildThreadId()
@@ -991,6 +1003,9 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			results = existingResults
 			duplicate = true
 			return nil
+		}
+		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_resume"); err != nil {
 			return err
@@ -1045,7 +1060,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 				return err
 			}
 		}
-		resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: childThreadID, Disposition: disposition.String()})
+		resultJSON, err := runtimecontrol.MarshalJSON(childLifecycleStoredResult{ChildThreadID: childThreadID, Disposition: disposition.String(), OwnerBindingID: request.GetScope().GetBinding().GetBindingId(), OwnerBindingGeneration: request.GetScope().GetBinding().GetBindingGeneration(), OwnerPodUID: request.GetScope().GetBinding().GetTargetPodUid(), OwnerProcessID: request.GetScope().GetBinding().GetRuntimeProcessId()})
 		if err != nil {
 			return err
 		}
@@ -1392,8 +1407,12 @@ func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.T
 }
 
 type childLifecycleStoredResult struct {
-	ChildThreadID string `json:"childThreadId"`
-	Disposition   string `json:"disposition"`
+	ChildThreadID          string `json:"childThreadId"`
+	Disposition            string `json:"disposition"`
+	OwnerBindingID         string `json:"ownerBindingId"`
+	OwnerBindingGeneration int64  `json:"ownerBindingGeneration"`
+	OwnerPodUID            string `json:"ownerPodUid"`
+	OwnerProcessID         string `json:"ownerProcessId"`
 }
 
 func readChildLifecycleOperationResultSetTx(
@@ -1431,6 +1450,13 @@ func readChildLifecycleOperationResultSetTx(
 		}
 		if declarationDigest != command.declarationDigest || receiptJSON == "" {
 			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
+		}
+		var proof childLifecycleStoredResult
+		if err := json.Unmarshal([]byte(receiptJSON), &proof); err != nil {
+			return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt proof is invalid")
+		}
+		if proof.OwnerBindingID != callerScope.GetBinding().GetBindingId() || proof.OwnerBindingGeneration != callerScope.GetBinding().GetBindingGeneration() || proof.OwnerPodUID != callerScope.GetBinding().GetTargetPodUid() || proof.OwnerProcessID != callerScope.GetBinding().GetRuntimeProcessId() {
+			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle receipt owner does not match")
 		}
 		result, err := unmarshalChildLifecycleStoredResult(receiptJSON, targetID, command.action)
 		if err != nil {

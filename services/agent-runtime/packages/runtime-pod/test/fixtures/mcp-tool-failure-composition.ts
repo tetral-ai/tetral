@@ -33,6 +33,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly modelRequestId: string;
 	readonly modelToolCallId: string;
 	readonly toolUseEventId: string;
@@ -93,6 +94,7 @@ const request: RuntimeToolExecutionRequest = {
 	bindingGeneration: input.bindingGeneration,
 	runtimeBindingToken: "fixture-binding-token",
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	modelRequestId: input.modelRequestId,
 	modelToolCallId: input.modelToolCallId,
 	modelOrder: 0,
@@ -132,6 +134,7 @@ const attempt = await writer.settleToolResult({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 	settlement: { toolUseEventId: input.toolUseEventId, outcome: settlement },
 });
 if (

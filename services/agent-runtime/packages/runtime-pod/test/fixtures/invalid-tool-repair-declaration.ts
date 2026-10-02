@@ -34,6 +34,7 @@ const identity = JSON.parse(rawIdentity) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeBindingToken: string;
 };
 const session = new ThreadRuntime(identity);

@@ -26,6 +26,7 @@ type RoleContract struct {
 type WorkloadRole struct {
 	Tables    map[string][]string `json:"tables"`
 	Sequences []string            `json:"sequences,omitempty"`
+	Functions []string            `json:"functions,omitempty"`
 }
 
 func LoadRoleContract() (RoleContract, error) {
@@ -60,6 +61,14 @@ func LoadRoleContract() (RoleContract, error) {
 				}
 				seen[privilege] = true
 			}
+		}
+		for _, function := range role.Functions {
+			if function != "tetral_lock_runtime_process(text, text, text)" || (workload != "bridge" && workload != "job_runner") {
+				return RoleContract{}, fmt.Errorf("invalid function grant for workload %q", workload)
+			}
+		}
+		if duplicate(role.Functions) {
+			return RoleContract{}, fmt.Errorf("duplicate function grant for workload %q", workload)
 		}
 		if duplicate(role.Sequences) {
 			return RoleContract{}, fmt.Errorf("duplicate sequence grant for workload %q", workload)

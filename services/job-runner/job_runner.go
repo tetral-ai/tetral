@@ -97,11 +97,12 @@ type RuntimePodLossRepairer interface {
 }
 
 type JobRunner struct {
-	Queue      QueueClient
-	Workspaces WorkspaceLister
-	Deliverer  RuntimeJobDeliverer
-	Config     JobRunnerConfig
-	Logger     *slog.Logger
+	Queue              QueueClient
+	AcquisitionContext context.Context
+	Workspaces         WorkspaceLister
+	Deliverer          RuntimeJobDeliverer
+	Config             JobRunnerConfig
+	Logger             *slog.Logger
 }
 
 type RuntimeJob struct {
@@ -125,6 +126,7 @@ type RuntimeJob struct {
 	InputKind             string
 	RejectionReasonCode   string
 	RecoverySourceEventID string
+	RecoveryHandoffID     string
 	PayloadJSON           string
 	AttemptCount          int32
 	MaxAttempts           int32
@@ -153,6 +155,7 @@ type RuntimeDeliveryResult struct {
 	AttemptedBindingID         string
 	AttemptedBindingGeneration int64
 	AttemptedTargetPodUID      string
+	AttemptedRuntimeProcessID  string
 }
 
 func (r *JobRunner) RunOnce(ctx context.Context) error {
@@ -195,7 +198,7 @@ func (r *JobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
 	// the exception — it means the runner itself is stopping.
 	var sweepErrs []error
 	for _, workspaceID := range workspaceIDs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || (r.AcquisitionContext != nil && r.AcquisitionContext.Err() != nil) {
 			sweepErrs = append(sweepErrs, ctx.Err())
 			break
 		}
@@ -225,7 +228,14 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
 		}
 	}
-	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
+	acquisitionCtx := ctx
+	if r.AcquisitionContext != nil {
+		acquisitionCtx = r.AcquisitionContext
+	}
+	if acquisitionCtx.Err() != nil {
+		return hadWork, errors.Join(phaseErrs...)
+	}
+	lease, err := r.Queue.Lease(acquisitionCtx, &queuev1.LeaseRequest{
 		WorkspaceId:     workspaceID,
 		Kinds:           []string{queue.KindRuntimeInput, queue.KindRuntimeRecovery, queue.KindRuntimeConfigUpdate, queue.KindCleanupSession, queue.KindSessionDeleteCleanup},
 		LeaseOwner:      cfg.LeaseOwner,
@@ -243,6 +253,16 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 			phaseErrs = append(phaseErrs, errors.New("queue returned a cross-workspace job"))
 			return hadWork, errors.Join(phaseErrs...)
 		}
+	}
+	if acquisitionCtx.Err() != nil {
+		// The actual Lease may commit before its response races quiesce. Return
+		// every observed capability without dispatching a new Runtime command.
+		for _, job := range jobs {
+			if err := transitionUpdated(r.Queue.Defer(ctx, &queuev1.DeferRequest{WorkspaceId: workspaceID, JobId: job.GetId(), LeaseToken: job.GetLeaseToken()})); err != nil {
+				phaseErrs = append(phaseErrs, err)
+			}
+		}
+		return hadWork, errors.Join(phaseErrs...)
 	}
 	var wait sync.WaitGroup
 	jobErrs := make(chan error, len(jobs))
@@ -370,6 +390,9 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	if result.QueueLeaseSettled {
 		return deliverErr
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if deliverErr != nil {
 		if job.Kind == queue.KindRuntimeInput && job.InputKind == "interrupt_control" {
 			replayer := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
@@ -386,6 +409,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		attemptedBindingID := result.AttemptedBindingID
 		attemptedBindingGeneration := result.AttemptedBindingGeneration
 		attemptedTargetPodUID := result.AttemptedTargetPodUID
+		attemptedRuntimeProcessID := result.AttemptedRuntimeProcessID
 		result = RuntimeDeliveryResult{
 			Status:                     RuntimeDeliveryRejected,
 			Retryable:                  true,
@@ -394,6 +418,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			AttemptedBindingID:         attemptedBindingID,
 			AttemptedBindingGeneration: attemptedBindingGeneration,
 			AttemptedTargetPodUID:      attemptedTargetPodUID,
+			AttemptedRuntimeProcessID:  attemptedRuntimeProcessID,
 		}
 		if job.Kind == queue.KindCleanupSession {
 			authorizer, ok := r.Deliverer.(interface {
@@ -842,23 +867,23 @@ func DecodeRuntimeJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 }
 
 func decodeRuntimeRecoveryJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
-	var payload struct {
-		SessionID       string `json:"session_id"`
-		SessionThreadID string `json:"session_thread_id"`
-		SourceEventID   string `json:"source_event_id"`
-	}
-	if err := json.Unmarshal([]byte(queueJob.GetPayloadJson()), &payload); err != nil {
+	payload, err := queue.DecodeRuntimeRecoveryPayload([]byte(queueJob.GetPayloadJson()))
+	if err != nil {
 		return RuntimeJob{}, err
 	}
-	if queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" ||
-		payload.SessionID == "" || payload.SessionThreadID == "" || payload.SourceEventID == "" {
-		return RuntimeJob{}, errors.New("runtime recovery payload has missing identity fields")
+	if queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" {
+		return RuntimeJob{}, errors.New("runtime recovery Queue identity is incomplete")
 	}
+	if queueJob.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(queueJob.GetWorkspaceId()), payload.SessionID) || queueJob.GetDedupeKey() != runtimecontrol.RecoveryDedupeKey(queueJob.GetWorkspaceId(), payload) {
+		return RuntimeJob{}, errors.New("runtime recovery Queue keys do not match source")
+	}
+
 	return RuntimeJob{
 		JobID: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(), Kind: queue.KindRuntimeRecovery,
 		PartitionKey: queueJob.GetPartitionKey(), DedupeKey: queueJob.GetDedupeKey(),
 		WorkspaceID: queueJob.GetWorkspaceId(), SessionID: payload.SessionID, SessionThreadID: payload.SessionThreadID,
 		RecoverySourceEventID: payload.SourceEventID,
+		RecoveryHandoffID:     payload.HandoffID,
 		PayloadJSON:           queueJob.GetPayloadJson(), AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
 	}, nil
 }

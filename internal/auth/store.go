@@ -343,61 +343,22 @@ func (s *APIKeyStore) UpsertBootstrap(ctx context.Context, workspaceID workspace
 	now := storage.Now().Format(time.RFC3339)
 
 	return storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		var existingID string
-		var existingDigest []byte
-		var existingRevokedAt sql.NullTime
-		err := tx.QueryRowContext(ctx,
-			`SELECT id, key_digest, revoked_at FROM api_keys
-			  WHERE workspace_id = $1 AND key_kind = $2`,
-			string(workspaceID), KindBootstrap,
-		).Scan(&existingID, &existingDigest, &existingRevokedAt)
-		switch {
-		case err == sql.ErrNoRows:
-			apiKeyID := id.New("ak_")
-			_, insertErr := tx.ExecContext(ctx,
-				`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				apiKeyID, string(workspaceID), "bootstrap", prefix, digest, KindBootstrap, now,
-			)
-			if insertErr != nil {
-				return mapPostgreSQLError(insertErr)
-			}
-			return nil
-		case err != nil:
+		// Serialize bootstrap startup on the existing workspace row. The bootstrap
+		// workspace index alone cannot arbitrate simultaneous inserts that also
+		// conflict on the global key_digest index. NO KEY UPDATE still permits
+		// unrelated foreign-key references while the bootstrap transaction runs.
+		var lockedWorkspace string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE`, string(workspaceID)).Scan(&lockedWorkspace); err != nil {
 			return err
 		}
-		if bytesEqual(existingDigest, digest) {
-			if !existingRevokedAt.Valid {
-				return nil
-			}
-			_, updateErr := tx.ExecContext(ctx,
-				`UPDATE api_keys
-				    SET last_used_at = NULL,
-				        revoked_at = NULL
-				  WHERE id = $1 AND workspace_id = $2 AND key_kind = $3`,
-				existingID, string(workspaceID), KindBootstrap,
-			)
-			if updateErr != nil {
-				return mapPostgreSQLError(updateErr)
-			}
-			return nil
-		}
-		// Refresh: replace the digest and prefix in place. last_used_at
-		// is cleared because the previous secret no longer applies.
-		_, updateErr := tx.ExecContext(ctx,
-			`UPDATE api_keys
-			    SET key_digest = $1,
-			        key_prefix = $2,
-			        last_used_at = NULL,
-			        revoked_at = NULL,
-			        created_at = $3
-			  WHERE id = $4 AND workspace_id = $5 AND key_kind = $6`,
-			digest, prefix, now, existingID, string(workspaceID), KindBootstrap,
-		)
-		if updateErr != nil {
-			return mapPostgreSQLError(updateErr)
-		}
-		return nil
+		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,created_at)
+   VALUES($1,$2,'bootstrap',$3,$4,'bootstrap',$5)
+   ON CONFLICT(workspace_id) WHERE key_kind='bootstrap'
+   DO UPDATE SET key_digest=EXCLUDED.key_digest,key_prefix=EXCLUDED.key_prefix,
+     last_used_at=NULL,revoked_at=NULL,
+     created_at=CASE WHEN api_keys.key_digest=EXCLUDED.key_digest THEN api_keys.created_at ELSE EXCLUDED.created_at END
+   WHERE api_keys.key_digest<>EXCLUDED.key_digest OR api_keys.revoked_at IS NOT NULL`, id.New("ak_"), string(workspaceID), prefix, digest, now)
+		return mapPostgreSQLError(err)
 	})
 }
 
@@ -424,18 +385,6 @@ func mapPostgreSQLError(err error) error {
 		return &ValidationError{Message: "api key constraint violated"}
 	}
 	return err
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func runeCount(s string) int {

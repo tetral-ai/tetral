@@ -40,6 +40,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly runtimeInputId: string;
 	readonly inputOrder: number;
 	readonly commitResponse?: CommitTaskNotificationResultResponse;
@@ -85,6 +86,7 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			loadContext: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, value: unknown) => void,
 			) => {
 				callback(null, {
@@ -108,6 +110,7 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			commitTaskNotificationResult: (
 				request: CommitTaskNotificationResultRequest,
 				_metadata: Metadata,
+				_options: unknown,
 				callback: (error: Error | null, value: unknown) => void,
 			) => {
 				declaration = request;
@@ -248,6 +251,7 @@ const preloadResult = await hosts.subAgentRunHost.preloadThread({
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 });
 if (!preloadResult.ok || !preloadResult.applied) {
 	throw new Error(
@@ -255,6 +259,7 @@ if (!preloadResult.ok || !preloadResult.applied) {
 	);
 }
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 	ownPod: {
 		namespace: "engine",
 		name: "runtime-pod-composition",
@@ -308,6 +313,7 @@ try {
 					bindingId: input.bindingId,
 					bindingGeneration: input.bindingGeneration,
 					targetPodUid: input.targetPodUid,
+					runtimeProcessId: input.runtimeProcessId,
 					runtimeInputId: input.runtimeInputId,
 					inputOrder: input.inputOrder,
 					notificationJson: input.notificationJson,

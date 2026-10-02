@@ -118,6 +118,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 			await fixture.service.applyRuntimeConfig(
 				mcpConfig({
 					targetPodUid: "another-pod",
+					runtimeProcessId: "process-test",
 					mcpManifest: {
 						mcpServerName: "docs",
 						generation: 3,
@@ -193,7 +194,9 @@ describe("RuntimeControlService method-specific ingress", () => {
 			bindingId: "bind_recovery",
 			bindingGeneration: 4,
 			targetPodUid: "uid-a",
+			runtimeProcessId: "process-test",
 			sourceEventId: "evt_tool_recovery",
+			handoffId: "",
 			recoveryLeaseRef: {
 				jobId: "job_recovery",
 				leaseToken: "lease_recovery",
@@ -204,8 +207,9 @@ describe("RuntimeControlService method-specific ingress", () => {
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ accepted: {} });
 		expect(fixture.host.recoveries).toEqual([{
 			workspaceId: "default", sessionId: "sesn_recovery", sessionThreadId: "thr_recovery",
-			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a",
+			bindingId: "bind_recovery", bindingGeneration: 4, targetPodUid: "uid-a", runtimeProcessId: "process-test",
 			sourceEventId: "evt_tool_recovery",
+			handoffId: "",
 			recoveryLeaseRef: request.recoveryLeaseRef!,
 		}]);
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
@@ -224,7 +228,9 @@ describe("RuntimeControlService method-specific ingress", () => {
 			bindingId: "bind_recovery_race",
 			bindingGeneration: 4,
 			targetPodUid: "uid-a",
+			runtimeProcessId: "process-test",
 			sourceEventId: "evt_recovery_race",
+			handoffId: "",
 			recoveryLeaseRef: {
 				jobId: "job_recovery_race",
 				leaseToken: "lease_recovery_old",
@@ -291,7 +297,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 		const fixture = makeFixture();
 		expect(
 			await fixture.service.acceptInput(
-				acceptInput({ targetPodUid: "another-pod" }),
+				acceptInput({ targetPodUid: "another-pod", runtimeProcessId: "process-test" }),
 				metadata(),
 			),
 		).toEqual({
@@ -517,7 +523,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 		);
 		expect(
 			await fixture.service.acceptInput(
-				acceptInput({ targetPodUid: "another-pod" }),
+				acceptInput({ targetPodUid: "another-pod", runtimeProcessId: "process-test" }),
 				metadata(),
 			),
 		).toEqual({
@@ -606,6 +612,7 @@ function sessionScope() {
 		bindingId: "bind_1",
 		bindingGeneration: 42,
 		targetPodUid: "uid-a",
+		runtimeProcessId: "process-test",
 	};
 }
 
@@ -754,6 +761,7 @@ function makeFixture(options: { readonly deny?: boolean } = {}) {
 	const logger = new RecordingLogger();
 	const authenticator = new FixedAuthenticator(options.deny === true);
 	const service = new RuntimeControlService({
+		runtimeProcessId: "process-test",
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod-a",

@@ -23,6 +23,7 @@ export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly configIdentity: string;
 }
 

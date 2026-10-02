@@ -32,6 +32,7 @@ export function validateRunMcpToolRequest(request: RunMcpToolRequest): Validatio
     invalidBytes(request.sessionThreadId, MaxIdBytes) ||
     invalidBytes(request.toolUseEventId, MaxIdBytes) ||
     invalidBytes(request.bindingId, MaxIdBytes) ||
+    invalidBytes(request.runtimeProcessId,MaxIdBytes) ||
     invalidBindingGeneration(request.bindingGeneration) ||
     invalidBytes(request.runtimeBindingToken, MaxTokenBytes)
   ) {

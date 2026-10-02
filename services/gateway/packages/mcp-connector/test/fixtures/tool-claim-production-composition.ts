@@ -193,6 +193,7 @@ const settlement = await writer.settleToolResult({
 	sessionThreadId: runtimeRequest.sessionThreadId,
 	bindingId: runtimeRequest.bindingId,
 	bindingGeneration: runtimeRequest.bindingGeneration,
+	runtimeProcessId: runtimeRequest.runtimeProcessId,
 	targetPodUid: runtimeRequest.targetPodUid,
 	settlement: { toolUseEventId, outcome: runtimeToolSettlement(runtimeResult) },
 });
@@ -317,6 +318,7 @@ function runRequest(eventId: string): RunMcpToolRequest {
 		toolUseEventId: eventId,
 		bindingId: "bind_mcp_production_composition",
 		bindingGeneration: 1,
+		runtimeProcessId: `process_${runtimePodUid}`,
 		runtimeBindingToken: signedBindingToken(),
 	};
 }
@@ -332,6 +334,7 @@ function mcpRuntimeRequest(
 		sessionThreadId: "thr_mcp_production_composition",
 		bindingId: "bind_mcp_production_composition",
 		bindingGeneration: 1,
+		runtimeProcessId: `process_${runtimePodUid}`,
 		runtimeBindingToken: signedBindingToken(),
 		targetPodUid: runtimePodUid,
 		modelRequestId: "mreq_mcp_durable_claim",
@@ -375,6 +378,7 @@ async function runOAuthRuntime(
 			sessionThreadId: request.sessionThreadId,
 			bindingId: request.bindingId,
 			bindingGeneration: request.bindingGeneration,
+			runtimeProcessId: request.runtimeProcessId,
 			targetPodUid: request.targetPodUid,
 			settlement: { toolUseEventId: eventId, outcome: runtimeToolSettlement(result) },
 		});
@@ -622,6 +626,7 @@ function signedBindingToken(): string {
 			binding_id: "bind_mcp_production_composition",
 			binding_generation: 1,
 			runtime_pod_uid: runtimePodUid,
+			runtime_process_id: `process_${runtimePodUid}`,
 			exp: Math.floor(new Date("2026-01-01T00:05:00Z").getTime() / 1_000),
 		}),
 	).toString("base64url");

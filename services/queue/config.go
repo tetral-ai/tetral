@@ -29,6 +29,7 @@ const (
 	EnvRetryBaseMS                     = "TETRAL_QUEUE_RETRY_BASE_MS"
 	EnvRetryCapMS                      = "TETRAL_QUEUE_RETRY_CAP_MS"
 	EnvRetryMaxAttempts                = "TETRAL_QUEUE_RETRY_MAX_ATTEMPTS"
+	EnvDrainTimeoutMS                  = "TETRAL_QUEUE_DRAIN_TIMEOUT_MS"
 	defaultLeaseReclaimIntervalSeconds = 30
 	defaultLeaseReclaimLimit           = 100
 	defaultRetryBaseMS                 = 1000
@@ -50,6 +51,7 @@ type Config struct {
 	RetryBaseDelay         time.Duration
 	RetryMaxDelay          time.Duration
 	RetryMaxAttempts       int
+	DrainTimeout           time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -99,6 +101,13 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if retryCapMS < retryBaseMS {
 		return Config{}, workload.NewConfigError(EnvRetryCapMS + " must be greater than or equal to " + EnvRetryBaseMS)
 	}
+	drainMS, err := nonNegativeOrDefault(env.Getenv(EnvDrainTimeoutMS), 10000, EnvDrainTimeoutMS)
+	if err != nil {
+		return Config{}, err
+	}
+	if drainMS <= 0 || drainMS > 25000 {
+		return Config{}, workload.NewConfigError(EnvDrainTimeoutMS + " must be between 1 and 25000 milliseconds, leaving join time inside the 30-second Pod grace")
+	}
 	return Config{
 		HTTPAddress:            httpAddress,
 		GRPCAddress:            grpcAddress,
@@ -109,6 +118,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 		RetryBaseDelay:         time.Duration(retryBaseMS) * time.Millisecond,
 		RetryMaxDelay:          time.Duration(retryCapMS) * time.Millisecond,
 		RetryMaxAttempts:       retryMaxAttempts,
+		DrainTimeout:           time.Duration(drainMS) * time.Millisecond,
 	}, nil
 }
 

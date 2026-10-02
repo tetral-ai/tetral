@@ -47,7 +47,7 @@ export const MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES = MCP_BLOB_MAX_BYTES + MCP_CON
 export interface McpConnectorGrpcServer {
   readonly server: Server;
   readonly bind: (address: string) => Promise<number>;
-  readonly shutdown: () => Promise<void>;
+  readonly shutdown: (deadline?: Date) => Promise<void>;
 }
 
 /**
@@ -80,24 +80,44 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
     server,
     bind: async (address) =>
       await new Promise<number>((resolve, reject) => {
-        server.bindAsync(address, ServerCredentials.createInsecure(), (error, port) => {
-          if (error !== null) {
-            reject(new Error("mcp connector grpc listener unavailable"));
-            return;
-          }
-          resolve(port);
-        });
+        server.bindAsync(
+          address,
+          ServerCredentials.createInsecure(),
+          (error, port) => {
+            if (error !== null) {
+              reject(new Error("mcp connector grpc listener unavailable"));
+              return;
+            }
+            resolve(port);
+          },
+        );
       }),
-    shutdown: async () =>
+    shutdown: async (deadline = new Date(Date.now() + 5000)) =>
       await new Promise<void>((resolve) => {
-        server.tryShutdown(() => resolve());
+        const timer = setTimeout(
+          () => {
+            server.forceShutdown();
+            resolve();
+          },
+          Math.max(0, deadline.getTime() - Date.now()),
+        );
+        server.tryShutdown(() => {
+          clearTimeout(timer);
+          resolve();
+        });
       }),
   };
 }
 
-function unaryHandler<Request extends RunMcpToolRequest | ListMcpToolsRequest, Response extends RunMcpToolResponse | ListMcpToolsResponse>(
+function unaryHandler<
+  Request extends RunMcpToolRequest | ListMcpToolsRequest,
+  Response extends RunMcpToolResponse | ListMcpToolsResponse,
+>(
   handler: (request: Request, metadata: Metadata) => Promise<Response>,
-): (call: ServerUnaryCall<Request, Response>, callback: sendUnaryData<Response>) => void {
+): (
+  call: ServerUnaryCall<Request, Response>,
+  callback: sendUnaryData<Response>,
+) => void {
   return (call, callback) => {
     void unary(() => handler(call.request, call.metadata), callback);
   };

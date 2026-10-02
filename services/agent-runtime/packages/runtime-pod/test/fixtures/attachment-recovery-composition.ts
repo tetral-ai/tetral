@@ -35,6 +35,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId: string;
 	readonly bindingGeneration: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly fileId?: string;
 	readonly readyPath?: string;
 	readonly acceptResultPath?: string;
@@ -57,6 +58,7 @@ const address = {
 	bindingId: input.bindingId,
 	bindingGeneration: input.bindingGeneration,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 };
 const writer = new BridgeAPIEventWriter({
 	address: input.bridgeAddress,
@@ -152,6 +154,14 @@ const credentialResolver = new ProviderCredentialResolver({
 	},
 	masterKeyHex: "0".repeat(64),
 });
+// Runtime and Gateway are separate Bun packages with distinct grpc-js instances.
+// Let Gateway construct its own Metadata through the production token path.
+const gatewayTokenPath = `${inputPath}.gateway-token`;
+await writeFile(gatewayTokenPath, "attachment-recovery-gateway-token", { mode: 0o600 });
+const attachmentResolver = new BridgeAPIAttachmentResolver({
+	address: input.bridgeAddress,
+	tokenPath: gatewayTokenPath,
+});
 const gatewayService = new ProviderGatewayServiceShell({
 	authenticator: {
 		authenticate: async () => ({
@@ -164,15 +174,11 @@ const gatewayService = new ProviderGatewayServiceShell({
 		}),
 	},
 	runtimeBindingTokenVerifier: { verify: () => true },
-	logger: { info: () => undefined, error: () => undefined },
+	logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
 	ready: () => true,
 	providerStreamer,
 	credentialResolver,
-	attachmentResolver: new BridgeAPIAttachmentResolver({
-		address: input.bridgeAddress,
-		tokenPath: "/unused/service-account-token",
-		metadataFactory,
-	}),
+	attachmentResolver,
 });
 const gatewayServer = createGatewayGrpcServer(gatewayService);
 const gatewayPort = await gatewayServer.bind("127.0.0.1:0");
@@ -262,6 +268,7 @@ if (input.mode === "cold") {
 		metadataFactory,
 	});
 	const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 		ownPod: {
 			namespace: "tetral-agent-runtime",
 			name: "runtime-pod-attachment-recovery",

@@ -350,6 +350,7 @@ describe("Runtime provider-context projection", () => {
 					bindingId: "binding-a",
 					bindingGeneration: 1,
 					targetPodUid: "pod-a",
+					runtimeProcessId: "process-test",
 					runtimeBindingToken: "binding-token",
 				},
 				requestId: `request-${testCase.status}`,

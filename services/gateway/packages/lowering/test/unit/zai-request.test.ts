@@ -247,6 +247,7 @@ function zaiRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
+    runtimeProcessId: "process-test",
     runtimeBindingToken: "rtbt_v1.test",
     model: { providerId: "zai", modelId: "glm-5.2", variant: "" },
     system: [],

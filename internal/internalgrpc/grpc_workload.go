@@ -33,6 +33,7 @@ type GRPCWorkloadParams struct {
 	MethodAuthorizer    MethodAuthorizer
 	ReadinessDependency func() bool
 	ShutdownTimeout     time.Duration
+	CancelJoinTimeout   time.Duration
 	DBStatsProvider     workload.DBStatsProvider
 	ServerOptions       []grpc.ServerOption
 	Logger              *slog.Logger
@@ -143,10 +144,11 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 			OnServing: func() {
 				markGRPCServing.Do(func() { close(grpcServing) })
 			},
-			ShutdownTimeout: shutdownTimeout,
-			Logger:          logger,
-			Metrics:         grpcMetrics,
-			ServerOptions:   params.ServerOptions,
+			ShutdownTimeout:   shutdownTimeout,
+			CancelJoinTimeout: params.CancelJoinTimeout,
+			Logger:            logger,
+			Metrics:           grpcMetrics,
+			ServerOptions:     params.ServerOptions,
 		})
 		if grpcCtx.Err() == nil {
 			if runErr == nil {
@@ -167,7 +169,13 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		}
 		return err
 	case <-serverCtx.Done():
+		readiness.BeginShutdown()
 		cancelGRPC()
+		// The listener owner must finish before callers close its dependencies,
+		// even when cancellation arrives before the serving callback.
+		if runErr := <-grpcErr; runErr != nil {
+			return runErr
+		}
 		return serverCtx.Err()
 	}
 	metricsOptions := []workload.HealthRouterOption{
@@ -193,15 +201,10 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	})
 	readiness.BeginShutdown()
 	cancelGRPC()
-	select {
-	case grpcRunErr := <-grpcErr:
-		if err == nil {
-			err = grpcRunErr
-		}
-	case <-time.After(shutdownTimeout):
-		if err == nil {
-			err = fmt.Errorf("internal grpc shutdown timed out")
-		}
+	// Run owns the drain deadline and forced cancellation. An outer timeout
+	// cannot safely release pools while its handlers are still joining.
+	if grpcRunErr := <-grpcErr; err == nil {
+		err = grpcRunErr
 	}
 	return err
 }

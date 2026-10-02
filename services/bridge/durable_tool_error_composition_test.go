@@ -54,7 +54,7 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 
 	runtimeRepair := runRuntimeInvalidToolRepairComposition(t, listener.Addr().String(), map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"runtimeBindingToken": "fixture-binding-token",
 	})
 	if runtimeRepair.ResultType != "completed" || len(runtimeRepair.StoreOrder) != 1 ||
@@ -274,7 +274,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 
 	adapter := runRuntimeDurableToolErrorDeclaration(t, map[string]any{
 		"workspaceId": "default", "sessionId": "sesn_durable_error", "sessionThreadId": "sthr_durable_error",
-		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error",
+		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error", "runtimeProcessId": "process_pod_durable_error",
 		"modelRequestId": "mreq_durable_error", "modelToolCallId": "call_durable_error",
 		"toolUseEventId": toolUse.GetCommitted().GetEventId(),
 	})

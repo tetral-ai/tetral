@@ -78,6 +78,13 @@ func NewJinaBackend(client *http.Client, searchEndpoint, readerEndpoint string, 
 	}
 }
 
+// Close releases this backend's owned HTTP transport after callers have joined.
+func (b *JinaBackend) Close() {
+	if b != nil && b.client != nil {
+		b.client.CloseIdleConnections()
+	}
+}
+
 // MaxAttemptsPerCall reports the construction-fixed upper bound for one
 // logical provider call. Key health changes which keys are currently usable,
 // but never shortens the bound used by subsequently created durable claims.

@@ -31,17 +31,26 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: {{ .Values.replicas.bridge }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: bridge
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "bridge") | indent 8 }}
       labels:
         app.kubernetes.io/name: bridge
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: bridge
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       containers:
         - name: bridge-api
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -49,6 +58,15 @@ spec:
           command:
             - /usr/local/bin/bridge-api
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.bridgeDrainMs | quote }}
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.cancelJoinMs | quote }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_BRIDGE_API_HTTP_ADDR
               value: :8080
             - name: TETRAL_BRIDGE_API_GRPC_ADDR
@@ -139,6 +157,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: bridge-api-kubernetes-api
               mountPath: /var/run/secrets/tetral-kubernetes-api
               readOnly: true
@@ -146,6 +167,9 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/mcp-connector
               readOnly: true
       volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
         - name: bridge-api-kubernetes-api
           projected:
             sources:

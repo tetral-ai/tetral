@@ -120,9 +120,11 @@ func TestSeparatedServiceWorkloadAuthentication(t *testing.T) {
 	store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte(identityBindingKey)
 	seedIdentitySession(t, adminDB)
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(adminDB), "tetral-agent-runtime", identityPodUID)
 	delivery := jobrunner.NewJobRunnerRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), nil, jobrunner.JobRunnerConfig{AgentRuntimeGRPCPort: 9090}, func() kubernetes.BindingVisibilitySnapshot {
-		return kubernetes.BindingVisibilitySnapshot{Ready: true, Candidates: []kubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-identity", PodUID: identityPodUID, PodIP: "127.0.0.1"}}}
+		return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-identity", PodUID: identityPodUID, PodIP: "127.0.0.1"}})
 	})
+	installFixtureRuntimeLoad(t, delivery)
 	declaration, err := delivery.PrepareRuntimeCommand(context.Background(), jobrunner.RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: "sesn_identity", RuntimeInputID: "runtime_config_update:sesn_identity:1", ConfigGeneration: "1"})
 	if err != nil || declaration.AttemptedBinding.BindingID == "" {
 		t.Fatalf("production Runner binding declaration: %v %+v", err, declaration)
@@ -132,7 +134,7 @@ func TestSeparatedServiceWorkloadAuthentication(t *testing.T) {
 		return handler(ctx, req)
 	})}})
 	client := bridgev1.NewAgentRuntimeBridgeServiceClient(bridgeConn)
-	scope := &bridgev1.RuntimeScope{WorkspaceId: "default", SessionId: "sesn_identity", SessionThreadId: "thrd_identity", Binding: &bridgev1.RuntimeBindingRef{BindingId: declaration.AttemptedBinding.BindingID, BindingGeneration: declaration.AttemptedBinding.Generation, TargetPodUid: declaration.AttemptedBinding.TargetPodUID}}
+	scope := &bridgev1.RuntimeScope{WorkspaceId: "default", SessionId: "sesn_identity", SessionThreadId: "thrd_identity", Binding: &bridgev1.RuntimeBindingRef{BindingId: declaration.AttemptedBinding.BindingID, BindingGeneration: declaration.AttemptedBinding.Generation, TargetPodUid: declaration.AttemptedBinding.TargetPodUID, RuntimeProcessId: declaration.AttemptedBinding.RuntimeProcessID}}
 	issued, err := client.RefreshRuntimeBindingToken(identityContext("runtime"), &bridgev1.RefreshRuntimeBindingTokenRequest{Scope: scope})
 	if err != nil || issued.GetRuntimeBindingToken() == "" {
 		t.Fatalf("production Bridge binding issuance: %v", err)
@@ -224,7 +226,7 @@ func TestSeparatedServiceWorkloadAuthentication(t *testing.T) {
 		return handler(ctx, req)
 	})}})
 	webClient := gatewayv1.NewProviderGatewayServiceClient(webConn)
-	request := &gatewayv1.RunWebRequest{WorkspaceId: "default", SessionId: "sesn_identity", SessionThreadId: "thrd_identity", BindingId: scope.Binding.BindingId, BindingGeneration: scope.Binding.BindingGeneration, ToolUseEventId: "sevt_identity", Input: &gatewayv1.WebToolInput{SearchQuery: []*gatewayv1.WebSearchQuery{{Q: "identity fixture"}}}}
+	request := &gatewayv1.RunWebRequest{WorkspaceId: "default", SessionId: "sesn_identity", SessionThreadId: "thrd_identity", BindingId: scope.Binding.BindingId, BindingGeneration: scope.Binding.BindingGeneration, RuntimeProcessId: scope.Binding.RuntimeProcessId, ToolUseEventId: "sevt_identity", Input: &gatewayv1.WebToolInput{SearchQuery: []*gatewayv1.WebSearchQuery{{Q: "identity fixture"}}}}
 	request.RuntimeBindingToken = issued.GetRuntimeBindingToken()
 	response, err := webClient.RunWeb(identityContext("runtime"), request)
 	if err != nil || response.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED || backend.calls.Load() != 1 || blobs.Len() == 0 {
@@ -251,6 +253,13 @@ func TestSeparatedServiceWorkloadAuthentication(t *testing.T) {
 		t.Fatalf("wrong Web binding bypassed fence: %v", err)
 	}
 	goOutcomes = append(goOutcomes, map[string]any{"receiver": "web", "method": "RunWeb", "caller": "runtime", "binding": "wrong reviewed pod", "code": codes.PermissionDenied.String(), "backendAndBlobsUnchanged": true})
+	request.RuntimeBindingToken = issued.GetRuntimeBindingToken()
+	request.RuntimeProcessId = "retired-process"
+	_, err = webClient.RunWeb(identityContext("runtime"), request)
+	if status.Code(err) != codes.PermissionDenied || backend.calls.Load() != beforeCalls || blobs.Len() != beforeObjects {
+		t.Fatalf("wrong Web process bypassed binding fence: %v", err)
+	}
+	goOutcomes = append(goOutcomes, map[string]any{"receiver": "web", "method": "RunWeb", "caller": "runtime", "binding": "wrong process", "code": codes.PermissionDenied.String(), "backendAndBlobsUnchanged": true})
 	if receipts() != initialReceipts {
 		t.Fatal("identity composition changed durable Bridge receipts")
 	}
@@ -261,7 +270,7 @@ func TestSeparatedServiceWorkloadAuthentication(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, bun, "run", "testdata/service-identity.ts")
-	command.Env = append(os.Environ(), "TETRAL_TEST_REVIEW_URL="+review.URL, "TETRAL_TEST_REVIEW_TOKEN_PATH="+tokenPath, "TETRAL_TEST_REVIEW_CA_PATH="+caPath, "TETRAL_TEST_DATABASE_URL=postgres://fixture-local", "TETRAL_TEST_RUNTIME_BINDING_TOKEN="+issued.GetRuntimeBindingToken(), "TETRAL_TEST_RUNTIME_BINDING_ID="+scope.Binding.BindingId, "TETRAL_TEST_RUNTIME_BINDING_GENERATION="+fmt.Sprint(scope.Binding.BindingGeneration))
+	command.Env = append(os.Environ(), "TETRAL_TEST_REVIEW_URL="+review.URL, "TETRAL_TEST_REVIEW_TOKEN_PATH="+tokenPath, "TETRAL_TEST_REVIEW_CA_PATH="+caPath, "TETRAL_TEST_DATABASE_URL=postgres://fixture-local", "TETRAL_TEST_RUNTIME_BINDING_TOKEN="+issued.GetRuntimeBindingToken(), "TETRAL_TEST_RUNTIME_BINDING_ID="+scope.Binding.BindingId, "TETRAL_TEST_RUNTIME_PROCESS_ID="+scope.Binding.RuntimeProcessId, "TETRAL_TEST_RUNTIME_BINDING_GENERATION="+fmt.Sprint(scope.Binding.BindingGeneration))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Bun receiving identity composition: %v\n%s", err, output)
@@ -351,7 +360,7 @@ func (b *identityWebBackend) Fetch(context.Context, string) (web.Page, web.Backe
 	panic("unexpected identity fixture fetch")
 }
 func identitySignedBinding(request *gatewayv1.RunWebRequest, pod string, expiry int64) string {
-	payload, _ := json.Marshal(map[string]any{"v": 1, "workspace_id": request.GetWorkspaceId(), "session_id": request.GetSessionId(), "session_thread_id": request.GetSessionThreadId(), "binding_id": request.GetBindingId(), "binding_generation": request.GetBindingGeneration(), "runtime_pod_uid": pod, "exp": expiry})
+	payload, _ := json.Marshal(map[string]any{"v": 1, "workspace_id": request.GetWorkspaceId(), "session_id": request.GetSessionId(), "session_thread_id": request.GetSessionThreadId(), "binding_id": request.GetBindingId(), "binding_generation": request.GetBindingGeneration(), "runtime_pod_uid": pod, "runtime_process_id": request.GetRuntimeProcessId(), "exp": expiry})
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, []byte(identityBindingKey))
 	_, _ = mac.Write([]byte(encoded))

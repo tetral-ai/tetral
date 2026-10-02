@@ -711,7 +711,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
+	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(true, enginekubernetes.BoundRuntimePod{
 				Namespace: "tetral-agent-runtime",
@@ -865,7 +865,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 
 	cleanupStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	cleanupStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	cleanupStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
+	cleanupStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(
 				true,

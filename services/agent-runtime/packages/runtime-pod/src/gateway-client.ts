@@ -146,8 +146,13 @@ const GatewayRoundRobinChannelOptions: ChannelOptions = {
  * and non-leaky transport error normalization.
  */
 export class RuntimePodGatewayClient implements GatewayClient {
-  private readonly client: ProviderGatewayServiceClient;
-  private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
+	private readonly client: ProviderGatewayServiceClient;
+	private readonly streams = new Set<RuntimeGatewayStreamHandle>();
+	private stopping = false;
+	private closed: Promise<void> | undefined;
+	private readonly metadataFactory: (
+		config: ServiceAccountTokenConfig,
+	) => Promise<Metadata>;
 
   /** Creates a Gateway adapter, constructing an insecure in-cluster gRPC channel unless one is injected. */
   constructor(private readonly options: RuntimePodGatewayClientOptions) {
@@ -159,62 +164,117 @@ export class RuntimePodGatewayClient implements GatewayClient {
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 
-  /**
-   * Opens one authenticated Gateway stream for a complete provider request.
-   * Requests beyond the outbound message fuse fail locally and deterministically;
-   * otherwise the returned handle carries ordered events, an idempotent cancel
-   * operation, and one completion result that settles after transport cleanup.
-   */
-  async streamProviderRequest(
-    request: ProviderRequest,
-    options: { readonly abortSignal?: AbortSignal } = {},
-  ): Promise<RuntimeGatewayStreamHandle> {
-    if (ProviderRequestMessage.encode(request).finish().byteLength > MaxGatewayRequestGrpcMessageBytes) {
-      const error: GatewayClientError = {
-        type: "gateway-client",
-        code: "gateway_protocol_error",
-        message: "Gateway provider request exceeds the transport fuse.",
-        retryable: false,
-        fatal: true,
-        statusCode: status.RESOURCE_EXHAUSTED,
-      };
-    logProviderStreamFailed(this.options.logger, request, error, "request_fuse");
-      throw error;
-    }
-    let metadata: Metadata;
-    try {
-      metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
-    } catch (error) {
-    const normalized = gatewayClientError(error);
-    logProviderStreamFailed(this.options.logger, request, normalized, "metadata");
-    throw normalized;
-    }
-    const callStartedAt = (this.options.nowEpochMs ?? Date.now)();
-    const deadlineEpochMs = callStartedAt + Math.max(0, request.limits?.timeoutMs ?? 0) + RuntimeGatewayTransportCompletionAllowanceMs;
-    let call: ClientReadableStream<ProviderStreamEvent>;
-    try {
-      call = this.client.streamProviderRequest(request, metadata, {
-        // The Runtime timer owns the exact completion boundary. Keeping the
-        // transport deadline strictly later prevents scheduler order from
-        // relabeling that boundary as an infrastructure failure.
-        deadline: new Date(deadlineEpochMs + RuntimeGatewayTransportDeadlineGuardMs),
-      } satisfies CallOptions);
-    } catch (error) {
-      const normalized = gatewayClientError(error);
-      logProviderStreamFailed(this.options.logger, request, normalized, "stream_call");
-      throw normalized;
-    }
-    logProviderStreamOpened(this.options.logger, request);
-    return runtimeGatewayStreamHandle(
-      call,
-      request,
-      deadlineEpochMs,
-      options.abortSignal,
-      this.options.nowEpochMs ?? Date.now,
-      this.options.scheduleTimeout ?? setTimeout,
-      this.options.cancelTimeout ?? clearTimeout,
-    );
-  }
+	/**
+	 * Opens one authenticated Gateway stream for a complete provider request.
+	 * Requests beyond the outbound message fuse fail locally and deterministically;
+	 * otherwise the returned handle carries ordered events, an idempotent cancel
+	 * operation, and one completion result that settles after transport cleanup.
+	 */
+	async streamProviderRequest(
+		request: ProviderRequest,
+		options: { readonly abortSignal?: AbortSignal } = {},
+	): Promise<RuntimeGatewayStreamHandle> {
+		if (this.stopping) throw new Error("Gateway client closing");
+		if (
+			ProviderRequestMessage.encode(request).finish().byteLength >
+			MaxGatewayRequestGrpcMessageBytes
+		) {
+			const error: GatewayClientError = {
+				type: "gateway-client",
+				code: "gateway_protocol_error",
+				message: "Gateway provider request exceeds the transport fuse.",
+				retryable: false,
+				fatal: true,
+				statusCode: status.RESOURCE_EXHAUSTED,
+			};
+			logProviderStreamFailed(
+				this.options.logger,
+				request,
+				error,
+				"request_fuse",
+			);
+			throw error;
+		}
+		let metadata: Metadata;
+		try {
+			metadata = await this.metadataFactory({
+				tokenPath: this.options.tokenPath,
+			});
+		} catch (error) {
+			const normalized = gatewayClientError(error);
+			logProviderStreamFailed(
+				this.options.logger,
+				request,
+				normalized,
+				"metadata",
+			);
+			throw normalized;
+		}
+		if (this.stopping) throw new Error("Gateway client closing");
+		if (options.abortSignal?.aborted) {
+			logProviderStreamOpened(this.options.logger, request);
+			return {
+				events: Stream.empty,
+				completion: Promise.resolve({
+					outcome: "cancelled",
+					cancelKind: "caller",
+				}),
+				cancel: () => undefined,
+			};
+		}
+		const callStartedAt = (this.options.nowEpochMs ?? Date.now)();
+		const deadlineEpochMs =
+			callStartedAt +
+			Math.max(0, request.limits?.timeoutMs ?? 0) +
+			RuntimeGatewayTransportCompletionAllowanceMs;
+		let call: ClientReadableStream<ProviderStreamEvent>;
+		try {
+			call = this.client.streamProviderRequest(request, metadata, {
+				// The Runtime timer owns the exact completion boundary. Keeping the
+				// transport deadline strictly later prevents scheduler order from
+				// relabeling that boundary as an infrastructure failure.
+				deadline: new Date(
+					deadlineEpochMs + RuntimeGatewayTransportDeadlineGuardMs,
+				),
+			} satisfies CallOptions);
+		} catch (error) {
+			const normalized = gatewayClientError(error);
+			logProviderStreamFailed(
+				this.options.logger,
+				request,
+				normalized,
+				"stream_call",
+			);
+			throw normalized;
+		}
+		logProviderStreamOpened(this.options.logger, request);
+		const handle = runtimeGatewayStreamHandle(
+			call,
+			request,
+			deadlineEpochMs,
+			options.abortSignal,
+			this.options.nowEpochMs ?? Date.now,
+			this.options.scheduleTimeout ?? setTimeout,
+			this.options.cancelTimeout ?? clearTimeout,
+		);
+		this.streams.add(handle);
+		void handle.completion.then(
+			() => this.streams.delete(handle),
+			() => this.streams.delete(handle),
+		);
+		return handle;
+	}
+	close(): Promise<void> {
+		if (this.closed !== undefined) return this.closed;
+		this.stopping = true;
+		this.closed = (async () => {
+			const active = [...this.streams];
+			for (const handle of active) handle.cancel("caller");
+			await Promise.all(active.map((handle) => handle.completion));
+			this.client.close();
+		})();
+		return this.closed;
+	}
 }
 
 function logProviderStreamFailed(

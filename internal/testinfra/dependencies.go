@@ -45,6 +45,7 @@ type dependencyStarters struct {
 	minio      func(context.Context, *dependencyManager) error
 	docker     func(context.Context) error
 	sdk        func(context.Context, *dependencyManager) error
+	image      func(context.Context, *dependencyManager, string) error
 }
 
 var productionDependencyStarters = dependencyStarters{
@@ -52,6 +53,9 @@ var productionDependencyStarters = dependencyStarters{
 	minio:      func(ctx context.Context, manager *dependencyManager) error { return manager.startMinIO(ctx) },
 	docker:     dockerAvailable,
 	sdk:        func(ctx context.Context, manager *dependencyManager) error { return manager.startSDK(ctx) },
+	image: func(ctx context.Context, manager *dependencyManager, name string) error {
+		return manager.preparePinnedImage(ctx, name)
+	},
 }
 
 func (m *dependencyManager) environmentForProcess() ([]string, string, error) {
@@ -129,6 +133,15 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 			manager.evidence = append(manager.evidence, DependencyEvidence{Name: "docker", Source: "host-daemon", Identity: "available"})
 		case "sdk":
 			if err := starters.sdk(ctx, manager); err != nil {
+				_ = manager.stopBounded()
+				return nil, err
+			}
+		case "envoy", "bun-image":
+			if starters.image == nil {
+				_ = manager.stopBounded()
+				return nil, fmt.Errorf("pinned image dependency starter is unavailable")
+			}
+			if err := starters.image(ctx, manager, dependency); err != nil {
 				_ = manager.stopBounded()
 				return nil, err
 			}
@@ -407,10 +420,16 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 	for _, container := range strings.Fields(output) {
 		pidText, err := commandOutput(ctx, "docker", "inspect", "--format", "{{index .Config.Labels \"tetral.test.owner-pid\"}}", container)
 		if err != nil {
+			if exists, checkErr := dockerResourceExists(ctx, "container", "id", container); checkErr == nil && !exists {
+				continue
+			}
 			return fmt.Errorf("inspect owned test dependency container: %w", err)
 		}
 		started, err := commandOutput(ctx, "docker", "inspect", "--format", "{{index .Config.Labels \"tetral.test.owner-start\"}}", container)
 		if err != nil {
+			if exists, checkErr := dockerResourceExists(ctx, "container", "id", container); checkErr == nil && !exists {
+				continue
+			}
 			return fmt.Errorf("inspect owned test dependency container: %w", err)
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(pidText))
@@ -418,6 +437,9 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 			continue
 		}
 		if err := runQuiet(ctx, "docker", "rm", "-f", container); err != nil {
+			if exists, checkErr := dockerResourceExists(ctx, "container", "id", container); checkErr == nil && !exists {
+				continue
+			}
 			return fmt.Errorf("remove orphaned test dependency container: %w", err)
 		}
 	}

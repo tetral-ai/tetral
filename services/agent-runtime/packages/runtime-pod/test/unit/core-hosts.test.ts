@@ -698,6 +698,7 @@ describe("Runtime core host production assembly", () => {
 					bindingId: request.bindingId,
 					bindingGeneration: request.bindingGeneration,
 					targetPodUid: request.targetPodUid,
+					runtimeProcessId: request.runtimeProcessId,
 				}),
 			).toMatchObject({ ok: true, observed: true, status: "idle" });
 
@@ -1387,6 +1388,7 @@ describe("Runtime core host production assembly", () => {
 			bindingId: "bind_2",
 			bindingGeneration: 2,
 			targetPodUid: "pod_2",
+			runtimeProcessId: "process-test",
 		};
 
 		const hosts = await buildRuntimeCoreHosts({
@@ -2194,6 +2196,7 @@ function cleanupScope(sessionId: string) {
 		bindingId: scope.bindingId,
 		bindingGeneration: scope.bindingGeneration,
 		targetPodUid: scope.targetPodUid,
+		runtimeProcessId: scope.runtimeProcessId,
 		cleanupOperationId: "cleanup_test",
 	};
 }
@@ -2206,6 +2209,7 @@ function commandScope(sessionId: string) {
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_cleanup",
 	};
 }
@@ -2219,6 +2223,7 @@ function acceptedInput(sessionId: string) {
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_1",
 		inputOrder: 1,
 		contentJson: JSON.stringify({
@@ -2236,6 +2241,7 @@ function composedReviewRequest(): RuntimeApprovalReviewRequest {
 		bindingId: "bind_reviewer_composed",
 		bindingGeneration: 1,
 		targetPodUid: "pod_reviewer_composed",
+		runtimeProcessId: "process-test",
 		runtimeBindingToken: "runtime-binding-token-reviewer-composed",
 		modelRequestId: "mreq_reviewer_parent",
 		parentBoundaryEventId: "sevt_reviewer_parent_start",
@@ -2400,6 +2406,7 @@ function writerFrom(
 				bindingId: envelope.bindingId,
 				bindingGeneration: envelope.bindingGeneration,
 				targetPodUid: envelope.targetPodUid,
+				runtimeProcessId: envelope.runtimeProcessId,
 				writeId: envelope.durableTurnId,
 				event: {
 					type: "session.status_idle",

@@ -16,6 +16,39 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 	}
 	for _, changed := range []string{
 		"internal/runtimeconfig/config.go",
+		"internal/schemaidentity/postgresql.go",
+		"internal/storage/postgresql_runtime_schema.go",
+		"services/gateway/packages/schema/src/verify.ts",
+		"internal/transportsecurity/loader.go",
+		"internal/dbconnect/plain_dsn.go",
+		"internal/blob/s3.go",
+		"internal/ts-dbconnect/src/index.ts",
+		"services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts",
+		"services/queue/run.go",
+		"services/sandbox/run.go",
+		"internal/kubernetes/watcher_cache.go",
+		"deploy/istio/routing.json",
+		"deploy/dependencies.lock.json",
+		"integration/replica_worker_lifecycle_test.go",
+		"integration/testdata/replica-runtime.ts",
+		"integration/runtime_direct_tls_test.go",
+		"integration/protected_store_test.go",
+		"integration/protected_object_store_test.go",
+		"integration/transport_security_test.go",
+		"integration/transport_fault_test.go",
+		"integration/transporttest/faults.go",
+		"services/gateway/packages/mcp-connector/test/fixtures/transport-business-fault.ts",
+		"integration/replica_runtime_handoff_test.go",
+		"integration/replica_bridge_test.go",
+		"integration/replica_attachments_test.go",
+		"integration/replica_provider_test.go",
+		"integration/replica_public_api_test.go",
+		"integration/replica_public_faults_test.go",
+		"integration/replica_sandbox_test.go",
+		"integration/replica_web_connector_test.go",
+		"integration/testdata/replica-public-client.ts",
+		"services/agent-runtime/packages/runtime-pod/test/fixtures/replica-provider-continuation.ts",
+		"services/gateway/packages/provider-gateway/test/fixtures/replica-attachments.ts",
 		"internal/mcpmanifest/manifest.go",
 		"internal/runtimecontrol/control.go",
 		"internal/internalgrpc/auth/config.go",
@@ -100,16 +133,17 @@ func TestSeparatedServiceManifestSelectionExecutesRawAndHelmInvariants(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raw, rendered, lint bool
+	var raw, rendered, issuer, lint bool
 	for _, command := range commands {
 		if len(command.Arguments) >= 2 && slices.Equal(command.Arguments[:2], []string{"go", "test"}) {
 			raw = raw || slices.Contains(command.Arguments, "./deploy/kubernetes")
 			rendered = rendered || slices.Contains(command.Arguments, "./deploy/helm")
+			issuer = issuer || slices.Contains(command.Arguments, "./deploy/istio")
 		}
 		lint = lint || slices.Equal(command.Arguments, []string{"helm", "lint", "deploy/helm/tetral"})
 	}
-	if !raw || !rendered || !lint {
-		t.Fatalf("deployment execution raw=%v rendered=%v lint=%v; all are required", raw, rendered, lint)
+	if !raw || !rendered || !issuer || !lint {
+		t.Fatalf("deployment execution raw=%v rendered=%v issuer=%v lint=%v; all are required", raw, rendered, issuer, lint)
 	}
 }
 

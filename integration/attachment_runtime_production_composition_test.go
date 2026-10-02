@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -129,7 +128,7 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	}
 	process.kill(t)
 
-	repairStore := runtimePodLossSweepStore(runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	repairStore := runtimePodLossSweepStore(t, runtimeDB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := repairStore.RepairLostRuntimeBindings(context.Background(), string(workspace.DefaultID)); err != nil || repaired != 1 {
@@ -212,14 +211,15 @@ func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port 
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: podName, PodUID: podUID, PodIP: "127.0.0.1",
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "attachment-runtime-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {
@@ -229,7 +229,7 @@ func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port 
 
 type attachmentRecoveryProcess struct {
 	command             *exec.Cmd
-	output              bytes.Buffer
+	output              lockedBuffer
 	port                int
 	providerStartedPath string
 	acceptResultPath    string
@@ -252,7 +252,7 @@ func startAttachmentRecoveryRuntime(t *testing.T, bridgeAddress, mode, sessionID
 	encoded, err := json.Marshal(map[string]any{
 		"mode": mode, "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": generation, "targetPodUid": podUID, "readyPath": readyPath,
+		"bindingGeneration": generation, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "readyPath": readyPath,
 		"acceptResultPath":    process.acceptResultPath,
 		"inspectResultPath":   process.inspectResultPath,
 		"providerStartedPath": process.providerStartedPath, "closePath": process.closePath,
@@ -355,7 +355,7 @@ func runAttachmentColdReplacement(t *testing.T, bridgeAddress, sessionID, thread
 	encoded, err := json.Marshal(map[string]any{
 		"mode": "cold", "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "bindingId": bindingID,
-		"bindingGeneration": generation, "targetPodUid": podUID, "fileId": fileID,
+		"bindingGeneration": generation, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "fileId": fileID,
 	})
 	if err != nil {
 		t.Fatalf("encode attachment cold replacement: %v", err)

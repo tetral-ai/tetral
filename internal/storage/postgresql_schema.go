@@ -596,6 +596,18 @@ const (
 					AND binding_generation IS NOT NULL AND binding_generation > 0
 					AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
 			))
+		),
+		mcp_discovery_attempts INTEGER NOT NULL DEFAULT 0,
+		mcp_discovery_deadline_at TIMESTAMPTZ,
+		mcp_discovery_diagnostic TEXT,
+		CONSTRAINT session_runtime_inbox_mcp_discovery_budget_shape CHECK (
+			(mcp_discovery_attempts = 0 AND mcp_discovery_deadline_at IS NULL)
+			OR (mcp_discovery_attempts > 0 AND mcp_discovery_deadline_at IS NOT NULL)
+		),
+		CONSTRAINT session_runtime_inbox_mcp_discovery_diagnostic_shape CHECK (
+			mcp_discovery_diagnostic IS NULL OR mcp_discovery_diagnostic IN (
+				'credential_unavailable', 'discovery_unavailable', 'manifest_invalid', 'internal'
+			)
 		)
 	)`
 
@@ -628,9 +640,11 @@ const (
 		agent_runtime_pod_name TEXT NOT NULL,
 		agent_runtime_pod_uid TEXT NOT NULL,
 		agent_runtime_pod_ip TEXT NOT NULL,
+		runtime_process_id TEXT NOT NULL CHECK (runtime_process_id <> ''),
 		bound_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, session_id),
+		FOREIGN KEY (agent_runtime_namespace, agent_runtime_pod_uid, runtime_process_id) REFERENCES runtime_processes(namespace, pod_uid, runtime_process_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_runtime_bindings_binding_id_shape CHECK (binding_id <> ''),
 		CONSTRAINT session_runtime_bindings_generation_shape CHECK (
@@ -1253,6 +1267,12 @@ const (
 		),
 		CONSTRAINT session_github_repository_authorization_token_required CHECK (
 			authorization_token_encrypted IS NOT NULL
+		),
+		git_identity_name TEXT,
+		git_identity_email TEXT,
+		CONSTRAINT session_github_repository_git_identity_shape CHECK (
+			(git_identity_name IS NULL AND git_identity_email IS NULL)
+			OR (git_identity_name IS NOT NULL AND git_identity_name <> '' AND git_identity_email IS NOT NULL AND git_identity_email <> '')
 		)
 	)`
 
@@ -1351,7 +1371,22 @@ const (
 			(status = 'building' AND lease_job_id IS NOT NULL AND lease_token IS NOT NULL AND lease_attempt_count > 0)
 			OR (status <> 'building' AND lease_job_id IS NULL AND lease_token IS NULL AND lease_attempt_count IS NULL)
 		),
-		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'daytona')
+		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'daytona'),
+		build_started_at TIMESTAMPTZ,
+		build_warn_at TIMESTAMPTZ,
+		build_deadline_at TIMESTAMPTZ,
+		build_warned_at TIMESTAMPTZ,
+		provider_build_ref TEXT,
+		provider_build_state TEXT,
+		CONSTRAINT environment_artifacts_build_timing_shape CHECK (
+			(build_started_at IS NULL AND build_warn_at IS NULL AND build_deadline_at IS NULL AND build_warned_at IS NULL)
+			OR (build_started_at IS NOT NULL AND build_warn_at IS NOT NULL AND build_deadline_at IS NOT NULL
+				AND build_warn_at > build_started_at AND build_deadline_at > build_warn_at)
+		),
+		CONSTRAINT environment_artifacts_build_ref_shape CHECK (length(provider_build_ref) BETWEEN 1 AND 128),
+		CONSTRAINT environment_artifacts_build_state_shape CHECK (
+			provider_build_state IN ('awaiting_visibility', 'pending', 'building', 'pulling', 'active', 'error', 'build_failed')
+		)
 	)`
 
 	//nolint:gosec // Schema credential identity constraint, not a secret value.
@@ -1807,9 +1842,8 @@ func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchema
 	return nil
 }
 
-// postgresqlBaselineSteps is the single ordered payload owned by migration
-// version 1, already applied by Alpha 1 installations. Keep its SQL bytes
-// immutable; later schema changes belong in new migration versions.
+// postgresqlBaselineSteps is the sole fresh schema payload. Initialization
+// rejects predecessor history and nonempty unregistered schemas before DDL.
 func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	steps := []postgresqlSchemaStep{
 		// Tables. Order follows foreign-key ownership: workspaces before
@@ -1844,7 +1878,14 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_background_tasks", createPostgreSQLSessionBackgroundTasksTable},
 		{"create_session_runtime_inbox", createPostgreSQLSessionRuntimeInboxTable},
 		{"create_session_runtime_binding_generation_sequence", createPostgreSQLSessionRuntimeBindingGenerationSequence},
+		{"create_runtime_process_pods", createPostgreSQLRuntimeProcessPodsTable},
+		{"create_runtime_processes", createPostgreSQLRuntimeProcessesTable},
+		{"index_runtime_processes_current", createPostgreSQLRuntimeProcessesCurrentIndex},
+		{"create_runtime_process_lock", createPostgreSQLRuntimeProcessLockFunction},
+		{"revoke_runtime_process_lock_public", revokePostgreSQLRuntimeProcessLockPublic},
 		{"create_session_runtime_bindings", createPostgreSQLSessionRuntimeBindingsTable},
+		{"create_session_runtime_handoffs", createPostgreSQLSessionRuntimeHandoffsTable},
+		{"create_session_runtime_handoff_threads", createPostgreSQLSessionRuntimeHandoffThreadsTable},
 		{"create_session_mcp_manifests", createPostgreSQLSessionMCPManifestsTable},
 		{"create_session_runtime_status", createPostgreSQLSessionRuntimeStatusTable},
 		{"create_session_bridge_operations", createPostgreSQLSessionBridgeOperationsTable},

@@ -19,8 +19,9 @@ type Client struct {
 	provider   Provider
 	descriptor Descriptor
 
-	closeOnce sync.Once
-	closeErr  error
+	closeOnce      sync.Once
+	closeErr       error
+	closeResources func() error
 }
 
 var notificationChannelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
@@ -389,6 +390,9 @@ func (c *Client) Stats() sql.DBStats {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.closeErr = c.db.Close()
+		if c.closeResources != nil {
+			c.closeErr = errors.Join(c.closeErr, c.closeResources())
+		}
 	})
 	return c.closeErr
 }

@@ -26,9 +26,12 @@ func TestBridgeAPICommandStartsAndStopsExecutionResultListener(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	previousOpen, previousWorkload := openDatabase, runWorkload
+	previousBlob := newBlobStore
+	newBlobStore = blob.NewS3BlobStore
 	previousGRPC, previousTokenReview := runInternalGRPC, newTokenReviewClient
 	t.Cleanup(func() {
 		openDatabase, runWorkload = previousOpen, previousWorkload
+		newBlobStore = previousBlob
 		runInternalGRPC, newTokenReviewClient = previousGRPC, previousTokenReview
 	})
 	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {

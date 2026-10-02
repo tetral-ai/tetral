@@ -111,6 +111,7 @@ func ScopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.Run
 			BindingId:         scope.GetBinding().GetBindingId(),
 			BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 			TargetPodUid:      scope.GetBinding().GetTargetPodUid(),
+			RuntimeProcessId:  scope.GetBinding().GetRuntimeProcessId(),
 		},
 	}
 }

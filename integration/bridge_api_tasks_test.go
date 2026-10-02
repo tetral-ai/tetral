@@ -170,7 +170,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	attemptedBinding := jobrunner.RuntimeAttemptedBinding{
-		BindingID: bindingID, Generation: 1, TargetPodUID: podUID,
+		BindingID: bindingID, Generation: 1, TargetPodUID: podUID, RuntimeProcessID: "process_" + podUID,
 	}
 	if settled, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, attemptedBinding); err != nil || settled {
 		t.Fatalf("MarkRuntimeInputAccepted after rejection = settled:%t err:%v; want replayed terminal Inbox", settled, err)

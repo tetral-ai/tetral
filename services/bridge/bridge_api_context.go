@@ -35,6 +35,9 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "load context request is required")
 	}
+	if request.GetRecoveryLeaseRef() == nil && (request.GetSourceEventId() != "" || request.GetHandoffId() != "") {
+		return nil, status.Error(codes.InvalidArgument, "recovery source requires exact Queue lease")
+	}
 	phase = "scope_validation"
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_context", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
@@ -42,7 +45,7 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 		}
 		if request.GetRecoveryLeaseRef() != nil {
 			phase = "recovery_authority"
-			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef()); err != nil {
+			if err := verifyRuntimeRecoveryLoadAuthorityTx(ctx, tx, request.GetScope(), request.GetRecoveryLeaseRef(), request.GetSourceEventId(), request.GetHandoffId()); err != nil {
 				return err
 			}
 		}
@@ -83,6 +86,7 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	ref *bridgev1.RecoveryLeaseRef,
+	sourceEventID, handoffID string,
 ) error {
 	if ref.GetJobId() == "" || ref.GetLeaseToken() == "" || ref.GetPartitionKey() == "" || ref.GetDedupeKey() == "" ||
 		ref.GetPartitionKey() != queue.FormatSessionPartitionKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId()) {
@@ -117,16 +121,18 @@ func verifyRuntimeRecoveryLoadAuthorityTx(
 	if !live {
 		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery authority is stale"))
 	}
-	var payload struct {
-		SessionID       string `json:"session_id"`
-		SessionThreadID string `json:"session_thread_id"`
-		SourceEventID   string `json:"source_event_id"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.SessionID != scope.GetSessionId() ||
-		payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID == "" ||
-		ref.GetDedupeKey() != queue.FormatRuntimeRecoveryDedupeKey(workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), payload.SourceEventID) {
+	payload, err := queue.DecodeRuntimeRecoveryPayload([]byte(payloadJSON))
+	if err != nil || payload.SessionID != scope.GetSessionId() || payload.SessionThreadID != scope.GetSessionThreadId() || payload.SourceEventID != sourceEventID || payload.HandoffID != handoffID || ref.GetDedupeKey() != runtimecontrol.RecoveryDedupeKey(scope.GetWorkspaceId(), payload) {
 		return status.Error(codes.InvalidArgument, "runtime recovery authority is invalid")
 	}
+	found, err := runtimecontrol.VerifyRecoverySourceTx(ctx, tx, scope.GetWorkspaceId(), ref.GetJobId(), payload)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime recovery source is stale"))
+	}
+
 	return nil
 }
 
@@ -1186,6 +1192,7 @@ type runtimeBindingTokenPayload struct {
 	BindingID         string `json:"binding_id"`
 	BindingGeneration int64  `json:"binding_generation"`
 	RuntimePodUID     string `json:"runtime_pod_uid"`
+	RuntimeProcessID  string `json:"runtime_process_id"`
 	ExpiresAtUnix     int64  `json:"exp"`
 }
 
@@ -1196,7 +1203,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 		scope.GetSessionThreadId() == "" ||
 		scope.GetBinding().GetBindingId() == "" ||
 		scope.GetBinding().GetBindingGeneration() <= 0 ||
-		scope.GetBinding().GetTargetPodUid() == "" {
+		scope.GetBinding().GetTargetPodUid() == "" || scope.GetBinding().GetRuntimeProcessId() == "" {
 		return "", status.Error(codes.FailedPrecondition, "runtime binding scope is incomplete")
 	}
 	if len(s.RuntimeBindingTokenHMACKey) == 0 {
@@ -1214,6 +1221,7 @@ func (s *PostgreSQLBridgeAPIStore) runtimeBindingToken(scope *bridgev1.RuntimeSc
 		BindingID:         scope.GetBinding().GetBindingId(),
 		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
 		RuntimePodUID:     scope.GetBinding().GetTargetPodUid(),
+		RuntimeProcessID:  scope.GetBinding().GetRuntimeProcessId(),
 		ExpiresAtUnix:     s.now().Add(ttl).Unix(),
 	})
 	if err != nil {

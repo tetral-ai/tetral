@@ -8,6 +8,11 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: git-proxy
@@ -27,29 +32,35 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
             - name: TETRAL_GIT_PROXY_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_GIT_PROXY_METRICS_ADDR
               value: ":8081"
             - name: TETRAL_GIT_PROXY_PUBLIC_BASE_URL
-              value: https://git.tetral.example
+              value: "https://git.tetral.example"
             - name: TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS
               value: "1800"
             - name: TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER
               value: "true"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
-              value: local
+              value: "local"
             - name: TETRAL_SERVICE_VERSION
-              value: dev
+              value: "dev"
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: tetral-database
+                  name: "tetral-database"
                   key: git-proxy-url
             - name: ENGINE_VAULT_KEY
               valueFrom:
                 secretKeyRef:
-                  name: api-secrets
+                  name: "api-secrets"
                   key: engine-vault-key
           ports:
             - name: http
@@ -64,15 +75,20 @@ spec:
             httpGet:
               path: /ready
               port: http
+          volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-              ephemeral-storage: 64Mi
+
             limits:
               cpu: "1"
-              memory: 512Mi
               ephemeral-storage: 512Mi
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              ephemeral-storage: 64Mi
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -80,3 +96,7 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"

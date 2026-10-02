@@ -107,7 +107,7 @@ func TestPostgreSQLFinalAttemptCleanupResponseLossReplaysSameHostOutcome(t *test
 		t, runtimeDB, admin, process.port, sessionID, "thrd_clean_final_loss", cleanupID, 1,
 	)
 	lost := &cleanupLostResponseSender{
-		RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+		RuntimeCommandSender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{}),
 	}
 	runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{
 		Store:  runner.Deliverer.(jobrunner.RuntimePodDirectDeliverer).Store,
@@ -375,7 +375,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 			PostgreSQLRuntimeDeliveryStore: deliveryStore,
 			entered:                        make(chan struct{}), release: make(chan struct{}),
 		}
-		sender := &countingCleanupSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})}
+		sender := &countingCleanupSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})}
 		runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{Store: barrierStore, Sender: sender}
 		runCtx, cancelRun := context.WithCancel(context.Background())
 		defer cancelRun()
@@ -401,7 +401,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 			t, runtimeDB, admin, process.port, sessionID, "thrd_clean_inflight", "cleanup_inflight", 3,
 		)
 		sender := &cleanupResponseBarrierSender{
-			RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{}),
+			RuntimeCommandSender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{}),
 			entered:              make(chan struct{}), release: make(chan struct{}), loseResponse: true,
 		}
 		runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}
@@ -431,7 +431,7 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 
 		winner := &jobrunner.JobRunner{
 			Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+			Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 			Config:    jobrunner.JobRunnerConfig{LeaseOwner: "cleanup-inflight-winner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 		}
 		if err := runIssuedLeaseThroughRunner(context.Background(), winner, cleanupQueueJobProto(newLease), winner.Config); err != nil {
@@ -549,7 +549,7 @@ func startCleanupComposition(t *testing.T, mode string, podUID string) *cleanupC
 		closePath:  filepath.Join(tempDir, "close"),
 	}
 	input, err := json.Marshal(map[string]any{
-		"targetPodUid": podUID, "sessionId": strings.TrimPrefix(podUID, "pod_uid_"), "mode": mode, "readyPath": readyPath,
+		"targetPodUid": podUID, "runtimeProcessId": "process_" + podUID, "sessionId": strings.TrimPrefix(podUID, "pod_uid_"), "mode": mode, "readyPath": readyPath,
 		"effectPath": process.effectPath, "closePath": process.closePath,
 	})
 	if err != nil {
@@ -613,14 +613,15 @@ func seedCleanupComposition(t *testing.T, runtimeDB, admin *sql.DB, port int, se
 	}
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
 	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC) }
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", "pod_uid_"+sessionID)
+	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-cleanup-composition", PodUID: "pod_uid_" + sessionID, PodIP: net.IPv4(127, 0, 0, 1).String(),
 		}})
 	}}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
-		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
+		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "cleanup-composition", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	return queueStore, deliveryStore, runner, queueJobID

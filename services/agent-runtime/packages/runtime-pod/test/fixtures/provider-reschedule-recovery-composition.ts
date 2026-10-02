@@ -38,6 +38,7 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly bindingId?: string;
 	readonly bindingGeneration?: number;
 	readonly targetPodUid: string;
+	readonly runtimeProcessId: string;
 	readonly now: string;
 	readonly preloadOnly?: boolean;
 	readonly terminationWriteId?: string;
@@ -55,6 +56,7 @@ const command = {
 	bindingId: input.bindingId ?? "",
 	bindingGeneration: input.bindingGeneration ?? 0,
 	targetPodUid: input.targetPodUid,
+	runtimeProcessId: input.runtimeProcessId,
 };
 const bridgeOptions = {
 	address: input.bridgeAddress,
@@ -244,6 +246,7 @@ if (input.serveRecovery === true) {
 		},
 	} satisfies RuntimeCleanupController;
 	const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
 		ownPod: {
 			namespace: "tetral-agent-runtime",
 			name: "runtime-provider-reschedule-recovery",

@@ -784,6 +784,7 @@ function reviewThreadControl(
 		bindingId: request.bindingId,
 		bindingGeneration: request.bindingGeneration,
 		targetPodUid: request.targetPodUid,
+		runtimeProcessId: request.runtimeProcessId,
 	};
 }
 
@@ -805,6 +806,7 @@ function approvalReviewInput(
 		bindingId: control.bindingId,
 		bindingGeneration: control.bindingGeneration,
 		targetPodUid: control.targetPodUid,
+		runtimeProcessId: control.runtimeProcessId,
 		runtimeInputId,
 		inputOrder,
 		kind: "approval_review",

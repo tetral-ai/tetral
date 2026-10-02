@@ -42,8 +42,11 @@ export interface ProviderGatewayApp {
   readonly service: ProviderGatewayServiceShell;
   readonly health: () => { readonly ok: true };
   readonly ready: () => { readonly ready: boolean };
-  readonly start: () => Promise<{ readonly grpcPort: number; readonly httpUrl: URL }>;
-  readonly shutdown: () => Promise<void>;
+  readonly start: () => Promise<{
+    readonly grpcPort: number;
+    readonly httpUrl: URL;
+  }>;
+  readonly shutdown: (deadline?: Date, drainDeadline?: Date) => Promise<void>;
 }
 
 /**
@@ -117,11 +120,37 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
       }
       return { grpcPort: boundGrpcPort, httpUrl: httpServer.url };
     },
-    shutdown: async () => {
+    shutdown: async (
+      deadline = new Date(
+        Date.now() +
+          options.config.drainTimeoutMs +
+          options.config.cancelJoinTimeoutMs,
+      ),
+      drainDeadline = new Date(
+        deadline.getTime() - options.config.cancelJoinTimeoutMs,
+      ),
+    ) => {
       readyFlag = false;
-      let failed = false, firstFailure: unknown;
-      try { await httpServer?.stop(); } catch (error) { failed = true; firstFailure = error; }
-      try { await grpcServer?.shutdown(); } catch (error) { if (!failed) firstFailure = error; failed = true; }
+      let failed = false,
+        firstFailure: unknown;
+      try {
+        await service.shutdown(deadline, drainDeadline);
+      } catch (error) {
+        failed = true;
+        firstFailure = error;
+      }
+      try {
+        await httpServer?.stop();
+      } catch (error) {
+        if (!failed) firstFailure = error;
+        failed = true;
+      }
+      try {
+        await grpcServer?.shutdown(deadline);
+      } catch (error) {
+        if (!failed) firstFailure = error;
+        failed = true;
+      }
       if (failed) throw firstFailure;
     },
   };

@@ -119,21 +119,21 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				if err != nil || repair.GetCommitted() == nil {
 					t.Fatalf("sibling internal repair=%v/%v", repair, err)
 				}
-				f.runner.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+				confirmationStarted, allowConfirmation := make(chan struct{}), make(chan struct{})
+				var confirmationOnce sync.Once
+				releaseConfirmation := func() { confirmationOnce.Do(func() { close(allowConfirmation) }) }
+				t.Cleanup(releaseConfirmation)
+				f.runner.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: func(ctx context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
+					close(confirmationStarted)
+					select {
+					case <-allowConfirmation:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return fixtureConfirmedMissingRuntimePod(ctx, namespace, name)
+				}, LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 					return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 				}}
-				lock, err := f.admin.BeginTx(f.ctx, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = lock.Rollback() })
-				var blocker int
-				if err := lock.QueryRowContext(f.ctx, `SELECT pg_backend_pid()`).Scan(&blocker); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := lock.ExecContext(f.ctx, `SELECT id FROM sessions WHERE workspace_id='default' AND id=$1 FOR UPDATE`, f.sessionID); err != nil {
-					t.Fatal(err)
-				}
 				type outcome struct {
 					owner      string
 					settlement *bridgev1.SettleToolResultResponse
@@ -151,14 +151,35 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					results <- outcome{owner: "recovery", repaired: count, err: err}
 					return nil
 				}
+				// Let the initial census transaction finish before arbitrating the
+				// mutation transaction against settlement. Fresh Pod confirmation
+				// now deliberately runs outside the session lock.
+				separatedStartRun(f.ctx, t, recover)
+				select {
+				case <-confirmationStarted:
+				case <-f.ctx.Done():
+					t.Fatal(f.ctx.Err())
+				}
+				lock, err := f.admin.BeginTx(f.ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = lock.Rollback() })
+				var blocker int
+				if err := lock.QueryRowContext(f.ctx, `SELECT pg_backend_pid()`).Scan(&blocker); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := lock.ExecContext(f.ctx, `SELECT id FROM sessions WHERE workspace_id='default' AND id=$1 FOR UPDATE`, f.sessionID); err != nil {
+					t.Fatal(err)
+				}
 				if first == "settlement" {
 					separatedStartRun(f.ctx, t, settle)
 				} else {
-					separatedStartRun(f.ctx, t, recover)
+					releaseConfirmation()
 				}
 				firstPIDs := separatedBlockedPIDs(t, f, blocker, 1)
 				if first == "settlement" {
-					separatedStartRun(f.ctx, t, recover)
+					releaseConfirmation()
 				} else {
 					separatedStartRun(f.ctx, t, settle)
 				}

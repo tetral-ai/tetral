@@ -8,9 +8,9 @@ replica setting. Package-owned manifests live under `k8s/provider-gateway/` and
 `services/web-connector`; its implementation and manifests belong there.
 Shared protocol, lowering and schema packages remain in this workspace.
 
-The Provider Gateway Service remains headless and Runtime retains its current
-DNS and client round-robin behavior. MCP and Web each use a separate ordinary
-ClusterIP Service. Provider autoscaling targets only `provider-gateway`, with
+Provider Gateway, MCP, and Web each use an ordinary ClusterIP Service. Routed
+mesh upstreams select replicas for each new request while preserving an admitted
+stream on its original upstream. Provider autoscaling targets only `provider-gateway`, with
 its existing minimum of two, maximum of ten and CPU target of 70 percent.
 
 ## Responsibilities
@@ -131,10 +131,35 @@ enters the platform pool. The gateway does not own Runtime turn retries.
 ### Process lifecycle
 
 Ops plane is bare `Bun.serve` on a separate port (`/healthz`, `/readyz`,
-`/metrics`; `packages/provider-gateway/src/http-server.ts`). Graceful shutdown on
-SIGTERM: flip readiness false → graceful `server.stop()` drain → grpc
-`tryShutdown()` → exit. New turns are refused (`UNAVAILABLE`) the moment
-readiness flips, while in-flight streams finish under the drain.
+`/metrics`; `packages/provider-gateway/src/http-server.ts`). SIGTERM withdraws
+readiness and admission immediately. Provider and MCP allow a configured 30-second business drain
+(`TETRAL_SERVICE_DRAIN_TIMEOUT_MS`), followed by a configured five-second
+cancellation and join phase (`TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`).
+Both phases and the five-second proxy cleanup allocation must fit the
+60-second Pod grace. Admitted requests may finish during drain; cancellation
+then joins remaining stream, SDK, and unary workers. A missed join deadline
+is reported after the owned workers join, so dependency closure cannot
+overtake work. Listener and client close reuse the same remaining budget. SQL closes last, after producers join,
+with a five-second allocation clipped to the remaining application deadline.
+A cleanup failure does not skip other owned resources.
+
+Provider request timeout starts at ingress and covers authentication,
+credential preparation, every attachment metadata/chunk RPC, provider headers,
+and response consumption. Each downstream call receives the remaining absolute
+budget and real cancellation. Shutdown joins actual unary callbacks before
+closing their channel. MCP similarly retains pending SDK connects, notifications,
+and calls after their public timeout or cache eviction until they settle or the
+shared shutdown bound expires; each SDK client closes once.
+
+MCP's typed Bridge policies mirror the Runtime descriptor: manifest notification
+five seconds and claim/commit/relinquish ten seconds. SDK defaults remain
+credential 15 seconds, connect ten seconds, call and discovery 120 seconds, and
+idle eviction 1,800 seconds. `TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` and
+`TETRAL_MCP_{CREDENTIAL,CONNECT,CALL,DISCOVERY}_TIMEOUT_MS` configure these actual
+operations. The credential, connect, call, and commit reserves must fit the
+180-second execution claim lease. A lost immutable result-commit response can
+rejoin its named receipt; an unknown execution outcome cannot be replayed or
+converted into a fabricated result.
 
 ## Seams
 
@@ -927,13 +952,13 @@ drops and asynchronous stderr failures. Startup and shutdown finally blocks
 release diagnostic timers/listeners without waiting for stream flush.
 
 Each command attempts every acquired resource once after startup, listener,
-wait or shutdown failure. Provider closes its app before SQL; MCP closes HTTP,
-gRPC, its owned SDK clients and SQL. A rejected earlier close does not skip
+wait or shutdown failure. Provider and MCP stop admission, join producers and listeners, close owned
+clients, and close SQL last under their shared absolute deadline. A rejected earlier close does not skip
 later resources. Programmatic callers retain the original run failure, or the
 first cleanup failure after a successful run. Executable and signal boundaries
 emit fixed safe phase/class records and exit nonzero on failure, without raw
 exception messages or stacks. Diagnostic faults add no stderr-flush wait;
-business shutdown keeps its existing drain behavior.
+business shutdown retains the same durable outcome when diagnostics fail.
 
 Provider request validation, caller denial and cancellation summaries use Info
 while retaining the safe failure tuple. Provider transport, configuration and
@@ -946,5 +971,12 @@ The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
 five controls accept canonical positive
 safe integers. Missing values use defaults; Provider Gateway also treats explicit
 empty values as defaults, while MCP Connector rejects explicit empties. These
-values configure the SQL constructor once at boot; Go's independently owned pool
-policy remains distinct.
+values configure each owned SQL generation. Explicit database TLS requires both
+`TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`, hostname
+verification, and a complete verified initial generation before readiness.
+Every actual awaited store operation, including transaction commit, stays inside
+the generation owner's `withSQL` callback. CA rotation verifies a candidate
+before publishing it, then joins old-generation borrowers under its running
+20-second rotation bound. Shutdown interrupts candidate validation and uses the
+remaining application deadline; it does not start a fresh rotation budget.
+Go's independently owned pool policy remains distinct.

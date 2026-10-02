@@ -19,17 +19,26 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: {{ .Values.replicas.mcpConnector }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: mcp-connector
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "mcp-connector") | indent 8 }}
       labels:
         app.kubernetes.io/name: mcp-connector
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: mcp-connector
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       containers:
         - name: mcp-connector
           image: {{ include "tetral.image" (dict "root" . "name" "gateway") }}
@@ -38,6 +47,15 @@ spec:
             - bun
             - /app/dist/mcp-connector/src-command.js
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" true) | trim | indent 12 }}
+            - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.mcpDrainMs | quote }}
+            - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.mcpJoinMs | quote }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9091
             - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR
@@ -102,6 +120,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: mcp-connector-kubernetes-api
               mountPath: /var/run/secrets/tetral-kubernetes-api
               readOnly: true
@@ -109,6 +130,9 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
       volumes:
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
         - name: mcp-connector-kubernetes-api
           projected:
             sources:

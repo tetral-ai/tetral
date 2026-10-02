@@ -88,6 +88,8 @@ export class ProviderGatewayServiceShell {
   private readonly providerStreamer: ProviderRequestStreamer;
   private readonly admission: TurnAdmissionGate;
   private readonly metrics: ProviderGatewayMetricsRegistry;
+  private stopping = false;
+  private readonly workers = new Map<AbortController, Promise<void>>();
 
   constructor(private readonly options: ProviderGatewayServiceOptions) {
     this.providerStreamer = options.providerStreamer ?? new CatalogGatedProviderStreamer();
@@ -116,6 +118,18 @@ export class ProviderGatewayServiceShell {
     metadata: Metadata,
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ProviderStreamEvent> {
+    const processController = new AbortController();
+    abortSignal =
+      abortSignal === undefined
+        ? processController.signal
+        : AbortSignal.any([abortSignal, processController.signal]);
+    let done!: () => void;
+    this.workers.set(
+      processController,
+      new Promise<void>((resolve) => {
+        done = resolve;
+      }),
+    );
     const started = performance.now();
     let requestOutcome: "ok" | "failed" = "failed";
     let errorClass = "runtime_error";
@@ -171,7 +185,7 @@ export class ProviderGatewayServiceShell {
       const finishMetrics = this.metrics.startProviderStream();
       let failed = false;
       const providerAbortController = new AbortController();
-      const providerStartedAt = performance.now();
+      const providerStartedAt = started;
       const providerDeadline = providerStartedAt + limits.timeoutMs;
       let providerTimeoutLogged = false;
       const forwardAbort = (): void => providerAbortController.abort(abortSignal?.reason ?? new DOMException("Provider request cancelled.", "AbortError"));
@@ -240,6 +254,8 @@ export class ProviderGatewayServiceShell {
       }
       throw error;
     } finally {
+      done();
+      this.workers.delete(processController);
       const record = {
         event: "provider_request_streamed",
         "event.kind": "provider_request_streamed",
@@ -271,6 +287,50 @@ export class ProviderGatewayServiceShell {
         }
       } catch {
         // Observability must not replace the request's outcome.
+      }
+    }
+  }
+
+  async shutdown(
+    deadline: Date,
+    drainDeadline: Date = deadline,
+  ): Promise<void> {
+    this.stopping = true;
+    const joined = Promise.all([...this.workers.values()]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cutoff = new Promise<"cutoff">((resolve) => {
+      timer = setTimeout(
+        () => resolve("cutoff"),
+        Math.max(0, drainDeadline.getTime() - Date.now()),
+      );
+    });
+    const result = await Promise.race([joined, cutoff]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (result === "cutoff") {
+      for (const controller of this.workers.keys())
+        controller.abort(new Error("Provider process draining"));
+      const end = new Promise<"expired">((resolve) => {
+        timer = setTimeout(
+          () => resolve("expired"),
+          Math.max(0, deadline.getTime() - Date.now()),
+        );
+      });
+      let expired = false;
+      try {
+        expired = await Promise.race([
+          joined.then(() => false),
+          end.then(() => true),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      // Keep ownership through forced cancellation even when a dependency ignores it.
+      // Commands may close required clients only after this promise has joined.
+      if (expired) {
+        await joined;
+        throw new Error(
+          "Provider workers did not join before shutdown deadline",
+        );
       }
     }
   }
@@ -313,7 +373,7 @@ export class ProviderGatewayServiceShell {
   }
 
   private ensureReady(): void {
-    if (!this.options.ready()) {
+    if (this.stopping || !this.options.ready()) {
       throw new GrpcStatusError(status.UNAVAILABLE, "gateway service not ready");
     }
   }
@@ -352,7 +412,12 @@ export class ProviderGatewayServiceShell {
       return;
     }
     const attachmentResolution = await withinProviderDeadline(
-      this.resolveAttachments(request, runtimePodUid, abortSignal),
+      this.resolveAttachments(
+        request,
+        runtimePodUid,
+        abortSignal,
+        Date.now() + Math.max(0, providerDeadline - performance.now()),
+      ),
       abortSignal,
       providerDeadline,
       () => abortOnTimeout({ kind: "overall_timeout" }),
@@ -576,6 +641,7 @@ export class ProviderGatewayServiceShell {
     request: ProviderRequest,
     runtimePodUid: string,
     abortSignal: AbortSignal,
+    deadline: number,
   ): Promise<{
     readonly ok: true;
     readonly attachments: readonly ResolvedProviderRequestAttachment[];
@@ -588,7 +654,12 @@ export class ProviderGatewayServiceShell {
       return { ok: false, error: attachmentUnavailableProviderError() };
     }
     try {
-      return await this.options.attachmentResolver.resolve({ request, runtimePodUid, abortSignal });
+      return await this.options.attachmentResolver.resolve({
+        request,
+        runtimePodUid,
+        abortSignal,
+        deadline,
+      });
     } catch {
       return { ok: false, error: attachmentUnavailableProviderError() };
     }
@@ -951,6 +1022,7 @@ export interface ProviderAttachmentResolveInput {
   readonly request: ProviderRequest;
   readonly runtimePodUid: string;
   readonly abortSignal?: AbortSignal | undefined;
+  readonly deadline?: number;
 }
 
 /**

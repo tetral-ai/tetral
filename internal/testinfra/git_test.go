@@ -102,6 +102,7 @@ func runGit(t *testing.T, root string, arguments ...string) string {
 
 func writeTestFile(t *testing.T, root, name, body string) {
 	t.Helper()
+	// #nosec G703 -- fixture callers supply literal repository-relative names under a test-owned root.
 	if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

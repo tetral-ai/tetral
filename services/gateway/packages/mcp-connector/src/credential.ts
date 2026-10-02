@@ -1,3 +1,5 @@
+import { asSQLSource } from "@tetral/ts-dbconnect";
+import type { SQLSource } from "@tetral/ts-dbconnect";
 /**
  * @packageDocumentation
  *
@@ -129,10 +131,11 @@ interface OAuthTokenEndpointAuth {
  * which serializes OAuth refresh and performs the credential-row write.
  */
 export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolver {
+  private readonly sqlSource: SQLSource<McpCredentialSQL>;
   private readonly refreshWriter: GitHubMcpCredentialRefreshWriter;
 
   constructor(
-    private readonly sql: McpCredentialSQL,
+    sql: McpCredentialSQL | SQLSource<McpCredentialSQL>,
     private readonly masterKeyHex: string,
     private readonly now: () => Date = () => new Date(),
     fetchFn: FetchLike = fetch,
@@ -140,6 +143,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     refreshHTTPTimeoutMs?: number,
     onRefreshCompleted?: ((event: McpOAuthRefreshCompletedEvent) => void) | undefined,
   ) {
+    this.sqlSource = asSQLSource(sql);
     this.refreshWriter = refreshWriter ?? new SQLVaultGitHubMcpCredentialUpdatePath(sql, masterKeyHex, now, fetchFn, refreshHTTPTimeoutMs, onRefreshCompleted);
   }
 
@@ -199,40 +203,42 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     readonly sessionId: string;
     readonly mcpServerName: string;
   }): Promise<readonly GitHubCredentialMatchedRow[]> {
-    const catalog = catalogEntryByName(input.mcpServerName);
-    if (catalog === undefined) {
-      return [];
-    }
-    if (this.sql.begin === undefined) {
-      return [];
-    }
-    const rows = await this.sql.begin(async (tx) => {
-      await setWorkspaceRLS(tx, input.workspaceId);
-      return await tx<readonly GitHubCredentialSQLRow[]>`
-        WITH session_vaults AS (
-          SELECT jsonb_array_elements_text(vault_ids_json::jsonb) AS vault_id
-            FROM sessions
-           WHERE workspace_id = ${input.workspaceId}
-             AND id = ${input.sessionId}
-        )
-        SELECT c.id, c.vault_id, c.auth_public_json, c.encrypted_auth
-          FROM credentials c
-          JOIN session_vaults sv ON sv.vault_id = c.vault_id
-         WHERE c.workspace_id = ${input.workspaceId}
-           AND c.archived_at IS NULL
-           AND c.revoked_at IS NULL
-           AND c.auth_type IN ('mcp_oauth', 'static_bearer')
-         ORDER BY c.vault_id ASC, c.id ASC
-      `;
-    });
-    const matched: GitHubCredentialMatchedRow[] = [];
-    for (const row of rows) {
-      const mcpServerURL = mcpServerURLFromPublicAuth(row.auth_public_json);
-      if (mcpServerURL !== undefined && catalogURLMatches(mcpServerURL, catalog.url)) {
-        matched.push({ ...row, mcp_server_url: mcpServerURL });
+    return await this.sqlSource.withSQL(async (sql) => {
+      const catalog = catalogEntryByName(input.mcpServerName);
+      if (catalog === undefined) {
+        return [];
       }
-    }
-    return matched;
+      if (sql.begin === undefined) {
+        return [];
+      }
+      const rows = await sql.begin(async (tx) => {
+        await setWorkspaceRLS(tx, input.workspaceId);
+        return await tx<readonly GitHubCredentialSQLRow[]>`
+          WITH session_vaults AS (
+            SELECT jsonb_array_elements_text(vault_ids_json::jsonb) AS vault_id
+              FROM sessions
+             WHERE workspace_id = ${input.workspaceId}
+               AND id = ${input.sessionId}
+          )
+          SELECT c.id, c.vault_id, c.auth_public_json, c.encrypted_auth
+            FROM credentials c
+            JOIN session_vaults sv ON sv.vault_id = c.vault_id
+           WHERE c.workspace_id = ${input.workspaceId}
+             AND c.archived_at IS NULL
+             AND c.revoked_at IS NULL
+             AND c.auth_type IN ('mcp_oauth', 'static_bearer')
+           ORDER BY c.vault_id ASC, c.id ASC
+        `;
+      });
+      const matched: GitHubCredentialMatchedRow[] = [];
+      for (const row of rows) {
+        const mcpServerURL = mcpServerURLFromPublicAuth(row.auth_public_json);
+        if (mcpServerURL !== undefined && catalogURLMatches(mcpServerURL, catalog.url)) {
+          matched.push({ ...row, mcp_server_url: mcpServerURL });
+        }
+      }
+      return matched;
+    });
   }
 
   private async resolveMatchedCredential(input: {

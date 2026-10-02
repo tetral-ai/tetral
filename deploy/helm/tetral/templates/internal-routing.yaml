@@ -1,0 +1,89 @@
+{{- $paths := .Files.Get "files/internal-routing.json" | fromJsonArray }}
+{{- range $path := $paths }}
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: tetral-{{ $path.name }}
+  namespace: {{ $path.sourceNamespace }}
+spec:
+  host: {{ $path.destination }}.tetral-system.svc.cluster.local
+  exportTo: ["."]
+  workloadSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $path.source }}
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: {{ $path.port }}
+        loadBalancer:
+          simple: LEAST_REQUEST
+        connectionPool:
+          tcp:
+            connectTimeout: 1s
+          http:
+            h2UpgradePolicy: UPGRADE
+        outlierDetection:
+          splitExternalLocalOriginErrors: true
+          consecutiveLocalOriginFailures: 2
+          consecutive5xxErrors: 0
+          consecutiveGatewayErrors: 0
+          baseEjectionTime: 10s
+          maxEjectionPercent: 100
+          minHealthPercent: 0
+        tls:
+          mode: {{ if and (eq $.Values.transport.profile "standard-routed") (has $path.destination (list "queue" "web-connector")) }}DISABLE{{ else }}ISTIO_MUTUAL{{ end }}
+{{- if has $.Values.transport.profile $path.protectedProfiles }}
+          subjectAltNames:
+            - {{ $path.destinationURI | replace "spiffe://cluster.local/" (printf "spiffe://%s/" $.Values.routing.trustDomain) | quote }}
+{{- end }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: tetral-{{ $path.name }}
+  namespace: {{ $path.sourceNamespace }}
+spec:
+  hosts: [{{ printf "%s.tetral-system.svc.cluster.local" $path.destination | quote }}]
+  gateways: [mesh]
+  exportTo: ["."]
+  http:
+{{- if eq $path.destination "bridge" }}
+{{- range $method := $.Files.Get "files/bridge-method-policy.json" | fromJsonArray }}
+    - name: {{ $method.method | lower }}
+      match:
+        - port: {{ $path.port }}
+          sourceNamespace: {{ $path.sourceNamespace }}
+          sourceLabels:
+            app.kubernetes.io/name: {{ $path.source }}
+          uri:
+            exact: {{ $method.path | quote }}
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: {{ $path.port }}
+          weight: 100
+{{- end }}
+{{- else }}
+    - match:
+        - port: {{ $path.port }}
+          sourceNamespace: {{ $path.sourceNamespace }}
+          sourceLabels:
+            app.kubernetes.io/name: {{ $path.source }}
+      timeout: {{ $path.timeout }}
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: {{ $path.destination }}.tetral-system.svc.cluster.local
+            port:
+              number: {{ $path.port }}
+          weight: 100
+{{- end }}
+{{- end }}

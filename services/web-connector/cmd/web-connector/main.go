@@ -42,10 +42,11 @@ func run(ctx context.Context, env webconnector.Env) error {
 	if err = blobCfg.AssertProductionReady(); err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
-	blobStore, err := blob.NewS3BlobStore(ctx, blobCfg)
+	blobStore, err := blob.NewProtectedS3BlobStore(ctx, blobCfg)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
 	}
+	defer func() { _ = blobStore.Close() }()
 	authCfg, err := grpcauth.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, webconnector.ServiceName, err)
@@ -60,6 +61,8 @@ func run(ctx context.Context, env webconnector.Env) error {
 	client := &http.Client{Transport: transport, Timeout: webconnector.BackendRequestTimeout}
 	metrics := webconnector.NewMetrics()
 	backend := webconnector.NewJinaBackend(client, cfg.SearchEndpoint, cfg.ReaderEndpoint, cfg.APIKeys, time.Now).WithMetrics(metrics).WithLogger(logger)
+	defer backend.Close()
+	defer transport.CloseIdleConnections()
 	service := webconnector.NewService(blobStore, backend, webconnector.NewBindingVerifier(cfg.BindingHMACKey, time.Now), metrics, time.Now, nil).WithLogger(logger)
 	return webconnector.Run(ctx, cfg, service, metrics, webconnector.RuntimeConfig{Authenticator: authenticator, Logger: logger})
 }

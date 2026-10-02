@@ -139,6 +139,8 @@ const (
 
 type PostgreSQLBridgeAPIStore struct {
 	Client                     *dbconnect.Client
+	ProcessPolicy              runtimecontrol.ProcessPolicy
+	LifecyclePolicy            BridgeLifecyclePolicy
 	Logger                     *slog.Logger
 	Clock                      func() time.Time
 	AttachmentBlobStore        blob.BlobStore
@@ -169,6 +171,7 @@ type transientAttachmentGCRow struct {
 func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIStore {
 	return &PostgreSQLBridgeAPIStore{
 		Client:                     client,
+		ProcessPolicy:              runtimecontrol.DefaultProcessPolicy(),
 		Clock:                      func() time.Time { return storage.Now() },
 		RuntimeBindingTokenTTL:     defaultRuntimeBindingTokenTTL,
 		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,
@@ -381,14 +384,18 @@ type runtimeToolResultInsert struct {
 }
 
 func readRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
-	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, true)
+	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, true, false)
 }
 
 func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
-	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false)
+	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false, false)
 }
 
-func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool) (runtimeToolResult, bool, error) {
+func readRuntimeToolReceiptReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
+	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false, true)
+}
+
+func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool, receiptProof bool) (runtimeToolResult, bool, error) {
 	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
 	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
 	               background_task_started, task_id, memory_projection_state,
@@ -398,17 +405,18 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4`
+	args := []any{scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID}
+	if receiptProof {
+		query += ` AND EXISTS (SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
+ ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+ WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$5 AND binding.binding_generation=$6 AND binding.agent_runtime_pod_uid=$7 AND binding.runtime_process_id=$8)`
+		args = append(args, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId())
+	}
 	if forUpdate {
 		query += `
 		  FOR UPDATE`
 	}
-	row := tx.QueryRow(ctx,
-		query,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUseEventID,
-	)
+	row := tx.QueryRow(ctx, query, args...)
 	var existing runtimeToolResult
 	if err := row.Scan(
 		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
@@ -416,6 +424,9 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
 		&existing.MCPClaimStatus, &existing.MCPClaimID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {
+		if receiptProof {
+			return runtimeToolResult{}, false, runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "accepted executor receipt or binding is stale"))
+		}
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
 		return runtimeToolResult{}, false, err
@@ -455,13 +466,24 @@ func insertRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 
 func validateRuntimeScope(scope *bridgev1.RuntimeScope) error {
 	if scope == nil || scope.GetWorkspaceId() == "" || scope.GetSessionId() == "" || scope.GetSessionThreadId() == "" || scope.GetBinding() == nil ||
-		scope.GetBinding().GetBindingId() == "" || scope.GetBinding().GetBindingGeneration() <= 0 || scope.GetBinding().GetTargetPodUid() == "" {
+		scope.GetBinding().GetBindingId() == "" || scope.GetBinding().GetBindingGeneration() <= 0 || scope.GetBinding().GetTargetPodUid() == "" || scope.GetBinding().GetRuntimeProcessId() == "" {
 		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.InvalidArgument, "invalid runtime scope"))
 	}
 	return nil
 }
 
+// verifyRuntimeScopeTx fences every new mutation with the exact current process.
 func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	if err := verifyRuntimeReceiptScopeTx(ctx, tx, scope); err != nil {
+		return err
+	}
+	return requireRuntimeProcessCurrentTx(ctx, tx, scope)
+}
+
+// verifyRuntimeReceiptScopeTx permits only an existing receipt to be replayed
+// by a retired process. The unchanged binding and exact process remain locked;
+// callers must require current process authority before any new mutation.
+func verifyRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	if err := validateRuntimeScope(scope); err != nil {
 		return err
 	}
@@ -474,7 +496,19 @@ func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 	if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, scope); err != nil {
 		return err
 	}
-	return verifyRuntimeBindingTx(ctx, tx, scope)
+	_, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	return err
+}
+
+func requireRuntimeProcessCurrentTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	process, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if !process.Current || process.RetiredAt.Valid || process.Phase == runtimecontrol.ProcessStarting {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime process is stale"))
+	}
+	return nil
 }
 
 func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
@@ -498,29 +532,21 @@ func verifyRuntimeSessionNonTerminalTx(ctx context.Context, tx *dbconnect.Tx, sc
 }
 
 func verifyRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	row := tx.QueryRow(ctx,
-		`SELECT agent_runtime_pod_uid
-		   FROM session_runtime_bindings
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetBinding().GetBindingId(),
-		scope.GetBinding().GetBindingGeneration(),
-	)
-	var podUID string
-	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
-	} else if err != nil {
-		return err
+	return requireRuntimeProcessCurrentTx(ctx, tx, scope)
+}
+
+func lockRuntimeBindingProcessTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (runtimecontrol.Process, error) {
+	var identity runtimecontrol.ProcessIdentity
+	err := tx.QueryRow(ctx, `SELECT agent_runtime_namespace, agent_runtime_pod_uid, runtime_process_id
+	 FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4 FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration()).Scan(&identity.Namespace, &identity.PodUID, &identity.ID)
+	if dbconnect.IsNoRows(err) || (err == nil && (identity.PodUID != scope.GetBinding().GetTargetPodUid() || identity.ID != scope.GetBinding().GetRuntimeProcessId())) {
+		return runtimecontrol.Process{}, runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "runtime binding is stale"))
 	}
-	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+	if err != nil {
+		return runtimecontrol.Process{}, err
 	}
-	return nil
+	return runtimecontrol.LockProcessTx(ctx, tx, identity)
 }
 
 func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.RuntimeScope) error {
@@ -537,26 +563,36 @@ func verifyRuntimeScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
 		return err
 	}
-	row := tx.QueryRow(ctx,
-		`SELECT agent_runtime_pod_uid
-		   FROM session_runtime_bindings
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetBinding().GetBindingId(),
-		scope.GetBinding().GetBindingGeneration(),
-	)
-	var podUID string
-	if err := row.Scan(&podUID); dbconnect.IsNoRows(err) {
-		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
-	} else if err != nil {
+	var current bool
+	err := tx.QueryRow(ctx, `SELECT process.is_current AND process.retired_at IS NULL AND process.phase IN ('accepting','draining')
+	 FROM session_runtime_bindings binding JOIN runtime_processes process
+	 ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+	 WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$3 AND binding.binding_generation=$4 AND binding.agent_runtime_pod_uid=$5 AND binding.runtime_process_id=$6`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()).Scan(&current)
+	if dbconnect.IsNoRows(err) || (err == nil && !current) {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime scope is stale"))
+	}
+	return err
+}
+
+// Receipt reads expose only an already accepted executor identity under its
+// unchanged authenticated binding; they never authorize a new mutation.
+func verifyRuntimeReceiptScopeReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	if err := validateRuntimeScope(scope); err != nil {
 		return err
 	}
-	if podUID != scope.GetBinding().GetTargetPodUid() {
-		return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
+	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
+		return err
+	}
+	var exists bool
+	err := tx.QueryRow(ctx, `SELECT /* runtime receipt scope validation */ EXISTS(SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
+ ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+ WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$3 AND binding.binding_generation=$4 AND binding.agent_runtime_pod_uid=$5 AND binding.runtime_process_id=$6)`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "runtime binding is stale"))
 	}
 	return nil
 }

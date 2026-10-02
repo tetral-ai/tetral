@@ -305,17 +305,18 @@ func newDaytonaActivationHarness(t *testing.T, createErrors []error) *daytonaAct
 	) VALUES ('ws_execution_store', 'sesn_execution_store', 'idle', clock_timestamp(), clock_timestamp(), clock_timestamp())`); err != nil {
 		t.Fatalf("seed capacity-chain Runtime status: %v", err)
 	}
+	registerSandboxFixtureProcess(t, adminDB, "tetral-agent-runtime", podUID)
 	if _, err := adminDB.Exec(`INSERT INTO session_runtime_bindings (
 			workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace,
-			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at
+			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
 		) VALUES ('ws_execution_store', 'sesn_execution_store', $1, 1, 'tetral-agent-runtime',
-			'runtime-pod-0', $2, '10.0.0.10', clock_timestamp(), clock_timestamp())`, bindingID, podUID); err != nil {
+			'runtime-pod-0', $2, '10.0.0.10','process_'||$2, clock_timestamp(), clock_timestamp())`, bindingID, podUID); err != nil {
 		t.Fatalf("seed Runtime binding for capacity chain: %v", err)
 	}
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	bridgeScope := &bridgev1.RuntimeScope{
 		WorkspaceId: "ws_execution_store", SessionId: "sesn_execution_store", SessionThreadId: "thr_execution_store",
-		Binding: &bridgev1.RuntimeBindingRef{BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID},
+		Binding: &bridgev1.RuntimeBindingRef{BindingId: bindingID, BindingGeneration: 1, TargetPodUid: podUID, RuntimeProcessId: "process_" + podUID},
 	}
 	zero := int64(0)
 	if _, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -572,7 +573,8 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 		"workspaceId": h.bridgeScope.GetWorkspaceId(), "sessionId": h.bridgeScope.GetSessionId(),
 		"sessionThreadId": h.bridgeScope.GetSessionThreadId(), "bindingId": h.bridgeScope.GetBinding().GetBindingId(),
 		"bindingGeneration": h.bridgeScope.GetBinding().GetBindingGeneration(), "targetPodUid": h.bridgeScope.GetBinding().GetTargetPodUid(),
-		"modelRequestId": h.modelRequestID, "modelToolCallId": waiter.modelToolCallID,
+		"runtimeProcessId": h.bridgeScope.GetBinding().GetRuntimeProcessId(),
+		"modelRequestId":   h.modelRequestID, "modelToolCallId": waiter.modelToolCallID,
 		"toolUseEventId": waiter.toolUseEventID, "resultJson": resultJSON,
 	}
 	inputJSON, err := json.Marshal(fixtureInput)
@@ -583,7 +585,9 @@ func (h *daytonaActivationHarness) assertExhaustionPublicChainForWaiter(t *testi
 	if err := os.WriteFile(inputPath, inputJSON, 0o600); err != nil {
 		t.Fatalf("write Runtime exhaustion fixture: %v", err)
 	}
-	command := exec.CommandContext(context.Background(), "bun", "packages/runtime-pod/test/fixtures/sandbox-activation-exhaustion.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
+	childCtx, cancelChild := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelChild()
+	command := exec.CommandContext(childCtx, "bun", "packages/runtime-pod/test/fixtures/sandbox-activation-exhaustion.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	command.Dir = "../agent-runtime"
 	output, err := command.CombinedOutput()
 	if err != nil {

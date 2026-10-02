@@ -68,7 +68,7 @@ func (r *Readiness) WithReadinessDependency(dependency func() bool) *Readiness {
 // MarkReady marks dependencies ready.
 func (r *Readiness) MarkReady() {
 	if r != nil {
-		r.state.Store(readinessReady)
+		r.state.CompareAndSwap(readinessNotReady, readinessReady)
 	}
 }
 
@@ -542,8 +542,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(signalCtx))
+	defer cancelWork()
+	users := &httpHandlerOwner{}
 	server := &http.Server{
-		Handler:           cfg.Handler,
+		Handler:           users.wrap(cfg.Handler),
+		BaseContext:       func(net.Listener) context.Context { return workCtx },
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 	}
 	cfg.Logger.Info("workload.started",
@@ -581,9 +585,29 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	users.stopAdmission()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		cancelWork()
+		_ = server.Close()
+	}
+	// Shutdown joins connections only on its successful path. The explicit handler
+	// join also covers forced close and hijacked handlers before resource owners exit.
+	handlersDone := make(chan struct{})
+	go func() { users.active.Wait(); close(handlersDone) }()
+	select {
+	case <-handlersDone:
+	case <-shutdownCtx.Done():
+		if shutdownErr == nil {
+			shutdownErr = shutdownCtx.Err()
+		}
+		cancelWork()
+		_ = server.Close()
+		<-handlersDone
+	}
+	<-serverErr
 	if serveErr != nil {
 		cfg.Logger.Error("workload.server.failed", StartupFailureAttrs(serveErr,
 			slog.String("component", "workload"),
@@ -598,6 +622,30 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.String("readiness.state", cfg.Readiness.message()),
 	)
 	return shutdownErr
+}
+
+// Synchronize admission with WaitGroup.Add so no request can become a resource
+// user after shutdown has begun waiting for the final handlers.
+type httpHandlerOwner struct {
+	mu       sync.Mutex
+	stopping bool
+	active   sync.WaitGroup
+}
+
+func (o *httpHandlerOwner) stopAdmission() { o.mu.Lock(); o.stopping = true; o.mu.Unlock() }
+func (o *httpHandlerOwner) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.mu.Lock()
+		if o.stopping {
+			o.mu.Unlock()
+			http.Error(w, "workload is draining", http.StatusServiceUnavailable)
+			return
+		}
+		o.active.Add(1)
+		o.mu.Unlock()
+		defer o.active.Done()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ForbiddenImportPrefixes returns packages the lifecycle package must not import.

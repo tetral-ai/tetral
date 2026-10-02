@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"reflect"
 	"strings"
@@ -145,7 +147,9 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 	}
 	jobA := lease("worker-a")
 	baseStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	baseStore.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	recoveryCandidate := enginekubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "runtime-recovery", PodUID: "pod-recovery", PodIP: "127.0.0.1"}
+	registerPlacementCandidateForTest(t, admin, recoveryCandidate)
+	baseStore.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-recovery", PodUID: "pod-recovery", PodIP: "127.0.0.1",
 		}})
@@ -728,6 +732,16 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},
 	)
+	registerPlacementCandidateForTest(t, admin, candidate)
+	resolver := store.TargetResolver.(KubernetesRuntimeTargetResolver)
+	resolver.LoadClient = runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) }))
+	store.TargetResolver = resolver
+
+	t.Cleanup(func() {
+		if owner, ok := store.MCPManifestLister.(interface{ Close() error }); ok {
+			_ = owner.Close()
+		}
+	})
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	job := RuntimeJob{
 		JobID:           "qjob_job_runner_initial_mcp",
@@ -1468,7 +1482,8 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 	}
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.TargetResolver = KubernetesRuntimeTargetResolver{
+	registerPlacementCandidateForTest(t, admin, candidate)
+	store.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},

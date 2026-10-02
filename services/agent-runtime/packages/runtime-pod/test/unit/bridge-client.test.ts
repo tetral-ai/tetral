@@ -192,6 +192,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			{
 				scope: expect.objectContaining({ sessionThreadId: "thrd_1" }),
 				recoveryLeaseRef: undefined,
+				sourceEventId: "",
+				handoffId: "",
 			},
 		]);
 		expect(loaded.contextEntries).toEqual([
@@ -1249,6 +1251,7 @@ class TypedBridge {
 			ensureApprovalReviewerTrunk: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				callback(null, this.approvalEnsureResponse);
@@ -1257,6 +1260,7 @@ class TypedBridge {
 			ensureApprovalReviewerSidecar: (
 				_request: unknown,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				callback(null, this.approvalEnsureResponse);
@@ -1265,6 +1269,7 @@ class TypedBridge {
 				admitApprovalReviewInput: (
 				request: unknown,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.approvalAdmissionRequests.push(request);
@@ -1279,6 +1284,7 @@ class TypedBridge {
 				closeApprovalReviewer: (
 					request: CloseApprovalReviewerRequest,
 					_metadata: Metadata,
+					_options: CallOptions,
 					callback: Callback,
 				) => {
 					this.approvalCloseRequests.push(request);
@@ -1293,6 +1299,7 @@ class TypedBridge {
 			loadContext: (
 				request: LoadContextRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.loadContextRequests.push(request);
@@ -1305,6 +1312,7 @@ class TypedBridge {
 			readAgentMail: (
 				request: ReadAgentMailRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.readMailRequests.push(request);
@@ -1329,6 +1337,7 @@ class TypedBridge {
 			commitTaskNotificationResult: (
 				request: CommitTaskNotificationResultRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.taskNotificationRequests.push(request);
@@ -1338,6 +1347,7 @@ class TypedBridge {
 			writeEvent: (
 				request: WriteEventRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.writeEventRequests.push(request);
@@ -1357,6 +1367,7 @@ class TypedBridge {
 			writeRequestEnd: (
 				request: WriteRequestEndRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.writeRequestEndRequests.push(request);
@@ -1366,6 +1377,7 @@ class TypedBridge {
 			finishIdle: (
 				request: FinishIdleRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.finishIdleRequests.push(request);
@@ -1375,6 +1387,7 @@ class TypedBridge {
 			commitInternalToolRepair: (
 				request: CommitInternalToolRepairRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.repairRequests.push(request);
@@ -1384,6 +1397,7 @@ class TypedBridge {
 			commitRuntimeTermination: (
 				request: CommitRuntimeTerminationRequest,
 				_metadata: Metadata,
+				_options: CallOptions,
 				callback: Callback,
 			) => {
 				this.terminationRequests.push(request);
@@ -1415,6 +1429,7 @@ function threadScope() {
 		bindingId: "bind_1",
 		bindingGeneration: 3,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 	};
 }
 

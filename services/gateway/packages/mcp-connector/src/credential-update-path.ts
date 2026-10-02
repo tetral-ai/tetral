@@ -1,3 +1,5 @@
+import { asSQLSource } from "@tetral/ts-dbconnect";
+import type { SQLSource } from "@tetral/ts-dbconnect";
 /**
  * @packageDocumentation
  *
@@ -130,14 +132,15 @@ interface RefreshOwnerResult {
  * the row lock held through token rotation, encryption, and write-back.
  */
 export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentialRefreshWriter {
+  private readonly sqlSource: SQLSource<McpCredentialSQL>;
   constructor(
-    private readonly sql: McpCredentialSQL,
+    sql: McpCredentialSQL | SQLSource<McpCredentialSQL>,
     private readonly masterKeyHex: string,
     private readonly now: () => Date = () => new Date(),
     private readonly fetchFn: FetchLike = fetch,
     private readonly refreshHTTPTimeoutMs: number = MCP_REFRESH_HTTP_TIMEOUT_MS,
     private readonly onRefreshCompleted?: ((event: McpOAuthRefreshCompletedEvent) => void) | undefined,
-  ) {}
+  ) { this.sqlSource = asSQLSource(sql); }
 
   /**
    * Locks and re-reads the selected live row before deciding whether to call
@@ -156,102 +159,104 @@ export class SQLVaultGitHubMcpCredentialUpdatePath implements GitHubMcpCredentia
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
   }): Promise<GitHubMcpCredentialResolution> {
-    const started = Date.now();
-    if (this.sql.begin === undefined) {
-      return this.finishRefresh(input, started, failedOwner("storage", "refresh_unavailable"));
-    }
-    let failurePhase: "storage" | "encrypt" | "write_back" = "storage";
-    try {
-      // Capture the caller's snapshot before waiting so expiry-only refresh wins remain observable.
-      const previousExpiresAt = await this.decryptCredentialExpiry(input.row.encrypted_auth);
-      const ownerResult = await this.sql.begin(async (tx): Promise<RefreshOwnerResult> => {
-        await tx`SELECT set_config('tetral.workspace_id', ${input.workspaceId}, true)`;
-        const locked = await tx<readonly GitHubCredentialLockedRow[]>`
-          SELECT id, vault_id, auth_public_json, encrypted_auth
-            FROM credentials
-           WHERE workspace_id = ${input.workspaceId}
-             AND vault_id = ${input.vaultId}
-             AND id = ${input.credentialId}
-             AND archived_at IS NULL
-             AND revoked_at IS NULL
-           FOR UPDATE
-        `;
-        const lockedRow = locked[0];
-        if (
-          lockedRow === undefined
-          || lockedRow.vault_id !== input.vaultId
-          || lockedRow.id !== input.credentialId
-        ) {
-          return failedOwner("credential_state", "credential_required");
-        }
-        if (lockedRow.encrypted_auth === undefined || lockedRow.encrypted_auth === null) {
-          return failedOwner("credential_state", "undecryptable");
-        }
-        const current = await this.decryptCredential(lockedRow);
-        if (current === undefined) {
-          return failedOwner("decrypt", "undecryptable");
-        }
-        if (current.type !== "mcp_oauth" || !nonEmpty(current.access_token)) {
-          return failedOwner("credential_state", "undecryptable");
-        }
-        const publicMcpServerURL = mcpServerURLFromPublicAuth(lockedRow.auth_public_json);
-        if (publicMcpServerURL === undefined || !catalogURLMatches(current.mcp_server_url ?? "", publicMcpServerURL)) {
-          return failedOwner("credential_state", "undecryptable");
-        }
-        const currentResolution = useToken(current.access_token, lockedRow);
-        if (expiryMovedForward(previousExpiresAt, current.expires_at)) {
-          return concurrentWinnerOwner(currentResolution);
-        }
-        if (
-          input.previousTokenHash !== undefined &&
-          currentResolution.ok &&
-          currentResolution.mode === "bearer" &&
-          currentResolution.tokenHash !== input.previousTokenHash
-        ) {
-          return concurrentWinnerOwner(currentResolution);
-        }
-        const currentAction = oauthRefreshAction(current, this.now(), false);
-        if (!input.force && currentAction === "use") {
-          return concurrentWinnerOwner(currentResolution);
-        }
-        if (current.refresh === undefined) {
-          return failedOwner("configuration", input.force ? "refresh_failed" : currentAction === "expired" ? "expired" : "refresh_failed");
-        }
-        const refreshed = await this.refreshGitHubOAuth(current.refresh, input.signal);
-        if (!refreshed.ok) {
-          return failedOwner(
-            refreshed.failureKind,
-            refreshResolutionError(refreshed.failureKind, refreshed.httpStatusClass),
-            refreshed.issuerAttempted,
-            refreshed.httpStatusClass,
-          );
-        }
-        const nextAuth = materializeRefreshedAuth(current, refreshed.value);
-        const publicAuth = publicAuthFromSecret(nextAuth);
-        failurePhase = "encrypt";
-        const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify(nextAuth)), this.masterKeyHex);
-        failurePhase = "write_back";
-        await tx`
-          UPDATE credentials
-             SET auth_public_json = ${JSON.stringify(publicAuth)},
-                 mcp_server_url = ${publicAuth.mcp_server_url ?? ""},
-                 expires_at = ${publicAuth.expires_at ?? ""},
-                 encrypted_auth = ${encrypted},
-                 updated_at = ${this.now().toISOString()}
-           WHERE workspace_id = ${input.workspaceId}
-             AND vault_id = ${input.row.vault_id}
-             AND id = ${input.row.id}
-        `;
-        return {
-          resolution: { ...useToken(nextAuth.access_token ?? "", lockedRow), refreshTriggered: true },
-          event: { outcome: "refreshed", httpStatusClass: refreshed.httpStatusClass,
-            durableWrite: "committed", refreshAttemptMetric: "success" },
-        };
-      });
-      return this.finishRefresh(input, started, ownerResult);
-    } catch {
-      return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable"));
-    }
+    return await this.sqlSource.withSQL(async (sql) => {
+      const started = Date.now();
+      if (sql.begin === undefined) {
+        return this.finishRefresh(input, started, failedOwner("storage", "refresh_unavailable"));
+      }
+      let failurePhase: "storage" | "encrypt" | "write_back" = "storage";
+      try {
+        // Capture the caller's snapshot before waiting so expiry-only refresh wins remain observable.
+        const previousExpiresAt = await this.decryptCredentialExpiry(input.row.encrypted_auth);
+        const ownerResult = await sql.begin(async (tx): Promise<RefreshOwnerResult> => {
+          await tx`SELECT set_config('tetral.workspace_id', ${input.workspaceId}, true)`;
+          const locked = await tx<readonly GitHubCredentialLockedRow[]>`
+            SELECT id, vault_id, auth_public_json, encrypted_auth
+              FROM credentials
+             WHERE workspace_id = ${input.workspaceId}
+               AND vault_id = ${input.vaultId}
+               AND id = ${input.credentialId}
+               AND archived_at IS NULL
+               AND revoked_at IS NULL
+             FOR UPDATE
+          `;
+          const lockedRow = locked[0];
+          if (
+            lockedRow === undefined
+            || lockedRow.vault_id !== input.vaultId
+            || lockedRow.id !== input.credentialId
+          ) {
+            return failedOwner("credential_state", "credential_required");
+          }
+          if (lockedRow.encrypted_auth === undefined || lockedRow.encrypted_auth === null) {
+            return failedOwner("credential_state", "undecryptable");
+          }
+          const current = await this.decryptCredential(lockedRow);
+          if (current === undefined) {
+            return failedOwner("decrypt", "undecryptable");
+          }
+          if (current.type !== "mcp_oauth" || !nonEmpty(current.access_token)) {
+            return failedOwner("credential_state", "undecryptable");
+          }
+          const publicMcpServerURL = mcpServerURLFromPublicAuth(lockedRow.auth_public_json);
+          if (publicMcpServerURL === undefined || !catalogURLMatches(current.mcp_server_url ?? "", publicMcpServerURL)) {
+            return failedOwner("credential_state", "undecryptable");
+          }
+          const currentResolution = useToken(current.access_token, lockedRow);
+          if (expiryMovedForward(previousExpiresAt, current.expires_at)) {
+            return concurrentWinnerOwner(currentResolution);
+          }
+          if (
+            input.previousTokenHash !== undefined &&
+            currentResolution.ok &&
+            currentResolution.mode === "bearer" &&
+            currentResolution.tokenHash !== input.previousTokenHash
+          ) {
+            return concurrentWinnerOwner(currentResolution);
+          }
+          const currentAction = oauthRefreshAction(current, this.now(), false);
+          if (!input.force && currentAction === "use") {
+            return concurrentWinnerOwner(currentResolution);
+          }
+          if (current.refresh === undefined) {
+            return failedOwner("configuration", input.force ? "refresh_failed" : currentAction === "expired" ? "expired" : "refresh_failed");
+          }
+          const refreshed = await this.refreshGitHubOAuth(current.refresh, input.signal);
+          if (!refreshed.ok) {
+            return failedOwner(
+              refreshed.failureKind,
+              refreshResolutionError(refreshed.failureKind, refreshed.httpStatusClass),
+              refreshed.issuerAttempted,
+              refreshed.httpStatusClass,
+            );
+          }
+          const nextAuth = materializeRefreshedAuth(current, refreshed.value);
+          const publicAuth = publicAuthFromSecret(nextAuth);
+          failurePhase = "encrypt";
+          const encrypted = await encryptAES256GCM(new TextEncoder().encode(JSON.stringify(nextAuth)), this.masterKeyHex);
+          failurePhase = "write_back";
+          await tx`
+            UPDATE credentials
+               SET auth_public_json = ${JSON.stringify(publicAuth)},
+                   mcp_server_url = ${publicAuth.mcp_server_url ?? ""},
+                   expires_at = ${publicAuth.expires_at ?? ""},
+                   encrypted_auth = ${encrypted},
+                   updated_at = ${this.now().toISOString()}
+             WHERE workspace_id = ${input.workspaceId}
+               AND vault_id = ${input.row.vault_id}
+               AND id = ${input.row.id}
+          `;
+          return {
+            resolution: { ...useToken(nextAuth.access_token ?? "", lockedRow), refreshTriggered: true },
+            event: { outcome: "refreshed", httpStatusClass: refreshed.httpStatusClass,
+              durableWrite: "committed", refreshAttemptMetric: "success" },
+          };
+        });
+        return this.finishRefresh(input, started, ownerResult);
+      } catch {
+        return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable"));
+      }
+    });
   }
 
   private finishRefresh(input: { readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName: string; readonly credentialId: string }, started: number, ownerResult: RefreshOwnerResult): GitHubMcpCredentialResolution {

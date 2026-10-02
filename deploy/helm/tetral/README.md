@@ -279,59 +279,30 @@ durations, and timeout must exceed the warning interval; invalid values fail
 Sandbox startup. These values initialize a build's saved policy on its first
 claim, so changing them does not renew deadlines for builds already in progress.
 
-## Upgrade and rollback
+## Database preparation and compatible rollout
 
-Database preparation is a separate deployment step, not an API startup action
-or an automatic Helm hook. Use the same immutable release revision for
-`tetral-db-prepare` and the workloads.
+Database preparation is a separate deployment step. Run `tetral-db-prepare`
+from the same immutable revision as the workloads, with administrative TLS
+trust/name configuration and operator-selected roles. The command creates the
+complete current schema only in an empty database. An exact current-schema
+repeat is idempotent. A predecessor, partial or incompatible schema is rejected;
+there is no incremental predecessor migration or old-binary fallback.
 
-For an upgrade that changes the schema:
+For a fresh installation, prepare the empty database and roles, seed bootstrap
+state, then install matching workloads. All database consumers verify the exact
+current schema and their scoped serving role before readiness. Runner uses the
+separate `job_runner` role through `tetral-database/job-runner-url`; it cannot
+inherit Bridge's process-registry writes.
 
-1. Record the current release and take a restorable database backup. Register
-   the candidate's numbered Daytona snapshot from its matching sandbox image
-   digest before testing tool execution.
-2. Stop admission and drain or stop application workloads, including runtime
-   workers. Suspend cleanup scheduling and autoscalers so they do not recreate
-   stopped workloads. Preserve PostgreSQL and application data. This is a
-   maintenance-window upgrade; the chart does not orchestrate this pause.
-3. Run `tetral-db-prepare` with administrative credentials and the existing
-   operator-selected role declarations. The [bootstrap command examples](../../../docs/bootstrap.md)
-   show source and one-shot Pod execution. Wait for exit zero, confirming both
-   migration and role application completed. On any failure, keep the rollout
-   stopped and inspect the structured logs; committed migrations remain applied.
-4. Apply the matching workload revision with plain `helm upgrade`, then restore
-   the intended worker, scheduler and autoscaler state and verify readiness.
-5. Run the release's rehearsal checks before reopening normal traffic.
-
-```bash
-helm upgrade tetral ./deploy/helm/tetral -f values.yaml
-```
-
-All eleven DB-connected containers now only verify schema and serving-role
-state. If preparation was skipped or failed, they stop startup rather than
-repairing the database. `agent-runtime` has no direct database connection.
-There is no API-first rollout barrier. Do not let old and new binaries overlap
-across a schema change unless compatibility has been independently established:
-running processes do not recheck schema, and restarted old binaries reject
-newer schema history.
-
-For a release without schema changes, run preparation before rollout if the
-role contract changes. A normal rolling upgrade still requires application
-compatibility; schema equality alone does not prove it.
-
-**Rollback:** migrations are forward-only. `helm rollback` changes workloads,
-not the database. After a new schema version commits, binaries whose registry
-ends at an older version reject it as `schema_ahead` (V1-only after V2, or
-V2-only after V3). V3 persists per-input MCP discovery budgets; it does not
-refresh existing tool directories. See [schema history](../../../database/README.md).
-Returning to that release requires an explicit compatible database recovery or
-a forward fix. A nonzero preparation exit does not imply the whole upgrade was
-rolled back: migration versions and role application use separate transactions.
-
-Do not use `--atomic` as a database rollback mechanism. `--wait` can observe
-workload readiness but neither validates rehearsal nor restores the database.
-On a failed first install, `--atomic` also uninstalls the release and, when
-`namespaces.create=true`, can delete namespaces and their operator-owned contents.
+A future rollout requires independently demonstrated schema, protocol and
+handoff compatibility. Preserve `maxUnavailable: 0`, bounded surge and the
+aggregate connection ledger. Readiness before replacement retirement does not
+replace application admission or direct-channel fencing. An incompatible
+change requires coordinated maintenance and a separately designed data recovery
+or forward change. `helm rollback` changes workloads, not database state; it
+cannot make a predecessor binary compatible with the current schema. Do not
+use `--atomic` as a database recovery mechanism. `--wait` observes workload
+readiness and does not establish rollout or transport behavior.
 
 ## Ownership metadata
 
@@ -355,7 +326,7 @@ Two follow-ups are intentionally outside this chart:
 Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector each own
 one Deployment, ServiceAccount, Service and metrics/probe port. The chart
 removes the former combined Gateway resources and shared `gateway` identity.
-Their declared Deployment replica defaults are one. Set `replicas.bridge`,
+Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
 `replicas.jobRunner`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
 
@@ -363,9 +334,9 @@ Their declared Deployment replica defaults are one. Set `replicas.bridge`,
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. That HPA
 controls effective Provider Gateway replicas while enabled. Set it to false to
 use `replicas.providerGateway` directly. It has no effect on MCP or Web replicas.
-No transport proxy is installed by this ownership extraction. Provider Gateway
-retains its headless Service and Runtime client discovery; MCP and Web have
-ordinary ClusterIP Services.
+Internal Istiod/Envoy routing is mandatory, including a one-replica deployment.
+Provider Gateway retains its headless Service; scoped source proxies own per-RPC
+selection. MCP and Web retain ordinary ClusterIP Services.
 
 Runner alone watches Runtime Pods and EndpointSlices and controls Runtime RPCs.
 Bridge alone serves its durable API and has no visibility watch grant. Separate
@@ -375,3 +346,116 @@ Kubernetes API reviewer/watch tokens retain the API audience. Existing Secret
 names and keys remain supported, with grants limited to each owning process.
 Raw, service-owned and rendered Helm tests assert exact ports, selectors,
 credential paths, RBAC and NetworkPolicy peers, including denied inherited access.
+
+## Internal routing and protected stores
+
+Install the [locked Istiod prerequisite](../../istio/README.md) before workloads.
+`routing.enabled=false` and mismatched release/revision values are rejected.
+Runtime, Runner, Bridge, Sandbox, Provider Gateway and MCP Connector always
+receive the locked proxy. Hardened mode also gives Queue and Web receiver
+proxies. Source/destination route scopes are generated from
+`files/internal-routing.json`: exact service-account URI identities, service
+DNS, business port and permitted profile. Adding a caller requires changing
+that inventory and its tests.
+
+Each scoped HTTP/2 route selects `LEAST_REQUEST`, connects within one second,
+and has no generic retry. Two consecutive local-origin failures eject an
+endpoint for ten seconds; status-based ejection is disabled, max ejection is
+100 percent and panic routing is disabled. All-unhealthy traffic fails within
+its caller deadline. Bridge's exhaustive descriptor policy owns method
+budgets. Its proxy routes have timeout zero so a valid configured application
+budget is preserved; Queue routes retain their five-second envelope. A shorter
+parent deadline still wins.
+
+The default `transport.profile=standard-routed` exposes Runtime directly to
+Runner on plaintext 19090, excluding exactly that port from mesh capture.
+Hardened mode exposes TLS 19443 through the Runtime proxy and leaves Bun's
+business listener only on 127.0.0.1:9090. It excludes exactly 19443 from capture,
+requires TLS 1.3, full certificate verification and exact Runner/Runtime URI
+SANs, and disables session resumption. The rendered filter adds one inbound
+listener and one static single-loopback cluster. Runtime server leaf/private
+key mount only in the proxy; Runner's native client owns its separate mounted
+leaf. PodUID, process ID and binding fences remain enforced after TLS. There is
+no endpoint/profile fallback or cross-Pod replay.
+
+All deployed PostgreSQL and object-store consumers use native verified TLS.
+Supply `transport.storeTrustConfigMap` with `database-ca.crt` and
+`object-store-ca.crt`, and set the exact `databaseServerName` and
+`blobServerName`. Every constructor rejects missing trust/name. PostgreSQL URL
+sslmode cannot downgrade explicit TLS, and protected Unix sockets are refused.
+Protected object stores require HTTPS and use direct connections; environment
+HTTP/CONNECT proxies do not own their TLS path. Ordinary store bytes,
+create-only writes and database roles remain unchanged.
+
+Go PostgreSQL consumers retain one pool and acquire a validated credential
+snapshot for each new connection. A valid trust update closes idle sockets;
+admitted transactions retain their connection until completion, then discard
+retired connections before returning them to the pool. Object stores retain at
+most two HTTP transport generations. Each admitted response body owns its
+generation through EOF or Close; new operations use the active transport.
+Retirement closes idle sockets immediately and bounds old response bodies to
+20 seconds, then closes remaining old sockets. Further updates retain only the
+latest mounted reference until the retired transport closes. Bun consumers validate a candidate SQL pool
+before activation. Each actual store operation and entire transaction remains
+inside one generation-owned `withSQL` callback, including lazy query execution,
+issuer work and commit. Replacement owns at most two pools, including the
+candidate and draining pool. While both exist, only the latest mount reference
+is pending; it is re-read after old-pool closure. Malformed updates preserve
+only previously valid material and emit bounded failure observations. Expired
+material cannot admit a fresh connection. CA retirement requires bounded drain
+of connections established with the retired generation. Shutdown first joins
+application producers, then closes both SQL generations within the remaining
+process deadline; it does not start a pending replacement.
+
+For hardened direct TLS, supply `tetral-runtime-direct-trust` with `ca.crt`
+and separate `tetral-runtime-direct-tls` and `tetral-runner-direct-tls` Secrets
+with `tls.crt`/`tls.key`. The Runtime certificate has the configured
+`runtimeServerName` DNS and exact Runtime URI SAN; Runner has its exact URI SAN.
+CA and complete leaf/key generations are projected atomically by the operator.
+The application cannot repair unavailable issuance by creating trust material.
+Hardened startup also requires successful initial updates for both named SDS
+leaf and validation resources. The chart retains those counters for the fixed
+local admin readiness check; socket acceptance alone does not establish TLS
+readiness.
+
+Application drains are configured through `lifecycle.*Ms`. The chart passes the
+owning parser's milliseconds environment values and rejects drains that exceed
+Pod grace after cancellation, resource and proxy joins. Queue permits at most
+25 seconds in the standard profile and 20 seconds in the hardened profile;
+Web permits 20 seconds. Both retain a 30-second Pod grace. Runner's default
+30-second drain and five-second cancellation join fit its 45-second grace with
+five seconds each for resource joins and proxy drain. Provider Gateway and MCP
+retain separate 30-second business drains and configurable five-second forced
+cancellation joins (`providerJoinMs`/`mcpJoinMs`); each drain plus join plus
+five-second proxy margin must remain strictly below its 60-second Pod grace.
+Their database close uses the remaining shared shutdown deadline after worker
+join.
+
+## PostgreSQL connection ledger
+
+`tetral-database-connection-budget` records maximum owned pool slots, operator
+reserve, server capacity and external consumers. Defaults leave capacity and
+external consumers unknown and its status unresolved. These are required
+operator bindings before deployment; an unknown shared consumer is not zero.
+`databaseReserve=8` is a portable example reservation, not measured server
+capacity. Bind every external/admin consumer and available server connections
+after server-reserved slots using `transport.externalDatabaseConnections`,
+`transport.databaseCapacity` and `transport.databaseReserve`.
+
+The ledger resolves absolute or percentage `rollout.maxSurge` against every
+replica/HPA maximum. Go processes count one pool; Provider Gateway and MCP count
+two generations throughout simultaneous rollout and trust replacement. API,
+Auth, Queue and Event Stream each count their replica plus surge; Git Proxy
+uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker
+concurrency do not add another pool. Separately configured old/new release
+cohorts require a combined ledger for both settings. A fully bound capacity
+below the total is rejected at render time. The default owned maximum is 740
+slots, before reserve and external consumers. Rendered subset fixtures prove
+128/127 and 368/367 boundaries without claiming eagerly opened connections.
+
+Regenerate raw/service projections with `python3 deploy/render-manifests.py`.
+The default raw directory is the standard profile. The complete alternate raw
+set in `deploy/kubernetes/profiles/hardened` replaces the default set; applying
+both sets together is unsupported. The local TLS fixtures use controlled
+certificates and Docker networks; issuing/policy/rollout behavior still needs
+verification in the deployment's actual environment.

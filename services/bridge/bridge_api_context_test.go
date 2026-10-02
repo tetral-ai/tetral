@@ -130,7 +130,8 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 		t.Fatalf("lease recovery Queue job = %#v/%v", leased, err)
 	}
 	request := &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope:         bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		SourceEventId: sourceID,
 		RecoveryLeaseRef: &bridgev1.RecoveryLeaseRef{
 			JobId: leased[0].ID, LeaseToken: leased[0].LeaseToken,
 			PartitionKey: leased[0].PartitionKey, DedupeKey: leased[0].DedupeKey,
@@ -207,7 +208,7 @@ func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testin
 	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
 		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"now": "2026-08-21T12:00:00Z", "preloadOnly": true,
 	})
 	turnEventsJSON, err := json.Marshal(result.RecoveredTurnEvents)

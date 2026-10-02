@@ -165,7 +165,7 @@ func bridgeAPIScope(sessionID string, threadID string, bindingID string, generat
 		WorkspaceId:     "default",
 		SessionId:       sessionID,
 		SessionThreadId: threadID,
-		Binding:         &bridgev1.RuntimeBindingRef{BindingId: bindingID, BindingGeneration: generation, TargetPodUid: podUID},
+		Binding:         &bridgev1.RuntimeBindingRef{BindingId: bindingID, BindingGeneration: generation, TargetPodUid: podUID, RuntimeProcessId: "process_" + podUID},
 	}
 }
 
@@ -471,12 +471,21 @@ func seedBridgeAPIChildThread(t *testing.T, db *sql.DB, workspaceID string, sess
 
 func seedBridgeAPIRuntimeBinding(t *testing.T, db *sql.DB, workspaceID string, sessionID string, bindingID string, generation int64, podUID string) {
 	t.Helper()
+	processIdentity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: podUID, ID: "process_" + podUID}
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(db), processIdentity)
+	if err != nil {
+		t.Fatalf("register fixture Runtime process: %v", err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(db), processIdentity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatalf("promote fixture Runtime process: %v", err)
+	}
+
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_bindings (
 			workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace,
-			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tetral-agent-runtime', 'runtime-pod-0', $5, '10.0.0.10', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, bindingID, generation, podUID); err != nil {
+			agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'tetral-agent-runtime', 'runtime-pod-0', $5, '10.0.0.10', $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		workspaceID, sessionID, bindingID, generation, podUID, processIdentity.ID); err != nil {
 		t.Fatalf("seed runtime binding: %v", err)
 	}
 }
@@ -499,6 +508,7 @@ func runtimePodLostBinding(sessionID string, bindingID string, generation int64)
 		Namespace:         "tetral-agent-runtime",
 		PodName:           "runtime-pod-0",
 		PodUID:            "pod_uid_" + sessionID,
+		RuntimeProcessID:  "process_pod_uid_" + sessionID,
 		PodIP:             "10.0.0.10",
 	}
 }

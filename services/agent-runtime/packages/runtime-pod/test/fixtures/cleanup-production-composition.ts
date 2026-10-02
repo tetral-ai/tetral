@@ -11,6 +11,7 @@ const inputPath = process.argv[2];
 if (inputPath === undefined) throw new Error("cleanup composition input is required");
 const input = JSON.parse(await readFile(inputPath, "utf8")) as {
   readonly targetPodUid: string;
+  readonly runtimeProcessId: string;
   readonly sessionId: string;
   readonly mode: "delayed_busy" | "success" | "failure";
   readonly readyPath: string;
@@ -52,6 +53,7 @@ if (input.mode === "success") {
     bindingId: `bind_${input.sessionId}`,
     bindingGeneration: 7,
     targetPodUid: input.targetPodUid,
+    runtimeProcessId: input.runtimeProcessId,
     runtimeBindingToken: `rtbt_${input.sessionId}`,
     contextEntries: [],
     thread: { role: "main", visibility: "public", status: "idle" },
@@ -81,6 +83,7 @@ const cleanupController = new SessionRunHostCleanupController({
   },
 });
 const service = new RuntimeControlService({
+	runtimeProcessId: input.runtimeProcessId,
   ownPod: {
     namespace: "tetral-agent-runtime",
     name: "runtime-cleanup-composition",

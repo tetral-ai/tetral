@@ -40,7 +40,7 @@ import type { ProviderGatewayServiceShell } from "./service.js";
 export interface GatewayGrpcServer {
   readonly server: Server;
   readonly bind: (address: string) => Promise<number>;
-  readonly shutdown: () => Promise<void>;
+  readonly shutdown: (deadline?: Date) => Promise<void>;
 }
 
 /**
@@ -64,17 +64,31 @@ export function createGatewayGrpcServer(service: ProviderGatewayServiceShell): G
     server,
     bind: async (address) =>
       await new Promise<number>((resolve, reject) => {
-        server.bindAsync(address, ServerCredentials.createInsecure(), (error, port) => {
-          if (error !== null) {
-            reject(new Error("grpc listener unavailable"));
-            return;
-          }
-          resolve(port);
-        });
+        server.bindAsync(
+          address,
+          ServerCredentials.createInsecure(),
+          (error, port) => {
+            if (error !== null) {
+              reject(new Error("grpc listener unavailable"));
+              return;
+            }
+            resolve(port);
+          },
+        );
       }),
-    shutdown: async () =>
+    shutdown: async (deadline = new Date(Date.now() + 5000)) =>
       await new Promise<void>((resolve) => {
-        server.tryShutdown(() => resolve());
+        const timer = setTimeout(
+          () => {
+            server.forceShutdown();
+            resolve();
+          },
+          Math.max(0, deadline.getTime() - Date.now()),
+        );
+        server.tryShutdown(() => {
+          clearTimeout(timer);
+          resolve();
+        });
       }),
   };
 }

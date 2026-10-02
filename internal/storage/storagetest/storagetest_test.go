@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -267,21 +268,11 @@ func TestConnectedTemplateRefusesClone(t *testing.T) {
 
 func expectedCurrentBaseTableCount(t *testing.T) int {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	contract, err := database.LoadPostgreSQL()
+	if err != nil {
+		t.Fatal(err)
 	}
-	storageDir := filepath.Join(filepath.Dir(thisFile), "..")
-	var count int
-	for _, name := range []string{"postgresql_schema.go", "postgresql_migrator.go"} {
-		body, err := os.ReadFile(filepath.Join(storageDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		count += strings.Count(string(body), "CREATE TABLE IF NOT EXISTS ")
-		count += strings.Count(string(body), "CREATE TABLE tetral_schema_migrations (")
-	}
-	return count
+	return len(contract.WorkspaceTables) + len(contract.GlobalTables) + 1
 }
 
 func TestNewPostgreSQLDBLeavesPublicFoundationTablesUnchanged(t *testing.T) {

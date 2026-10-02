@@ -12,7 +12,7 @@ import (
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
-var openDatabase = dbconnect.OpenPlainDSNFromEnv
+var openDatabase = dbconnect.OpenProtectedDSNFromEnv
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 
 var newMetricsExporter = func(endpoint string) tetralcleanup.MetricsExporter {

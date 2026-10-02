@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { loadProviderGatewayConfigFromEnv } from "../../src/config.js";
 
 describe("Gateway config", () => {
+  test("preserves configured business drain and separate join within Pod grace",()=>{
+    const result=loadProviderGatewayConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:"1000"});
+    expect(result.ok).toBe(true);if(result.ok){expect(result.config.drainTimeoutMs).toBe(200);expect(result.config.cancelJoinTimeoutMs).toBe(1000);}
+    for(const join of ["0","-1","55000","bad"])expect(loadProviderGatewayConfigFromEnv({...validEnv(),TETRAL_SERVICE_DRAIN_TIMEOUT_MS:"200",TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS:join}).ok).toBe(false);
+  });
+
   test("projects only Gateway-owned environment", () => {
     const config = loadProviderGatewayConfigFromEnv({
       ...validEnv(),

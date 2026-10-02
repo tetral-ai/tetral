@@ -4,7 +4,10 @@ Tetral needs one deployment-owned workspace row before Auth can register the
 bootstrap API key. Before starting workloads, the repository-owned PostgreSQL
 preparation command constructs the current schema, creates the separate migration
 and serving roles, and applies their exact grants. Seed the workspace before
-starting workloads; every service then only verifies database readiness.
+starting workloads; every service then only verifies database readiness. The target
+is a dedicated empty database and isolated object namespace. Preparation accepts
+only an empty catalog or the exact current schema; it does not upgrade a
+predecessor installation or erase unexpected state.
 
 ## 1. Choose the workspace ID
 
@@ -138,12 +141,15 @@ with a safe error message.
 
 ```bash
 export TETRAL_DATABASE_ADMIN_URL
+export TETRAL_DATABASE_TLS_CA_PATH=/secure/path/database-ca.pem
+export TETRAL_DATABASE_TLS_SERVER_NAME=<database-server-dns>
 go run ./cmd/tetral-db-prepare \
   < /secure/path/tetral-postgresql-roles.json
 ```
 
-The idempotent command applies all pending versions, revokes public database/schema
-access, assigns catalog ownership to the migration role, and grants each
+The idempotent command initializes one canonical schema or verifies its exact
+identity, revokes public database/schema access, assigns catalog ownership to
+the migration role, and grants each
 serving role only its declared operations. Use the resulting role DSNs in the
 Secret inventory above; `api-database/url` is the API serving role. Keep the
 schema-owner credential out of serving Secrets. Runtime workloads reject
@@ -153,8 +159,10 @@ Secret.
 
 To run preparation inside Kubernetes using the release image, provision a
 separate operator-managed `database-preparation` Secret with key `url` containing
-the administrative DSN. The following one-shot Pod receives that Secret only;
-the role JSON is streamed over stdin. Keep the completed Pod available for
+the administrative DSN. Provide a `database-trust` ConfigMap with the verified
+public CA in `ca.crt`, and substitute the expected database DNS name below.
+Both one-shot commands require this trust; no database credentials are stored
+in the ConfigMap. The role JSON is streamed over stdin. Keep the completed Pod available for
 `kubectl logs` and the cluster's Pod log collector, if configured:
 
 ```bash
@@ -172,8 +180,14 @@ kubectl -n tetral-system run tetral-db-prepare \
           "valueFrom": {
             "secretKeyRef": {"name": "database-preparation", "key": "url"}
           }
-        }]
-      }]
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
     }
   }' \
   --command -- /usr/local/bin/tetral-db-prepare \
@@ -184,11 +198,14 @@ Inspect `kubectl -n tetral-system logs tetral-db-prepare` before deleting the
 completed Pod with `kubectl -n tetral-system delete pod tetral-db-prepare`;
 delete it before reusing the same name for another attempt.
 
-Proceed only after a zero exit. A failure after migration may leave that schema
-version committed; inspect the structured logs and rerun the same command after
-correcting the cause. Neither invocation deploys services or resets data. For
-existing installations, use the [upgrade sequence](../deploy/helm/tetral/README.md#upgrade-and-rollback)
-before invoking this command; do not replay from-zero bootstrap as an upgrade.
+Proceed only after a zero exit. Schema initialization and role installation use
+separate transactions, so a role failure may leave the canonical schema committed.
+Keep admission closed, inspect the structured logs, and rerun the same revision
+after repair. A predecessor or unknown nonempty schema is rejected without
+mutation. Neither command deploys services, resets data, or restores an older
+architecture. Compatible later workload updates must preserve this initialized
+state and durable custody; schema equality alone does not establish protocol
+compatibility.
 
 ## 4. Seed the workspace
 
@@ -212,8 +229,14 @@ kubectl -n tetral-system run tetral-bootstrap \
           "valueFrom": {
             "secretKeyRef": {"name": "api-database", "key": "url"}
           }
-        }]
-      }]
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
     }
   }' \
   --command -- /usr/local/bin/tetral-bootstrap \

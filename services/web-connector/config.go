@@ -3,6 +3,7 @@ package webconnector
 import (
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ const (
 	DefaultReaderEndpoint          = "https://r.jina.ai/"
 	DefaultGRPCAddress             = "0.0.0.0:9092"
 	DefaultMetricsAddress          = "0.0.0.0:9464"
+	EnvDrainTimeout                = "TETRAL_SERVICE_DRAIN_TIMEOUT_MS"
 	EnvSearchEndpoint              = "TETRAL_WEB_SEARCH_ENDPOINT"
 	EnvReaderEndpoint              = "TETRAL_WEB_READER_ENDPOINT"
 	EnvAPIKeys                     = "TETRAL_WEB_API_KEYS" //nolint:gosec // configuration name, not a value
@@ -28,6 +30,7 @@ const (
 
 type Env interface{ Getenv(string) string }
 type Config struct {
+	DrainTimeout                                                time.Duration
 	SearchEndpoint, ReaderEndpoint, GRPCAddress, MetricsAddress string
 	APIKeys                                                     []string
 	BindingHMACKey                                              []byte
@@ -55,6 +58,15 @@ func LoadConfig(env Env) (Config, error) {
 	hmacKey := env.Getenv(EnvBindingHMACKey)
 	if len(hmacKey) < 32 || len(hmacKey) > 4096 {
 		return Config{}, workload.NewConfigError(EnvBindingHMACKey + " must contain 32 to 4096 bytes")
+	}
+
+	cfg.DrainTimeout = DefaultListenerShutdownTimeout
+	if raw := env.Getenv(EnvDrainTimeout); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 20000 {
+			return Config{}, workload.NewConfigError(EnvDrainTimeout + " must be 1..20000 milliseconds (30s Pod budget includes joins/proxy)")
+		}
+		cfg.DrainTimeout = time.Duration(value) * time.Millisecond
 	}
 	cfg.BindingHMACKey = []byte(hmacKey)
 	return cfg, nil

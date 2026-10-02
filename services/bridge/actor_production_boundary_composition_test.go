@@ -98,7 +98,7 @@ func runSubagentProductionComposition(
 	input, err := json.Marshal(map[string]any{
 		"bridgeAddress": listener.Addr().String(), "workspaceId": "default",
 		"sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID,
+		"bindingId": bindingID, "bindingGeneration": bindingGeneration, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"taskName": taskName, "prompt": prompt, "forkTurns": forkTurns,
 	})
 	if err != nil {

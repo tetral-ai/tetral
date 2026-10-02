@@ -45,6 +45,8 @@ func TestBindingAdmissionRejectsEveryTamperedClaimBeforeBlobOrBackendAccess(t *t
 		{name: "thread claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.SessionThreadId = "other-thread" }},
 		{name: "binding claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.BindingId = "other-binding" }},
 		{name: "binding generation claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.BindingGeneration++ }},
+		{name: "runtime process claim", mutate: func(request *providergatewayv1.RunWebRequest) { request.RuntimeProcessId = "other-process" }},
+		{name: "missing runtime process", mutate: func(request *providergatewayv1.RunWebRequest) { request.RuntimeProcessId = "" }},
 		{name: "runtime pod claim", podUID: "other-runtime-pod"},
 		{name: "expiration claim", replaceToken: func(request *providergatewayv1.RunWebRequest) string {
 			return signRequest(request, "runtime-pod", nowValue, key)
@@ -172,7 +174,7 @@ func bindingAdmissionRequest() *providergatewayv1.RunWebRequest {
 		SessionThreadId:   "thr",
 		ToolUseEventId:    "evt-admission",
 		BindingId:         "bind",
-		BindingGeneration: 1,
+		BindingGeneration: 1, RuntimeProcessId: "process_web_fixture",
 		Input: &providergatewayv1.WebToolInput{
 			SearchQuery: []*providergatewayv1.WebSearchQuery{{Q: "example"}},
 		},

@@ -39,7 +39,10 @@ func BridgeAPIMethodAuthorizer(identity auth.Identity, method string) error {
 
 func isRuntimePodBridgeAPIMethod(method string) bool {
 	switch method {
-	case bridgev1.AgentRuntimeBridgeService_LoadContext_FullMethodName,
+	case bridgev1.AgentRuntimeBridgeService_RegisterRuntimeProcess_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ReportRuntimeProcess_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ReleaseRuntimeBinding_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_LoadContext_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_RefreshRuntimeBindingToken_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitInputs_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CommitTaskNotificationResult_FullMethodName,

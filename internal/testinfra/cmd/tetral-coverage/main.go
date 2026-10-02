@@ -21,7 +21,11 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	result, err := testinfra.Execute(ctx, testinfra.CoveragePlan(root), testinfra.RunOptions{Root: root, OutputDir: *output})
+	plan, err := testinfra.CoveragePlan(root)
+	if err != nil {
+		fatal(err)
+	}
+	result, err := testinfra.Execute(ctx, plan, testinfra.RunOptions{Root: root, OutputDir: *output})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "coverage %s: %v\n", result.Status, err)
 		os.Exit(1)

@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,7 +33,7 @@ func TestPostgreSQLRuntimePodLossSweepPreservesActiveToolOwnerAndIsIdempotent(t 
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 80, "Write", "idle", false, false, false, false, true)
 	var logs bytes.Buffer
-	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 
@@ -115,7 +117,7 @@ func TestPostgreSQLRuntimePodLossPreservesRequestForExactInterruptOwner(t *testi
 		t.Fatalf("seed interrupt barrier Inbox: %v", err)
 	}
 	seedActiveInterruptQueueCustody(t, runtime, fixture.sessionID, fixture.parentThreadID, interruptID, "evt_pod_loss_interrupt_barrier", 2)
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 
@@ -170,9 +172,16 @@ func TestPostgreSQLRuntimePodLossSweepUsesClosedVisibilityPartition(t *testing.T
 			candidate := seedRuntimePodLossSweepSession(t, admin, index, "running")
 			bound := boundRuntimePod(candidate.binding)
 			var logs bytes.Buffer
-			store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+			store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(tc.ready, bound, tc.state)
 			})
+			resolver := store.TargetResolver.(KubernetesRuntimeTargetResolver)
+			if tc.want == 0 {
+				resolver.GetPod = func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
+					return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: candidate.binding.PodUID, Running: true, IP: candidate.binding.PodIP}, nil
+				}
+			}
+			store.TargetResolver = resolver
 			repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
 			if err != nil || repaired != tc.want {
 				t.Fatalf("visibility %s sweep = %d/%v; want %d/nil", tc.state, repaired, err, tc.want)
@@ -208,7 +217,7 @@ func TestPostgreSQLRuntimePodLossSweepUsesClosedVisibilityPartition(t *testing.T
 func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	candidate := seedRuntimePodLossSweepSession(t, admin, 20, "idle")
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
@@ -222,7 +231,8 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 		PodUID:    "pod-replacement-idle",
 		PodIP:     "10.33.0.250",
 	}
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	registerPlacementCandidateForTest(t, admin, replacement)
+	store.TargetResolver = KubernetesRuntimeTargetResolver{GetPod: fixtureAbsentRuntimePod, LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotStateWithCandidatesForTest(
 			true,
 			boundRuntimePod(candidate.binding),
@@ -267,7 +277,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesReschedulingSession(t *testing.T) 
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='rescheduling' WHERE workspace_id='default' AND id=$1`, candidate.sessionID); err != nil {
 		t.Fatalf("mark session rescheduling: %v", err)
 	}
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
@@ -299,7 +309,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesAcceptedInputBeforeRunningStatus(t
 		WHERE workspace_id = 'default' AND runtime_input_id = $1`, runtimeInputID, candidate.binding.BindingGeneration); err != nil {
 		t.Fatalf("align accepted input binding generation: %v", err)
 	}
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
@@ -328,7 +338,7 @@ func TestPostgreSQLRuntimePodLossSweepRequiresMatchingRuntimeStatusBinding(t *te
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET binding_generation=binding_generation+1 WHERE workspace_id='default' AND session_id=$1`, candidate.sessionID); err != nil {
 		t.Fatalf("make runtime status binding stale: %v", err)
 	}
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
@@ -361,18 +371,20 @@ func TestPostgreSQLRuntimePodLossSweepFreezesCensusBeforeWatcherAndContinuesPage
 	inserted := runtimePodLossSweepSeed{}
 	reboundBindingID := "bind_pod_loss_rebound"
 	var logs bytes.Buffer
-	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 		watcherCalls++
-		inserted = seedRuntimePodLossSweepSession(t, admin, 190, "running")
-		if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
+		if watcherCalls == 1 {
+			inserted = seedRuntimePodLossSweepSession(t, admin, 190, "running")
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings
 			SET binding_id=$2, binding_generation=binding_generation+100
 			WHERE workspace_id='default' AND session_id=$1`, rebound.sessionID, reboundBindingID); err != nil {
-			t.Fatalf("rebind after census snapshot: %v", err)
-		}
-		if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
+				t.Fatalf("rebind after census snapshot: %v", err)
+			}
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status
 			SET binding_id=$2, binding_generation=binding_generation+100
 			WHERE workspace_id='default' AND session_id=$1`, rebound.sessionID, reboundBindingID); err != nil {
-			t.Fatalf("rebind status after census snapshot: %v", err)
+				t.Fatalf("rebind status after census snapshot: %v", err)
+			}
 		}
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, healthy)
 	})
@@ -381,8 +393,8 @@ func TestPostgreSQLRuntimePodLossSweepFreezesCensusBeforeWatcherAndContinuesPage
 	if err != nil {
 		t.Fatalf("frozen pod-loss sweep: %v", err)
 	}
-	if watcherCalls != 1 || runtimePodLossCensusPageSize != 32 || repaired != lostCount {
-		t.Fatalf("frozen sweep calls=%d page_size=%d repaired=%d; want 1/32/%d", watcherCalls, runtimePodLossCensusPageSize, repaired, lostCount)
+	if watcherCalls < 2 || runtimePodLossCensusPageSize != 32 || repaired != lostCount {
+		t.Fatalf("frozen sweep calls=%d page_size=%d repaired=%d; want rechecked snapshots/32/%d", watcherCalls, runtimePodLossCensusPageSize, repaired, lostCount)
 	}
 	var insertedRows, reboundRows, remainingInitiallyLost int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, inserted.sessionID).Scan(&insertedRows); err != nil {
@@ -427,8 +439,8 @@ func TestPostgreSQLRuntimePodLossSweepConvergesConcurrentReplicasAndActiveFences
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	}
 	stores := []*PostgreSQLRuntimeDeliveryStore{
-		runtimePodLossSweepStore(runtime, nil, snapshot),
-		runtimePodLossSweepStore(runtime, nil, snapshot),
+		runtimePodLossSweepStore(t, runtime, nil, snapshot),
+		runtimePodLossSweepStore(t, runtime, nil, snapshot),
 	}
 	type result struct {
 		repaired int
@@ -447,7 +459,7 @@ func TestPostgreSQLRuntimePodLossSweepConvergesConcurrentReplicasAndActiveFences
 	}
 
 	inactive := seedRuntimePodLossSweepSession(t, admin, 211, "running")
-	inactiveStore := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	inactiveStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET status='idle' WHERE workspace_id='default' AND session_id=$1`, inactive.sessionID); err != nil {
 			t.Fatalf("make frozen candidate inactive: %v", err)
 		}
@@ -476,7 +488,7 @@ func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndC
 	))
 	var deletedAfterCensus atomic.Bool
 	var logs bytes.Buffer
-	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 		if deletedAfterCensus.CompareAndSwap(false, true) {
 			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET status='idle'
 				WHERE workspace_id='default' AND session_id=$1`, deleted.sessionID); err != nil {
@@ -561,10 +573,11 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 		PodUID:    "pod-race-replacement",
 		PodIP:     "10.55.0.1",
 	}
+	registerPlacementCandidateForTest(t, admin, replacement)
 	var entered atomic.Int32
 	release := make(chan struct{})
 	var releaseOnce sync.Once
-	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		if call := entered.Add(1); call <= 2 {
 			if call == 2 {
 				releaseOnce.Do(func() { close(release) })
@@ -683,7 +696,7 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 		}
 	}()
 	var logs bytes.Buffer
-	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+	store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -754,15 +767,18 @@ func seedRuntimePodLossSweepSession(t *testing.T, db *sql.DB, index int, runtime
 		threadID:  threadID,
 		binding: runtimecontrol.Binding{
 			BindingID: bindingID, BindingGeneration: bindingGeneration,
-			Namespace: "tetral-agent-runtime", PodName: podName, PodUID: podUID, PodIP: podIP,
+			Namespace: "tetral-agent-runtime", PodName: podName, PodUID: podUID, PodIP: podIP, RuntimeProcessID: "process_" + podUID,
 		},
 	}
 }
 
-func runtimePodLossSweepStore(runtime *sql.DB, logs *bytes.Buffer, snapshot func() enginekubernetes.BindingVisibilitySnapshot) *PostgreSQLRuntimeDeliveryStore {
+func runtimePodLossSweepStore(t *testing.T, runtime *sql.DB, logs *bytes.Buffer, snapshot func() enginekubernetes.BindingVisibilitySnapshot) *PostgreSQLRuntimeDeliveryStore {
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: snapshot, Clock: store.Clock}
+	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: snapshot, Clock: store.Clock,
+		GetPod:     fixtureAbsentRuntimePod,
+		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
+	}
 	if logs != nil {
 		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	}
@@ -790,4 +806,23 @@ func decodeRuntimePodLossLogRecords(t *testing.T, logs *bytes.Buffer) []map[stri
 		records = append(records, record)
 	}
 	return records
+}
+
+// Cached deletion/IP/UID states do not prove loss. These historical closeout
+// fixtures now supply explicit fresh NotFound evidence while preserving their
+// custody, projection, pagination, race and idempotency assertions.
+func fixtureAbsentRuntimePod(_ context.Context, _, name string) (*enginekubernetes.PodObservation, error) {
+	return &enginekubernetes.PodObservation{Absent: true}, nil
+}
+func registerPlacementCandidateForTest(t *testing.T, admin *sql.DB, candidate enginekubernetes.BindingCandidate) {
+	t.Helper()
+	identity := runtimecontrol.ProcessIdentity{Namespace: candidate.Namespace, PodUID: candidate.PodUID, ID: "process_" + candidate.PodUID}
+	client := dbconnect.NewClientForTesting(admin)
+	registered, err := runtimecontrol.RegisterProcess(context.Background(), client, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(context.Background(), client, identity, registered.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
 }

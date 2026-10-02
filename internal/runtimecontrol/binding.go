@@ -14,6 +14,7 @@ type Binding struct {
 	PodName           string
 	PodUID            string
 	PodIP             string
+	RuntimeProcessID  string
 }
 
 func ReadRuntimeBindingForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (Binding, error) {
@@ -29,7 +30,7 @@ func ReadRuntimeBindingForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, work
 
 func ReadOptionalRuntimeBindingForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (Binding, bool, error) {
 	row := tx.QueryRow(ctx,
-		`SELECT binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip
+		`SELECT binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id
 		   FROM session_runtime_bindings
 		  WHERE workspace_id = $1 AND session_id = $2
 		  FOR UPDATE`,
@@ -37,12 +38,12 @@ func ReadOptionalRuntimeBindingForDeliveryTx(ctx context.Context, tx *dbconnect.
 		sessionID,
 	)
 	var binding Binding
-	if err := row.Scan(&binding.BindingID, &binding.BindingGeneration, &binding.Namespace, &binding.PodName, &binding.PodUID, &binding.PodIP); dbconnect.IsNoRows(err) {
+	if err := row.Scan(&binding.BindingID, &binding.BindingGeneration, &binding.Namespace, &binding.PodName, &binding.PodUID, &binding.PodIP, &binding.RuntimeProcessID); dbconnect.IsNoRows(err) {
 		return Binding{}, false, nil
 	} else if err != nil {
 		return Binding{}, false, err
 	}
-	if binding.BindingID == "" || binding.BindingGeneration <= 0 || binding.Namespace == "" || binding.PodName == "" || binding.PodUID == "" || binding.PodIP == "" {
+	if binding.BindingID == "" || binding.BindingGeneration <= 0 || binding.Namespace == "" || binding.PodName == "" || binding.PodUID == "" || binding.PodIP == "" || binding.RuntimeProcessID == "" {
 		return Binding{}, false, PreparationError{Kind: "runtime_binding_invalid", Message: "runtime binding is invalid", Retryable: true}
 	}
 	if _, err := netip.ParseAddr(binding.PodIP); err != nil {

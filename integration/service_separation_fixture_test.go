@@ -56,9 +56,11 @@ func newSeparatedOwners(t *testing.T, suffix string, mcp bool) *separatedOwners 
 		t.Fatalf("seed Session runtime-status invariant: %v", err)
 	}
 	runnerClient := dbconnect.NewClientForTesting(runtime)
+	seedFixtureRuntimeProcess(t, runnerClient, "tetral-agent-runtime", "pod_separation")
 	f.runner = jobrunner.NewJobRunnerRuntimeDeliveryStore(runnerClient, nil, jobrunner.JobRunnerConfig{AgentRuntimeGRPCPort: 9090}, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-separation", PodUID: "pod_separation", PodIP: "127.0.0.1"}})
 	})
+	installFixtureRuntimeLoad(t, f.runner)
 	f.bridge = agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(bridgeDB))
 	f.bridge.RuntimeBindingTokenHMACKey = []byte("test-only-separation-token-signing-key")
 	f.queue = queue.NewPostgreSQLStore(runnerClient)

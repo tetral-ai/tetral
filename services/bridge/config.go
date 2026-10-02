@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -35,6 +36,8 @@ type Env interface {
 }
 
 type BridgeAPIConfig struct {
+	ProcessPolicy              runtimecontrol.ProcessPolicy
+	LifecyclePolicy            BridgeLifecyclePolicy
 	MCPConnectorGRPCAddress    string
 	GatewayTokenPath           string
 	ProviderRescheduleBudget   int64
@@ -71,6 +74,12 @@ func BridgeAPIConfigFromEnv(env Env) (BridgeAPIConfig, error) {
 		return BridgeAPIConfig{}, err
 	}
 	if cfg.CompactionRescheduleBudget, err = parseBoundedRescheduleBudget(env.Getenv(EnvCompactionRescheduleBudget), EnvCompactionRescheduleBudget, defaultCompactionRescheduleBudget); err != nil {
+		return BridgeAPIConfig{}, err
+	}
+	if cfg.ProcessPolicy, err = runtimecontrol.ProcessPolicyFromEnv(env.Getenv); err != nil {
+		return BridgeAPIConfig{}, err
+	}
+	if cfg.LifecyclePolicy, err = BridgeLifecyclePolicyFromEnv(env.Getenv); err != nil {
 		return BridgeAPIConfig{}, err
 	}
 	return cfg, nil

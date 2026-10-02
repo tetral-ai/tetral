@@ -43,7 +43,7 @@ func (a *Application) Close() error {
 }
 
 func OpenStartupDatabaseFromEnv(ctx context.Context) (StartupDatabase, error) {
-	openResult, err := dbconnect.OpenPlainDSNFromEnv(ctx)
+	openResult, err := dbconnect.OpenProtectedDSNFromEnv(ctx)
 	if err != nil {
 		return StartupDatabase{}, err
 	}

@@ -151,6 +151,12 @@ export class ThreadState {
 	#lastRequestContextAnchorSequence: number | undefined;
 	#providerRequestOutputSchemaJson: string | undefined;
 	#runtimeShutdownRequested = false;
+	#runtimeQuiesceRequested = false;
+	#runtimeCheckpointExpired = false;
+	#quiesceController = new AbortController();
+	#drainDependencyAllowed: (() => boolean) | undefined;
+	#quiesceModelRequestId: string | undefined;
+	#reviewDependencies = new Map<string, string>();
 	#cooperativeCancelRequested = false;
 	#userInterrupt: RuntimeUserInterruptState | undefined;
 	#lastUserInterruptCommit:
@@ -618,6 +624,55 @@ export class ThreadState {
 
 	beginRuntimeShutdown(): void {
 		this.#runtimeShutdownRequested = true;
+	}
+
+	/** Closes ordinary step admission while permitting an explicitly owned reviewer dependency. */
+	beginRuntimeQuiesce(dependencyAllowed?: () => boolean): void {
+		if (!this.#runtimeQuiesceRequested)
+			this.#quiesceModelRequestId =
+				this.#threadTurnCheckpoint.request?.modelRequestId;
+		this.#runtimeQuiesceRequested = true;
+		this.#quiesceController.abort();
+		this.#drainDependencyAllowed = dependencyAllowed;
+	}
+
+	beginRuntimeCheckpointExpiry(): void {
+		this.#runtimeCheckpointExpired = true;
+	}
+
+	runtimeCheckpointExpired(): boolean {
+		return this.#runtimeCheckpointExpired;
+	}
+
+	/** Quiesce is a scheduling fence; it does not cancel the already admitted step. */
+	runtimeCheckpointYieldRequested(): boolean {
+		return this.#runtimeQuiesceRequested && !this.#drainDependencyAllowed?.();
+	}
+
+	/** Only the exact tool in the already admitted parent request can extend a drain. */
+	beginReviewDependency(
+		modelRequestId: string,
+		modelToolCallId: string,
+	): () => void {
+		this.#reviewDependencies.set(modelToolCallId, modelRequestId);
+		return () => {
+			this.#reviewDependencies.delete(modelToolCallId);
+		};
+	}
+
+	allowsReviewDependency(modelToolCallId: string): boolean {
+		const requestId = this.#reviewDependencies.get(modelToolCallId);
+		return (
+			requestId !== undefined &&
+			(!this.#runtimeQuiesceRequested ||
+				requestId === this.#quiesceModelRequestId)
+		);
+	}
+
+	checkpointSignal(): AbortSignal | undefined {
+		return this.#drainDependencyAllowed?.()
+			? undefined
+			: this.#quiesceController.signal;
 	}
 
 	runtimeShutdownRequested(): boolean {

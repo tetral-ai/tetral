@@ -567,6 +567,7 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	modelRequestId: SanitizedIdentifierSchema,
 	modelToolCallId: SanitizedIdentifierSchema,
 	toolName: SanitizedIdentifierSchema,
@@ -982,6 +983,7 @@ export const SessionEventEnvelopeSchema = z
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		event: SessionEventWriterAppendEventSchema,
 		assistantContextAppend: RuntimeAssistantContextAppendSchema.optional(),
@@ -1091,6 +1093,7 @@ export const SessionEventWriterToolSettlementEnvelopeSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	settlement: RuntimeToolSettlementDeclarationSchema,
 });
 export type SessionEventWriterToolSettlementEnvelope = z.infer<
@@ -1106,6 +1109,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		modelRequestId: SanitizedIdentifierSchema,
 		providerContextRetention: z
@@ -1278,6 +1282,7 @@ export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
 	bindingId: SanitizedIdentifierSchema,
 	bindingGeneration: NonNegativeIntegerSchema,
 	targetPodUid: SanitizedIdentifierSchema,
+	runtimeProcessId: SanitizedIdentifierSchema,
 	durableTurnId: SanitizedIdentifierSchema,
 	stopReason: SessionIdleStopReasonSchema,
 	completionMailText: RuntimeTextSchema.optional(),
@@ -1294,6 +1299,7 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema =
 		bindingId: SanitizedIdentifierSchema,
 		bindingGeneration: NonNegativeIntegerSchema,
 		targetPodUid: SanitizedIdentifierSchema,
+		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
 		failure: RuntimeFailureSchema,
 	});

@@ -34,6 +34,7 @@ function messageInput(
 		bindingId: "bind_1",
 		bindingGeneration: 1,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_1",
 		inputOrder: 1,
 		kind: "messages",

@@ -42,9 +42,11 @@ describe("McpConnector command failure ownership", () => {
   test("repeated shutdown reuses its failed result and still releases later resources", async () => {
     const events: string[] = [];
     let reentered: Promise<void> | undefined;
+    let httpClose!:()=>void;
+    const httpCloseReached=new Promise<void>(resolve=>{httpClose=resolve;});
     const fixture = commandFixture("http", (event) => {
       events.push(event);
-      if (event === "http.close") reentered = shutdown!();
+      if (event === "http.close") {reentered = shutdown!();httpClose();}
     });
     let shutdown: (() => Promise<void>) | undefined;
     await withEnv(async () => {
@@ -53,6 +55,8 @@ describe("McpConnector command failure ownership", () => {
         registerSignalHandlers: (close) => { shutdown = close; },
         waitForever: async () => {
           const first = shutdown!();
+          void first.catch(()=>undefined);
+          await httpCloseReached;
           expect(events).toContain("http.close");
           expect(reentered).toBe(first);
           const second = shutdown!();

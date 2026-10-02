@@ -123,6 +123,7 @@ describe("Runtime Pod transport bounds", () => {
 			toolUseEventId: "event_web_capacity",
 			bindingId: "bind_web_capacity",
 			bindingGeneration: 1,
+			runtimeProcessId: "process-test",
 			runtimeBindingToken: "binding-token",
 			input: {
 				searchQuery: Array.from({ length: 8 }, () => ({

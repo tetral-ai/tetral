@@ -84,7 +84,8 @@ describe("mcp-connector static boundaries", () => {
     ]) {
       expect(credential).not.toContain(forbidden);
     }
-    expect(credential).toContain("this.sql.begin");
+    expect(credential).toContain("this.sqlSource.withSQL(async (sql)");
+    expect(credential).toContain("sql.begin");
     expect(credential).toContain("set_config('tetral.workspace_id'");
     expect(credential).not.toMatch(/\bencrypted_auth\s*=\s*\$/);
   });

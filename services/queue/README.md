@@ -138,6 +138,17 @@ timestamp is reported as an integrity error and retained without preventing
 eligible peers in the same bounded pass from being deleted or the subsequent
 empty-partition-counter sweep from running.
 
+The serving process owns this loop together with its RPC and HTTP listeners.
+Shutdown marks readiness unavailable and closes both request and maintenance
+cycle admission. A cycle already admitted may finish during the same drain
+window as existing RPCs. At the deadline the service cancels maintenance and
+HTTP database work and force-stops RPC transport, then joins every admitted
+user before returning. Only then does the command close its database pool.
+A cancelled reclaim transaction rolls back as a whole; another replica can
+reclaim the remaining expired leases. Shutdown never implies reclamation
+succeeded. Queue replicas share only PostgreSQL authority: Lease, Heartbeat,
+and Ack can reach different replicas with the same Workspace/job/token.
+
 ### Startup configuration
 
 Everything is startup env, validated before the service serves traffic; any
@@ -152,6 +163,13 @@ malformed value is a startup failure (`ConfigFromEnv`).
 | `TETRAL_QUEUE_RETRY_MAX_ATTEMPTS` | `10` | service-default attempt budget; the "unset" per-job `0` resolves to this at the lease projection and the dead-letter comparison |
 | `TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS` | `30` | reclaim cadence; required positive |
 | `TETRAL_QUEUE_LEASE_RECLAIM_LIMIT` | `100` | per-scan batch size; required positive |
+| `TETRAL_QUEUE_DRAIN_TIMEOUT_MS` | `10000` | concurrent RPC/HTTP/maintenance completion window; 1–25000 ms, leaving cancellation/join time inside the 30-second Pod grace |
+
+Production database startup requires `TETRAL_DATABASE_TLS_CA_PATH` and
+`TETRAL_DATABASE_TLS_SERVER_NAME` alongside `TETRAL_DATABASE_URL`. The shared
+database owner verifies the server identity, refreshes trust for new
+connections, and joins its credential watcher when the command closes the
+pool after service shutdown.
 
 The retry policy is Queue-Service-owned; consumers carry no delay authority.
 
@@ -336,6 +354,9 @@ the next holder re-leases under a new token.
 | `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse, the field census matching lease arithmetic, validation → `InvalidArgument` mapping |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
 | `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, then bounded empty-counter cleanup, and logs shared operation/error fields |
+| `services/queue/run_test.go` | admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes |
+| `integration/replica_queue_test.go` | three independent Queue receivers share lease authority; lost committed Lease/Ack responses, real expiry/reclaim, stale-token rejection on every transition, and Workspace/Session barriers |
+| `integration/replica_queue_maintenance_test.go` | a real reclaim UPDATE is held before commit; normal completion commits the whole batch, forced cancellation rolls it all back, the pool stays alive until join, and a replacement maintenance owner reclaims remaining work |
 | `services/queue/cmd/tetral-queue/main_test.go` | schema-behind startup stops before the store and listener; startup-failure logs use shared fields |
 
 Run the store suite (and any test that opens PostgreSQL) with the race detector

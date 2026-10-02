@@ -726,7 +726,7 @@ func TestKubernetesManifestTetralAPIProvidesBlobStoreConfig(t *testing.T) {
 		"name: TETRAL_BLOB_BUCKET",
 		"name: TETRAL_BLOB_ACCESS_KEY",
 		"name: TETRAL_BLOB_SECRET_KEY",
-		"name: tetral-blob",
+		"name: \"tetral-blob\"",
 		"key: endpoint",
 		"key: region",
 		"key: bucket",
@@ -782,7 +782,11 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.metricsEnv, ":8081")
 		}
 		if workload.internalGRPC {
-			requireContains(t, deployment, "containerPort: 9090")
+			port := 9090
+			if workload.name == "agent-runtime" {
+				port = 19090
+			}
+			requireContains(t, deployment, fmt.Sprintf("containerPort: %d", port))
 			requireContains(t, deployment, "name: "+workload.grpcPortName)
 			serviceGRPCPort := "name: " + workload.grpcPortName + "\n      port: 9090\n      targetPort: " + workload.grpcPortName
 			if workload.name == "agent-runtime" {
@@ -792,7 +796,7 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			}
 			expectedGRPCAddress := ":9090"
 			if workload.name == "agent-runtime" {
-				expectedGRPCAddress = "9090"
+				expectedGRPCAddress = "19090"
 			}
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.grpcEnv, expectedGRPCAddress)
 		} else if strings.Contains(service.text, "targetPort: grpc") || strings.Contains(deployment.text, "containerPort: 9090") {
@@ -859,7 +863,7 @@ func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing
 		"name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64",
 		"name: TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS",
 		"name: TETRAL_DATABASE_URL",
-		"name: auth-bootstrap",
+		"name: \"auth-bootstrap\"",
 		"key: private_key_b64",
 	} {
 		requireContains(t, authDeployment, required)
@@ -1573,7 +1577,7 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 	}
 	for envName, want := range map[string]string{ // #nosec G101 -- Kubernetes fixture env values, not credentials.
 		"TETRAL_RUNTIME_POD_HTTP_ADDR":                           "0.0.0.0:8080",
-		"TETRAL_RUNTIME_POD_GRPC_PORT":                           "9090",
+		"TETRAL_RUNTIME_POD_GRPC_PORT":                           "19090",
 		"TETRAL_DEPLOYMENT_ENVIRONMENT":                          "local",
 		"TETRAL_SERVICE_VERSION":                                 "dev",
 		"TETRAL_RUNTIME_POD_GRPC_AUDIENCE":                       "tetral-internal-grpc",
@@ -1952,10 +1956,10 @@ func TestKubernetesManifestAgentRuntimePodIsComposedFromServiceLocalManifests(t 
 		"networkpolicy.yaml",
 	})
 	aggregate := requireDocument(t, readManifestDocuments(t), "agent-runtime.yaml", "Deployment", "agent-runtime")
-	requireContains(t, aggregate, "terminationGracePeriodSeconds: 15")
+	requireContains(t, aggregate, "terminationGracePeriodSeconds: 90")
 	serviceLocal := readServiceLocalManifestText(t, filepath.Join("agent-runtime", "k8s", "deployment.yaml"))
-	if !strings.Contains(serviceLocal, "terminationGracePeriodSeconds: 15") {
-		t.Fatal("service-local agent-runtime deployment is missing terminationGracePeriodSeconds: 15")
+	if !strings.Contains(serviceLocal, "terminationGracePeriodSeconds: 90") {
+		t.Fatal("service-local agent-runtime deployment is missing terminationGracePeriodSeconds: 90")
 	}
 }
 
@@ -2206,7 +2210,11 @@ func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 		}
 		networkPolicy := requireDocument(t, documents, workload.file, "NetworkPolicy", workload.name)
 		if workload.internalGRPC {
-			requireContains(t, networkPolicy, "port: 9090")
+			port := 9090
+			if workload.name == "agent-runtime" {
+				port = 19090
+			}
+			requireContains(t, networkPolicy, fmt.Sprintf("port: %d", port))
 			if workload.name == "queue" {
 				for _, port := range []int{8080, 9090} {
 					requireNetworkPolicyIngressEdge(t, networkPolicy, port, networkPolicyPeer{namespace: "tetral-system", podName: "api"})
@@ -2221,8 +2229,8 @@ func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 				continue
 			}
 			if workload.name == "agent-runtime" {
-				requireNetworkPolicyIngressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "job-runner"})
-				requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 9090)
+				requireNetworkPolicyIngressEdge(t, networkPolicy, 19090, networkPolicyPeer{namespace: "tetral-system", podName: "job-runner"})
+				requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 19090)
 				for _, forbiddenSource := range []string{"api", "event-stream"} {
 					requireNotContains(t, networkPolicy, "app.kubernetes.io/name: "+forbiddenSource)
 				}
@@ -3657,6 +3665,9 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 	t.Helper()
 	root := topLevelManifestRoot()
 	expectedFiles := []string{
+		"database-budget.yaml",
+		"internal-routing.yaml",
+		"internal-security.yaml",
 		"agent-runtime.yaml",
 		"bridge.yaml",
 		"job-runner-rbac.yaml",
@@ -3885,12 +3896,13 @@ func TestKubernetesManifestAudiencesAreAllowListed(t *testing.T) {
 func TestKubernetesManifestDocumentsHaveRecognizedKindAndName(t *testing.T) {
 	documents := readManifestDocuments(t)
 	allowed := map[string]bool{
-		"CiliumNetworkPolicy":     true,
-		"ClusterRole":             true,
-		"ClusterRoleBinding":      true,
-		"ConfigMap":               true,
-		"CronJob":                 true,
-		"Deployment":              true,
+		"CiliumNetworkPolicy": true,
+		"ClusterRole":         true,
+		"ClusterRoleBinding":  true,
+		"ConfigMap":           true,
+		"CronJob":             true,
+		"Deployment":          true,
+		"DestinationRule":     true, "VirtualService": true, "PeerAuthentication": true, "AuthorizationPolicy": true,
 		"HorizontalPodAutoscaler": true,
 		"NetworkPolicy":           true,
 		"Role":                    true,

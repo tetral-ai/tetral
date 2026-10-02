@@ -250,6 +250,7 @@ describe("RuntimePodToolRunner", () => {
 					bindingId: "bind_1",
 					bindingGeneration: 42,
 					targetPodUid: "pod_1",
+					runtimeProcessId: "process-test",
 				},
 			},
 		});
@@ -1619,6 +1620,7 @@ describe("RuntimePodToolRunner", () => {
 						bindingId: "bind_1",
 						bindingGeneration: 42,
 						targetPodUid: "pod_1",
+						runtimeProcessId: "process-test",
 					},
 				},
 			},
@@ -1769,6 +1771,7 @@ describe("RuntimePodToolRunner", () => {
 				toolUseEventId: "sevt_tool_1",
 				bindingId: "bind_1",
 				bindingGeneration: 42,
+				runtimeProcessId: "process-test",
 				runtimeBindingToken: "binding-token",
 				input: {
 					searchQuery: [{ q: "tetral", domains: ["example.com"] }],
@@ -2032,6 +2035,7 @@ describe("RuntimePodToolRunner", () => {
 				toolUseEventId: "sevt_tool_1",
 				bindingId: "bind_1",
 				bindingGeneration: 42,
+				runtimeProcessId: "process-test",
 				runtimeBindingToken: "binding-token",
 			},
 		]);
@@ -4135,6 +4139,7 @@ function resumeChildControl() {
 		bindingId: "bind_1",
 		bindingGeneration: 42,
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		runtimeInputId: "rin_resume_inspect",
 		eventIds: [],
 		sequenceFrom: 0,
@@ -4250,6 +4255,7 @@ function toolRequest(
 		bindingGeneration: 42,
 		runtimeBindingToken: "binding-token",
 		targetPodUid: "pod_1",
+		runtimeProcessId: "process-test",
 		modelRequestId: "mreq_1",
 		modelToolCallId: "tool_call_1",
 		modelOrder,
@@ -4525,6 +4531,7 @@ class RecordingBridgeClient {
 	private awaitSandboxExecution(
 		request: AwaitSandboxExecutionRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.awaitSandboxExecutionRequests.push(request);
@@ -4548,6 +4555,7 @@ class RecordingBridgeClient {
 	private runMemory(
 		request: RunMemoryRequest,
 		metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.runMemoryRequests.push(request);
@@ -4588,6 +4596,7 @@ class RecordingBridgeClient {
 	private sendCommandInput(
 		request: SendCommandInputRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.sendCommandInputRequests.push(request);
@@ -4608,6 +4617,7 @@ class RecordingBridgeClient {
 	private readCommandResult(
 		request: ReadCommandResultRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.readCommandResultRequests.push(request);
@@ -4617,7 +4627,7 @@ class RecordingBridgeClient {
 			return grpcCall();
 		}
 		if (this.deferReadCommandResult) {
-			return grpcCall();
+			return {cancel:()=>callback(Object.assign(new Error("cancelled"), {code:GrpcStatus.CANCELLED}), undefined)};
 		}
 		callback(
 			null,
@@ -4652,6 +4662,7 @@ class RecordingBridgeClient {
 	private authorizeWebToolExecution(
 		request: AuthorizeWebToolExecutionRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.authorizeWebToolExecutionRequests.push(request);
@@ -4662,6 +4673,7 @@ class RecordingBridgeClient {
 	private createSubagentThread(
 		request: CreateSubagentThreadRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.createSubagentThreadRequests.push(request);
@@ -4686,6 +4698,7 @@ class RecordingBridgeClient {
 	private resolveChildThread(
 		request: ResolveChildThreadRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.resolveChildThreadRequests.push(request);
@@ -4703,6 +4716,7 @@ class RecordingBridgeClient {
 	private listChildThreads(
 		request: ListChildThreadsRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.listChildThreadsRequests.push(request);
@@ -4739,6 +4753,7 @@ class RecordingBridgeClient {
 	private deliverInterAgentMail(
 		request: DeliverInterAgentMailRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.deliverInterAgentMailRequests.push(request);
@@ -4772,6 +4787,7 @@ class RecordingBridgeClient {
 	private admitChildInterrupt(
 		request: AdmitChildInterruptRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.admitChildInterruptRequests.push(request);
@@ -4792,6 +4808,7 @@ class RecordingBridgeClient {
 	private awaitChildInterrupt(
 		request: AwaitChildInterruptRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.awaitChildInterruptRequests.push(request);
@@ -4825,6 +4842,7 @@ class RecordingBridgeClient {
 	private closeChildControl(
 		request: CloseChildControlRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.closeChildControlRequests.push(request);
@@ -4868,6 +4886,7 @@ class RecordingBridgeClient {
 	private markChildThreadActive(
 		request: MarkChildThreadActiveRequest,
 		_metadata: Metadata,
+		_options: CallOptions,
 		callback: (error: Error | null, response: unknown) => void,
 	): unknown {
 		this.markChildThreadActiveRequests.push(request);

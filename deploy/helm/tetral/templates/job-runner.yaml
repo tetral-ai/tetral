@@ -19,17 +19,26 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: {{ .Values.replicas.jobRunner }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app.kubernetes.io/name: job-runner
   template:
     metadata:
+      annotations:
+{{ include "tetral.routingAnnotations" (dict "root" . "role" "job-runner") | indent 8 }}
       labels:
         app.kubernetes.io/name: job-runner
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: {{ .Values.routing.revision | quote }}
     spec:
       serviceAccountName: job-runner
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
       containers:
         - name: job-runner
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -37,6 +46,27 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runnerDrainMs | quote }}
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.cancelJoinMs | quote }}
+{{- if eq .Values.transport.profile "hardened" }}
+            - name: TETRAL_RUNTIME_DIRECT_TLS_CA_PATH
+              value: /var/run/tetral/runtime-direct/trust/ca.crt
+            - name: TETRAL_RUNTIME_DIRECT_TLS_CERT_PATH
+              value: /var/run/tetral/runtime-direct/leaf/tls.crt
+            - name: TETRAL_RUNTIME_DIRECT_TLS_KEY_PATH
+              value: /var/run/tetral/runtime-direct/leaf/tls.key
+            - name: TETRAL_RUNTIME_DIRECT_TLS_SERVER_NAME
+              value: {{ .Values.transport.runtimeServerName | quote }}
+            - name: TETRAL_RUNTIME_DIRECT_TLS_PEER_URI
+              value: {{ printf "spiffe://%s/ns/tetral-agent-runtime/sa/agent-runtime" .Values.routing.trustDomain | quote }}
+{{- end }}
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: {{ .Values.transport.profile | quote }}
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR
               value: :8081
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
@@ -47,7 +77,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.tetralDatabase | quote }}
-                  key: bridge-url
+                  key: job-runner-url
             - name: TETRAL_QUEUE_GRPC_ADDR
               value: queue.tetral-system.svc.cluster.local:9090
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
@@ -65,7 +95,7 @@ spec:
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
               value: app.kubernetes.io/name=agent-runtime
             - name: TETRAL_AGENT_RUNTIME_GRPC_PORT
-              value: '9090'
+              value: {{ if eq .Values.transport.profile "hardened" }}"19443"{{ else }}"19090"{{ end }}
             - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
             - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
@@ -118,6 +148,17 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+{{- if eq .Values.transport.profile "hardened" }}
+            - name: runner-direct-leaf
+              mountPath: /var/run/tetral/runtime-direct/leaf
+              readOnly: true
+            - name: runner-direct-trust
+              mountPath: /var/run/tetral/runtime-direct/trust
+              readOnly: true
+{{- end }}
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: bridge-runtime-pod-token
               mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
               readOnly: true
@@ -128,6 +169,17 @@ spec:
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
       volumes:
+{{- if eq .Values.transport.profile "hardened" }}
+        - name: runner-direct-leaf
+          secret:
+            secretName: {{ .Values.transport.runnerDirectLeafSecret | quote }}
+        - name: runner-direct-trust
+          configMap:
+            name: {{ .Values.transport.runtimeDirectTrustConfigMap | quote }}
+{{- end }}
+        - name: store-trust
+          configMap:
+            name: {{ .Values.transport.storeTrustConfigMap | quote }}
         - name: bridge-runtime-pod-token
           projected:
             sources:
@@ -225,7 +277,7 @@ spec:
               app.kubernetes.io/name: agent-runtime
       ports:
         - protocol: TCP
-          port: 9090
+          port: {{ if eq .Values.transport.profile "hardened" }}19443{{ else }}19090{{ end }}
     - to:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:

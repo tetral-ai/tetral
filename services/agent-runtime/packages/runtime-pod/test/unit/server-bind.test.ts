@@ -1,3 +1,4 @@
+import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import { describe, expect, test } from "bun:test";
 import { Writable } from "node:stream";
 import { createDiagnosticStreamSink, createTetralJsonLogger } from "@tetral/ts-observability";
@@ -157,6 +158,12 @@ function fakeLifecycle() {
 				mcpConnectorGrpcAddress: "gateway.engine.svc:9091",
 				webConnectorGrpcAddress: "gateway.engine.svc:9092",
 				providerStreamTimeoutMs: 1_800_000,
+				bridgeMethodPolicies: DefaultBridgeMethodPolicies,
+				transportProfile: "standard-routed",
+				routingProxyRequired: true,
+				maxLocalSessions: 256,
+				maxConcurrentTools: 8,
+				lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
 				platformModels: {
 					approvalReviewer: {
 						providerId: "anthropic",
@@ -180,6 +187,7 @@ function fakeLifecycle() {
 
 function fakeRuntimeControlService(): RuntimeControlService {
 	return new RuntimeControlService({
+	runtimeProcessId: "process-test",
 		ownPod: {
 			namespace: "engine",
 			name: "runtime-pod-a",

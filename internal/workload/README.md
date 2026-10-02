@@ -7,6 +7,29 @@ Go defaults `local`/`unknown`; `ResourceConfigFromEnvWithTrimPolicy` explicitly 
 existing trimming of all metadata values; ordinary callers preserve nonblank
 spaces and default only exact empty values.
 
+## Listener and request lifetime
+
+`Run` closes request admission when shutdown begins and marks readiness as
+shutting down. A late startup callback cannot restore readiness. Already
+admitted HTTP handlers retain their request contexts during the configured
+shutdown grace period; cancellation of the process context alone does not
+abort them. At the deadline the owner cancels those contexts, closes remaining
+connections and joins all admitted handlers and the serving loop before it
+returns. Command-owned database, object-store and transport clients can then
+close without racing an active handler. Hijacked handlers are included in the
+join even though `http.Server.Shutdown` does not wait for them.
+
+The internal gRPC owner uses the same order: withdraw health/admission, attempt
+graceful completion, force cancellation at its deadline, then join handlers
+and the serving loop. `internalgrpc.RunGRPCWorkload` joins every started gRPC
+server, including cancellation before the serving callback. Its outer HTTP
+orchestration does not impose a second timeout that could return while gRPC
+still uses the command's dependencies. A configured cancellation/join budget
+reports an overrun immediately, retains handler ownership until the join, and
+then returns an error. A zero budget uses the shared five-second default.
+Service-specific consumers separately
+own their acquisition, heartbeat, settlement and drain policies.
+
 ## Diagnostics
 
 The process reads diagnostic controls once at startup. Empty values keep the

@@ -34,6 +34,7 @@ describe("Runtime context lifetimes", () => {
 			bindingId: "binding",
 			bindingGeneration: 1,
 			targetPodUid: "pod",
+			runtimeProcessId: "process-test",
 			contextOwner: context,
 			writer: {} as never,
 		});
@@ -256,6 +257,7 @@ describe("Runtime context lifetimes", () => {
 					bindingId: "binding",
 					bindingGeneration: 1,
 					targetPodUid: "pod",
+					runtimeProcessId: "process-test",
 					runtimeBindingToken: "runtime-binding-token",
 				},
 				requestId: `provider_${rules.providerFamily}`,

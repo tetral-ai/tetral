@@ -1,6 +1,9 @@
 package static_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -138,23 +141,61 @@ func TestSchemaOwnershipServingProcessesOnlyVerify(t *testing.T) {
 func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testing.T) {
 	root := schemaOwnershipEngineRoot(t)
 	const path = "services/job-runner/cmd/job-runner/main.go"
-	text := readSchemaOwnershipFile(t, filepath.Join(root, path))
-	for _, required := range []string{
-		"deliveryStore := jobrunner.NewJobRunnerRuntimeDeliveryStore(",
-		"jobrunner.JobRunner{",
-		"Deliverer: jobrunner.RuntimePodDirectDeliverer{",
-		"Store: deliveryStore,",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("job-runner startup missing production runtime-delivery wiring %q in %s", required, path)
-		}
+	source := readSchemaOwnershipFile(t, filepath.Join(root, path))
+	file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The deliverer must be a field of the JobRunner literal, not a detached
-	// value: pin the ordering so the assignment itself is proven.
-	runnerAt := strings.Index(text, "jobrunner.JobRunner{")
-	delivererAt := strings.Index(text, "Deliverer: jobrunner.RuntimePodDirectDeliverer{")
-	if runnerAt >= delivererAt {
-		t.Fatalf("job-runner startup does not assign the deliverer inside the JobRunner literal in %s (JobRunner at %d, Deliverer at %d)", path, runnerAt, delivererAt)
+	selector := func(expr ast.Expr, name string) bool {
+		value, ok := expr.(*ast.SelectorExpr)
+		if !ok || value.Sel.Name != name {
+			return false
+		}
+		pkg, ok := value.X.(*ast.Ident)
+		return ok && pkg.Name == "jobrunner"
+	}
+	assembled, wired := false, false
+	ast.Inspect(file, func(node ast.Node) bool {
+		if assignment, ok := node.(*ast.AssignStmt); ok && len(assignment.Lhs) == 1 && len(assignment.Rhs) == 1 {
+			name, ok := assignment.Lhs[0].(*ast.Ident)
+			call, called := assignment.Rhs[0].(*ast.CallExpr)
+			if ok && called && name.Name == "deliveryStore" && selector(call.Fun, "NewJobRunnerRuntimeDeliveryStore") {
+				assembled = true
+			}
+		}
+		runner, ok := node.(*ast.CompositeLit)
+		if !ok || !selector(runner.Type, "JobRunner") {
+			return true
+		}
+		for _, element := range runner.Elts {
+			field, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := field.Key.(*ast.Ident)
+			if !ok || key.Name != "Deliverer" {
+				continue
+			}
+			deliverer, ok := field.Value.(*ast.CompositeLit)
+			if !ok || !selector(deliverer.Type, "RuntimePodDirectDeliverer") {
+				continue
+			}
+			for _, element := range deliverer.Elts {
+				field, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := field.Key.(*ast.Ident)
+				value, assigned := field.Value.(*ast.Ident)
+				if ok && assigned && key.Name == "Store" && value.Name == "deliveryStore" {
+					wired = true
+				}
+			}
+		}
+		return true
+	})
+	if !assembled || !wired {
+		t.Fatalf("job-runner must assemble deliveryStore with production constructor and assign it inside JobRunner.Deliverer.Store in %s (assembled=%t wired=%t)", path, assembled, wired)
 	}
 }
 

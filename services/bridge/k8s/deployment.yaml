@@ -8,17 +8,29 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: bridge
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/nativeSidecar: "true"
+        sidecar.istio.io/proxyImage: "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9"
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'
       labels:
         app.kubernetes.io/name: bridge
         app.kubernetes.io/part-of: tetral
+        istio.io/rev: "1-31-1"
     spec:
       serviceAccountName: bridge
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
       containers:
         - name: bridge-api
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -26,18 +38,36 @@ spec:
           command:
             - /usr/local/bin/bridge-api
           env:
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
+            - name: TETRAL_BLOB_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/object-store-ca.crt
+            - name: TETRAL_BLOB_TLS_SERVER_NAME
+              value: "tetral-object-store.tetral-system.svc.cluster.local"
+            - name: TETRAL_DRAIN_TIMEOUT_MS
+              value: "40000"
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
+            - name: TETRAL_TRANSPORT_PROFILE
+              value: "standard-routed"
+            - name: TETRAL_ROUTING_PROXY_REQUIRED
+              value: "true"
             - name: TETRAL_BRIDGE_API_HTTP_ADDR
               value: :8080
             - name: TETRAL_BRIDGE_API_GRPC_ADDR
               value: :9090
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
-              value: local
+              value: "local"
             - name: TETRAL_SERVICE_VERSION
-              value: dev
+              value: "dev"
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: tetral-database
+                  name: "tetral-database"
                   key: bridge-url
             - name: TETRAL_INTERNAL_GRPC_AUDIENCE
               value: tetral-internal-grpc
@@ -50,7 +80,7 @@ spec:
             - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
               valueFrom:
                 secretKeyRef:
-                  name: runtime-binding-token
+                  name: "runtime-binding-token"
                   key: hmac-key
             - name: TETRAL_PROVIDER_RESCHEDULE_BUDGET
               valueFrom:
@@ -71,27 +101,27 @@ spec:
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: endpoint
             - name: TETRAL_BLOB_REGION
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: region
             - name: TETRAL_BLOB_BUCKET
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: bucket
             - name: TETRAL_BLOB_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: access-key
             - name: TETRAL_BLOB_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: tetral-blob
+                  name: "tetral-blob"
                   key: secret-key
           ports:
             - name: http
@@ -107,14 +137,15 @@ spec:
               path: /ready
               port: http
           resources:
+
+            limits:
+              cpu: "1"
+              ephemeral-storage: 1Gi
+              memory: 1Gi
             requests:
               cpu: 250m
-              memory: 512Mi
               ephemeral-storage: 256Mi
-            limits:
-              cpu: '1'
-              memory: 1Gi
-              ephemeral-storage: 1Gi
+              memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -123,6 +154,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: store-trust
+              mountPath: /var/run/tetral/store-trust
+              readOnly: true
             - name: bridge-api-kubernetes-api
               mountPath: /var/run/secrets/tetral-kubernetes-api
               readOnly: true
@@ -130,6 +164,9 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/mcp-connector
               readOnly: true
       volumes:
+        - name: store-trust
+          configMap:
+            name: "tetral-store-trust"
         - name: bridge-api-kubernetes-api
           projected:
             sources:

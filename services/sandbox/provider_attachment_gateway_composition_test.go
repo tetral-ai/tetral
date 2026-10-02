@@ -25,13 +25,14 @@ func TestPostgreSQLSandboxTransientAttachmentResolvesThroughProductionGateway(t 
 	gatewayRoot := filepath.Clean(filepath.Join("..", "gateway"))
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	registerSandboxFixtureProcess(t, adminDB, "tetral-agent-runtime", "pod_uid_provider_attachment_composition")
 	if _, err := adminDB.ExecContext(context.Background(), `INSERT INTO session_runtime_bindings (
 		workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace,
-		agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at
+		agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
 	) VALUES (
 		'ws_execution_store', 'sesn_execution_store', 'bind_provider_attachment_composition', 1,
 		'tetral-agent-runtime', 'runtime-pod-0', 'pod_uid_provider_attachment_composition',
-		'10.0.0.10', '2026-07-31T16:00:00Z', '2026-07-31T16:00:00Z'
+		'10.0.0.10', 'process_pod_uid_provider_attachment_composition', '2026-07-31T16:00:00Z', '2026-07-31T16:00:00Z'
 	)`); err != nil {
 		t.Fatalf("seed provider attachment Runtime binding: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestPostgreSQLSandboxTransientAttachmentResolvesThroughProductionGateway(t 
 			listener.Addr().String(), published.Result.AttachmentRef,
 			"ws_execution_store", "sesn_execution_store", "thr_execution_store",
 			"bind_provider_attachment_composition", "pod_uid_provider_attachment_composition",
-			"gateway_attachment.png", "gateway_attachment.png",
+			"gateway_attachment.png", "gateway_attachment.png", "process_pod_uid_provider_attachment_composition",
 		) //nolint:gosec // fixed repository fixture and test-owned arguments.
 		command.Dir = gatewayRoot
 		output, err := command.CombinedOutput()

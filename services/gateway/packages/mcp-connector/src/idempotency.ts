@@ -24,6 +24,9 @@ export interface McpIdempotencyContext {
   readonly bindingId: string;
   readonly bindingGeneration: number;
   readonly runtimePodUid: string;
+  readonly runtimeProcessId: string;
+  readonly deadline?: number;
+  readonly phaseDeadline?: () => number | undefined;
 }
 
 /** Immutable executor facts loaded by Bridge from the durable Tool declaration. */
@@ -71,6 +74,13 @@ export type IdempotencyClaim =
   | { readonly status: "conflict" };
 
 /** Signals that Connector cannot prove current MCP claim custody and must defer to reconciliation. */
+/** A lost commit ACK cannot authorize relinquishment or another external execution. */
+export class McpIdempotencyOutcomeUnknownError extends Error {
+  constructor() {
+    super("MCP commit outcome remains unknown");
+  }
+}
+
 export class McpIdempotencyStaleCustodyError extends Error {
   constructor() {
     super("mcp tool result belongs to stale runtime custody");

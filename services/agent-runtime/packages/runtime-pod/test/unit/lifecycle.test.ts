@@ -5,6 +5,162 @@ import { createJsonLogger } from "../../src/logger.js";
 import { GrpcStatusError, RuntimePodLifecycle } from "../../src/lifecycle.js";
 
 describe("Runtime Pod lifecycle", () => {
+  test("registration and accepting ACK gate readiness; freshness expires between reports", async () => {
+    const config = loadRuntimePodConfig({
+      ...validEnv(),
+      TETRAL_RUNTIME_REPORT_TIMEOUT_MS: "10",
+      TETRAL_RUNTIME_REPORT_INTERVAL_MS: "20",
+      TETRAL_RUNTIME_PROCESS_FRESHNESS_MS: "60",
+    });
+    expect(config.ok).toBe(true);
+    let acceptingAck!: () => void;
+    const accepting = new Promise<void>((resolve) => {
+      acceptingAck = resolve;
+    });
+    let reports = 0;
+    const phases: string[] = [];
+    const lifecycle = new RuntimePodLifecycle({
+      config,
+      logger: { info: () => undefined, error: () => undefined },
+      bootstrap: successfulBootstrap(),
+      runtimeProcess: {
+        runtimeProcessId: "boot-freshness",
+        register: async () => {
+          phases.push("registered");
+        },
+        report: async (phase) => {
+          phases.push(phase);
+          if (phase === "accepting" && reports++ === 0) await accepting;
+          else if (phase === "accepting") throw new Error("report unavailable");
+        },
+        release: async () => {
+          throw new Error("unexpected release");
+        },
+        close: async () => undefined,
+      },
+      shutdownHooks: { quiesce: async () => undefined },
+    });
+    const startup = lifecycle.start();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(phases).toEqual(["registered", "accepting"]);
+    expect(lifecycle.ready()).toEqual({ ready: false });
+    acceptingAck();
+    await startup;
+    expect(lifecycle.ready()).toEqual({ ready: true });
+    await new Promise((resolve) => setTimeout(resolve, 85));
+    expect(lifecycle.metricsSnapshot().accepting).toBe(false);
+    expect(lifecycle.ready()).toEqual({ ready: false });
+    expect(() => lifecycle.runCommand(async () => undefined)).toThrow();
+    await lifecycle.shutdown();
+    expect(phases).toContain("draining");
+  });
+
+  test("expired cancellation joins producer and Core before process client close", async () => {
+    let releaseProducer!: () => void, releaseCore!: () => void;
+    const producer = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
+    const core = new Promise<void>((resolve) => {
+      releaseCore = resolve;
+    });
+    let closed = false,
+      joined = false;
+    const lifecycle = new RuntimePodLifecycle({
+      config: validConfig(),
+      logger: { info: () => undefined, error: () => undefined },
+      bootstrap: successfulBootstrap(),
+      drainTimeoutMs: 10,
+      runtimeProcess: {
+        runtimeProcessId: "boot-joined",
+        register: async () => undefined,
+        report: async () => undefined,
+        release: async () => {
+          throw new Error("unexpected release");
+        },
+        close: async () => {
+          closed = true;
+        },
+      },
+      shutdownHooks: {
+        quiesce: async () => {
+          await core;
+        },
+      },
+    });
+    await lifecycle.start();
+    const result = lifecycle
+      .runCommand(async () => {
+        await producer;
+      })
+      .catch((error) => error);
+    const shutdown = lifecycle.shutdown().then(() => {
+      joined = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect((await result).code).toBe(status.FAILED_PRECONDITION);
+    expect(closed).toBe(false);
+    expect(joined).toBe(false);
+    releaseProducer();
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(closed).toBe(false);
+    releaseCore();
+    await shutdown;
+    expect(closed).toBe(true);
+    expect(joined).toBe(true);
+  });
+
+  test("heartbeat first failure, count, and recovery survive silent and throwing sinks", async () => {
+    for (const sink of ["normal", "silent", "throw"] as const) {
+      const config = loadRuntimePodConfig({
+        ...validEnv(),
+        TETRAL_RUNTIME_REPORT_TIMEOUT_MS: "2",
+        TETRAL_RUNTIME_REPORT_INTERVAL_MS: "5",
+        TETRAL_RUNTIME_PROCESS_FRESHNESS_MS: "100",
+      });
+      const records: Array<Record<string, unknown>> = [];
+      const observe = (record: Record<string, unknown>) => {
+        if (sink === "normal") records.push(record);
+        if (sink === "throw") throw new Error("sink unavailable");
+      };
+      let reports = 0;
+      const lifecycle = new RuntimePodLifecycle({
+        config,
+        logger: { info: observe, error: observe },
+        bootstrap: successfulBootstrap(),
+        runtimeProcess: {
+          runtimeProcessId: "boot-reports",
+          register: async () => undefined,
+          report: async (phase) => {
+            if (phase === "accepting" && ++reports > 1 && reports < 5)
+              throw new Error("report unavailable");
+          },
+          release: async () => {
+            throw new Error("unexpected release");
+          },
+          close: async () => undefined,
+        },
+        shutdownHooks: { quiesce: async () => undefined },
+      });
+      await lifecycle.start();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(reports).toBeGreaterThanOrEqual(5);
+      expect(lifecycle.ready()).toEqual({ ready: true });
+      await lifecycle.shutdown();
+      if (sink === "normal") {
+        const failures = records.filter(
+            (record) => record.event === "runtime_process_report_failed",
+          ),
+          recovered = records.filter(
+            (record) => record.event === "runtime_process_report_recovered",
+          );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.["failed.count"]).toBe(1);
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]?.["failed.count"]).toBe(3);
+      }
+    }
+  });
+
   test("health is OK and readiness flips true only after all bootstrap gates succeed", async () => {
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
@@ -29,21 +185,40 @@ describe("Runtime Pod lifecycle", () => {
     let failCore = false;
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
-      logger: { info: () => undefined, error: () => { throw new Error("PRIVATE_LIFECYCLE_LOG_SENTINEL"); } },
-      bootstrap: { ...successfulBootstrap(), core: async () => { if (failCore) throw new Error("PRIVATE_BOOTSTRAP_SENTINEL"); } },
+      logger: {
+        info: () => undefined,
+        error: () => {
+          throw new Error("PRIVATE_LIFECYCLE_LOG_SENTINEL");
+        },
+      },
+      bootstrap: {
+        ...successfulBootstrap(),
+        core: async () => {
+          if (failCore) throw new Error("PRIVATE_BOOTSTRAP_SENTINEL");
+        },
+      },
     });
     await lifecycle.start();
     expect(lifecycle.ready()).toEqual({ ready: true });
     failCore = true;
     await lifecycle.start();
     expect(lifecycle.ready()).toEqual({ ready: false });
-    expect(lifecycle.metricsSnapshot()).toEqual({ ready: false, accepting: false, inFlightCommands: 0 });
-    expect(() => lifecycle.runCommand(async () => "must not run")).toThrow("runtime pod shutting down");
+    expect(lifecycle.metricsSnapshot()).toEqual({
+      ready: false,
+      accepting: false,
+      inFlightCommands: 0,
+    });
+    expect(() => lifecycle.runCommand(async () => "must not run")).toThrow(
+      "runtime pod shutting down",
+    );
   });
 
   test("config/env failure is classified as config_error and readiness remains false", async () => {
     const sink: string[] = [];
-    const parsed = loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_POD_IP: "runtime.service.local" });
+    const parsed = loadRuntimePodConfig({
+      ...validEnv(),
+      TETRAL_RUNTIME_POD_IP: "runtime.service.local",
+    });
 
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) {
@@ -76,30 +251,64 @@ describe("Runtime Pod lifecycle", () => {
       expect(parsed.config.providerStreamTimeoutMs).toBe(1_800_000);
     }
 
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: "anthropic/" }).ok).toBe(false);
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES: "65536" }).ok).toBe(false);
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "0" }).ok).toBe(false);
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "1.5" }).ok).toBe(false);
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "2147483647" }).ok).toBe(true);
-    expect(loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "2147483648" }).ok).toBe(false);
+    expect(
+      loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: "anthropic/" })
+        .ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({
+        ...validEnv(),
+        TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES: "65536",
+      }).ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "0" }).ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "1.5" }).ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({
+        ...validEnv(),
+        TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "2147483647",
+      }).ok,
+    ).toBe(true);
+    expect(
+      loadRuntimePodConfig({
+        ...validEnv(),
+        TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS: "2147483648",
+      }).ok,
+    ).toBe(false);
   });
 
   test("dependency, listener, and auth-client failures are startup_error without raw details", async () => {
     for (const scenario of [
       {
         name: "dependency",
-        bootstrap: { ...successfulBootstrap(), core: async () => { throw new Error("postgres://secret@host/db raw provider payload sk-provider-key"); } },
+        bootstrap: {
+          ...successfulBootstrap(),
+          core: async () => {
+            throw new Error("postgres://secret@host/db raw provider payload sk-provider-key");
+          },
+        },
       },
       {
         name: "listener",
-        bootstrap: { ...successfulBootstrap(), grpc: async () => { throw new Error("127.0.0.1:19090 bind failed raw request body"); } },
+        bootstrap: {
+          ...successfulBootstrap(),
+          grpc: async () => {
+            throw new Error("127.0.0.1:19090 bind failed raw request body");
+          },
+        },
       },
       {
         name: "auth",
         bootstrap: {
           ...successfulBootstrap(),
           authClient: async () => {
-            throw new Error(`bearer secret-token https://kubernetes.default.svc {"kind":"TokenReview","status":{"error":"kube object dump"}}`);
+            throw new Error(
+              `bearer secret-token https://kubernetes.default.svc {"kind":"TokenReview","status":{"error":"kube object dump"}}`,
+            );
           },
         },
       },
@@ -140,7 +349,9 @@ describe("Runtime Pod lifecycle", () => {
       logger: createJsonLogger({ write: () => undefined }),
       bootstrap: successfulBootstrap(),
       shutdownHooks: {
-        shutdownActiveRuns: async () => { shutdownActiveRunCalls++; },
+        shutdownActiveRuns: async () => {
+          shutdownActiveRunCalls++;
+        },
       },
       drainTimeoutMs: 50,
     });
@@ -197,10 +408,16 @@ describe("Runtime Pod lifecycle", () => {
     });
     await lifecycle.start();
 
-    const blocked = lifecycle.trackCommand(new Promise(() => undefined));
-    await lifecycle.shutdown();
-
+    const owned = deferred<void>("owned command release");
+    const blocked = lifecycle.trackCommand(owned.promise);
+    let closed = false;
+    const shutdown = lifecycle.shutdown().then(() => {
+      closed = true;
+    });
     await expectGrpcCode(blocked, status.FAILED_PRECONDITION);
+    expect(closed).toBe(false);
+    owned.resolve(undefined);
+    await shutdown;
   });
 
   test("shutdown active-run settlement rejection logs safe diagnostics without cleanup or unbind", async () => {
@@ -226,7 +443,13 @@ describe("Runtime Pod lifecycle", () => {
     expect(output).toContain("runtime pod shutdown active-run settlement failed");
     expect(output).toContain("error.message_safe");
     expect(output).toContain("error.code");
-    for (const forbidden of ["bearer", "token", "raw provider payload", "runtime-pod-a", "10.0.0.1"]) {
+    for (const forbidden of [
+      "bearer",
+      "token",
+      "raw provider payload",
+      "runtime-pod-a",
+      "10.0.0.1",
+    ]) {
       expect(output).not.toContain(forbidden);
     }
   });
@@ -254,14 +477,22 @@ describe("Runtime Pod lifecycle", () => {
       return "ACK";
     });
 
-    await lifecycle.shutdown();
+    const shutdown = lifecycle.shutdown();
     await expectGrpcCode(command, status.FAILED_PRECONDITION);
     gate.resolve(undefined);
+    await shutdown;
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(mutations).toEqual(["rollback"]);
     expect(sink.join("\n")).toContain("shutdown_drain_timeout");
-    for (const forbidden of ["bearer", "token", "kubernetes.default.svc", "raw request body", "runtime-pod-a", "10.0.0.1"]) {
+    for (const forbidden of [
+      "bearer",
+      "token",
+      "kubernetes.default.svc",
+      "raw request body",
+      "runtime-pod-a",
+      "10.0.0.1",
+    ]) {
       expect(sink.join("\n")).not.toContain(forbidden);
     }
   });
@@ -273,7 +504,7 @@ function validEnv() {
     TETRAL_RUNTIME_POD_NAME: "runtime-pod-a",
     TETRAL_RUNTIME_POD_UID: "uid-a",
     TETRAL_RUNTIME_POD_IP: "10.0.0.1",
-    TETRAL_RUNTIME_POD_GRPC_PORT: "9090",
+    TETRAL_RUNTIME_POD_GRPC_PORT: "19090",
     TETRAL_RUNTIME_POD_HTTP_ADDR: "127.0.0.1:0",
     TETRAL_DEPLOYMENT_ENVIRONMENT: "test",
     TETRAL_SERVICE_VERSION: "test",
@@ -281,8 +512,10 @@ function validEnv() {
     TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS: "engine/bridge",
     KUBERNETES_API_SERVER_URL: "https://kubernetes.default.svc",
     KUBERNETES_API_CA_CERT_PATH: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
-    KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH: "/var/run/secrets/kubernetes.io/serviceaccount/token",
-    TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH: "/var/run/secrets/tetral-internal-grpc/runtime-pod/token",
+    KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH:
+      "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH:
+      "/var/run/secrets/tetral-internal-grpc/runtime-pod/token",
     TETRAL_BRIDGE_API_GRPC_ADDR: "bridge.engine.svc:9090",
     TETRAL_GATEWAY_GRPC_ADDR: "gateway.engine.svc:9090",
     TETRAL_MCP_CONNECTOR_GRPC_ADDR: "gateway.engine.svc:9091",
@@ -305,7 +538,10 @@ function successfulBootstrap() {
   };
 }
 
-function deferred<T>(valueLabel: string): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+function deferred<T>(valueLabel: string): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
   let resolve: (value: T) => void = () => {
     throw new Error(`uninitialized ${valueLabel}`);
   };

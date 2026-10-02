@@ -73,7 +73,7 @@ export interface SDKClientLike {
   callTool(
     params: { readonly name: string; readonly arguments?: Record<string, unknown> | undefined },
     resultSchema?: unknown,
-    options?: { readonly timeout?: number },
+    options?: { readonly timeout?: number; readonly signal?: AbortSignal },
   ): Promise<CallToolResult | CompatibilityCallToolResult>;
   close(): Promise<void>;
 }
@@ -161,6 +161,12 @@ type CredentialMaterial = Extract<GitHubMcpCredentialResolution, { readonly ok: 
 export class McpSDKClient implements McpClient {
   readonly #connections = new Map<string, ConnectionEntry>();
 	readonly #clientEntries = new Map<SDKClientLike, ConnectionEntry>();
+  readonly #lifetime = new AbortController();
+  readonly #closing = new Set<Promise<void>>();
+  readonly #rawOperations = new Set<Promise<unknown>>();
+  readonly #openingClients = new Set<SDKClientLike>();
+  readonly #clientClosures = new WeakMap<SDKClientLike, Promise<void>>();
+  #closed: Promise<void> | undefined;
   readonly #connectionOpenings = new Map<string, Promise<ConnectionEntry>>();
   readonly #idleTimeoutMs: number;
   readonly #callTimeoutMs: number;
@@ -190,8 +196,22 @@ export class McpSDKClient implements McpClient {
    * starts cursorless on its own connection, so a re-list on a new MCP session
    * restarts pagination rather than reusing a cursor from the old session.
    */
-  async listTools(input: McpIdentity, options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<readonly McpClientTool[]> {
-    const timeoutMs = Math.min(options?.timeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS, this.options.discoveryTimeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS);
+  async listTools(
+    input: McpIdentity,
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number },
+  ): Promise<readonly McpClientTool[]> {
+    if (this.#lifetime.signal.aborted) throw new Error("MCP client closing");
+    options = {
+      ...options,
+      signal:
+        options?.signal === undefined
+          ? this.#lifetime.signal
+          : AbortSignal.any([options.signal, this.#lifetime.signal]),
+    };
+    const timeoutMs = Math.min(
+      options?.timeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS,
+      this.options.discoveryTimeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS,
+    );
     const deadline = Date.now() + timeoutMs;
     try {
       const result = await withPhaseTimeout(async (signal) => {
@@ -225,29 +245,97 @@ export class McpSDKClient implements McpClient {
   }
 
   /** Calls one MCP tool and reports whether credential refresh contributes to the successful attempt. */
-  async callTool(input: McpIdentity & {
-    readonly sessionThreadId: string;
-    readonly toolName: string;
-    readonly input: Record<string, unknown>;
-  }): Promise<McpCallToolResult> {
-    const result = await this.withAuthRefreshRetry(input, async (connection) => {
-		const result = await this.runConnectionOperation(connection, () => connection.client.callTool(
-        { name: input.toolName, arguments: input.input },
-        undefined,
-        { timeout: this.#callTimeoutMs },
-		));
-      this.touch(connection);
-      if ("toolResult" in result) {
-        return { structuredContent: result.toolResult };
-      }
-      return result;
-    });
+  async callTool(
+    input: McpIdentity & {
+      readonly sessionThreadId: string;
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    },
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<McpCallToolResult> {
+    if (this.#lifetime.signal.aborted) throw new Error("MCP client closing");
+    const signal =
+      options?.signal === undefined
+        ? this.#lifetime.signal
+        : AbortSignal.any([options.signal, this.#lifetime.signal]);
+    const result = await this.withAuthRefreshRetry(
+      input,
+      async (connection) => {
+        const result = await this.runConnectionOperation(connection, () =>
+          connection.client.callTool(
+            { name: input.toolName, arguments: input.input },
+            undefined,
+            { timeout: this.#callTimeoutMs, signal },
+          ),
+        );
+        this.touch(connection);
+        if ("toolResult" in result) {
+          return { structuredContent: result.toolResult };
+        }
+        return result;
+      },
+      signal,
+    );
     return { ...result.value, refreshTriggered: result.refreshTriggered };
   }
 
-  /** Closes and evicts every connection currently present in the live cache. */
-  async closeAll(): Promise<void> {
-    await Promise.all([...this.#connections.values()].map((entry) => this.closeConnection(entry)));
+  /** Cancels producers, closes pending and cached transports, and joins their actual operations. */
+  closeAll(deadline = new Date(Date.now() + 5000)): Promise<void> {
+    if (this.#closed !== undefined) return this.#closed;
+    this.#lifetime.abort(new Error("MCP client shutting down"));
+    this.#closed = (async () => {
+      const joined = (async () => {
+        await Promise.allSettled([
+          ...[...this.#openingClients].map((client) =>
+            this.closeClient(client),
+          ),
+          ...[...this.#connections.values()].map((entry) =>
+            this.closeConnection(entry),
+          ),
+        ]);
+        await Promise.allSettled([...this.#connectionOpenings.values()]);
+        while (this.#rawOperations.size > 0 || this.#closing.size > 0) {
+          await Promise.allSettled([...this.#rawOperations, ...this.#closing]);
+        }
+      })();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          joined,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("MCP client shutdown deadline exceeded")),
+              Math.max(0, deadline.getTime() - Date.now()),
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    })();
+    return this.#closed;
+  }
+
+  private ownOperation<T>(operation: Promise<T>): Promise<T> {
+    this.#rawOperations.add(operation);
+    void operation.then(
+      () => this.#rawOperations.delete(operation),
+      () => this.#rawOperations.delete(operation),
+    );
+    return operation;
+  }
+
+  private closeClient(client: SDKClientLike): Promise<void> {
+    const existing = this.#clientClosures.get(client);
+    if (existing !== undefined) return existing;
+    const closing = Promise.resolve().then(() => client.close());
+    this.#clientClosures.set(client, closing);
+    this.#closing.add(closing);
+    void closing.then(
+      () => this.#closing.delete(closing),
+      () => this.#closing.delete(closing),
+    );
+    return closing;
   }
 
   /** Returns the number of live cached connections, excluding pending openings. */
@@ -256,12 +344,16 @@ export class McpSDKClient implements McpClient {
   }
 
   private async connection(identity: McpIdentity, markRefresh: () => void, signal?: AbortSignal): Promise<ConnectionEntry> {
+    this.#lifetime.signal.throwIfAborted();
     const catalog = catalogEntryByName(identity.mcpServerName);
     if (catalog === undefined) {
       throw new McpConnectorError("mcp_invalid_input", "MCP server is outside the curated catalog.");
     }
     const credential = await withPhaseTimeout(
-      (signal) => this.options.credentialResolver.resolve({ ...identity, signal }),
+      (signal) =>
+        this.ownOperation(
+          this.options.credentialResolver.resolve({ ...identity, signal }),
+        ),
       this.#credentialTimeoutMs,
       "MCP credential resolution timed out.",
       signal,
@@ -293,6 +385,7 @@ export class McpSDKClient implements McpClient {
   }
 
   private async openConnection(identity: McpIdentity, credential: CredentialMaterial, allowAuthRefresh: boolean, markRefresh: () => void): Promise<ConnectionEntry> {
+    this.#lifetime.signal.throwIfAborted();
     const catalog = catalogEntryByName(identity.mcpServerName);
     if (catalog === undefined) {
       throw new McpConnectorError("mcp_invalid_input", "MCP server is outside the curated catalog.");
@@ -329,6 +422,7 @@ export class McpSDKClient implements McpClient {
   }
 
   private async establishConnection(identity: McpIdentity, credential: CredentialMaterial, allowAuthRefresh: boolean, markRefresh: () => void): Promise<ConnectionEntry> {
+    this.#lifetime.signal.throwIfAborted();
     const catalog = catalogEntryByName(identity.mcpServerName);
     if (catalog === undefined) {
       throw new McpConnectorError("mcp_invalid_input", "MCP server is outside the curated catalog.");
@@ -337,6 +431,7 @@ export class McpSDKClient implements McpClient {
     const key = connectionCacheKey(baseKey, credential);
     await this.closeStaleTokenConnections(baseKey, key);
     const client = this.createClient(identity);
+    this.#openingClients.add(client);
     const transport = this.createTransport({
       url: new URL(catalog.url),
       token: credential.token,
@@ -344,12 +439,20 @@ export class McpSDKClient implements McpClient {
     });
     try {
       await withPhaseTimeout(
-        (signal) => client.connect(transport, { timeout: this.#connectTimeoutMs, signal }),
+        (signal) =>
+          this.ownOperation(
+            client.connect(transport, {
+              timeout: this.#connectTimeoutMs,
+              signal,
+            }),
+          ),
         this.#connectTimeoutMs,
         "MCP connection initialization timed out.",
+        this.#lifetime.signal,
       );
     } catch (error) {
-      await client.close().catch(() => undefined);
+      this.#openingClients.delete(client);
+      await this.closeClient(client).catch(() => undefined);
       if (allowAuthRefresh && credential.mode === "bearer" && isAuthFailureError(error)) {
         const refreshed = await this.refreshCredential(identity, credential.tokenHash, credential.vaultId, credential.credentialId, markRefresh);
         return await this.openConnection(identity, refreshed, false, markRefresh);
@@ -366,6 +469,11 @@ export class McpSDKClient implements McpClient {
       inFlight: new Set(),
       closed: false,
     };
+    this.#openingClients.delete(client);
+    if (this.#lifetime.signal.aborted) {
+      await this.closeClient(client);
+      throw new Error("MCP client shutting down");
+    }
     this.#connections.set(key, entry);
 		this.#clientEntries.set(client, entry);
 		client.onerror = (error) => {
@@ -460,14 +568,17 @@ export class McpSDKClient implements McpClient {
     let refreshed: GitHubMcpCredentialResolution;
     try {
       refreshed = await withPhaseTimeout(
-        (signal) => this.options.credentialResolver.refresh({
-          ...identity,
-          vaultId,
-          credentialId,
-          previousTokenHash,
-          force: true,
-          signal,
-        }),
+        (signal) =>
+          this.ownOperation(
+            this.options.credentialResolver.refresh({
+              ...identity,
+              vaultId,
+              credentialId,
+              previousTokenHash,
+              force: true,
+              signal,
+            }),
+          ),
         this.#credentialTimeoutMs,
         "MCP credential refresh timed out.",
         signal,
@@ -491,33 +602,66 @@ export class McpSDKClient implements McpClient {
     if (this.options.createClient !== undefined) {
       return this.options.createClient(identity);
     }
-    return new DiscoverySDKClient({
-      name: "tetral-mcp-connector",
-      version: "0.1.0",
-    }, {
-      listChanged: {
-        tools: {
-          // Tetral owns the one re-list per protocol notification. Disabling
-          // SDK refresh and debounce preserves notification cardinality while
-          // Bridge remains the sole durable manifest lifecycle owner.
-          autoRefresh: false,
-          debounceMs: 0,
-          onChanged: (error) => {
-            if (error !== undefined && error !== null) {
-              this.options.logger?.error(mcpToolsListChangedFailureLogRecord(identity, "refresh_failed"));
-              return;
-            }
-            void this.options.onToolsListChanged(identity).catch(() => {
-              this.options.logger?.error(mcpToolsListChangedFailureLogRecord(identity, "notify_failed"));
-            });
+    return new DiscoverySDKClient(
+      {
+        name: "tetral-mcp-connector",
+        version: "0.1.0",
+      },
+      {
+        listChanged: {
+          tools: {
+            // Tetral owns the one re-list per protocol notification. Disabling
+            // SDK refresh and debounce preserves notification cardinality while
+            // Bridge remains the sole durable manifest lifecycle owner.
+            autoRefresh: false,
+            debounceMs: 0,
+            onChanged: (error) => {
+              if (error !== undefined && error !== null) {
+                try {
+                  this.options.logger?.error(
+                    mcpToolsListChangedFailureLogRecord(
+                      identity,
+                      "refresh_failed",
+                    ),
+                  );
+                } catch {
+                  /* diagnostic isolation */
+                }
+                return;
+              }
+              if (this.#lifetime.signal.aborted) return;
+              void this.ownOperation(
+                Promise.resolve().then(() =>
+                  this.options.onToolsListChanged(identity),
+                ),
+              ).catch(() => {
+                try {
+                  this.options.logger?.error(
+                    mcpToolsListChangedFailureLogRecord(
+                      identity,
+                      "notify_failed",
+                    ),
+                  );
+                } catch {
+                  /* diagnostic isolation */
+                }
+              });
+            },
           },
         },
       },
-    }, {
-      ...(this.options.discoveryMaxPages === undefined ? {} : { maxPages: this.options.discoveryMaxPages }),
-      ...(this.options.discoveryMaxTools === undefined ? {} : { maxTools: this.options.discoveryMaxTools }),
-      ...(this.options.discoveryMaxBytes === undefined ? {} : { maxBytes: this.options.discoveryMaxBytes }),
-    });
+      {
+        ...(this.options.discoveryMaxPages === undefined
+          ? {}
+          : { maxPages: this.options.discoveryMaxPages }),
+        ...(this.options.discoveryMaxTools === undefined
+          ? {}
+          : { maxTools: this.options.discoveryMaxTools }),
+        ...(this.options.discoveryMaxBytes === undefined
+          ? {}
+          : { maxBytes: this.options.discoveryMaxBytes }),
+      },
+    );
   }
 
   private createTransport(input: { readonly url: URL; readonly token?: string | undefined; readonly toolsets?: string | undefined }): unknown {
@@ -535,7 +679,7 @@ export class McpSDKClient implements McpClient {
       this.#clearTimer(entry.idleTimer);
     }
     entry.idleTimer = this.#setTimer(() => {
-      void this.closeConnection(entry);
+      void this.closeConnection(entry).catch(() => undefined);
     }, this.#idleTimeoutMs);
     if (typeof entry.idleTimer === "object" && entry.idleTimer !== null && "unref" in entry.idleTimer) {
       (entry.idleTimer as { unref: () => void }).unref();
@@ -557,33 +701,44 @@ export class McpSDKClient implements McpClient {
       entry.idleTimer = undefined;
     }
     this.#connections.delete(entry.key);
-		this.#clientEntries.delete(entry.client);
-		entry.closing = entry.client.close();
-		return await entry.closing;
+    this.#clientEntries.delete(entry.client);
+    entry.closing = this.closeClient(entry.client);
+    this.#closing.add(entry.closing);
+    try {
+      return await entry.closing;
+    } finally {
+      this.#closing.delete(entry.closing);
+    }
   }
 
-	private async runConnectionOperation<T>(entry: ConnectionEntry, operation: () => Promise<T>): Promise<T> {
-		let call!: InFlightCall;
-		const exhausted = new Promise<T>((_resolve, reject) => {
-			call = {
-				settled: false,
-				reject: (error) => {
-					if (call.settled) {
-						return;
-					}
-					call.settled = true;
-					reject(error);
-				},
-			};
-		});
-		entry.inFlight.add(call);
-		try {
-			return await Promise.race([operation(), exhausted]);
-		} finally {
-			call.settled = true;
-			entry.inFlight.delete(call);
-		}
-	}
+  private async runConnectionOperation<T>(
+    entry: ConnectionEntry,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let call!: InFlightCall;
+    const exhausted = new Promise<T>((_resolve, reject) => {
+      call = {
+        settled: false,
+        reject: (error) => {
+          if (call.settled) {
+            return;
+          }
+          call.settled = true;
+          reject(error);
+        },
+      };
+    });
+    entry.inFlight.add(call);
+    try {
+      return await Promise.race([
+        this.ownOperation(Promise.resolve().then(operation)),
+        exhausted,
+      ]);
+    } finally {
+      call.settled = true;
+      entry.inFlight.delete(call);
+    }
+  }
 
 	private handleClientError(client: SDKClientLike, error: Error): void {
 		if (!isReconnectExhaustedError(error)) {

@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 )
 
 // S3API is the narrow subset of *s3.Client behavior the BlobStore
@@ -45,8 +47,9 @@ type S3API interface {
 // constructor); a dependency-confinement test in s3_test.go pins that
 // rule so no other Engine package imports the SDK directly.
 type S3BlobStore struct {
-	client S3API
-	bucket string
+	client         S3API
+	bucket         string
+	closeResources func() error
 }
 
 // NewS3BlobStore constructs the production S3-backed store from a
@@ -54,17 +57,53 @@ type S3BlobStore struct {
 // the SDK's standard option chain. Path-style addressing is enabled
 // for non-AWS hosts so MinIO / R2 / B2 work identically to AWS S3.
 func NewS3BlobStore(ctx context.Context, cfg *Config) (*S3BlobStore, error) {
+	return newS3BlobStore(ctx, cfg, false)
+}
+
+// NewProtectedS3BlobStore requires the operator's explicit trust and DNS
+// references. Deliberate local fixture stores use NewS3BlobStore instead.
+func NewProtectedS3BlobStore(ctx context.Context, cfg *Config) (*S3BlobStore, error) {
+	return newS3BlobStore(ctx, cfg, true)
+}
+
+func newS3BlobStore(ctx context.Context, cfg *Config, protected bool) (*S3BlobStore, error) {
 	if cfg == nil {
 		return nil, &ConfigError{Message: "blob: configuration is nil"}
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+	options := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken)),
-	)
+	}
+	var closeResources func() error
+	if protected || cfg.TLSCAPath != "" || cfg.TLSServerName != "" {
+		if cfg.LocalTestMode || cfg.AllowInsecure {
+			return nil, &ConfigError{Message: "blob: protected transport cannot use local plaintext configuration"}
+		}
+		owner, err := transportsecurity.Open(ctx, transportsecurity.Config{CAPath: cfg.TLSCAPath, Purpose: "blob"})
+		if err != nil {
+			return nil, err
+		}
+		if _, err = owner.ClientTLSConfig(cfg.TLSServerName, ""); err != nil {
+			_ = owner.Close()
+			return nil, err
+		}
+		transport, err := newProtectedTransport(owner, cfg.TLSServerName)
+		if err != nil {
+			_ = owner.Close()
+			return nil, err
+		}
+		closeResources = transport.Close
+
+		options = append(options, awsconfig.WithHTTPClient(&http.Client{Transport: transport}))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, options...)
 	if err != nil {
+		if closeResources != nil {
+			_ = closeResources()
+		}
 		return nil, &ConfigError{Message: "blob: AWS SDK configuration failed"}
 	}
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
@@ -76,7 +115,15 @@ func NewS3BlobStore(ctx context.Context, cfg *Config) (*S3BlobStore, error) {
 			o.UsePathStyle = true
 		}
 	})
-	return &S3BlobStore{client: client, bucket: cfg.Bucket}, nil
+	return &S3BlobStore{client: client, bucket: cfg.Bucket, closeResources: closeResources}, nil
+}
+
+// Close releases owned native transport resources after the caller joins its operations.
+func (s *S3BlobStore) Close() error {
+	if s.closeResources != nil {
+		return s.closeResources()
+	}
+	return nil
 }
 
 // ListPrefix lists object keys beneath prefix. It is intentionally read-only;
