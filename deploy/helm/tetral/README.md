@@ -331,9 +331,12 @@ Their declared Deployment replica defaults are one. Set `replicas.api`, `replica
 `replicas.webConnector` independently to a positive integer.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
-HPA: minimum two, maximum ten, CPU utilization target 70 percent. That HPA
-controls effective Provider Gateway replicas while enabled. Set it to false to
-use `replicas.providerGateway` directly. It has no effect on MCP or Web replicas.
+HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled
+`autoscaling.providerGateway.maxReplicas` must be at least two. The HPA controls
+Provider Gateway replicas after reconciliation; `replicas.providerGateway` still
+sets the initial Deployment count, which may exceed the HPA maximum. Set
+autoscaling to false to use that replica count directly, including one replica.
+It has no effect on MCP or Web replicas.
 Internal Istiod/Envoy routing is mandatory, including a one-replica deployment.
 Provider Gateway uses an ordinary ClusterIP Service without session affinity.
 Scoped source proxies own per-RPC selection; the Runtime client retains its
@@ -465,8 +468,10 @@ capacity. Bind every external/admin consumer and available server connections
 after server-reserved slots using `transport.externalDatabaseConnections`,
 `transport.databaseCapacity` and `transport.databaseReserve`.
 
-The ledger resolves absolute or percentage `rollout.maxSurge` against every
-replica/HPA maximum. Go processes count one pool; Provider Gateway and MCP count
+The ledger counts the greater of initial Deployment replicas and an enabled
+HPA maximum, then resolves absolute or percentage `rollout.maxSurge` against
+that bound. Disabled autoscaling counts only initial replicas. Go processes
+count one pool; Provider Gateway and MCP count
 two generations throughout simultaneous rollout and trust replacement. API,
 Auth, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
 uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker

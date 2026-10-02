@@ -279,7 +279,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: provider-gateway
-  minReplicas: 2
+  minReplicas: {{ include "tetral.providerGatewayMinReplicas" . }}
   maxReplicas: {{ .Values.autoscaling.providerGateway.maxReplicas }}
   metrics:
     - type: Resource

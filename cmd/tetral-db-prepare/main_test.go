@@ -492,3 +492,127 @@ CREATE TABLE predecessor_data (value TEXT NOT NULL); INSERT INTO predecessor_dat
 		}
 	}
 }
+
+func TestRunRejectsUnregisteredNamespaceObjectsWithoutMutationOrRoles(t *testing.T) {
+	for _, test := range []struct{ name, setup string }{
+		{"enum", `CREATE TYPE private_unregistered_enum AS ENUM ('first','second')`},
+		{"domain", `CREATE DOMAIN private_unregistered_domain AS text DEFAULT 'private-domain-default' NOT NULL CHECK (VALUE <> '')`},
+		{"collation", `CREATE COLLATION private_unregistered_collation (provider=libc, locale='C')`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
+			if _, err := admin.Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			before := preparationNamespaceCatalog(t, admin)
+			declarations := testRoleDeclarations(t)
+			// A broken guard can install roles before this test reports failure.
+			// Reclaim that failed-case ownership without hiding its evidence.
+			t.Cleanup(func() {
+				var installed bool
+				if err := admin.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)`, declarations.Roles["migration"].Name).Scan(&installed); err != nil {
+					t.Error(err)
+					return
+				}
+				if installed {
+					cleanupInstalledRoles(t, admin, declarations)
+				}
+			})
+			payload, err := json.Marshal(declarations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dsn := storagetest.AdminDatabaseURL(t, admin)
+			var logs bytes.Buffer
+			err = runLocalPreparationFixture(context.Background(), func(key string) string {
+				if key == adminDatabaseURLEnv {
+					return dsn
+				}
+				return ""
+			}, bytes.NewReader(payload), &logs)
+			if err == nil {
+				t.Fatal("preparation accepted an unregistered namespace object")
+			}
+			if after := preparationNamespaceCatalog(t, admin); after != before {
+				t.Fatal("rejected preparation changed namespace or object catalog metadata")
+			}
+			var sessions, history bool
+			if err := admin.QueryRow(`SELECT to_regclass('sessions') IS NOT NULL,to_regclass('tetral_schema_migrations') IS NOT NULL`).Scan(&sessions, &history); err != nil {
+				t.Fatal(err)
+			}
+			if sessions || history {
+				t.Fatal("rejected preparation initialized canonical objects or identity")
+			}
+			for _, role := range declarations.Roles {
+				var exists bool
+				if err := admin.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)`, role.Name).Scan(&exists); err != nil {
+					t.Fatal(err)
+				}
+				if exists {
+					t.Fatal("unregistered object rejection installed a role")
+				}
+			}
+			output := logs.String()
+			for _, private := range []string{dsn, "private_unregistered", "private-domain-default", "CREATE TYPE", "CREATE DOMAIN", "CREATE COLLATION"} {
+				if strings.Contains(output, private) {
+					t.Fatal("private object or connection detail escaped preparation diagnostics")
+				}
+			}
+			for _, role := range declarations.Roles {
+				if strings.Contains(output, role.Password) {
+					t.Fatal("role credential escaped preparation diagnostics")
+				}
+			}
+			var schemaFailures, commandFailures int
+			decoder := json.NewDecoder(strings.NewReader(output))
+			for {
+				var record map[string]any
+				if err := decoder.Decode(&record); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				switch record["msg"] {
+				case "schema.migration.started", "schema.migration.completed", "database.prepare.completed":
+					t.Fatal("rejected initialization reported transaction or command success")
+				case "schema.migration.failed":
+					if record["service.name"] != "db-prepare" || record["schema.step"] != "verify_empty_schema" || record["transaction.outcome"] != "not_started" || record["error.code"] != string(storage.SchemaErrorUnexpectedState) || record["schema.version"] != nil {
+						t.Fatalf("unexpected pre-mutation schema failure diagnostic: %v", record)
+					}
+					schemaFailures++
+				case "database.prepare.failed":
+					if record["step"] != "migrate_schema" || schemaFailures != 1 {
+						t.Fatalf("command failure did not follow namespace rejection: %v", record)
+					}
+					commandFailures++
+				}
+			}
+			if schemaFailures != 1 || commandFailures != 1 {
+				t.Fatalf("schema/command failure counts=%d/%d; want1/1", schemaFailures, commandFailures)
+			}
+		})
+	}
+}
+
+// Inspect the same private namespace before and after the actual command,
+// including exact type definitions/labels, constraints, ownership and OIDs.
+// There is no canonical history table to query in these rejected fixtures.
+func preparationNamespaceCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var snapshot string
+	if err := db.QueryRow(`SELECT jsonb_build_object(
+		'namespace',to_jsonb(n),
+		'dependencies',(SELECT jsonb_agg(to_jsonb(d) ORDER BY d.classid,d.objid,d.objsubid,d.refclassid,d.refobjid,d.refobjsubid,d.deptype)
+			FROM pg_catalog.pg_depend d WHERE d.refclassid='pg_catalog.pg_namespace'::pg_catalog.regclass AND d.refobjid=n.oid),
+		'types',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.oid) FROM pg_catalog.pg_type t WHERE t.typnamespace=n.oid),
+		'enum_values',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.enumtypid,e.enumsortorder)
+			FROM pg_catalog.pg_enum e JOIN pg_catalog.pg_type t ON t.oid=e.enumtypid WHERE t.typnamespace=n.oid),
+		'constraints',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_constraint c WHERE c.connamespace=n.oid),
+		'collations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_collation c WHERE c.collnamespace=n.oid),
+		'relations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_class c WHERE c.relnamespace=n.oid),
+		'routines',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.oid) FROM pg_catalog.pg_proc p WHERE p.pronamespace=n.oid)
+	)::text FROM pg_catalog.pg_namespace n WHERE n.nspname=pg_catalog.current_schema()`).Scan(&snapshot); err != nil {
+		t.Fatalf("snapshot preparation namespace catalog: %v", err)
+	}
+	return snapshot
+}

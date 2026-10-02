@@ -77,7 +77,8 @@ traffic.sidecar.istio.io/excludeOutboundPorts: {{ if eq $root.Values.transport.p
 replacement with at most two generations per process, including candidates. */}}
 {{- define "tetral.databasePoolSlots" -}}
 {{- $provider := int .Values.replicas.providerGateway -}}
-{{- if .Values.autoscaling.providerGateway.enabled -}}{{- $provider = int .Values.autoscaling.providerGateway.maxReplicas -}}{{- end -}}
+{{/* The HPA limit does not cap the separately declared initial Deployment. */}}
+{{- if .Values.autoscaling.providerGateway.enabled -}}{{- $provider = max $provider (int .Values.autoscaling.providerGateway.maxReplicas) -}}{{- end -}}
 {{/* Each named consumer owns one Go pool. Sandbox and Event Stream use
 alternative DSN environment names; neither can be inferred from DATABASE_URL. */}}
 {{- $goProcesses := 1 -}}{{/* nonoverlapping Cleanup CronJob */}}
@@ -101,3 +102,6 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 
 {{/* Fixed scheduling/signal margin after Runtime's four application/proxy phases. */}}
 {{- define "tetral.runtimeShutdownMarginMs" -}}5000{{- end -}}
+
+{{/* Existing Provider HPA floor, shared by its resource and validation. */}}
+{{- define "tetral.providerGatewayMinReplicas" -}}2{{- end -}}

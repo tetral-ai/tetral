@@ -159,9 +159,15 @@ func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 	} else {
 		diagnostics.step = "verify_empty_schema"
 		var occupied bool
-		if err := conn.QueryRowContext(ctx, `SELECT
-          EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema())
-          OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema())`).Scan(&occupied); err != nil {
+		// Namespace dependencies include standalone types, collations and other
+		// objects that a relation/routine catalog census would miss. Inspect only
+		// the initialization namespace, preserving unrelated schema objects.
+		if err := conn.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_namespace n ON n.oid=d.refobjid
+			WHERE d.refclassid='pg_catalog.pg_namespace'::pg_catalog.regclass
+			  AND n.nspname=pg_catalog.current_schema()
+		)`).Scan(&occupied); err != nil {
 			return newSchemaMigrationError(SchemaErrorMalformed, 0, err)
 		}
 		if occupied {

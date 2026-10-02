@@ -20,7 +20,10 @@ canonical schema in an empty database, then installs the exact role contract.
 Repeating preparation for the exact current version/checksum verifies the schema
 and preserves its identity stamp. An unexpected object without a schema registry,
 an empty registry, a predecessor checksum or another version is rejected before
-schema mutation. There is no predecessor upgrade or compatibility fallback.
+schema mutation. The emptiness check covers all objects dependent on the active
+initialization namespace, including standalone types and collations, without
+changing unrelated namespaces. There is no predecessor upgrade or compatibility
+fallback.
 
 The administrative connection must authenticate as a PostgreSQL superuser
 (`rolsuper=true`); `CREATEROLE` or migration-role membership is insufficient.

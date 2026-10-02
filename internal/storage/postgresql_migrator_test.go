@@ -866,6 +866,9 @@ func TestMigrateSchemaRejectsUnregisteredObjectsAndPredecessorIdentity(t *testin
 		{"table", `CREATE TABLE unregistered_table(id integer)`, storage.SchemaErrorUnexpectedState},
 		{"sequence", `CREATE SEQUENCE unregistered_sequence`, storage.SchemaErrorUnexpectedState},
 		{"function", `CREATE FUNCTION unregistered_function() RETURNS integer LANGUAGE sql AS 'SELECT 1'`, storage.SchemaErrorUnexpectedState},
+		{"enum", `CREATE TYPE unregistered_enum AS ENUM ('first','second')`, storage.SchemaErrorUnexpectedState},
+		{"domain", `CREATE DOMAIN unregistered_domain AS text DEFAULT 'private-domain-default' NOT NULL CHECK (VALUE <> '')`, storage.SchemaErrorUnexpectedState},
+		{"collation", `CREATE COLLATION unregistered_collation (provider=libc, locale='C')`, storage.SchemaErrorUnexpectedState},
 		{"predecessor", `CREATE TABLE tetral_schema_migrations(version bigint PRIMARY KEY,checksum text NOT NULL); INSERT INTO tetral_schema_migrations VALUES(1,'d42f4f8936525f02525b621e943d9ad98a91c6d8a76ca11a309c62dee496ade6')`, storage.SchemaErrorChecksumDrift},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -874,11 +877,40 @@ func TestMigrateSchemaRejectsUnregisteredObjectsAndPredecessorIdentity(t *testin
 				t.Fatal(err)
 			}
 			before := baseTableNames(t, db)
+			catalogBefore := unregisteredNamespaceCatalog(t, db)
 			assertSchemaErrorKind(t, storage.MigrateSchema(context.Background(), db), test.kind)
 			if after := baseTableNames(t, db); strings.Join(before, "|") != strings.Join(after, "|") {
 				t.Fatal("rejected initialization changed predecessor objects")
 			}
+			if after := unregisteredNamespaceCatalog(t, db); after != catalogBefore {
+				t.Fatal("rejected initialization changed namespace or object catalog metadata")
+			}
+			if test.name != "predecessor" {
+				assertTableExists(t, db, "tetral_schema_migrations", false)
+			}
 			assertTableExists(t, db, "sessions", false)
 		})
 	}
+}
+
+// Snapshot object identities and definitions before a registry exists. Unlike
+// the canonical catalog helper, this never reads or fabricates migration rows.
+func unregisteredNamespaceCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var snapshot string
+	if err := db.QueryRow(`SELECT jsonb_build_object(
+		'namespace',to_jsonb(n),
+		'dependencies',(SELECT jsonb_agg(to_jsonb(d) ORDER BY d.classid,d.objid,d.objsubid,d.refclassid,d.refobjid,d.refobjsubid,d.deptype)
+			FROM pg_catalog.pg_depend d WHERE d.refclassid='pg_catalog.pg_namespace'::pg_catalog.regclass AND d.refobjid=n.oid),
+		'types',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.oid) FROM pg_catalog.pg_type t WHERE t.typnamespace=n.oid),
+		'enum_values',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.enumtypid,e.enumsortorder)
+			FROM pg_catalog.pg_enum e JOIN pg_catalog.pg_type t ON t.oid=e.enumtypid WHERE t.typnamespace=n.oid),
+		'constraints',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_constraint c WHERE c.connamespace=n.oid),
+		'collations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_collation c WHERE c.collnamespace=n.oid),
+		'relations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.oid) FROM pg_catalog.pg_class c WHERE c.relnamespace=n.oid),
+		'routines',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.oid) FROM pg_catalog.pg_proc p WHERE p.pronamespace=n.oid)
+	)::text FROM pg_catalog.pg_namespace n WHERE n.nspname=pg_catalog.current_schema()`).Scan(&snapshot); err != nil {
+		t.Fatalf("snapshot unregistered namespace catalog: %v", err)
+	}
+	return snapshot
 }

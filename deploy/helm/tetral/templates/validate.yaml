@@ -61,6 +61,7 @@ that silently permits more than the default did.
 {{- end }}
 {{- if not (regexMatch "^([1-9][0-9]*|[1-9][0-9]*%)$" (toString .Values.rollout.maxSurge)) }}{{ fail "rollout.maxSurge must be a bounded positive integer or percentage" }}{{ end }}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.autoscaling.providerGateway.maxReplicas)) }}{{ fail "autoscaling.providerGateway.maxReplicas must be bounded" }}{{ end }}
+{{- if and .Values.autoscaling.providerGateway.enabled (lt (int .Values.autoscaling.providerGateway.maxReplicas) (int (include "tetral.providerGatewayMinReplicas" .))) }}{{ fail "autoscaling.providerGateway.maxReplicas must be at least the enabled HPA minimum of 2" }}{{ end }}
 {{- if and (ne .Values.transport.databaseCapacity nil) (not (regexMatch "^[1-9][0-9]*$" (toString .Values.transport.databaseCapacity))) }}{{ fail "transport.databaseCapacity must be a bounded positive integer or unknown" }}{{ end }}
 {{- if and (ne .Values.transport.externalDatabaseConnections nil) (not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.transport.externalDatabaseConnections))) }}{{ fail "transport.externalDatabaseConnections must declare a bounded nonnegative count or unknown" }}{{ end }}
 {{- if and (ne .Values.transport.databaseCapacity nil) (ne .Values.transport.externalDatabaseConnections nil) }}
