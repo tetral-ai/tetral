@@ -37,7 +37,7 @@ spec:
     spec:
       serviceAccountName: agent-runtime
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 90
+      terminationGracePeriodSeconds: {{ .Values.lifecycle.runtimeGraceSeconds }}
       containers:
         - name: agent-runtime
           image: {{ include "tetral.image" (dict "root" . "name" "agent-runtime") }}
@@ -46,6 +46,14 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeDrainMs | quote }}
+            - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeSettlementMs | quote }}
+            - name: TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeLocalJoinMs | quote }}
+            - name: TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.runtimeProxyJoinMs | quote }}
             - name: TETRAL_TRANSPORT_PROFILE
               value: {{ .Values.transport.profile | quote }}
             - name: TETRAL_ROUTING_PROXY_REQUIRED

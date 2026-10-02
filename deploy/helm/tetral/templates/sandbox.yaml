@@ -58,7 +58,7 @@ metadata:
     app.kubernetes.io/name: sandbox
     app.kubernetes.io/part-of: tetral
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.sandbox }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -86,7 +86,7 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
-{{ include "tetral.storeTLSEnv" (dict "root" . "database" false "blob" true "bun" false) | trim | indent 12 }}
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.sandboxDrainMs | quote }}
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS

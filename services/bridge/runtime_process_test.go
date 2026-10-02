@@ -28,6 +28,10 @@ func processRegistryRPCWithStore(t *testing.T, store *PostgreSQLBridgeAPIStore, 
 	return processRegistryRPCWithIdentity(t, store, identity, after)
 }
 func processRegistryRPCWithIdentity(t *testing.T, store *PostgreSQLBridgeAPIStore, identity auth.Identity, after func(context.Context, string, any) error) bridgev1.AgentRuntimeBridgeServiceClient {
+	client, _ := processRegistryRPCWithIdentityAddress(t, store, identity, after)
+	return client
+}
+func processRegistryRPCWithIdentityAddress(t *testing.T, store *PostgreSQLBridgeAPIStore, identity auth.Identity, after func(context.Context, string, any) error) (bridgev1.AgentRuntimeBridgeServiceClient, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -61,7 +65,7 @@ func processRegistryRPCWithIdentity(t *testing.T, store *PostgreSQLBridgeAPIStor
 			t.Error("process registry RPC did not join")
 		}
 	})
-	return bridgev1.NewAgentRuntimeBridgeServiceClient(conn)
+	return bridgev1.NewAgentRuntimeBridgeServiceClient(conn), listener.Addr().String()
 }
 
 func TestPostgreSQLRuntimeProcessLiveness(t *testing.T) {

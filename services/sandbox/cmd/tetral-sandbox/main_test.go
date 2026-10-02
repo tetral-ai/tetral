@@ -63,6 +63,11 @@ func TestTetralSandboxCommandStartsAllSandboxOwnedQueueRunners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
+	assembly, err := os.ReadFile("worker_assembly.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source = append(source, assembly...)
 	required := []string{
 		"RunWorkspaceConsumerLoop",
 		"RunSandboxToolExecutionConsumerGroup",

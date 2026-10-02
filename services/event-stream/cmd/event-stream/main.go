@@ -42,7 +42,7 @@ type commandConfig struct {
 }
 
 func main() {
-	if err := run(context.Background(), osEnv{}, nil); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}, nil) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -109,6 +109,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, "event-stream", err)
 	}
+	workload.ConfigureProcessShutdown(ctx, defaultShutdownTimeout+5*time.Second, diagnosticOwner)
 	if open == nil {
 		open = openStartupDatabaseFromEnv
 	}
@@ -116,7 +117,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	if err != nil {
 		return logStartupFailure(logger, err)
 	}
-	defer func() { _ = closeStartupDatabase(database) }()
+	defer workload.ProcessCleanup(ctx, func() { _ = closeStartupDatabase(database) })
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics()
 	reader := internaleventstream.NewPostgreSQLReader(database.runtimeClient)

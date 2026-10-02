@@ -317,3 +317,6 @@ function safeResourceValue(value: string): string {
 
 export { processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "./process-boundary.js";
 export type { ProcessFailurePhase } from "./process-boundary.js";
+
+export { processShutdownFailureLogRecord } from "./process-boundary.js";
+export type { ExecutableProcessBoundary } from "./process-boundary.js";

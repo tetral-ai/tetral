@@ -48,10 +48,10 @@ func (m *RuntimePlacementMetrics) Collector() workload.MetricsCollector {
 		m.mutex.Lock()
 		defer m.mutex.Unlock()
 		metrics := []workload.Metric{{Name: "runtime_placement_probe_seconds_total", Help: "Total Runtime placement probe duration.", Type: "counter", Value: m.probeSeconds}, {Name: "runtime_placement_seconds_total", Help: "Total Runtime placement attempt duration.", Type: "counter", Value: m.attemptSeconds}}
-		for _, outcome := range []string{"eligible", "registry_unavailable", "load_unavailable"} {
+		for _, outcome := range []string{"eligible", "registry_unavailable", "timeout", "cancelled", "transport_error", "http_error", "invalid_metrics", "not_accepting", "capacity_excluded", "response_too_large"} {
 			metrics = append(metrics, workload.Metric{Name: "runtime_placement_probe_total", Help: "Runtime placement probe outcomes.", Type: "counter", Labels: []workload.MetricLabel{{Name: "outcome", Value: outcome}}, Value: m.probes[outcome]})
 		}
-		for _, outcome := range []string{"selected", "unavailable"} {
+		for _, outcome := range []string{"selected", "exhausted", "no_candidates", "visibility_not_ready", "timeout", "cancelled", "invalid_policy", "random_unavailable"} {
 			metrics = append(metrics, workload.Metric{Name: "runtime_placement_total", Help: "Bounded Runtime placement sample outcomes.", Type: "counter", Labels: []workload.MetricLabel{{Name: "outcome", Value: outcome}}, Value: m.attempts[outcome]})
 		}
 		return metrics, nil

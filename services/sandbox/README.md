@@ -366,6 +366,12 @@ and Blob clients, and waits for the mandatory local routing proxy when
 `TETRAL_DATABASE_TLS_CA_PATH` / `TETRAL_DATABASE_TLS_SERVER_NAME` and
 `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` trust settings.
 
+The command registers twelve consumers, three maintenance loops and the Queue
+notification listener before launching any of them. Its typed registry rejects
+unknown, duplicate or missing producers and provides one join for all registrations.
+The notification listener receives acquisition cancellation; admitted consumer
+and maintenance work retains its work context through the drain cutoff.
+
 SIGTERM closes acquisition and readiness immediately. Every Queue family uses
 that acquisition boundary: no waiting worker slot or new Lease starts work after
 quiesce. If a committed Lease reply arrives late, only its observed exact job IDs
@@ -379,7 +385,9 @@ custody; they are separate from Pod shutdown budgets.
 cutoff the process cancels unfinished workers, then joins their cleanup together
 with consumer loops, maintenance, notifications and HTTP handlers. Owned Queue
 channels, provider/Blob resources and database pools close only after their users
-join. A missed cancellation-join budget is an error; it does not authorize closing
+join. The executable exits with status 1 if the absolute drain-plus-join deadline
+expires; reusable runners report an overrun and retain ownership. Drain plus join
+must fit within 50000 ms of the 60-second Pod grace. Neither path authorizes closing
 a pool beneath a live worker.
 
 A replacement worker continues the durable external command reference without a
@@ -472,7 +480,15 @@ quiet at the default Info level.
 late Lease replies and joined cancellation. `TestPostgreSQLReplicaSandboxTakeover`
 uses two independent production consumers and Queue endpoints to drain one worker
 while the other processes six executions, then takes over at both command-reference
-persistence boundaries through actual lease expiry. `TestPostgreSQLReplicaWorkerDrain`
+persistence boundaries through actual lease expiry.
+`TestPostgreSQLReplicaSandboxProcessTakeover` kills an actual worker PID after
+provider submission, separately before and after reference persistence, and
+checks successor lease fencing, original command observation, unknown outcomes
+and six unchanged Sandbox identities. Command registration tests bind every
+producer to its actual caller/context and repeat common drain, contender and
+late-Lease controls; child process tests cover noncooperative consumer,
+maintenance and listener owners plus cooperative resource cleanup.
+`TestPostgreSQLReplicaWorkerDrain`
 keeps actual Runtime/Gateway work alive across Job Runner shutdown and replacement.
 
 

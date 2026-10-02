@@ -73,6 +73,8 @@ spec:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
             - name: TETRAL_QUEUE_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.queueDrainMs | quote }}
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: {{ .Values.lifecycle.cancelJoinMs | quote }}
             - name: TETRAL_TRANSPORT_PROFILE
               value: {{ .Values.transport.profile | quote }}
 {{- if eq .Values.transport.profile "hardened" }}

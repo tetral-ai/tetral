@@ -45,6 +45,9 @@ func BridgeLifecyclePolicyFromEnv(getenv func(string) string) (BridgeLifecyclePo
 	if p.AdmissionTimeout >= p.DrainTimeout || p.ReleaseTimeout >= p.DrainTimeout {
 		return BridgeLifecyclePolicy{}, workload.NewConfigError("Bridge admission and release attempts must fit within drain timeout")
 	}
+	if p.DrainTimeout > 50*time.Second || p.CancelJoinTimeout > 50*time.Second-p.DrainTimeout {
+		return BridgeLifecyclePolicy{}, workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	}
 	return p, nil
 }
 func (s *PostgreSQLBridgeAPIStore) lifecyclePolicy() BridgeLifecyclePolicy {

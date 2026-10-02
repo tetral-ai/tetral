@@ -23,7 +23,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -41,11 +41,12 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
+	workload.ConfigureProcessShutdown(ctx, cfg.DrainGrace, diagnosticOwner)
 	openResult, err := openDatabase(ctx, cfg.DatabaseURL, env.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), env.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
-	defer func() { _ = openResult.Client.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = openResult.Client.Close() })
 	if err := verifySchema(ctx, openResult.Client); err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}

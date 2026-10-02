@@ -47,10 +47,35 @@ func TestReplicaWebSharedStore(t *testing.T) {
 	t.Run("drain-completes", func(t *testing.T) { testReplicaWebCommandDrain(t, false) })
 	t.Run("drain-cancels", func(t *testing.T) { testReplicaWebCommandDrain(t, true) })
 	t.Run("three_instances", func(t *testing.T) {
-		stores := replicaMinIOStores(t)
+		stores, objects, receipts := replicaWebObservedStores(t)
 		var calls atomic.Int64
+		var duplicateCalls atomic.Int64
+		duplicateStarted, duplicateRelease := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseDuplicate := func() { releaseOnce.Do(func() { close(duplicateRelease) }) }
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls.Add(1)
+			var input struct {
+				URL string `json:"url"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				http.Error(w, "invalid backend fixture request", http.StatusBadRequest)
+				return
+			}
+			if input.URL == "https://duplicate.example/" {
+				if duplicateCalls.Add(1) == 1 {
+					close(duplicateStarted)
+				}
+				select {
+				case <-duplicateRelease:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if input.URL == "https://failure.example/" {
+				http.Error(w, "controlled transient backend failure", http.StatusServiceUnavailable)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if strings.HasPrefix(r.URL.Path, "/search") {
 				_, _ = io.WriteString(w, `{"code":200,"data":[{"title":"Example","url":"https://example.com/","description":"fixture"}],"meta":{"usage":{"tokens":1}}}`)
@@ -58,10 +83,10 @@ func TestReplicaWebSharedStore(t *testing.T) {
 				_, _ = io.WriteString(w, `{"code":200,"data":{"title":"Example","url":"https://example.com/","content":"Alpha\nbeta alpha","httpStatus":200,"usage":{"tokens":2}}}`)
 			}
 		}))
-		defer backend.Close()
+		defer func() { releaseDuplicate(); backend.Close() }()
 		var clients []gatewayv1.ProviderGatewayServiceClient
 		for i := 0; i < 3; i++ {
-			blobs := stores()
+			blobs := stores[i]
 			metrics := web.NewMetrics()
 			jina := web.NewJinaBackend(backend.Client(), backend.URL+"/search", backend.URL+"/reader", []string{"fixture"}, time.Now)
 			t.Cleanup(jina.Close)
@@ -98,20 +123,127 @@ func TestReplicaWebSharedStore(t *testing.T) {
 		if !proto.Equal(found, replay) || calls.Load() != 2 {
 			t.Fatal("committed receipt replay changed result or called backend")
 		}
+		searchDigest, err := replicaWebStoredReceipt(ctx, receipts, search, found)
+		if err != nil {
+			t.Fatal(err)
+		}
 		conflict := proto.Clone(search).(*gatewayv1.RunWebRequest)
 		conflict.Input.SearchQuery[0].Q = "changed"
 		rejected, err := clients[1].RunWeb(ctx, conflict)
 		if err != nil || rejected.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR || calls.Load() != 2 {
 			t.Fatalf("conflict=%+v/%v", rejected, err)
 		}
-		isolated := replicaWebRequest("event_other_scope", &gatewayv1.WebToolInput{Open: []*gatewayv1.WebOpenRequest{{RefId: &ref}}})
-		isolated.SessionThreadId = "sthr_other"
-		signReplicaWeb(isolated)
-		other, err := clients[2].RunWeb(ctx, isolated)
-		if err != nil || other.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_TOOL_ERROR || calls.Load() != 2 {
-			t.Fatalf("scope isolation=%+v/%v", other, err)
+		replay = run(2, search)
+		unchangedDigest, err := replicaWebStoredReceipt(ctx, receipts, search, replay)
+		if err != nil || !proto.Equal(found, replay) || searchDigest != unchangedDigest || calls.Load() != 2 {
+			t.Fatalf("conflict changed original receipt/result: %v calls=%d", err, calls.Load())
 		}
-		t.Log("three real Web services independently pooled MinIO; search stub materialized on A, open B/find C no backend, cross-instance exact receipt and scope/conflict denial")
+		for _, foreign := range []struct{ name, workspace, session, thread string }{
+			{"workspace", "other_workspace", "sesn_replica_web", "sthr_replica_web"},
+			{"session", "default", "sesn_other", "sthr_replica_web"},
+			{"thread", "default", "sesn_replica_web", "sthr_other"},
+		} {
+			isolated := replicaWebRequest("event_other_"+foreign.name, &gatewayv1.WebToolInput{Open: []*gatewayv1.WebOpenRequest{{RefId: &ref}}})
+			isolated.WorkspaceId, isolated.SessionId, isolated.SessionThreadId = foreign.workspace, foreign.session, foreign.thread
+			signReplicaWeb(isolated)
+			other, err := clients[2].RunWeb(ctx, isolated)
+			if err != nil || other.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_TOOL_ERROR || strings.Contains(other.GetResultText(), "Alpha") || strings.Contains(other.GetResultText(), "beta alpha") || len(other.GetRefs()) != 0 || calls.Load() != 2 {
+				t.Fatalf("%s scope isolation=%+v/%v", foreign.name, other, err)
+			}
+		}
+		_, snapshotsBefore := replicaWebPutCounts(objects, "")
+		if snapshotsBefore != 2 {
+			t.Fatalf("search stub/materialized page plus conflict/scope denials created %d snapshot writes; want 2", snapshotsBefore)
+		}
+		duplicateURL := "https://duplicate.example/"
+		duplicate := replicaWebRequest("event_concurrent", &gatewayv1.WebToolInput{Open: []*gatewayv1.WebOpenRequest{{Url: &duplicateURL}}})
+		type result struct {
+			response *gatewayv1.RunWebResponse
+			err      error
+		}
+		winner, waiter := make(chan result, 1), make(chan result, 1)
+		go func() { response, err := clients[0].RunWeb(ctx, duplicate); winner <- result{response, err} }()
+		select {
+		case <-duplicateStarted:
+		case <-ctx.Done():
+			t.Fatal("concurrent winner backend barrier absent")
+		}
+		go func() {
+			response, err := clients[1].RunWeb(ctx, proto.Clone(duplicate).(*gatewayv1.RunWebRequest))
+			waiter <- result{response, err}
+		}()
+		// Do not release the backend until B has read the actual in-flight
+		// receipt from MinIO. This rejects a merely sequential replay fixture.
+		select {
+		case <-objects[1].inFlightPolled:
+		case <-ctx.Done():
+			t.Fatal("duplicate B never observed A's actual in-flight MinIO claim")
+		}
+		releaseDuplicate()
+		var original *gatewayv1.RunWebResponse
+		for i, channel := range []<-chan result{winner, waiter} {
+			select {
+			case result := <-channel:
+				if result.err != nil || result.response.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED {
+					t.Fatalf("concurrent replica%d=%+v/%v", i, result.response, result.err)
+				}
+				if i == 0 {
+					original = result.response
+				} else if !proto.Equal(original, result.response) {
+					t.Fatal("concurrent duplicate did not return the exact winner outcome")
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		replay = run(2, duplicate)
+		if !proto.Equal(original, replay) || duplicateCalls.Load() != 1 || calls.Load() != 3 {
+			t.Fatalf("concurrent/C replay backend=%d total=%d", duplicateCalls.Load(), calls.Load())
+		}
+		duplicateDigest, err := replicaWebStoredReceipt(ctx, receipts, duplicate, original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobKey := "default/sesn_replica_web/sthr_replica_web/jobs/event_concurrent.job"
+		jobWrites, snapshotsAfter := replicaWebPutCounts(objects, jobKey)
+		if jobWrites != 2 || snapshotsAfter != snapshotsBefore+1 {
+			t.Fatalf("concurrent MinIO effects claim+result=%d snapshots=%d→%d", jobWrites, snapshotsBefore, snapshotsAfter)
+		}
+		lostURL := "https://lost.example/"
+		lost := replicaWebRequest("event_response_lost", &gatewayv1.WebToolInput{Open: []*gatewayv1.WebOpenRequest{{Url: &lostURL}}})
+		captured := replicaWebLoseCommittedResponse(ctx, t, clients[0], receipts, lost)
+		replay = run(1, lost)
+		lostDigest, err := replicaWebStoredReceipt(ctx, receipts, lost, replay)
+		if err != nil || !proto.Equal(captured.response, replay) || captured.digest != lostDigest || calls.Load() != 4 {
+			t.Fatalf("lost committed response replay changed receipt/outcome: calls=%d/%v", calls.Load(), err)
+		}
+		jobWrites, snapshotsAfter = replicaWebPutCounts(objects, "default/sesn_replica_web/sthr_replica_web/jobs/event_response_lost.job")
+		if jobWrites != 2 || snapshotsAfter != snapshotsBefore+2 {
+			t.Fatalf("lost response repeated MinIO effects=%d snapshots=%d", jobWrites, snapshotsAfter)
+		}
+		failureURL := "https://failure.example/"
+		failed := replicaWebRequest("event_runtime_error", &gatewayv1.WebToolInput{Open: []*gatewayv1.WebOpenRequest{{Url: &failureURL}}})
+		runtimeError, err := clients[0].RunWeb(ctx, failed)
+		if err != nil || runtimeError.GetStatus() != gatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR || calls.Load() != 5 {
+			t.Fatalf("runtime failure=%+v/%v calls=%d", runtimeError, err, calls.Load())
+		}
+		failureDigest, err := replicaWebStoredReceipt(ctx, receipts, failed, runtimeError)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i < 3; i++ {
+			replay, err := clients[i].RunWeb(ctx, failed)
+			digest, receiptErr := replicaWebStoredReceipt(ctx, receipts, failed, replay)
+			if err != nil || receiptErr != nil || !proto.Equal(runtimeError, replay) || digest != failureDigest || calls.Load() != 5 {
+				t.Fatalf("persisted runtime error replay%d=%+v/%v/%v calls=%d", i, replay, err, receiptErr, calls.Load())
+			}
+		}
+		jobWrites, snapshotsAfter = replicaWebPutCounts(objects, "default/sesn_replica_web/sthr_replica_web/jobs/event_runtime_error.job")
+		if jobWrites != 2 || snapshotsAfter != snapshotsBefore+2 {
+			t.Fatalf("runtime error repeated MinIO effects=%d snapshots=%d", jobWrites, snapshotsAfter)
+		}
+		t.Logf("real MinIO/backend counters: backend_total=%d concurrent_backend=%d concurrent_snapshot_delta=1 lost_snapshot_delta=1 runtime_error_snapshot_delta=0; each claim+completed receipt has 2 successful job PUTs; final snapshot writes=%d", calls.Load(), duplicateCalls.Load(), snapshotsAfter)
+		t.Logf("three real Web services independently pooled MinIO; A materialization/B open/C find no backend; concurrent identity backend1 with observed B in-flight receipt and one snapshot; dropped committed RPC response replay exact; persisted runtime-error B/C replay no backend/effect; Workspace/Session/Thread and payload conflict denial; receipts duplicate=%s lost=%s runtime_error=%s", duplicateDigest, lostDigest, failureDigest)
 	})
 }
 func replicaWebRequest(event string, input *gatewayv1.WebToolInput) *gatewayv1.RunWebRequest {

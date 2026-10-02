@@ -30,6 +30,17 @@ then returns an error. A zero budget uses the shared five-second default.
 Service-specific consumers separately
 own their acquisition, heartbeat, settlement and drain policies.
 
+Executable entrypoints explicitly call `RunProcess`. Their validated service
+configuration supplies one absolute application shutdown allocation (drain plus
+cancellation/join). The first signal, listener failure or dependency cleanup
+starts that deadline; other listeners and later cleanup cannot reset it. If a
+producer refuses cancellation, the executable exits with status 1 when that
+allocation expires. It does not close dependencies beneath live producers or
+claim a completed handoff. A final diagnostic is best effort through the bounded
+process logger; silent, blocked and panicking sinks cannot delay exit. Reusable
+runners retain join-before-close ownership and cannot exit their caller. Normal
+completion disarms the executable guard only after command cleanup returns.
+
 ## Diagnostics
 
 The process reads diagnostic controls once at startup. Empty values keep the

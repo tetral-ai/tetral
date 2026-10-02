@@ -100,3 +100,106 @@ func TestRuntimeLoadProbeWireBounds(t *testing.T) {
 		})
 	}
 }
+
+// The transport ceiling is tested at its production boundary, independently of
+// exposition validity. Closing the actual response body is an owned obligation.
+type observedLoadTransport struct {
+	delegate http.RoundTripper
+	closed   chan struct{}
+}
+type observedLoadBody struct {
+	io.ReadCloser
+	closed chan struct{}
+}
+
+func (b *observedLoadBody) Close() error { err := b.ReadCloser.Close(); close(b.closed); return err }
+func (tr observedLoadTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := tr.delegate.RoundTrip(r)
+	if err == nil {
+		response.Body = &observedLoadBody{ReadCloser: response.Body, closed: tr.closed}
+	}
+	return response, err
+}
+func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
+	for _, scenario := range []string{"exact limit", "one excess byte", "slow body", "caller cancellation"} {
+		t.Run(scenario, func(t *testing.T) {
+			body := runtimeLoadFixture(0)
+			for len(body) < 256*1024 {
+				n := min(500, 256*1024-len(body))
+				if n == 1 {
+					body += "\n"
+				} else {
+					body += "#" + strings.Repeat(" ", n-2) + "\n"
+				}
+			}
+			if scenario == "one excess byte" {
+				body += "\n"
+			}
+			partial := make(chan struct{})
+			cancelled := make(chan struct{})
+			client := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if scenario == "slow body" || scenario == "caller cancellation" {
+					_, _ = io.WriteString(w, "# partial\n")
+					w.(http.Flusher).Flush()
+					close(partial)
+					<-r.Context().Done()
+					close(cancelled)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			closed := make(chan struct{})
+			client.Transport = observedLoadTransport{delegate: client.Transport, closed: closed}
+			policy := DefaultRuntimePlacementPolicy()
+			policy.ProbeTimeout = 100 * time.Millisecond
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := probeRuntimeLoad(ctx, client, kubernetes.BindingCandidate{PodIP: "10.0.0.1"}, policy)
+				done <- err
+			}()
+			if scenario == "caller cancellation" {
+				select {
+				case <-partial:
+				case <-time.After(3 * time.Second):
+					t.Fatal("body read did not begin")
+				}
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if scenario == "exact limit" {
+					if err != nil {
+						t.Fatalf("semantically valid256KiB body rejected: %v", err)
+					}
+				} else if err == nil {
+					t.Fatal("unbounded/oversized body admitted")
+				}
+				if scenario == "one excess byte" && runtimeLoadFailureReason(err) != "response_too_large" {
+					t.Fatalf("size reason=%v", err)
+				}
+				if scenario == "slow body" && runtimeLoadFailureReason(err) != "timeout" {
+					t.Fatalf("slow body reason=%v", err)
+				}
+				if scenario == "caller cancellation" && runtimeLoadFailureReason(err) != "cancelled" {
+					t.Fatalf("parent cancellation=%v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("load body reader failed to join")
+			}
+			select {
+			case <-closed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("actual HTTP response reader not closed")
+			}
+			if scenario == "slow body" || scenario == "caller cancellation" {
+				select {
+				case <-cancelled:
+				case <-time.After(3 * time.Second):
+					t.Fatal("actual server request not cancelled")
+				}
+			}
+		})
+	}
+}

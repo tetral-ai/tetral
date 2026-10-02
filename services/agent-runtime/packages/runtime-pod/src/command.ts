@@ -1,4 +1,5 @@
-import { createDiagnosticStreamSink, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
+import { createDiagnosticStreamSink, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  * Boots the Runtime Pod process and composes its Runtime Core, Bridge, Gateway, tool, authentication,
@@ -101,6 +102,7 @@ export interface RuntimePodCommandDependencies {
  * and the terminal wait used by the executable and its tests.
  */
 export interface RuntimePodCommandOptions {
+	readonly processBoundary?: ExecutableProcessBoundary;
 	readonly logger?: RuntimePodLogger;
 	readonly dependencyBuilder?: (input: {
 		readonly config: RuntimePodConfig;
@@ -164,9 +166,14 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 	let logger: RuntimePodLogger | undefined;
 	const report = (record: RuntimePodLogRecord): void => { try { logger?.error(record); } catch { /* observability does not own lifecycle */ } };
 	const closes: { phase: ProcessFailurePhase; close: () => void | Promise<void> }[] = [];
+	let applicationShutdownBudgetMs: number | undefined;
 	let stopping: Promise<void> | undefined;
 	const shutdown = (): Promise<void> => {
 		if (stopping !== undefined) return stopping;
+		const disarmExit = applicationShutdownBudgetMs === undefined ? undefined : options.processBoundary?.beginShutdown(
+			Date.now() + applicationShutdownBudgetMs,
+			() => report(processShutdownFailureLogRecord()),
+		);
 		let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
 		stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
 		void (async () => {
@@ -183,6 +190,7 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 					}
 				}
 			} finally {
+				disarmExit?.();
 				for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
 				diagnosticSink?.close();
 			}
@@ -202,6 +210,10 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 		}
 		logger = options.logger ?? createJsonLogger({ write: (line) => diagnosticSink?.write(line), sinkFailures: () => diagnosticSink?.stats().failures ?? 0, deploymentEnvironment: config.config.deploymentEnvironment, diagnostics: config.config.diagnostics, serviceVersion: config.config.serviceVersion });
 		registerDiagnosticCleanup(logger);
+		applicationShutdownBudgetMs =
+			config.config.lifecycle.currentStepTimeoutMs +
+			config.config.lifecycle.settlementTimeoutMs +
+			config.config.lifecycle.localJoinTimeoutMs;
 		phase = "dependency";
 		let dependencies: RuntimePodCommandDependencies;
 		try { dependencies = await (options.dependencyBuilder ?? buildRuntimePodCommandDependencies)({ config: config.config, logger }); }
@@ -217,7 +229,13 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 		await dependencies.app.start();
 		logWorkloadStarted(logger);
 		phase = "wait";
-		await (options.waitForever ?? waitForever)();
+		const terminalWait = (options.waitForever ?? waitForever)();
+		await (dependencies.app.processFailure === undefined
+			? terminalWait
+			: Promise.race([
+				terminalWait,
+				dependencies.app.processFailure.then((error) => { throw error; }),
+			]));
 	} catch (error) {
 		failed = true;
 		if (!failureReported) report(processFailureLogRecord(phase));
@@ -1221,5 +1239,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 if (import.meta.main) {
-	await runProcessEntry(() => runRuntimePodCommand());
+	await runProcessEntry((processBoundary) => runRuntimePodCommand({ processBoundary }));
 }

@@ -144,6 +144,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	case <-serverCtx.Done():
 		errOut = serverCtx.Err()
 	}
+	workload.BeginProcessShutdown(ctx)
 	readiness.BeginShutdown()
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	maintenanceAdmission.close()

@@ -49,7 +49,7 @@ export interface RuntimePodGatewayClientOptions {
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   /** Reuses an existing generated client instead of constructing a channel. */
   readonly client?: ProviderGatewayServiceClient;
-  /** Extends or overrides the default round-robin channel configuration. */
+  /** Supplies transport fuses; load distribution belongs to the scoped routing proxy. */
   readonly channelOptions?: ChannelOptions;
   /** Receives bounded identity-only transport diagnostics. */
   readonly logger?: RuntimePodLogger;
@@ -134,12 +134,6 @@ export function runtimeProviderStreamObserver(
   };
 }
 
-const GatewayRoundRobinChannelOptions: ChannelOptions = {
-  "grpc.service_config": JSON.stringify({
-    loadBalancingConfig: [{ round_robin: {} }],
-  }),
-};
-
 /**
  * Streams provider requests from Runtime Core to Gateway while enforcing the
  * Runtime-side transport fuse, workload authentication, cancellation cleanup,
@@ -159,7 +153,7 @@ export class RuntimePodGatewayClient implements GatewayClient {
     this.client = options.client ?? new ProviderGatewayServiceClient(
       options.address,
       credentials.createInsecure(),
-      { ...GatewayRoundRobinChannelOptions, ...options.channelOptions },
+      options.channelOptions ?? {},
     );
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }

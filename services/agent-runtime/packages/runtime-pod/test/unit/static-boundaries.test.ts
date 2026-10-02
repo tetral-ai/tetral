@@ -262,12 +262,29 @@ describe("Runtime Pod static boundaries", () => {
     expect(hasCallExpression('process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(true);
   });
 
-  test("Runtime Pod uses headless Gateway DNS with grpc-js round-robin", async () => {
+  test("Runtime Pod uses the sole scoped Gateway proxy route and ordinary Service", async () => {
     const gatewayClient = await readFile(new URL("src/gateway-client.ts", podRoot), "utf8");
     const deployment = await readFile(new URL("../../k8s/deployment.yaml", podRoot), "utf8");
 
-    expect(gatewayClient).toContain("\"grpc.service_config\"");
-    expect(gatewayClient).toContain("round_robin");
+    expect(gatewayClient).not.toContain("grpc.service_config");
+    expect(gatewayClient).not.toContain("round_robin");
+    const repositoryRoot = new URL("../../", workspaceRoot);
+    const service = await readFile(new URL("services/gateway/k8s/provider-gateway/service.yaml", repositoryRoot), "utf8");
+    expect(service).toContain("type: ClusterIP");
+    expect(service).not.toContain("clusterIP: None");
+    const routing = await readFile(new URL("deploy/kubernetes/internal-routing.yaml", repositoryRoot), "utf8");
+    const providerRules = routing.split(/^---\s*$/m).filter((document) => document.includes("  name: tetral-runtime-provider\n"));
+    expect(providerRules).toHaveLength(2);
+    expect(routing.split(/^---\s*$/m).filter((document) => document.includes("provider-gateway.tetral-system.svc.cluster.local"))).toHaveLength(2);
+    const destination = providerRules.find((document) => document.includes("kind: DestinationRule"));
+    const virtualService = providerRules.find((document) => document.includes("kind: VirtualService"));
+    expect(destination).toContain("host: provider-gateway.tetral-system.svc.cluster.local");
+    expect(destination).toContain("workloadSelector:");
+    expect(destination).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(destination).toContain("simple: LEAST_REQUEST");
+    expect(virtualService).toContain("sourceNamespace: tetral-agent-runtime");
+    expect(virtualService).toContain("app.kubernetes.io/name: agent-runtime");
+    expect(virtualService).toContain("attempts: 0");
     expect(deployment).toContain("TETRAL_GATEWAY_GRPC_ADDR");
     expect(deployment).toContain("dns:///provider-gateway.tetral-system.svc.cluster.local:9090");
     expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");

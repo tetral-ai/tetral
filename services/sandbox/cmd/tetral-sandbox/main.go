@@ -6,14 +6,12 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -40,7 +38,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -67,11 +65,12 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	if cfgErr != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, cfgErr))
 	}
+	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, diagnosticOwner)
 	openResult, err := openDatabase(resourcesCtx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer func() { _ = openResult.Client.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = openResult.Client.Close() })
 	if err := verifySchema(ctx, openResult.Client); err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
@@ -84,13 +83,14 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer func() { _ = queueConn.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = queueConn.Close() })
 	providerAdapter, err := tetralsandbox.NewDaytonaAdapter(resourcesCtx, cfg, openResult.Client, logger)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	if closer, ok := providerAdapter.BlobStore.(interface{ Close() error }); ok {
 		defer func() {
+			workload.BeginProcessShutdown(ctx)
 			if closeErr := closer.Close(); closeErr != nil {
 				logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
 			}
@@ -126,218 +126,24 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	workerCtx, cancelWorkers := context.WithCancel(resourcesCtx)
 	defer cancelWorkers()
 	workerCtx = tetralsandbox.WithAcquisitionContext(workerCtx, acquisitionCtx)
-	var workers sync.WaitGroup
-	startWorker := func(run func()) { workers.Add(1); go func() { defer workers.Done(); run() }() }
 
-	queueWakeCtx, cancelQueueWake := context.WithCancel(acquisitionCtx)
-	defer cancelQueueWake()
 	queueWake := queue.NewWakeSignal()
-	startWorker(func() {
-		_ = queue.RunNotificationListener(queueWakeCtx, queue.PostgreSQLNotificationListener{Client: openResult.Client}, queue.ConsumerClassSandbox, queueWake, logger)
-	})
-	overLimitLoopCtx := workerCtx
-	startWorker(func() {
-		tetralsandbox.RunSandboxQueueOverLimitLoop(overLimitLoopCtx, &tetralsandbox.SandboxQueueOverLimitReconciler{
-			Queue: queueStore, Finalizer: overLimitFinalizer,
-		}, tetralsandbox.SandboxQueueOverLimitInterval)
-	})
-	environmentBuildLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(environmentBuildLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.EnvironmentBuildJobRunner{
-				Queue:     queueClient,
-				Store:     environmentStore,
-				Providers: providerRegistry,
-				Logger:    logger,
-				Config: tetralsandbox.EnvironmentRunnerConfig{
-					BuildWarnAfter:    cfg.EnvironmentBuildWarnAfter,
-					BuildTimeout:      cfg.EnvironmentBuildTimeout,
-					WorkspaceID:       workspaceID.String(),
-					LeaseOwner:        tetralsandbox.ServiceName,
-					MaxJobs:           cfg.EnvironmentBuildConcurrency,
-					LeaseDuration:     tetralsandbox.EnvironmentQueueLeaseDuration(cfg),
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	outputCaptureLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(outputCaptureLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxOutputCaptureJobRunner{
-				Queue: queueClient, Store: outputCaptureStore, Providers: providerRegistry, BlobStore: providerAdapter.BlobStore, Logger: logger,
-				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	outputCaptureCleanupLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(outputCaptureCleanupLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxOutputCaptureCleanupRunner{
-				Queue: queueClient, Store: outputCaptureStore, BlobStore: providerAdapter.BlobStore,
-				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	outputCaptureSweepLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureSweepLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			count, err := outputCaptureStore.SweepExpiredCaptures(cycleCtx, workspaceID.String(), storage.Now(), tetralsandbox.SandboxOutputCaptureCleanupBatchSize)
-			return count > 0, err
-		}, nil, logger)
-	})
-	executionLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunSandboxToolExecutionConsumerGroup(
-			executionLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval,
-			queueClient, executionCoordinator, providerRegistry, mediaMaterializer,
-			tetralsandbox.SandboxToolExecutionRunnerConfig{
-				LeaseOwner: tetralsandbox.ServiceName, MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-				HeartbeatInterval: cfg.LeaseHeartbeatInterval, PreparationTimeout: cfg.ProviderCommandTimeout,
-				LateCommandMargin: cfg.LateCommandMargin,
-			},
-			queueWake,
-			logger,
-		)
-	})
-	cancellationLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(cancellationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxToolCancelJobRunner{
-				Queue: queueClient, Store: executionCoordinator, Providers: providerRegistry, Logger: logger,
-				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	backgroundReconcileLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(backgroundReconcileLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxBackgroundReconcileJobRunner{
-				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
-				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	backgroundCommandLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(backgroundCommandLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxBackgroundCommandJobRunner{
-				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
-				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	memoryProjectionLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(memoryProjectionLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxMemoryProjectionJobRunner{
-				Queue: queueClient, Store: memoryProjectionStore, Providers: providerRegistry,
-				Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	activationLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(activationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxActivationJobRunner{
-				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry, Logger: logger,
-				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	materializationLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(materializationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxMaterializationJobRunner{
-				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry, Logger: logger,
-				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	releaseLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerGroup(releaseLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxReleaseJobRunner{
-				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry, Logger: logger,
-				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	environmentReadyFanoutLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(environmentReadyFanoutLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.EnvironmentReadyFanoutJobRunner{
-				Queue:  queueClient,
-				Store:  environmentStore,
-				Logger: logger,
-				Config: tetralsandbox.EnvironmentRunnerConfig{
-					WorkspaceID:       workspaceID.String(),
-					LeaseOwner:        tetralsandbox.ServiceName,
-					MaxJobs:           cfg.EnvironmentReadyFanoutConcurrency,
-					LeaseDuration:     tetralsandbox.EnvironmentQueueLeaseDuration(cfg),
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}, queueWake, logger)
-	})
-	resourcePrefixGCLoopCtx := workerCtx
-	startWorker(func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(resourcePrefixGCLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			jobs, err := (&tetralsandbox.ResourcePrefixGCRunner{
-				Client: openResult.Client,
-				Blobs:  providerAdapter.BlobStore,
-				Config: tetralsandbox.ResourcePrefixGCRunnerConfig{
-					WorkspaceID: workspaceID.String(),
-					RetryAfter:  cfg.JobPollInterval,
-				},
-			}).RunOnce(cycleCtx)
-			return len(jobs) > 0, err
-		}, nil, logger)
-	})
 	shutdownJoined := make(chan error, 1)
-	allWorkersDone := make(chan struct{})
-	go func() { workers.Wait(); close(allWorkersDone) }()
+	allWorkersDone, err := launchSandboxWorkers(workerCtx, acquisitionCtx, sandboxWorkerDependencies{
+		cfg: cfg, loops: defaultSandboxWorkerLoops(), queueClient: queueClient, queueStore: queueStore, workspaceStore: workspaceStore,
+		client: openResult.Client, providerAdapter: providerAdapter, providerRegistry: providerRegistry, executionCoordinator: executionCoordinator,
+		mediaMaterializer: mediaMaterializer, lifecycleStore: lifecycleStore, backgroundCommandStore: backgroundCommandStore, memoryProjectionStore: memoryProjectionStore,
+		outputCaptureStore: outputCaptureStore, overLimitFinalizer: overLimitFinalizer, environmentStore: environmentStore, workerPool: workerPool, queueWake: queueWake, logger: logger,
+	})
+	if err != nil {
+		return err
+	}
 	go func() {
 		<-acquisitionCtx.Done()
 		shutdownJoined <- tetralsandbox.JoinSandboxWorkers(allWorkersDone, cancelWorkers, cfg.DrainTimeout, cfg.CancelJoinTimeout)
 	}()
 	defer func() {
+		workload.BeginProcessShutdown(ctx)
 		closeAcquisition()
 		if err := <-shutdownJoined; err != nil && runErr == nil {
 			runErr = err

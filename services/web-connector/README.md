@@ -89,7 +89,7 @@ returns and stops.
 | Binding token | `rtbt_v1` HMAC token verifies against this scope triple, `binding_id`, `binding_generation`, caller pod UID and exact `runtime_process_id`; not expired (`BindingVerifier.Verify`) | gRPC status error | none |
 | Idempotency | key = `tool_use_event_id` + canonical-input hash; read job record first | matching hash replays stored response verbatim; mismatched hash is `runtime_error` "tool delivery conflict", never re-executed | none |
 | Execution | run `search_query`, then `open`, then `find` in field order | per-operation `tool_error` / `runtime_error` in the composed result | stub / snapshot writes as each operation dictates |
-| Settlement | write the create-only job record | — | see result-class table below |
+| Settlement | conditionally settle the matching in-flight claim with the immutable result receipt | — | see result-class table below |
 
 An in-flight identity remains owned for the maximum legal call: eight input
 items, four domain requests per search item, every configured provider-key
@@ -107,13 +107,15 @@ parent context, the stored claim expiry, and the 30-second commit margin.
 
 | Result status | Persisted as job record? | Same-key retry | Notes |
 | --- | --- | --- | --- |
-| `completed` | yes (create-only) | replays the stored response byte-identical | settled outcome |
-| `tool_error` | yes (create-only) | replays the stored response byte-identical | a settled, model-visible outcome |
-| `runtime_error` | never | re-executes | the retryable class; a transient backend failure must not stick |
+| `completed` | yes (conditional claim settlement) | replays the stored response byte-identical | settled outcome |
+| `tool_error` | yes (conditional claim settlement) | replays the stored response byte-identical | a settled, model-visible outcome |
+| `runtime_error` | yes, when produced after acquiring the job claim | replays the stored response byte-identical | preserves the settled delivery outcome; same-key delivery does not invoke the backend again |
 
 Pre-execution rejections (envelope failures, idempotency conflict) are never
-persisted. A concurrent duplicate that loses the create-only job race reads
-and returns the winner's stored response. A non-completed result additionally
+persisted. A failure to read, acquire or settle a claim may return an unpersisted
+runtime error; this does not grant authority to re-execute a still-owned identity.
+A concurrent duplicate that loses the create-only claim race waits for and
+returns the winner's conditionally settled response. A non-completed result additionally
 deletes its own cache objects best-effort, and its usage block still rides the
 error response.
 
@@ -132,7 +134,7 @@ Objects are keyed under the scope triple taken from the authenticated envelope
 | --- | --- | --- | --- |
 | `.meta` stub | a rendered search hit (`SnapshotStore.StoreStub`) | write-once; a lazy upgrade adds a sibling `.doc`, never rewrites the stub | bucket lifecycle (7 days) |
 | `.doc` snapshot | `open(url)`, or lazy upgrade of a stub (`StorePage` / `StorePageForRef`) | immutable; normalized once at write time and never again | bucket lifecycle (7 days) |
-| `.job` record | settlement of a `completed` / `tool_error` result (`PutJob`) | create-only | bucket lifecycle (7 days) — a replay after TTL simply re-executes |
+| `.job` record | create-only in-flight claim (`PutJob`), followed by conditional outcome settlement (`CompareAndSwapJob`) | immutable identity/input hash and claim expiry; one conditional settlement to a replayable response, including runtime errors | bucket lifecycle (7 days); deduplication does not extend beyond record retention |
 
 A `ref_id` is `r_` followed by 26 lowercase base32 characters over 128 random
 bits, minted by the connector. Model input contributes only the final
@@ -371,7 +373,7 @@ fixtures before the tests can pin it.
 | --- | --- |
 | `service_test.go` | `RunWeb` end-to-end: identity and binding rejected before dependencies; search+open usage summed; failed search does not count backend requests; validation errors have usage and no side effects |
 | `admission_test.go` | binding admission rejects every tampered claim before any blob/backend access; matching claims proceed; the web port leaves the sibling provider stream `UNIMPLEMENTED` |
-| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, immutable expiry, bounded winner CAS, parent-context authority, bounded duplicate polling, boundary settlement, exact replay, and abandoned-claim convergence; runtime failures re-execute; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
+| `operations_test.go` | operation semantics: envelope validation performs no I/O; lazy upgrade from stub then stays local; scope isolation; idempotent replay and conflict; maximum-call claim ownership, immutable expiry, bounded winner CAS, parent-context authority, bounded duplicate polling, boundary settlement, exact replay, and abandoned-claim convergence; claimed runtime failures persist and replay without another backend execution; multi-item composition and singular-field reduction; window/lineno bounds; denied-URL and target-HTTP taxonomy; loser-cleanup on concurrent delivery |
 | `storage_test.go` | snapshot normalization order (truncate → CRLF split → wrap → count); create-only writes never replace bytes; UTF-8-safe truncation; every stored line addressable; window continuation to the final window; canonical input-hash stability and array-order sensitivity |
 | `backend_test.go` | Jina backend: closed header tables; fixture-driven search/fetch mapping; usage from the data block; target-redirect status treated as readable; full failure taxonomy; construction-fixed attempt bound; key-pool rotation, cooldown boundaries, dead-key persistence, exhaustion; domain fan-out dedup and too-many-domains rejection |
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |
@@ -439,3 +441,10 @@ and terminal internal failures emit Error. `RunWeb` retains request metrics and
 specific idempotency warnings without duplicating that boundary record. Unknown
 backend client-error taxonomy is recorded as `unknown_client_error` with the
 actual HTTP status; arbitrary dependency response names never enter diagnostics.
+
+The command validates `TETRAL_CANCEL_JOIN_TIMEOUT_MS` (default 5000) together
+with `TETRAL_SERVICE_DRAIN_TIMEOUT_MS`: their sum must fit within 25000 ms,
+leaving the gateway Pod's proxy allocation. One executable deadline covers
+service drain, cancellation, all joins and dependency cleanup. An uncooperative
+producer causes exit status 1 without closing dependencies under live work.
+Reusable `Run` callers retain join-before-close ownership.

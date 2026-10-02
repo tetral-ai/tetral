@@ -141,7 +141,14 @@ then joins remaining stream, SDK, and unary workers. A missed join deadline
 is reported after the owned workers join, so dependency closure cannot
 overtake work. Listener and client close reuse the same remaining budget. SQL closes last, after producers join,
 with a five-second allocation clipped to the remaining application deadline.
-A cleanup failure does not skip other owned resources.
+A cleanup failure does not skip other owned resources. Reusable service owners
+retain an unjoined worker and its dependencies; they do not terminate the host
+process. Executable commands arm one absolute deadline from the configured drain
+and join phases (35 seconds by default), covering signal and command-finally
+cleanup. If work cannot join, the command reports incomplete shutdown and exits
+nonzero at that deadline. SQL and other required dependencies remain owned until
+process termination, with no fabricated successful cleanup. Silent or throwing
+diagnostic sinks cannot extend the deadline.
 
 Provider request timeout starts at ingress and covers authentication,
 credential preparation, every attachment metadata/chunk RPC, provider headers,

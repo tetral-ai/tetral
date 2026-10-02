@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -79,7 +80,43 @@ func RuntimePlacementPolicyFromEnv(getenv func(string) string) (RuntimePlacement
 
 type RuntimeLoadReport struct{ ActiveSessions, Capacity, MemoryUsage, MemoryLimit float64 }
 
-func ParseRuntimeLoadReport(raw string, cutoff float64) (RuntimeLoadReport, error) {
+type runtimeLoadFailure struct {
+	reason string
+	cause  error
+}
+
+func (e runtimeLoadFailure) Error() string { return e.cause.Error() }
+func (e runtimeLoadFailure) Unwrap() error { return e.cause }
+func loadFailure(reason string, err error) error {
+	return runtimeLoadFailure{reason: reason, cause: err}
+}
+func runtimeLoadFailureReason(err error) string {
+	var failure runtimeLoadFailure
+	if errors.As(err, &failure) {
+		return failure.reason
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return "timeout"
+	}
+	return "transport_error"
+}
+
+func ParseRuntimeLoadReport(raw string, cutoff float64) (report RuntimeLoadReport, err error) {
+	defer func() {
+		if err != nil {
+			var classified runtimeLoadFailure
+			if !errors.As(err, &classified) {
+				err = loadFailure("invalid_metrics", err)
+			}
+		}
+	}()
 	names := map[string]bool{"runtimepod_active_sessions": true, "runtimepod_session_capacity": true, "runtimepod_container_memory_usage_bytes": true, "runtimepod_container_memory_limit_bytes": true, "runtimepod_ready": true, "runtimepod_accepting_commands": true}
 	values := map[string]float64{}
 	scanner := bufio.NewScanner(strings.NewReader(raw))
@@ -118,15 +155,15 @@ func ParseRuntimeLoadReport(raw string, cutoff float64) (RuntimeLoadReport, erro
 			return RuntimeLoadReport{}, fmt.Errorf("required metric %s is missing", name)
 		}
 	}
-	report := RuntimeLoadReport{ActiveSessions: values["runtimepod_active_sessions"], Capacity: values["runtimepod_session_capacity"], MemoryUsage: values["runtimepod_container_memory_usage_bytes"], MemoryLimit: values["runtimepod_container_memory_limit_bytes"]}
+	report = RuntimeLoadReport{ActiveSessions: values["runtimepod_active_sessions"], Capacity: values["runtimepod_session_capacity"], MemoryUsage: values["runtimepod_container_memory_usage_bytes"], MemoryLimit: values["runtimepod_container_memory_limit_bytes"]}
 	if report.ActiveSessions != math.Trunc(report.ActiveSessions) || report.Capacity != math.Trunc(report.Capacity) || report.Capacity <= 0 || report.MemoryLimit <= 0 {
 		return RuntimeLoadReport{}, fmt.Errorf("metrics counts or finite container limit are invalid")
 	}
 	if values["runtimepod_ready"] != 1 || values["runtimepod_accepting_commands"] != 1 {
-		return RuntimeLoadReport{}, fmt.Errorf("runtime does not admit new commands")
+		return report, loadFailure("not_accepting", fmt.Errorf("runtime does not admit new commands"))
 	}
 	if report.ActiveSessions >= report.Capacity || report.MemoryUsage/report.MemoryLimit >= cutoff {
-		return RuntimeLoadReport{}, fmt.Errorf("runtime capacity excludes new bindings")
+		return report, loadFailure("capacity_excluded", fmt.Errorf("runtime capacity excludes new bindings"))
 	}
 	return report, nil
 }
@@ -158,14 +195,14 @@ func probeRuntimeLoad(ctx context.Context, client *http.Client, candidate engine
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return RuntimeLoadReport{}, fmt.Errorf("load HTTP status %d", response.StatusCode)
+		return RuntimeLoadReport{}, loadFailure("http_error", fmt.Errorf("load HTTP status %d", response.StatusCode))
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, policy.MaxResponseBytes+1))
 	if err != nil {
 		return RuntimeLoadReport{}, err
 	}
 	if int64(len(raw)) > policy.MaxResponseBytes {
-		return RuntimeLoadReport{}, fmt.Errorf("load response exceeds size bound")
+		return RuntimeLoadReport{}, loadFailure("response_too_large", fmt.Errorf("load response exceeds size bound"))
 	}
 	return ParseRuntimeLoadReport(string(raw), policy.MemoryCutoff)
 }
@@ -175,34 +212,44 @@ type runtimePlacementRequiredError struct{}
 func (runtimePlacementRequiredError) Error() string { return "runtime placement sample is required" }
 
 type runtimePlacementContextKey struct{}
+type runtimePlacementObservation struct {
+	Candidate enginekubernetes.BindingCandidate
+	ProcessID string
+	Reason    string
+	Report    RuntimeLoadReport
+}
 type runtimePlacementChoice struct {
 	WorkspaceID, SessionID, ProcessID string
 	Candidate                         enginekubernetes.BindingCandidate
 	Report                            RuntimeLoadReport
 	Rounds, Probes                    int
+	Observations                      []runtimePlacementObservation
+	Reason                            string
 }
 
 // sampleRuntimePlacement runs only after the owning transaction has rolled
 // back its need-for-placement result. Every probe precedes Session arbitration.
-func (r KubernetesRuntimeTargetResolver) sampleRuntimePlacement(ctx context.Context, client *dbconnect.Client, job RuntimeJob) (runtimePlacementChoice, error) {
+func (r KubernetesRuntimeTargetResolver) sampleRuntimePlacement(ctx context.Context, client *dbconnect.Client, job RuntimeJob) (choice runtimePlacementChoice, resultErr error) {
 	started := time.Now()
-	outcome := "unavailable"
-	defer func() { r.PlacementMetrics.observeAttempt(outcome, time.Since(started)) }()
+	choice = runtimePlacementChoice{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, Reason: "exhausted"}
+	defer func() { r.PlacementMetrics.observeAttempt(choice.Reason, time.Since(started)) }()
 	policy := r.PlacementPolicy
 	if policy == (RuntimePlacementPolicy{}) {
 		policy = DefaultRuntimePlacementPolicy()
 	}
 	if err := policy.Validate(); err != nil {
-		return runtimePlacementChoice{}, err
+		choice.Reason = "invalid_policy"
+		return choice, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, policy.ProbeBudget)
 	defer cancel()
 	snapshot := r.BindingVisibilitySnapshot()
 	if !snapshot.Ready {
-		return runtimePlacementChoice{}, runtimecontrol.PreparationError{Kind: "runtime_visibility_not_ready", Message: "Runtime visibility is not ready", Retryable: true}
+		choice.Reason = "visibility_not_ready"
+		return choice, runtimecontrol.PreparationError{Kind: "runtime_visibility_not_ready", Message: "Runtime visibility is not ready", Retryable: true}
 	}
 	var candidates []enginekubernetes.BindingCandidate
-	seen := make(map[string]bool)
+	seen := map[string]bool{}
 	for _, candidate := range snapshot.Candidates {
 		key := candidate.Namespace + "/" + candidate.PodUID
 		if candidate.PodUID == "" || seen[key] {
@@ -211,95 +258,96 @@ func (r KubernetesRuntimeTargetResolver) sampleRuntimePlacement(ctx context.Cont
 		seen[key] = true
 		candidates = append(candidates, candidate)
 	}
-	// Fisher-Yates yields a uniform distinct sample without probing a Pod twice.
+	if len(candidates) == 0 {
+		choice.Reason = "no_candidates"
+	}
 	for i := len(candidates) - 1; i > 0; i-- {
 		j, err := r.placementRandomIndex(i + 1)
-		if err != nil {
-			return runtimePlacementChoice{}, err
-		}
-		if r.RandomIndex != nil {
-			if j < 0 || j > i {
-				return runtimePlacementChoice{}, fmt.Errorf("placement random index is invalid")
-			}
+		if err != nil || j < 0 || j > i {
+			choice.Reason = "random_unavailable"
+			return choice, fmt.Errorf("placement randomness is unavailable")
 		}
 		candidates[i], candidates[j] = candidates[j], candidates[i]
 	}
-	probes := 0
-	completedRounds := 0
 	for round := 1; round <= policy.Rounds && len(candidates) > 0; round++ {
-		completedRounds = round
-		size := 2
-		if len(candidates) < size {
-			size = len(candidates)
-		}
+		choice.Rounds = round
+		size := min(2, len(candidates))
 		sample := candidates[:size]
 		candidates = candidates[size:]
-		type probeResult struct {
-			choice runtimePlacementChoice
-			err    error
-		}
-		results := make(chan probeResult, size)
+		results := make([]runtimePlacementObservation, size)
 		var joined sync.WaitGroup
 		joined.Add(size)
-		for _, candidate := range sample {
-			probes++
-			go func(candidate enginekubernetes.BindingCandidate) {
+		for index, candidate := range sample {
+			choice.Probes++
+			go func(index int, candidate enginekubernetes.BindingCandidate) {
 				defer joined.Done()
 				started := time.Now()
-				outcome := "registry_unavailable"
-				defer func() { r.PlacementMetrics.observeProbe(outcome, time.Since(started)) }()
+				observation := runtimePlacementObservation{Candidate: candidate, Reason: "registry_unavailable"}
+				defer func() {
+					results[index] = observation
+					r.PlacementMetrics.observeProbe(observation.Reason, time.Since(started))
+				}()
 				probeCtx, cancelProbe := context.WithTimeout(ctx, policy.ProbeTimeout)
 				defer cancelProbe()
-				var processID string
-				err := client.QueryRow(probeCtx, "runtime_placement.read_process", `SELECT runtime_process_id FROM runtime_processes WHERE namespace=$1 AND pod_uid=$2 AND is_current AND phase='accepting' AND retired_at IS NULL`, candidate.Namespace, candidate.PodUID).Scan(&processID)
+				err := client.QueryRow(probeCtx, "runtime_placement.read_process", `SELECT runtime_process_id FROM runtime_processes WHERE namespace=$1 AND pod_uid=$2 AND is_current AND phase='accepting' AND retired_at IS NULL`, candidate.Namespace, candidate.PodUID).Scan(&observation.ProcessID)
 				if err != nil {
-					results <- probeResult{err: err}
+					if probeCtx.Err() != nil {
+						observation.Reason = runtimeLoadFailureReason(probeCtx.Err())
+					}
 					return
 				}
-				report, err := probeRuntimeLoad(probeCtx, r.LoadClient, candidate, policy)
-				outcome = "load_unavailable"
-				if err == nil {
-					outcome = "eligible"
+				observation.Report, err = probeRuntimeLoad(probeCtx, r.LoadClient, candidate, policy)
+				if err != nil {
+					observation.Reason = runtimeLoadFailureReason(err)
+					return
 				}
-				results <- probeResult{choice: runtimePlacementChoice{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, ProcessID: processID, Candidate: candidate, Report: report}, err: err}
-			}(candidate)
-		}
-		var valid []runtimePlacementChoice
-		for range size {
-			result := <-results
-			if result.err == nil {
-				valid = append(valid, result.choice)
-			}
+				observation.Reason = "eligible"
+			}(index, candidate)
 		}
 		joined.Wait()
+		choice.Observations = append(choice.Observations, results...)
+		var valid []runtimePlacementObservation
+		for _, result := range results {
+			if result.Reason == "eligible" {
+				valid = append(valid, result)
+			}
+		}
 		if len(valid) > 0 {
-			chosen := valid[0]
-			tie := 0
-			if len(valid) == 2 && valid[1].Report.ActiveSessions == chosen.Report.ActiveSessions {
-				var err error
-				tie, err = r.placementRandomIndex(2)
-				if err != nil {
-					return runtimePlacementChoice{}, err
-				}
-				if r.RandomIndex != nil {
-					if tie < 0 || tie > 1 {
-						return runtimePlacementChoice{}, fmt.Errorf("placement random index is invalid")
+			selected := valid[0]
+			if len(valid) == 2 {
+				tie := 0
+				if valid[1].Report.ActiveSessions == selected.Report.ActiveSessions {
+					var err error
+					tie, err = r.placementRandomIndex(2)
+					if err != nil || tie < 0 || tie > 1 {
+						choice.Reason = "random_unavailable"
+						return choice, fmt.Errorf("placement randomness is unavailable")
 					}
 				}
+				if valid[1].Report.ActiveSessions < selected.Report.ActiveSessions || (valid[1].Report.ActiveSessions == selected.Report.ActiveSessions && tie == 1) {
+					selected = valid[1]
+				}
 			}
-			if len(valid) == 2 && (valid[1].Report.ActiveSessions < chosen.Report.ActiveSessions || (valid[1].Report.ActiveSessions == chosen.Report.ActiveSessions && tie == 1)) {
-				chosen = valid[1]
-			}
-			outcome = "selected"
-			chosen.Rounds = round
-			chosen.Probes = probes
-			return chosen, nil
+			choice.ProcessID, choice.Candidate, choice.Report = selected.ProcessID, selected.Candidate, selected.Report
+			choice.Reason = "selected"
+			return choice, nil
 		}
 		if ctx.Err() != nil {
+			choice.Reason = runtimeLoadFailureReason(ctx.Err())
 			break
 		}
 	}
-	return runtimePlacementChoice{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, Rounds: completedRounds, Probes: probes}, runtimecontrol.PreparationError{Kind: "runtime_placement_unavailable", Message: "bounded Runtime load sampling found no eligible candidate", Retryable: true}
+	reason := choice.Reason
+	if reason == "exhausted" && len(choice.Observations) > 0 {
+		reason = choice.Observations[0].Reason
+		for _, observation := range choice.Observations {
+			if observation.Reason != reason {
+				reason = "exhausted"
+				break
+			}
+		}
+	}
+	return choice, runtimecontrol.PreparationError{Kind: "runtime_placement_" + reason, Message: "bounded Runtime load sampling found no eligible candidate", Retryable: true}
 }
 
 func (r KubernetesRuntimeTargetResolver) placementRandomIndex(bound int) (int, error) {

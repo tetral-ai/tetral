@@ -52,7 +52,7 @@ func renderedPoolSlots(objects map[string]map[string]any, roles map[string]int) 
 			ownsDB := false
 			for _, entry := range env {
 				v := entry.(map[string]any)
-				if v["name"] == "TETRAL_DATABASE_URL" {
+				if v["name"] == "TETRAL_DATABASE_URL" || v["name"] == "TETRAL_POSTGRES_DSN" || v["name"] == "TETRAL_EVENT_STREAM_DATABASE_URL" {
 					ownsDB = true
 				}
 				if v["name"] == "TETRAL_DATABASE_POOL_MAX" || v["name"] == "TETRAL_DB_MAX_OPEN_CONNS" {
@@ -150,22 +150,49 @@ func TestAggregatePostgreSQLConnectionBudget(t *testing.T) {
 	if err != nil || gitPercentage != 280 {
 		t.Fatalf("Git Proxy HPA percentage surge=%d err=%v", gitPercentage, err)
 	}
+	// Sandbox is an independently scaled Go consumer using a nonstandard DSN key.
+	sandbox := uniqueObjects(t, renderChart(t, helm, chart, "replicas.sandbox=3"))
+	sandboxSlots, err := renderedPoolSlots(sandbox, map[string]int{"sandbox": 1})
+	if err != nil || sandboxSlots != 80 {
+		t.Fatalf("Sandbox three replicas plus surge=%d err=%v", sandboxSlots, err)
+	}
+	sandboxPercent := uniqueObjects(t, renderChart(t, helm, chart, "replicas.sandbox=3", "rollout.maxSurge=34%"))
+	sandboxSlots, err = renderedPoolSlots(sandboxPercent, map[string]int{"sandbox": 1})
+	if err != nil || sandboxSlots != 100 {
+		t.Fatalf("Sandbox percentage surge=%d err=%v", sandboxSlots, err)
+	}
+	if sandbox["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "820" {
+		t.Fatal("Sandbox scale was omitted from full ledger")
+	}
+	if sandboxPercent["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)["maximumOwnedPoolSlots"] != "960" {
+		t.Fatal("Sandbox scale and percentage surge were omitted from full ledger")
+	}
+	for _, invalid := range []string{"replicas.sandbox=0", "replicas.sandbox=-1", "replicas.sandbox=1.5", "replicas.sandbox=unbounded"} {
+		requireRenderError(t, helm, chart, []string{invalid})
+	}
+	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=748", "transport.externalDatabaseConnections=0"})
 	// Resolve every counted owner and enforce the actual full-chart inequality.
-	resolved := uniqueObjects(t, renderChart(t, helm, chart, "transport.databaseCapacity=748", "transport.externalDatabaseConnections=0"))
+	resolved := uniqueObjects(t, renderChart(t, helm, chart, "transport.databaseCapacity=788", "transport.externalDatabaseConnections=0"))
 	data := resolved["v1|ConfigMap|tetral-system|tetral-database-connection-budget"]["data"].(map[string]any)
-	if data["status"] != "resolved" || data["maximumOwnedPoolSlots"] != "740" {
+	if data["status"] != "resolved" || data["maximumOwnedPoolSlots"] != "780" {
 		t.Fatalf("actual deployed inventory budget differs: %v", data)
 	}
-	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=747", "transport.externalDatabaseConnections=0"})
+	requireRenderError(t, helm, chart, []string{"transport.databaseCapacity=787", "transport.externalDatabaseConnections=0"})
 }
-func requireRenderError(t *testing.T, helm, chart string, values []string) {
+func requireRenderError(t *testing.T, helm, chart string, values []string, expectedReason ...string) {
 	t.Helper()
 	args := []string{"template", "tetral", chart}
 	for _, value := range values {
 		args = append(args, "--set", value)
 	}
 	command := exec.Command(helm, args...)
-	if err := command.Run(); err == nil {
+	output, err := command.CombinedOutput()
+	if err == nil {
 		t.Fatalf("invalid configuration rendered: %v", values)
+	}
+	for _, reason := range expectedReason {
+		if !strings.Contains(string(output), reason) {
+			t.Fatalf("configuration%v failed at wrong boundary: want%s actual%s", values, reason, output)
+		}
 	}
 }

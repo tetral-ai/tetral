@@ -322,6 +322,9 @@ func ConfigFromEnv(env Env) (Config, error) {
 			*target = time.Duration(ms) * time.Millisecond
 		}
 	}
+	if cfg.DrainTimeout > 50*time.Second || cfg.CancelJoinTimeout > 50*time.Second-cfg.DrainTimeout {
+		return Config{}, workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	}
 	return cfg, nil
 }
 

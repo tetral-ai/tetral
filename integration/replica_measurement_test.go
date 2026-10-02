@@ -22,6 +22,10 @@ type replicaCompletionSample struct {
 	StartNS       int64  `json:"start_ns"`
 	EndNS         int64  `json:"end_ns"`
 	DurationNS    int64  `json:"duration_ns"`
+	BindingID     string `json:"binding_id,omitempty"`
+	PodUID        string `json:"pod_uid,omitempty"`
+	ProcessID     string `json:"process_id,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
 }
 
 var replicaMeasurementOrigin = time.Now()

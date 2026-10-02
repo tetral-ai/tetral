@@ -71,6 +71,11 @@ interface TrackedCommand<T> {
  * Owns process-local readiness and the set of commands participating in shutdown drain.
  */
 export class RuntimePodLifecycle {
+  private resolveProcessFailure!: (error: GrpcStatusError) => void;
+  /** Resolves on permanent process rejection; the executable owns shutdown and exit. */
+  readonly processFailure = new Promise<GrpcStatusError>((resolve) => {
+    this.resolveProcessFailure = resolve;
+  });
   private readyFlag = false;
   private accepting = false;
   private phase: "accepting" | "draining" = "accepting";
@@ -78,13 +83,17 @@ export class RuntimePodLifecycle {
   private heartbeat: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
   private lastReportAt = 0;
+  private startupComplete = false;
+  private processSuperseded = false;
   private freshnessTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inFlight = new Set<TrackedCommand<unknown>>();
 
   constructor(private readonly options: RuntimePodLifecycleOptions) {}
 
   sessionCapacity(): number | undefined {
-    return this.options.config.ok ? this.options.config.config.maxLocalSessions : undefined;
+    return this.options.config.ok
+      ? this.options.config.config.maxLocalSessions
+      : undefined;
   }
 
   /** Returns process liveness independently of startup readiness or drain state. */
@@ -115,9 +124,17 @@ export class RuntimePodLifecycle {
    * Startup failures are sanitized, logged, and represented by a non-ready lifecycle.
    */
   async start(): Promise<void> {
+    if (
+      this.processSuperseded ||
+      this.phase !== "accepting" ||
+      this.stopping !== undefined
+    )
+      return;
     if (!this.options.config.ok) {
       try {
-        this.options.logger.error(startupFailureLogRecord(this.options.config.error));
+        this.options.logger.error(
+          startupFailureLogRecord(this.options.config.error),
+        );
       } catch {
         /* lifecycle state remains authoritative */
       }
@@ -125,7 +142,8 @@ export class RuntimePodLifecycle {
       this.accepting = false;
       return;
     }
-    let causeCategory: "dependency_readiness" | "listener" = "dependency_readiness";
+    let causeCategory: "dependency_readiness" | "listener" =
+      "dependency_readiness";
     try {
       await this.options.bootstrap.runtime();
       await this.options.bootstrap.core();
@@ -146,8 +164,18 @@ export class RuntimePodLifecycle {
         );
         await this.options.runtimeProcess.report(
           "accepting",
-          bridgeMethodDeadline(config.bridgeMethodPolicies, "reportRuntimeProcess", Date.now()),
+          bridgeMethodDeadline(
+            config.bridgeMethodPolicies,
+            "reportRuntimeProcess",
+            Date.now(),
+          ),
         );
+        if (
+          this.phase !== "accepting" ||
+          this.stopping !== undefined ||
+          this.processSuperseded
+        )
+          return;
         this.lastReportAt = Date.now();
         this.armProcessFreshness();
         this.startHeartbeat();
@@ -156,9 +184,23 @@ export class RuntimePodLifecycle {
           "runtime.process.phase": "accepting",
         });
       }
+      if (
+        this.phase !== "accepting" ||
+        this.stopping !== undefined ||
+        this.processSuperseded
+      )
+        return;
+      this.startupComplete = true;
       this.readyFlag = true;
       this.accepting = true;
     } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === status.FAILED_PRECONDITION
+      )
+        this.rejectProcess();
       try {
         this.options.logger.error(
           startupFailureLogRecord({
@@ -181,7 +223,10 @@ export class RuntimePodLifecycle {
    */
   trackCommand<T>(command: Promise<T>): Promise<T> {
     if (!this.readyFlag || !this.accepting) {
-      throw new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutting down");
+      throw new GrpcStatusError(
+        status.FAILED_PRECONDITION,
+        "runtime pod shutting down",
+      );
     }
     let fail: (error: GrpcStatusError) => void = () => undefined;
     const shutdownFailure = new Promise<T>((_resolve, reject) => {
@@ -209,14 +254,22 @@ export class RuntimePodLifecycle {
    * Admits a command with a lease whose signal and callbacks abort when shutdown exhausts its drain
    * budget, while the returned promise participates in the in-flight count.
    */
-  runCommand<T>(command: (lease: RuntimeCommandLease) => Promise<T>): Promise<T> {
+  runCommand<T>(
+    command: (lease: RuntimeCommandLease) => Promise<T>,
+  ): Promise<T> {
     if (!this.readyFlag || !this.accepting) {
-      throw new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutting down");
+      throw new GrpcStatusError(
+        status.FAILED_PRECONDITION,
+        "runtime pod shutting down",
+      );
     }
     const controller = new AbortController();
     const abortHandlers = new Set<() => void>();
     const abortError = () =>
-      new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutdown drain timed out");
+      new GrpcStatusError(
+        status.FAILED_PRECONDITION,
+        "runtime pod shutdown drain timed out",
+      );
     const lease: RuntimeCommandLease = {
       signal: controller.signal,
       throwIfAborted: () => {
@@ -298,6 +351,13 @@ export class RuntimePodLifecycle {
     if (!this.options.config.ok) return;
     this.freshnessTimer = setTimeout(
       () => {
+        if (
+          this.options.config.ok &&
+          Date.now() <
+            this.lastReportAt +
+              this.options.config.config.lifecycle.processFreshnessMs
+        )
+          return;
         this.readyFlag = false;
         this.accepting = false;
         this.recordLifecycle({
@@ -309,13 +369,16 @@ export class RuntimePodLifecycle {
       },
       Math.max(
         0,
-        this.lastReportAt + this.options.config.config.lifecycle.processFreshnessMs - Date.now(),
+        this.lastReportAt +
+          this.options.config.config.lifecycle.processFreshnessMs -
+          Date.now(),
       ),
     );
   }
 
   private startHeartbeat(): void {
-    if (!this.options.config.ok || this.options.runtimeProcess === undefined) return;
+    if (!this.options.config.ok || this.options.runtimeProcess === undefined)
+      return;
     const config = this.options.config.config;
     const controller = new AbortController();
     this.heartbeatStop = controller;
@@ -325,12 +388,30 @@ export class RuntimePodLifecycle {
       while (!controller.signal.aborted) {
         await sleep(config.lifecycle.reportIntervalMs, controller.signal);
         if (controller.signal.aborted) break;
+        const reportedPhase = this.phase;
         try {
           await this.options.runtimeProcess!.report(
-            this.phase,
-            bridgeMethodDeadline(config.bridgeMethodPolicies, "reportRuntimeProcess", Date.now()),
+            reportedPhase,
+            bridgeMethodDeadline(
+              config.bridgeMethodPolicies,
+              "reportRuntimeProcess",
+              Date.now(),
+            ),
           );
+          if (controller.signal.aborted || reportedPhase !== this.phase) break;
+          if (this.processSuperseded && reportedPhase === "accepting") continue;
           this.lastReportAt = Date.now();
+          // Only this still-current boot's ACCEPTING ACK may recover an expired freshness fence.
+          // Explicit stale rejection is permanent, and an ACK cannot reopen shutdown admission.
+          if (
+            reportedPhase === "accepting" &&
+            this.startupComplete &&
+            this.stopping === undefined &&
+            !this.processSuperseded
+          ) {
+            this.readyFlag = true;
+            this.accepting = true;
+          }
           if (failedCount > 0) {
             this.recordLifecycle({
               event: "runtime_process_report_recovered",
@@ -343,10 +424,14 @@ export class RuntimePodLifecycle {
           this.armProcessFreshness();
         } catch (error) {
           const code =
-            typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+            typeof error === "object" && error !== null && "code" in error
+              ? error.code
+              : undefined;
+          if (code === status.FAILED_PRECONDITION) this.rejectProcess();
           if (
-            code === status.FAILED_PRECONDITION ||
-            Date.now() - this.lastReportAt >= config.lifecycle.processFreshnessMs
+            this.processSuperseded ||
+            Date.now() - this.lastReportAt >=
+              config.lifecycle.processFreshnessMs
           ) {
             this.readyFlag = false;
             this.accepting = false;
@@ -371,15 +456,33 @@ export class RuntimePodLifecycle {
     })();
   }
 
+  private rejectProcess(): void {
+    this.processSuperseded = true;
+    this.readyFlag = false;
+    this.accepting = false;
+    this.resolveProcessFailure(
+      new GrpcStatusError(
+        status.FAILED_PRECONDITION,
+        "Runtime process is stale",
+      ),
+    );
+  }
+
   private async drain(): Promise<void> {
-    const config = this.options.config.ok ? this.options.config.config : undefined;
+    const config = this.options.config.ok
+      ? this.options.config.config
+      : undefined;
     const started = Date.now();
     const currentStepDeadline =
-      started + (this.options.drainTimeoutMs ?? config?.lifecycle.currentStepTimeoutMs ?? 5000);
+      started +
+      (this.options.drainTimeoutMs ??
+        config?.lifecycle.currentStepTimeoutMs ??
+        5000);
     const settlementDeadline =
       this.options.drainTimeoutMs !== undefined
         ? currentStepDeadline
-        : currentStepDeadline + (config?.lifecycle.settlementTimeoutMs ?? 15000);
+        : currentStepDeadline +
+          (config?.lifecycle.settlementTimeoutMs ?? 15000);
     let resolveDraining!: () => void, rejectDraining!: (error: unknown) => void;
     const draining = new Promise<void>((resolve, reject) => {
       resolveDraining = resolve;
@@ -408,7 +511,8 @@ export class RuntimePodLifecycle {
             "checkpoint.deadline_at": currentStepDeadline,
             "checkpoint.expired": true,
             "parent.thread.id": parentThreadId,
-            "reviewer.thread.id": parentThreadId === undefined ? undefined : scope.sessionThreadId,
+            "reviewer.thread.id":
+              parentThreadId === undefined ? undefined : scope.sessionThreadId,
           }),
         ingressJoined: Promise.allSettled(
           [...this.inFlight].map((command) => command.promise),
@@ -452,7 +556,8 @@ export class RuntimePodLifecycle {
                 "binding.generation": scope.bindingGeneration,
                 "operation.id": operationId,
                 "handoff.id": receipt.handoffId,
-                "handoff.disposition": thread.disposition === 1 ? "idle" : "recover",
+                "handoff.disposition":
+                  thread.disposition === 1 ? "idle" : "recover",
               });
           }, deadline);
         },
@@ -465,7 +570,8 @@ export class RuntimePodLifecycle {
       await this.heartbeat;
       if (this.options.runtimeProcess !== undefined) {
         await retryRuntimeProcessOperation(
-          () => this.options.runtimeProcess!.report("draining", settlementDeadline),
+          () =>
+            this.options.runtimeProcess!.report("draining", settlementDeadline),
           settlementDeadline,
         );
         this.lastReportAt = Date.now();
@@ -479,7 +585,10 @@ export class RuntimePodLifecycle {
       resolveDraining();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expired = new Promise<"expired">((resolve) => {
-        timer = setTimeout(() => resolve("expired"), Math.max(0, settlementDeadline - Date.now()));
+        timer = setTimeout(
+          () => resolve("expired"),
+          Math.max(0, settlementDeadline - Date.now()),
+        );
       });
       const joined = Promise.allSettled([
         coreDrain,
@@ -490,7 +599,10 @@ export class RuntimePodLifecycle {
       if (result === "expired") {
         for (const command of this.inFlight)
           command.fail(
-            new GrpcStatusError(status.FAILED_PRECONDITION, "runtime pod shutdown drain timed out"),
+            new GrpcStatusError(
+              status.FAILED_PRECONDITION,
+              "runtime pod shutdown drain timed out",
+            ),
           );
         // Joining producer bodies follows cancellation; public promise rejection is not ownership transfer.
         const localDeadline =

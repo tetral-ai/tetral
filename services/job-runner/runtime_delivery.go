@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -3719,6 +3720,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(job RuntimeJob, pla
 	attrs := []any{slog.String("component", ServiceNameJobRunner), slog.String("event.kind", "runtime_placement"), slog.String("workspace.id", job.WorkspaceID), slog.String("session.id", job.SessionID), slog.String("job.id", job.JobID), slog.String("outcome", outcome), slog.String("kubernetes.uid", plan.Target.PodUID), slog.String("runtime.process.id", plan.Target.RuntimeProcessID), slog.Int64("duration.ms", time.Since(started).Milliseconds())}
 	if plan.placement != nil {
 		choice := plan.placement
+		attrs = append(attrs, slog.String("reason", choice.Reason))
+		for index, observation := range choice.Observations {
+			if index >= 4 {
+				break
+			}
+			fields := []any{slog.String("kubernetes.uid", observation.Candidate.PodUID), slog.String("runtime.process.id", observation.ProcessID), slog.String("reason", observation.Reason)}
+			if observation.Report.Capacity > 0 && observation.Report.MemoryLimit > 0 {
+				fields = append(fields, slog.Float64("runtime.load.active_sessions", observation.Report.ActiveSessions), slog.Float64("runtime.load.session_capacity", observation.Report.Capacity), slog.Float64("runtime.load.memory_ratio", observation.Report.MemoryUsage/observation.Report.MemoryLimit))
+			}
+			attrs = append(attrs, slog.Group(fmt.Sprintf("runtime.placement.candidate.%d", index+1), fields...))
+		}
 		attrs = append(attrs, slog.Int("runtime.placement.rounds", choice.Rounds), slog.Int("runtime.placement.probes", choice.Probes), slog.String("runtime.placement.sampled_pod_uid", choice.Candidate.PodUID))
 		if choice.Report.MemoryLimit > 0 {
 			attrs = append(attrs, slog.Float64("runtime.load.active_sessions", choice.Report.ActiveSessions), slog.Float64("runtime.load.session_capacity", choice.Report.Capacity), slog.Float64("runtime.load.memory_ratio", choice.Report.MemoryUsage/choice.Report.MemoryLimit))

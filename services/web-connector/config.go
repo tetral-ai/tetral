@@ -31,6 +31,7 @@ const (
 type Env interface{ Getenv(string) string }
 type Config struct {
 	DrainTimeout                                                time.Duration
+	CancelJoinTimeout                                           time.Duration
 	SearchEndpoint, ReaderEndpoint, GRPCAddress, MetricsAddress string
 	APIKeys                                                     []string
 	BindingHMACKey                                              []byte
@@ -67,6 +68,17 @@ func LoadConfig(env Env) (Config, error) {
 			return Config{}, workload.NewConfigError(EnvDrainTimeout + " must be 1..20000 milliseconds (30s Pod budget includes joins/proxy)")
 		}
 		cfg.DrainTimeout = time.Duration(value) * time.Millisecond
+	}
+	cfg.CancelJoinTimeout = 5 * time.Second
+	if raw := env.Getenv("TETRAL_CANCEL_JOIN_TIMEOUT_MS"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > 25000 {
+			return Config{}, workload.NewConfigError("TETRAL_CANCEL_JOIN_TIMEOUT_MS must be 1..25000 milliseconds")
+		}
+		cfg.CancelJoinTimeout = time.Duration(value) * time.Millisecond
+	}
+	if cfg.CancelJoinTimeout > 25*time.Second-cfg.DrainTimeout {
+		return Config{}, workload.NewConfigError("web drain and cancellation join exceed the Pod application shutdown allocation")
 	}
 	cfg.BindingHMACKey = []byte(hmacKey)
 	return cfg, nil

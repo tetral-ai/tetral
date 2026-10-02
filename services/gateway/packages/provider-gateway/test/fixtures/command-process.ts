@@ -55,5 +55,5 @@ export function commandFixture(mode: string, event: (name: string) => void = () 
 if (import.meta.main) {
   Object.assign(process.env, commandEnv());
   const fixture = commandFixture(process.argv[2] ?? "none", (event) => process.stdout.write(event + "\n"));
-  await runProcessEntry(() => runProviderGatewayCommand(fixture.options));
+  await runProcessEntry((processBoundary) => runProviderGatewayCommand({ ...fixture.options, processBoundary }));
 }

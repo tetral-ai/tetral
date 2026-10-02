@@ -323,11 +323,11 @@ Two follow-ups are intentionally outside this chart:
 
 ## Independent workload replicas and access
 
-Bridge, Job Runner, Provider Gateway, MCP Connector and Web Connector each own
+Bridge, Job Runner, Sandbox, Provider Gateway, MCP Connector and Web Connector each own
 one Deployment, ServiceAccount, Service and metrics/probe port. The chart
 removes the former combined Gateway resources and shared `gateway` identity.
 Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
-`replicas.jobRunner`, `replicas.providerGateway`, `replicas.mcpConnector` or
+`replicas.jobRunner`, `replicas.sandbox`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
@@ -335,8 +335,10 @@ HPA: minimum two, maximum ten, CPU utilization target 70 percent. That HPA
 controls effective Provider Gateway replicas while enabled. Set it to false to
 use `replicas.providerGateway` directly. It has no effect on MCP or Web replicas.
 Internal Istiod/Envoy routing is mandatory, including a one-replica deployment.
-Provider Gateway retains its headless Service; scoped source proxies own per-RPC
-selection. MCP and Web retain ordinary ClusterIP Services.
+Provider Gateway uses an ordinary ClusterIP Service without session affinity.
+Scoped source proxies own per-RPC selection; the Runtime client retains its
+channel without installing its own replica load-balancing policy. MCP and Web
+also use ordinary ClusterIP Services.
 
 Runner alone watches Runtime Pods and EndpointSlices and controls Runtime RPCs.
 Bridge alone serves its durable API and has no visibility watch grant. Separate
@@ -420,9 +422,20 @@ readiness.
 
 Application drains are configured through `lifecycle.*Ms`. The chart passes the
 owning parser's milliseconds environment values and rejects drains that exceed
-Pod grace after cancellation, resource and proxy joins. Queue permits at most
-25 seconds in the standard profile and 20 seconds in the hardened profile;
-Web permits 20 seconds. Both retain a 30-second Pod grace. Runner's default
+Pod grace after cancellation, resource and proxy joins. Runtime projects the
+existing typed phase defaults through `runtimeDrainMs=60000`,
+`runtimeSettlementMs=15000`, `runtimeLocalJoinMs=5000` and
+`runtimeProxyJoinMs=5000`; the actual Runtime proxy drain annotation follows the
+configured proxy phase. `runtimeGraceSeconds=90` must cover all four phases plus
+the fixed five-second scheduling/signal margin. These are shared phase deadlines,
+not per-Session extensions or preStop sleeps. Queue and Web receive the configured
+`cancelJoinMs` through `TETRAL_CANCEL_JOIN_TIMEOUT_MS`. Queue drain plus join must
+fit 30 seconds in the standard profile or 25 seconds in the hardened profile,
+which reserves five seconds for proxy shutdown. Web drain plus join must fit
+25 seconds in both profiles, preserving a five-second proxy margin. Queue and
+Web retain their typed drain maxima of 25 and 20 seconds respectively; a shorter
+configured join can increase the hardened Queue drain within those bounds.
+Both retain a 30-second Pod grace. Runner's default
 30-second drain and five-second cancellation join fit its 45-second grace with
 five seconds each for resource joins and proxy drain. Provider Gateway and MCP
 retain separate 30-second business drains and configurable five-second forced
@@ -445,11 +458,11 @@ after server-reserved slots using `transport.externalDatabaseConnections`,
 The ledger resolves absolute or percentage `rollout.maxSurge` against every
 replica/HPA maximum. Go processes count one pool; Provider Gateway and MCP count
 two generations throughout simultaneous rollout and trust replacement. API,
-Auth, Queue and Event Stream each count their replica plus surge; Git Proxy
+Auth, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
 uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker
 concurrency do not add another pool. Separately configured old/new release
 cohorts require a combined ledger for both settings. A fully bound capacity
-below the total is rejected at render time. The default owned maximum is 740
+below the total is rejected at render time. The default owned maximum is 780
 slots, before reserve and external consumers. Rendered subset fixtures prove
 128/127 and 368/367 boundaries without claiming eagerly opened connections.
 

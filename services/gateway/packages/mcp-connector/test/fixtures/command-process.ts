@@ -58,5 +58,5 @@ export function commandFixture(mode: string, event: (name: string) => void = () 
 if (import.meta.main) {
   Object.assign(process.env, commandEnv());
   const fixture = commandFixture(process.argv[2] ?? "none", (event) => process.stdout.write(event + "\n"));
-  await runProcessEntry(() => runMcpConnectorCommand(fixture.options));
+  await runProcessEntry((processBoundary) => runMcpConnectorCommand({ ...fixture.options, processBoundary }));
 }

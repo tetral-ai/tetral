@@ -1261,7 +1261,7 @@ metadata:
   namespace: tetral-system
 data:
   status: "unresolved"
-  maximumOwnedPoolSlots: "740"
+  maximumOwnedPoolSlots: "780"
   operatorReserveSlots: "8"
   availableServerConnections: "unknown"
   externalConsumerSlots: "unknown"
@@ -1794,7 +1794,7 @@ metadata:
     app.kubernetes.io/part-of: tetral
 spec:
   type: ClusterIP
-  clusterIP: None
+  sessionAffinity: None
   selector:
     app.kubernetes.io/name: provider-gateway
   ports:
@@ -1906,6 +1906,14 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
+              value: "60000"
+            - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
+              value: "15000"
+            - name: TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS
+              value: "5000"
+            - name: TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS
+              value: "5000"
             - name: TETRAL_TRANSPORT_PROFILE
               value: "hardened"
             - name: TETRAL_ROUTING_PROXY_REQUIRED
@@ -3285,6 +3293,8 @@ spec:
               value: "20"
             - name: TETRAL_QUEUE_DRAIN_TIMEOUT_MS
               value: "10000"
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
             - name: TETRAL_TRANSPORT_PROFILE
               value: "hardened"
             - name: TETRAL_ROUTING_PROXY_REQUIRED
@@ -3420,6 +3430,12 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+            - name: TETRAL_DATABASE_TLS_CA_PATH
+              value: /var/run/tetral/store-trust/database-ca.crt
+            - name: TETRAL_DATABASE_TLS_SERVER_NAME
+              value: "tetral-postgres.tetral-system.svc.cluster.local"
+            - name: TETRAL_DB_MAX_OPEN_CONNS
+              value: "20"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -3694,6 +3710,8 @@ spec:
               value: "tetral-object-store.tetral-system.svc.cluster.local"
             - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
               value: "10000"
+            - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
+              value: "5000"
             - name: TETRAL_TRANSPORT_PROFILE
               value: "hardened"
             - name: TETRAL_ROUTING_PROXY_REQUIRED

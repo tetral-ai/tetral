@@ -84,13 +84,20 @@ ownership.
 `processFailureLogRecord` supplies fixed command/cleanup phases and a safe
 failure tuple, without accepting exception text or stacks. `runProcessEntry`
 and `registerProcessSignalHandlers` contain executable and signal rejections
-and choose exit status. They do not own business resources or drain budgets.
+and choose exit status. `runProcessEntry` supplies an explicit executable-only
+boundary: each command arms one absolute application shutdown deadline from its
+resolved typed policy, for signal and command-finally cleanup. Joined cleanup
+disarms it. Expiry reports a fixed incomplete-shutdown diagnostic and exits nonzero
+even when the diagnostic sink is silent or throws. The helper never closes business
+resources or invents custody transfer; reusable commands receive no exit policy
+unless invoked through the executable boundary.
 Each command attempts its acquired resources once in its existing shutdown
 order, continues after a rejected close, and releases diagnostics afterward.
 Programmatic command callers still receive the original run failure, or the
 first cleanup failure when the run succeeded. Diagnostic faults add no wait
-for stderr. Business closes retain their existing drain behavior; these
-adapters do not impose a timeout on an arbitrary pending business operation.
+for stderr. Reusable business owners retain their existing drain and join
+behavior; the executable failure fuse does not publish an operation outcome or
+claim that an unjoined business operation completed.
 
 Shared contract tests run through Provider Gateway's selected unit-test entry;
 Runtime's real HTTP metrics test also exercises asynchronous stream failure.

@@ -128,3 +128,18 @@ func TestPostgreSQLBridgeAdmissionPhaseDeadlineRollsBack(t *testing.T) {
 		})
 	}
 }
+
+func TestBridgeLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		drain, join string
+		valid       bool
+	}{
+		{"2000", "3000", true}, {"45000", "5000", true}, {"45001", "5000", false}, {"120000", "5000", false}, {"9223372036854", "9223372036854", false},
+	} {
+		env := map[string]string{"TETRAL_DRAIN_TIMEOUT_MS": tc.drain, "TETRAL_CANCEL_JOIN_TIMEOUT_MS": tc.join, "TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS": "100", "TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS": "200"}
+		_, err := BridgeLifecyclePolicyFromEnv(func(k string) string { return env[k] })
+		if (err == nil) != tc.valid {
+			t.Fatalf("drain=%s join=%s error=%v", tc.drain, tc.join, err)
+		}
+	}
+}

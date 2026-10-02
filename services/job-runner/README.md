@@ -22,8 +22,10 @@ cancelled, then workers and Queue notifications join before native channels,
 Blob/database clients and visibility watches close. A Lease response racing
 shutdown returns every observed capability through Queue Defer and starts no
 new Runtime command. `TETRAL_CANCEL_JOIN_TIMEOUT_MS` defaults to 5000; exceeding
-it reports a failed process termination bound and still requires the actual join
-before resource closure. Bridge cancellation does not stop these
+the executable exits with status 1 at the original drain-plus-join deadline,
+without closing dependencies beneath live workers. Reusable runners still join
+before resource closure. Drain plus join may not exceed 35000 ms, reserving
+10000 ms within the 45-second Pod grace for proxy and scheduling. Bridge cancellation does not stop these
 resources. Health readiness depends on synchronized Pod/EndpointSlice visibility.
 
 The process uses shared `internal/workload` diagnostics: `info` by default;
@@ -110,7 +112,14 @@ differ when another Runner commits first. `runtime.placement.rounds` and
 `runtime.load.active_sessions`, `runtime.load.session_capacity` and
 `runtime.load.memory_ratio` retain the validated choice's finite load values.
 `runtime_placement_probe_total`, `runtime_placement_total` and their duration
-counters use only finite outcome labels.
+counters use only finite outcome labels. The attempt also emits at most four
+`runtime.placement.candidate.1` through `.4` groups, including losing candidates.
+Each group retains the exact Pod UID, observed process ID, bounded reason and,
+when valid, finite active-session/capacity/memory measurements. Reasons distinguish
+registry unavailability, timeout/cancellation, transport or HTTP failure, invalid
+metrics, response size, admission and capacity exclusions. The overall reason
+distinguishes no candidates, exhausted probes and selection; it stays separate
+from the actual binding outcome when another Runner commits first.
 
 For `runtime_input` the runner reconciles referenced events first — all
 already processed → stale with no command; superseded by a processed

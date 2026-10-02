@@ -8,6 +8,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logger, wake *queue.WakeSignal) error {
@@ -30,6 +31,7 @@ func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 		return err
 	case <-ctx.Done():
 	}
+	workload.BeginProcessShutdown(ctx)
 	drain := owned.Config.DrainTimeout
 	if drain <= 0 {
 		drain = 30 * time.Second

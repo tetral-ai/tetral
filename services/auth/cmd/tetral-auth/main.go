@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	tetralauth "github.com/tetral-ai/tetral/services/auth"
 
@@ -18,7 +19,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -36,12 +37,13 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
+	workload.ConfigureProcessShutdown(ctx, tetralauth.DefaultShutdownTimeout+5*time.Second, diagnosticOwner)
 	httpMetrics := workload.NewHTTPMetrics()
 	app, err := tetralauth.BuildApplication(ctx, cfg, nil, tetralauth.WithLogger(logger), tetralauth.WithRequestMetrics(httpMetrics))
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
-	defer func() { _ = app.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = app.Close() })
 	readiness := workload.NewReadiness()
 	handler := buildHTTPHandler(readiness, app.Handler)
 	metricsHandler := workload.HealthRouter(readiness,

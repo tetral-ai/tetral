@@ -13,6 +13,7 @@ import type {
   ReleaseRuntimeBindingResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import { BridgeUnaryCalls } from "./bridge-calls.js";
+import { GrpcStatusError } from "./errors.js";
 import type { BridgeMethodPolicies } from "./bridge-policy.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
@@ -40,16 +41,23 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
       readonly tokenPath: string;
       readonly policies: BridgeMethodPolicies;
       readonly client?: AgentRuntimeBridgeServiceClient;
-      readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
+      readonly metadataFactory?: (
+        config: ServiceAccountTokenConfig,
+      ) => Promise<Metadata>;
     },
   ) {
     this.owner = new BridgeUnaryCalls(
       options.client ??
-        new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure()),
+        new AgentRuntimeBridgeServiceClient(
+          options.address,
+          credentials.createInsecure(),
+        ),
       options.policies,
     );
     this.metadata = () =>
-      (options.metadataFactory ?? buildOutboundBearerMetadata)({ tokenPath: options.tokenPath });
+      (options.metadataFactory ?? buildOutboundBearerMetadata)({
+        tokenPath: options.tokenPath,
+      });
   }
 
   async register(deadline: number): Promise<void> {
@@ -65,16 +73,22 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
       registration.registrationOrder < 1 ||
       !registration.registrationReceipt ||
       (this.registration !== undefined &&
-        (this.registration.registrationOrder !== registration.registrationOrder ||
-          this.registration.registrationReceipt !== registration.registrationReceipt))
+        (this.registration.registrationOrder !==
+          registration.registrationOrder ||
+          this.registration.registrationReceipt !==
+            registration.registrationReceipt))
     ) {
       throw new Error("Runtime process registration acknowledgement invalid");
     }
     this.registration = registration;
   }
 
-  async report(phase: "accepting" | "draining", deadline: number): Promise<void> {
-    if (this.registration === undefined) throw new Error("Runtime process is not registered");
+  async report(
+    phase: "accepting" | "draining",
+    deadline: number,
+  ): Promise<void> {
+    if (this.registration === undefined)
+      throw new Error("Runtime process is not registered");
     const expected =
       phase === "accepting"
         ? RuntimeProcessPhase.RUNTIME_PROCESS_PHASE_ACCEPTING
@@ -94,7 +108,10 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
       response.phase !== expected ||
       !response.current
     ) {
-      throw new Error("Runtime process report acknowledgement invalid");
+      throw new GrpcStatusError(
+        status.FAILED_PRECONDITION,
+        "Runtime process report acknowledgement invalid",
+      );
     }
   }
 
@@ -115,7 +132,8 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
       response.operationId !== request.operationId ||
       !response.handoffId ||
       response.releasedBinding?.bindingId !== request.bindingId ||
-      response.releasedBinding.bindingGeneration !== request.bindingGeneration ||
+      response.releasedBinding.bindingGeneration !==
+        request.bindingGeneration ||
       response.releasedBinding.runtimeProcessId !== this.runtimeProcessId
     ) {
       throw new Error("Runtime binding release acknowledgement invalid");
@@ -125,12 +143,17 @@ export class BridgeRuntimeProcess implements RuntimeProcessPort {
       if (
         !thread.sessionThreadId ||
         thread.sessionThreadId <= previous ||
-        (thread.disposition !== RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_IDLE &&
-          thread.disposition !== RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER) ||
+        (thread.disposition !==
+          RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_IDLE &&
+          thread.disposition !==
+            RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER) ||
         Boolean(thread.queueJobId) !==
-          (thread.disposition === RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER)
+          (thread.disposition ===
+            RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER)
       ) {
-        throw new Error("Runtime binding release thread acknowledgement invalid");
+        throw new Error(
+          "Runtime binding release thread acknowledgement invalid",
+        );
       }
       previous = thread.sessionThreadId;
     }
@@ -153,7 +176,9 @@ export async function retryRuntimeProcessOperation(
       return;
     } catch (error) {
       const code =
-        typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+        typeof error === "object" && error !== null && "code" in error
+          ? error.code
+          : undefined;
       if (
         (code !== status.UNAVAILABLE && code !== status.DEADLINE_EXCEEDED) ||
         Date.now() + 100 >= deadline

@@ -104,8 +104,10 @@ func bridgeChildAction(name string, replica int, method string, request json.Raw
 }
 func replicaBridgePair(t *testing.T, db *sql.DB, podUID string, after func(context.Context, string, any) error) (*bridge.PostgreSQLBridgeAPIStore, []string) {
 	t.Helper()
-	first := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(db))
-	second := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(db))
+	firstPool := storagetest.OpenRuntimeRoleDBWithTracer(t, db, nil)
+	secondPool := storagetest.OpenRuntimeRoleDBWithTracer(t, db, nil)
+	first := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(firstPool))
+	second := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(secondPool))
 	first.RuntimeBindingTokenHMACKey = []byte("replica-bridge-recovery-shared-key")
 	second.RuntimeBindingTokenHMACKey = first.RuntimeBindingTokenHMACKey
 	ctx, cancel := context.WithCancel(context.Background())

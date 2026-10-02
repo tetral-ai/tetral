@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +133,39 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 				err  error
 			}
 			done := make(chan result, 2)
+			activateMeasured := func(index int) (jobrunner.RuntimeCommandPlan, error) {
+				// Recovery preparation only validates the Queue authority. Placement
+				// completes here, after sampling and binding arbitration have returned.
+				started := time.Now()
+				plan, err := stores[index].ActivateRuntimeRecovery(ctx, job)
+				ended := time.Now()
+				outcome, errorCode := "success", ""
+				if err != nil {
+					outcome = "error"
+					if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
+						outcome = "cancelled"
+					} else if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+						outcome = "deadline_exceeded"
+					}
+					var preparation runtimecontrol.PreparationError
+					if errors.As(err, &preparation) {
+						errorCode = preparation.Kind
+					}
+				} else if plan.StaleAccepted {
+					outcome = "stale"
+				} else if plan.DeliveryAuthorityLost {
+					outcome = "authority_lost"
+				} else if plan.RecoverThread == nil {
+					outcome = "no_binding"
+				}
+				replicaLogCompletion(t, replicaCompletionSample{
+					Cohort: "placement", Method: "ActivateRuntimeRecovery", Receiver: fmt.Sprintf("runner-%d", index+1), Outcome: outcome,
+					StartBoundary: "activation_started", EndBoundary: "binding_arbitration_returned", ClockID: fmt.Sprintf("go:%d", os.Getpid()),
+					StartNS: started.Sub(replicaMeasurementOrigin).Nanoseconds(), EndNS: ended.Sub(replicaMeasurementOrigin).Nanoseconds(), DurationNS: ended.Sub(started).Nanoseconds(),
+					BindingID: plan.AttemptedBinding.BindingID, PodUID: plan.Target.PodUID, ProcessID: plan.Target.RuntimeProcessID, ErrorCode: errorCode,
+				})
+				return plan, err
+			}
 			activate := func(index int) {
 				started := time.Now()
 				prepared, err := stores[index].PrepareRuntimeCommand(ctx, job)
@@ -138,12 +173,12 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 				if err != nil {
 					outcome = "error"
 				}
-				replicaRecordCompletion(t, "placement", "PrepareRuntimeCommand", fmt.Sprintf("runner-%d", index+1), outcome, started)
+				replicaRecordCompletion(t, "recovery_preparation", "PrepareRuntimeCommand", fmt.Sprintf("runner-%d", index+1), outcome, started)
 				if err != nil || !prepared.RecoveryPrepared {
 					done <- result{err: fmt.Errorf("actual recovery preparation: %+v/%v", prepared, err)}
 					return
 				}
-				plan, err := stores[index].ActivateRuntimeRecovery(ctx, job)
+				plan, err := activateMeasured(index)
 				done <- result{plan, err}
 			}
 			go activate(0)
@@ -172,11 +207,11 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 					if prepareErr != nil {
 						outcome = "error"
 					}
-					replicaRecordCompletion(t, "placement", "PrepareRuntimeCommand", "runner-2", outcome, started)
+					replicaRecordCompletion(t, "recovery_preparation", "PrepareRuntimeCommand", "runner-2", outcome, started)
 					if prepareErr != nil || !prepared.RecoveryPrepared {
 						t.Fatalf("independent winner preparation=%+v/%v", prepared, prepareErr)
 					}
-					winnerPlan, activateErr := stores[1].ActivateRuntimeRecovery(ctx, job)
+					winnerPlan, activateErr := activateMeasured(1)
 					if activateErr != nil || winnerPlan.Target.PodUID != winner.PodUID {
 						t.Fatalf("independent winner activation=%+v/%v", winnerPlan, activateErr)
 					}

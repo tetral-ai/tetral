@@ -53,6 +53,8 @@ export interface RuntimePodAppOptions {
  * commands before waiting for active work and listener termination.
  */
 export interface RuntimePodApp {
+  /** Permanent process rejection is consumed by the command, never by a heartbeat shutdown call. */
+  readonly processFailure?: Promise<Error>;
   readonly service: RuntimeControlService;
   readonly lifecycle: RuntimePodLifecycle;
   readonly start: () => Promise<{ readonly grpcPort: number; readonly httpUrl: URL }>;
@@ -129,6 +131,7 @@ export function createRuntimePodApp(
   });
 
   return {
+    processFailure: lifecycle.processFailure,
     service,
     lifecycle,
     start: async () => {

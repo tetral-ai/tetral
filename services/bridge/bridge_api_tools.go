@@ -802,7 +802,7 @@ func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.C
 			if err := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
 				return err
 			}
-			existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
+			existing, ok, err := readRuntimeToolReceiptReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 			if err != nil {
 				return err
 			}

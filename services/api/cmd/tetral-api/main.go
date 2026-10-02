@@ -12,7 +12,7 @@ import (
 var runWorkload = workload.Run
 
 func main() {
-	if err := run(context.Background(), osEnv{}, tetralapi.BuildProductionApplication); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}, tetralapi.BuildProductionApplication) }); err != nil {
 		os.Exit(1)
 	}
 }

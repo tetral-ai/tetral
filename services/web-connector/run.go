@@ -148,6 +148,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		httpConsumed = true
 	case <-serverCtx.Done():
 	}
+	workload.BeginProcessShutdown(ctx)
 	admission.Lock()
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	draining.Store(true)
@@ -177,7 +178,11 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 			runErr = errors.Join(runErr, err)
 		}
 	}
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	joinTimeout := cfg.CancelJoinTimeout
+	if joinTimeout <= 0 {
+		joinTimeout = 5 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), joinTimeout)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		_ = httpServer.Close()

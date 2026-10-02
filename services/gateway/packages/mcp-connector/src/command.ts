@@ -1,6 +1,7 @@
+import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
 import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
 import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
-import { createDiagnosticStreamSink, diagnosticMetricsText, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import { createDiagnosticStreamSink, diagnosticMetricsText, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -43,6 +44,7 @@ import type { McpConnectorGrpcServer } from "./server.js";
  * schema and reviewer-material checks pass and both listeners bind.
  */
 export async function runMcpConnectorCommand(options: {
+  readonly processBoundary?: ExecutableProcessBoundary;
   readonly bindAddress?: string | undefined;
   readonly httpBindAddress?: string | undefined;
   readonly waitForever?: () => Promise<never>;
@@ -91,6 +93,9 @@ export async function runMcpConnectorCommand(options: {
     if (stopping !== undefined) return stopping;
     drainDeadline = new Date(Date.now() + drainTimeoutMs);
     shutdownDeadline = new Date(drainDeadline.getTime() + cancelJoinTimeoutMs);
+    const disarmExit = options.processBoundary?.beginShutdown(
+      shutdownDeadline.getTime(), () => report(processShutdownFailureLogRecord()),
+    );
     let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
     stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
     void (async () => {
@@ -107,6 +112,7 @@ export async function runMcpConnectorCommand(options: {
           }
         }
       } finally {
+        disarmExit?.();
         for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
         diagnosticSink?.close();
       }
@@ -349,5 +355,5 @@ async function waitForever(): Promise<never> {
 }
 
 if (import.meta.main) {
-  await runProcessEntry(() => runMcpConnectorCommand());
+  await runProcessEntry((processBoundary) => runMcpConnectorCommand({ processBoundary }));
 }

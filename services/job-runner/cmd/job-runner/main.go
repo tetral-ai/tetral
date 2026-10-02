@@ -36,7 +36,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -58,11 +58,12 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
+	workload.ConfigureProcessShutdown(ctx, cfg.DrainTimeout+cfg.CancelJoinTimeout, owner)
 	database, err := openDatabase(ctx, jobrunner.EnvDatabaseURL, cfg.DatabaseURL)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer func() { _ = database.Client.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = database.Client.Close() })
 	if err := verifySchema(ctx, database.Client); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
@@ -87,6 +88,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
 		}
 		defer func() {
+			workload.BeginProcessShutdown(ctx)
 			if closeErr := directTLS.Close(); closeErr != nil {
 				logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_direct_tls", "error.class", "resource_shutdown", "error.code", "runtime_direct_tls_close_failed")
 			}
@@ -105,6 +107,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		}
 	}
 	defer func() {
+		workload.BeginProcessShutdown(ctx)
 		if closeErr := commandClient.Close(); closeErr != nil {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_command_channels", "error.class", "resource_shutdown", "error.code", "runtime_command_channels_close_failed")
 		}
@@ -113,14 +116,14 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err))
 	}
-	defer func() { _ = listener.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = listener.Close() })
 	dialOptions := append([]grpc.DialOption{}, internalgrpc.QueueRPCDialOptions()...)
 	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	queueConn, err := grpc.NewClient(cfg.QueueGRPCAddress, dialOptions...)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer func() { _ = queueConn.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = queueConn.Close() })
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
@@ -140,7 +143,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer watchHandles.Stop()
+	defer workload.ProcessCleanup(ctx, watchHandles.Stop)
 	readiness := workload.NewReadiness().WithReadinessDependency(kubernetesCache.Ready)
 	readiness.MarkReady()
 	blobConfig, err := blob.LoadConfig()
@@ -155,6 +158,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() {
+		workload.BeginProcessShutdown(ctx)
 		if closeErr := blobStore.Close(); closeErr != nil {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
 		}
@@ -167,6 +171,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	)
 	if closer, ok := deliveryStore.MCPManifestLister.(interface{ Close() error }); ok {
 		defer func() {
+			workload.BeginProcessShutdown(ctx)
 			if closeErr := closer.Close(); closeErr != nil {
 				logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
 			}
@@ -179,7 +184,11 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	acquisitionCtx, closeAcquisition := context.WithCancel(ctx)
 	defer closeAcquisition()
 	var loopWorkers sync.WaitGroup
-	defer func() { closeAcquisition(); loopWorkers.Wait() }()
+	defer func() {
+		workload.BeginProcessShutdown(ctx)
+		closeAcquisition()
+		loopWorkers.Wait()
+	}()
 	queueWake := queue.NewWakeSignal()
 	loopWorkers.Add(1)
 	go func() {

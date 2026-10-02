@@ -43,7 +43,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := workload.RunProcess(func(ctx context.Context) error { return run(ctx, osEnv{}) }); err != nil {
 		os.Exit(1)
 	}
 }
@@ -61,11 +61,16 @@ func run(ctx context.Context, env envReader) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
+	bridgeConfig, err := agentruntimebridge.BridgeAPIConfigFromEnv(env)
+	if err != nil {
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
+	}
+	workload.ConfigureProcessShutdown(ctx, bridgeConfig.LifecyclePolicy.DrainTimeout+bridgeConfig.LifecyclePolicy.CancelJoinTimeout, owner)
 	database, err := openDatabase(resourceCtx, agentruntimebridge.EnvDatabaseURL, env.Getenv(agentruntimebridge.EnvDatabaseURL))
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	defer func() { _ = database.Client.Close() }()
+	defer workload.ProcessCleanup(ctx, func() { _ = database.Client.Close() })
 	if err := verifySchema(ctx, database.Client); err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
@@ -77,10 +82,6 @@ func run(ctx context.Context, env envReader) error {
 	}
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(database.Client)
 	store.Logger = logger
-	bridgeConfig, err := agentruntimebridge.BridgeAPIConfigFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
-	}
 	tokenKey, err := agentruntimebridge.RuntimeBindingTokenHMACKeyFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
@@ -105,6 +106,7 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, fmt.Errorf("blob store: %w", err)))
 	}
 	defer func() {
+		workload.BeginProcessShutdown(ctx)
 		if closeErr := blobStore.Close(); closeErr != nil {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
 		}
@@ -116,6 +118,7 @@ func run(ctx context.Context, env envReader) error {
 	})
 	store.MCPManifestLister = manifestLister
 	defer func() {
+		workload.BeginProcessShutdown(ctx)
 		if closeErr := manifestLister.Close(); closeErr != nil {
 			logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
 		}
@@ -124,7 +127,11 @@ func run(ctx context.Context, env envReader) error {
 	// their wake hints; initial readiness and reconnect trigger catch-up reads.
 	executionResultListenerCtx, cancelExecutionResultListener := context.WithCancel(resourceCtx)
 	executionResultListenerDone := make(chan struct{})
-	defer func() { cancelExecutionResultListener(); <-executionResultListenerDone }()
+	defer func() {
+		workload.BeginProcessShutdown(ctx)
+		cancelExecutionResultListener()
+		<-executionResultListenerDone
+	}()
 	go func() {
 		defer close(executionResultListenerDone)
 		if err := store.RunExecutionResultListener(executionResultListenerCtx); err != nil && executionResultListenerCtx.Err() == nil {
@@ -137,7 +144,7 @@ func run(ctx context.Context, env envReader) error {
 		}
 	}()
 	stopAttachmentGC := agentruntimebridge.StartTransientAttachmentGC(resourceCtx, store, logger, time.Minute, 100)
-	defer stopAttachmentGC()
+	defer workload.ProcessCleanup(ctx, stopAttachmentGC)
 	return internalgrpc.RunGRPCWorkload(ctx, env, internalgrpc.GRPCWorkloadParams{
 		ServiceName:       agentruntimebridge.ServiceNameBridgeAPI,
 		ShutdownTimeout:   bridgeConfig.LifecyclePolicy.DrainTimeout,

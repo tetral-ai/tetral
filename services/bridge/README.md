@@ -47,7 +47,10 @@ budget. Execution-result LISTEN and attachment GC stay available while those
 RPCs settle. After graceful completion or forced cancellation, handlers,
 listeners and maintenance owners join before retained MCP connections, Blob
 resources or the database pool close. The process diagnostic
-owner closes last with a bounded shutdown budget. A healthy idle listener emits
+owner closes last with a bounded shutdown budget. The executable enforces one
+absolute drain-plus-join deadline; an uncooperative producer causes exit status 1
+without premature resource closure. Drain plus join may not exceed 50000 ms
+inside the 60-second Pod grace. A healthy idle listener emits
 no periodic successful diagnostic records.
 The shared `internal/workload` diagnostic owner defaults to `info` and validates
 `TETRAL_LOG_LEVEL` values `debug`, `info`, `warn` or `error` plus bounded record,
@@ -101,7 +104,11 @@ rollback. Promotion takes the Pod lock and process update locks without taking a
 Session lock. Ordinary receipt replay may bypass process-current after retirement
 only while its authenticated workspace, Session, Thread and exact binding remain
 unchanged. It returns the stored identity/result without touching timestamps,
-claims or projections. Context, attachment and first-effect authorization reads
+claims or projections. Background operation and memory projection waiters bind
+the exact scope proof to the sensitive receipt SELECT itself, so a binding cut
+between an earlier validation and a later poll cannot disclose stored results.
+Independently accepted Sandbox/Queue work retains its own custody.
+Context, attachment and first-effect authorization reads
 still require current process custody. Once the binding is superseded, ordinary
 receipt replay rejects. Named terminal/frozen-child receipts and cooperative
 release use their separately persisted old-owner proofs.

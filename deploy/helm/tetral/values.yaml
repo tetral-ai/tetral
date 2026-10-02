@@ -260,6 +260,7 @@ replicas:
   auth: 1
   bridge: 1
   jobRunner: 1
+  sandbox: 1
   providerGateway: 1
   mcpConnector: 1
   webConnector: 1
@@ -297,6 +298,12 @@ rollout:
 
 # Application drains and cancellation joins are bounded inside each Pod grace.
 lifecycle:
+  # Checked projections of the Runtime typed phase defaults; Pod grace adds a fixed 5s signal margin.
+  runtimeDrainMs: 60000
+  runtimeSettlementMs: 15000
+  runtimeLocalJoinMs: 5000
+  runtimeProxyJoinMs: 5000
+  runtimeGraceSeconds: 90
   bridgeDrainMs: 40000
   runnerDrainMs: 30000
   sandboxDrainMs: 30000

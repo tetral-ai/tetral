@@ -35,7 +35,7 @@ that silently permits more than the default did.
 {{- if and .Values.cilium.gitProxyFQDNPolicy (not .Values.cilium.enabled) }}
 {{- fail "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true." }}
 {{- end }}
-{{- range $key := list "api" "auth" "bridge" "jobRunner" "providerGateway" "mcpConnector" "webConnector" }}
+{{- range $key := list "api" "auth" "bridge" "jobRunner" "sandbox" "providerGateway" "mcpConnector" "webConnector" }}
 {{- $replicas := get $.Values.replicas $key }}
 {{- if or (not (has (kindOf $replicas) $numericKinds)) (not (regexMatch "^[1-9][0-9]*$" (toString $replicas))) }}
 {{- fail (printf "replicas.%s must be a positive integer." $key) }}
@@ -68,14 +68,18 @@ that silently permits more than the default did.
 {{- if lt (int .Values.transport.databaseCapacity) (int $required) }}{{ fail (printf "transport.databaseCapacity is below the required aggregate connection budget %d" $required) }}{{ end }}
 {{- end }}
 
-{{- range $key := list "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
+{{- range $key := list "runtimeDrainMs" "runtimeSettlementMs" "runtimeLocalJoinMs" "runtimeProxyJoinMs" "runtimeGraceSeconds" "bridgeDrainMs" "runnerDrainMs" "sandboxDrainMs" "cancelJoinMs" "providerDrainMs" "providerJoinMs" "mcpDrainMs" "mcpJoinMs" "webDrainMs" "queueDrainMs" }}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString (get $.Values.lifecycle $key))) }}{{ fail (printf "lifecycle.%s must be a bounded positive number of milliseconds" $key) }}{{ end }}
 {{- end }}
+{{- $runtimeRequired := add (int .Values.lifecycle.runtimeDrainMs) (int .Values.lifecycle.runtimeSettlementMs) (int .Values.lifecycle.runtimeLocalJoinMs) (int .Values.lifecycle.runtimeProxyJoinMs) (int (include "tetral.runtimeShutdownMarginMs" .)) -}}
+{{- if gt $runtimeRequired (mul (int .Values.lifecycle.runtimeGraceSeconds) 1000) }}{{ fail "Runtime current step, settlement, local/proxy joins and 5s signal margin must fit configured Pod grace" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.bridgeDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Bridge drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.runnerDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 45000 }}{{ fail "Runner drain, cancellation join, resource/proxy margin must fit 45s Pod grace" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.sandboxDrainMs) (int .Values.lifecycle.cancelJoinMs) 10000) 60000 }}{{ fail "Sandbox drain, cancellation join, resource/proxy margin must fit 60s Pod grace" }}{{ end }}
 {{- if ge (add (int .Values.lifecycle.providerDrainMs) (int .Values.lifecycle.providerJoinMs) 5000) 60000 }}{{ fail "Provider Gateway business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
 {{- if ge (add (int .Values.lifecycle.mcpDrainMs) (int .Values.lifecycle.mcpJoinMs) 5000) 60000 }}{{ fail "MCP business drain, cancellation join and proxy margin must remain below 60s Pod grace" }}{{ end }}
-{{- if gt (int .Values.lifecycle.webDrainMs) 20000 }}{{ fail "Web drain must leave 10s join/proxy margin inside 30s Pod grace" }}{{ end }}
-{{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must leave 5s join margin inside 30s Pod grace" }}{{ end }}
-{{- if and (eq .Values.transport.profile "hardened") (gt (int .Values.lifecycle.queueDrainMs) 20000) }}{{ fail "Hardened Queue drain must leave 5s join and 5s proxy margin inside 30s Pod grace" }}{{ end }}
+{{- if gt (int .Values.lifecycle.webDrainMs) 20000 }}{{ fail "Web drain must remain within its typed 20s limit" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.webDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Web drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}
+{{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 30000 }}{{ fail "Queue drain and cancellation join must fit 30s standard application allocation" }}{{ end }}
+{{- if and (eq .Values.transport.profile "hardened") (gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000) }}{{ fail "Hardened Queue drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}

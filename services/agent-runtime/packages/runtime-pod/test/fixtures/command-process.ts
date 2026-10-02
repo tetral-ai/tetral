@@ -77,5 +77,5 @@ if (import.meta.main) {
 	}
 	Object.assign(process.env, commandEnv());
 	const fixture = commandFixture(process.argv[2] ?? "none", (event) => process.stdout.write(event + "\n"));
-	await runProcessEntry(() => runRuntimePodCommand(fixture.options));
+	await runProcessEntry((processBoundary) => runRuntimePodCommand({ ...fixture.options, processBoundary }));
 }

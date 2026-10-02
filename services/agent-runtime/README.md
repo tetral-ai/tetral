@@ -489,8 +489,14 @@ clients, Runtime Core, listeners, and routing proxy are ready. An authenticated
 Bridge registration returns a receipt and server-assigned order; an ACCEPTING
 report must commit before `/readyz` becomes ready. Reports repeat every two
 seconds with a one-second timeout. Ten seconds without a committed report
-withdraws admission and readiness. A newer boot in the same Pod supersedes the
-old boot; old-process commands, tokens, writes, and promotion are stale.
+withdraws admission and readiness. A later validated current ACCEPTING ACK from
+this boot restores both after a temporary Bridge outage. An explicit stale-process
+rejection permanently fences this boot and notifies the command to shut down and
+exit nonzero, without registering another identity. Startup rejection has the same
+disposition. Reusable lifecycle code reports the failure to its owner; the
+executable supplies the bounded exit policy. A late ACK cannot reopen shutdown admission.
+A newer boot in the same Pod supersedes the old boot; old-process commands, tokens,
+writes, and promotion are stale.
 
 `TETRAL_TRANSPORT_PROFILE=standard-routed` binds `0.0.0.0:19090`.
 `hardened` binds the application to `127.0.0.1:9090`, with the routing proxy's
@@ -508,6 +514,13 @@ five seconds for proxy joins, within the 90-second Pod grace period. An idle
 Session releases immediately; one slow Session does not delay another Session's
 handoff. No successor provider request starts in the draining process. Owned
 unary calls cancel real handles and join callbacks before channels close.
+Reusable lifecycle owners retain unjoined producers and their dependencies. The
+executable command arms one absolute application deadline from the configured
+current-step, settlement, and local-join phases (80 seconds by default). If a
+producer or cleanup still cannot join, the executable reports incomplete shutdown
+and exits nonzero at that deadline, without claiming a handoff or closing required
+dependencies early. Diagnostic sink failures cannot defer this exit. The proxy
+allocation remains a separate deployment and listener cleanup bound.
 
 Lifecycle controls are `TETRAL_RUNTIME_REPORT_INTERVAL_MS`,
 `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS`, `TETRAL_RUNTIME_DRAIN_TIMEOUT_MS`,

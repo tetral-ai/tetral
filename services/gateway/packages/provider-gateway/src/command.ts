@@ -1,6 +1,7 @@
+import type { ExecutableProcessBoundary } from "@tetral/ts-observability";
 import { ServiceLifecycleDefaults } from "@tetral/gateway-protocol/src/service-lifecycle.js";
 import { openPostgresSQLOwner } from "@tetral/ts-dbconnect";
-import { createDiagnosticStreamSink, processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
+import { createDiagnosticStreamSink, processFailureLogRecord, processShutdownFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "@tetral/ts-observability";
 /**
  * @packageDocumentation
  *
@@ -47,6 +48,7 @@ export interface ProviderGatewayCommandDependencies {
 
 /** Defines process-runner overrides for logging, dependency composition, waiting, and signal registration. */
 export interface ProviderGatewayCommandOptions {
+  readonly processBoundary?: ExecutableProcessBoundary;
   readonly logger?: GatewayLogger;
   readonly dependencyBuilder?: (input: {
     readonly config: ProviderGatewayConfig;
@@ -101,6 +103,9 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     if (stopping !== undefined) return stopping;
     drainDeadline = new Date(Date.now() + drainTimeoutMs);
     shutdownDeadline = new Date(drainDeadline.getTime() + cancelJoinTimeoutMs);
+    const disarmExit = options.processBoundary?.beginShutdown(
+      shutdownDeadline.getTime(), () => report(processShutdownFailureLogRecord()),
+    );
     let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
     stopping = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
     void (async () => {
@@ -117,6 +122,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
           }
         }
       } finally {
+        disarmExit?.();
         for (const release of diagnosticReleases) { try { release(); } catch { /* best effort */ } }
         diagnosticSink?.close();
       }
@@ -341,5 +347,5 @@ async function waitForever(): Promise<never> {
 }
 
 if (import.meta.main) {
-  await runProcessEntry(() => runProviderGatewayCommand());
+  await runProcessEntry((processBoundary) => runProviderGatewayCommand({ processBoundary }));
 }

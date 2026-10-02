@@ -806,6 +806,8 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 			var operationState string
 			var resultJSON sql.NullString
 			var writeSequence sql.NullInt64
+			args := []any{scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID}
+			args = append(args, runtimeReceiptBindingArgs(scope)...)
 			err := tx.QueryRow(ctx, `SELECT receipt.background_operation_state,
 				COALESCE(receipt.result_json, task.terminal_result_json),
 				receipt.background_write_sequence
@@ -817,8 +819,11 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 				 AND task.task_id=receipt.background_task_id
 				WHERE receipt.workspace_id=$1 AND receipt.session_id=$2
 				  AND receipt.session_thread_id=$3 AND receipt.tool_use_event_id=$4
-				  AND receipt.tool_kind='sandbox_background'`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID).Scan(
+				  AND receipt.tool_kind='sandbox_background'`+runtimeReceiptBindingPredicate, args...).Scan(
 				&operationState, &resultJSON, &writeSequence)
+			if dbconnect.IsNoRows(err) {
+				return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "accepted background receipt or binding is stale"))
+			}
 			if err != nil {
 				return err
 			}

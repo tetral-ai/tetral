@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -21,14 +22,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/auth"
-	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	api "github.com/tetral-ai/tetral/services/api"
 	authservice "github.com/tetral-ai/tetral/services/auth"
 )
 
 func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
+	if os.Getenv(replicaPublicAPIChildDirEnv) != "" {
+		runReplicaPublicAPIChild(t)
+		return
+	}
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -37,10 +40,6 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifier, err := auth.NewInternalPrincipalVerifierFromBase64(signer.PublicKeyBase64())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +73,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	authServers := make([]*httptest.Server, 2)
 	apiServers := make([]*httptest.Server, 2)
 	var authCounts, apiCounts [2]atomic.Int64
-	var apiCancels [2]context.CancelFunc
-	var apiTraces [2]*replicaPublicTransactionBarrier
+	var apiChildren [2]*replicaPublicAPIChild
 	for i := range authServers {
 		index := i
 		authServers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,29 +81,13 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			authRouters[index].ServeHTTP(w, r)
 		}))
 		t.Cleanup(authServers[i].Close)
-		apiTraces[i] = &replicaPublicTransactionBarrier{}
-		pool := storagetest.OpenRuntimeRoleDBWithTracer(t, runtimeDB, apiTraces[i])
-		dataDir := t.TempDir()
-		if err := os.Chmod(dataDir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		router, err := api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(pool), RawDatabase: pool, VaultKey: sdkIntegrationVaultKey, DataDir: dataDir, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_replica_public"}, PrincipalVerifier: verifier})
+		apiChildren[i] = startReplicaPublicAPIChild(ctx, t, runtimeDB, signer.PublicKeyBase64())
+		target, err := url.Parse(apiChildren[i].URL)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if owned, ok := router.(io.Closer); ok {
-			t.Cleanup(func() {
-				if err := owned.Close(); err != nil {
-					t.Error(err)
-				}
-			})
-		}
-		apiCtx, stopAPI := context.WithCancel(ctx)
-		apiCancels[i] = stopAPI
-		t.Cleanup(stopAPI)
-		apiServers[i] = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { apiCounts[index].Add(1); router.ServeHTTP(w, r) }))
-		apiServers[i].Config.BaseContext = func(net.Listener) context.Context { return apiCtx }
-		apiServers[i].Start()
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		apiServers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { apiCounts[index].Add(1); proxy.ServeHTTP(w, r) }))
 		t.Cleanup(apiServers[i].Close)
 	}
 	var edges []*httptest.Server
@@ -297,9 +279,9 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Fatalf("ordinary replay effects %d→%d/%v", sessionsBefore, sessionsAfter, err)
 	}
 
-	// A request already inside API A's persistence boundary survives B stopping;
-	// after B leaves the route set, a new request is sent to A.
-	reached, release := apiTraces[0].arm(t, "from sessions")
+	// Hold a read already inside B's persistence boundary while A is killed
+	// below. B must complete that admitted request and accept new requests.
+	reached, releaseRead := apiChildren[1].arm(t, "from sessions")
 	type asyncResult struct {
 		status int
 		body   []byte
@@ -307,40 +289,25 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	}
 	admitted := make(chan asyncResult, 1)
 	go func() {
-		r, _ := http.NewRequestWithContext(ctx, "GET", edges[0].URL+sessionPath, nil)
+		r, _ := http.NewRequestWithContext(ctx, "GET", edges[1].URL+sessionPath, nil)
 		r.Header.Set("X-Api-Key", standard)
 		started := time.Now()
 		response, err := http.DefaultClient.Do(r)
 		if err != nil {
-			replicaRecordCompletion(t, "public_authentication_api", "GET", edges[0].URL, "transport_error", started)
+			replicaRecordCompletion(t, "public_authentication_api", "GET", edges[1].URL, "transport_error", started)
 			admitted <- asyncResult{err: err}
 			return
 		}
 		defer func() { _ = response.Body.Close() }()
 		raw, err := io.ReadAll(response.Body)
-		replicaRecordCompletion(t, "public_authentication_api", "GET", edges[0].URL, http.StatusText(response.StatusCode), started)
+		replicaRecordCompletion(t, "public_authentication_api", "GET", edges[1].URL, http.StatusText(response.StatusCode), started)
 		admitted <- asyncResult{status: response.StatusCode, body: raw, err: err}
 	}()
 	replicaPublicBarrierReached(t, reached)
-	apiCancels[1]()
-	apiServers[1].Close()
-	release()
-	select {
-	case result := <-admitted:
-		if result.err != nil || result.status != 200 {
-			t.Fatalf("admitted request failed: %d/%v", result.status, result.err)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	code, raw = request(edges[0].URL, "GET", sessionPath, standard, "", nil)
-	if code != 200 {
-		t.Fatalf("survivor new request=%d %s", code, raw)
-	}
 
 	// Terminate A with its event/inbox/queue inserts still uncommitted. An
 	// independent administrator sees neither provisional nor partial effects.
-	reached, release = apiTraces[0].arm(t, "insert into queue_jobs")
+	reached, _ = apiChildren[0].arm(t, "insert into queue_jobs")
 	uncommitted := make(chan asyncResult, 1)
 	go func() {
 		r, _ := http.NewRequestWithContext(ctx, "POST", edges[0].URL+eventPath, strings.NewReader(strings.ReplaceAll(body, "replica-public-input", "replica-terminated-input")))
@@ -368,10 +335,20 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		}
 	}
 	assertEffects()
-	apiCancels[0]()
+	databasePID := apiChildren[0].assertUncommittedTransaction(ctx, t, admin)
+	apiChildren[0].killAndJoin(t)
+	apiChildren[0].awaitDatabaseDisconnect(ctx, t, admin, databasePID)
 	apiServers[0].CloseClientConnections()
-	release()
 	apiServers[0].Close()
+	releaseRead()
+	select {
+	case result := <-admitted:
+		if result.err != nil || result.status != 200 || !bytes.Contains(result.body, []byte(report.SessionID)) {
+			t.Fatalf("survivor admitted request failed: %d/%v", result.status, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 	select {
 	case result := <-uncommitted:
 		if result.err == nil && result.status < 400 {
@@ -381,6 +358,44 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	assertEffects()
+	// The surviving child owns its original listener, pool, and router. Its
+	// new route must list/read state, replay the committed receipt, and accept
+	// the identity whose uncommitted attempt died with A.
+	survivorHandler, err := newSDKIntegrationEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	survivor := httptest.NewServer(survivorHandler)
+	t.Cleanup(survivor.Close)
+	code, raw = request(survivor.URL, "GET", sessionPath, standard, "", nil)
+	if code != 200 || !bytes.Contains(raw, []byte(report.SessionID)) {
+		t.Fatalf("survivor new read=%d %s", code, raw)
+	}
+	code, raw = request(survivor.URL, "GET", "/v1/sessions?beta=true", standard, "", nil)
+	if code != 200 || !bytes.Contains(raw, []byte(report.SessionID)) {
+		t.Fatalf("survivor list=%d %s", code, raw)
+	}
+	code, raw = request(survivor.URL, "GET", eventPath, standard, "", nil)
+	if code != 200 || !bytes.Contains(raw, []byte("replica-public-input")) || bytes.Contains(raw, []byte("replica-terminated-input")) {
+		t.Fatalf("survivor rollback/event read=%d %s", code, raw)
+	}
+	code, replay = request(survivor.URL, "POST", eventPath, standard, body, headers)
+	if code != 200 || !bytes.Equal(first, replay) {
+		t.Fatalf("survivor original receipt replay=%d %s", code, replay)
+	}
+	terminatedBody := strings.ReplaceAll(body, "replica-public-input", "replica-terminated-input")
+	terminatedHeaders := map[string]string{"Idempotency-Key": "replica-terminated-input"}
+	code, recovered := request(survivor.URL, "POST", eventPath, standard, terminatedBody, terminatedHeaders)
+	if code != 200 {
+		t.Fatalf("survivor new append=%d %s", code, recovered)
+	}
+	code, replay = request(survivor.URL, "POST", eventPath, standard, terminatedBody, terminatedHeaders)
+	if code != 200 || !bytes.Equal(recovered, replay) {
+		t.Fatalf("survivor recovered receipt replay=%d %s", code, replay)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='user.message'),(SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1),(SELECT count(*) FROM queue_jobs WHERE causal_session_id=$1 AND kind='runtime_input')`, report.SessionID).Scan(&eventCount, &inboxCount, &queueCount); err != nil || eventCount != 2 || inboxCount != 2 || queueCount != 2 {
+		t.Fatalf("survivor append/replay effects=%d/%d/%d %v", eventCount, inboxCount, queueCount, err)
+	}
 
 	var keyID string
 	if err := admin.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE key_digest=$1`, auth.DigestAPIKey(standard)).Scan(&keyID); err != nil {
@@ -401,7 +416,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			t.Fatalf("replica%d unexercised", i)
 		}
 	}
-	t.Logf("pinned SDK create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; terminated precommit rollback; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
+	t.Logf("pinned SDK create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; actual API child SIGKILL/join at proven uncommitted transaction then existing survivor lists/reads/appends/replays; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
 }
 
 type replicaBootstrapBarrier struct {

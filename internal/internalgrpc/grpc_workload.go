@@ -163,6 +163,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	case <-grpcServing:
 		readiness.MarkReady()
 	case err = <-grpcErr:
+		workload.BeginProcessShutdown(ctx)
 		cancelGRPC()
 		if err == nil {
 			return fmt.Errorf("internal grpc stopped before serving")
@@ -170,6 +171,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		return err
 	case <-serverCtx.Done():
 		readiness.BeginShutdown()
+		workload.BeginProcessShutdown(ctx)
 		cancelGRPC()
 		// The listener owner must finish before callers close its dependencies,
 		// even when cancellation arrives before the serving callback.
@@ -199,6 +201,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		ShutdownTimeout:       shutdownTimeout,
 		Logger:                logger,
 	})
+	workload.BeginProcessShutdown(ctx)
 	readiness.BeginShutdown()
 	cancelGRPC()
 	// Run owns the drain deadline and forced cancellation. An outer timeout

@@ -89,10 +89,9 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 				t.Fatalf("service ports=%v; want%v", ports, c.servicePorts)
 			}
 			requireContains(t, s, "selector:\n    app.kubernetes.io/name: "+name)
+			requireNotContains(t, s, "clusterIP: None")
 			if name == "provider-gateway" {
-				requireContains(t, s, "clusterIP: None")
-			} else {
-				requireNotContains(t, s, "clusterIP: None")
+				requireContains(t, s, "sessionAffinity: None")
 			}
 
 			requireExactSeparatedPeers(t, parseNetworkPolicyIngressRules(t, n), c.ingress, false)

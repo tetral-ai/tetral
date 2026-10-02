@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -269,7 +270,7 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
 	objects := uniqueObjects(t, renderChart(t, helm, chart))
-	for role, settings := range map[string]map[string]string{"bridge": {"TETRAL_DRAIN_TIMEOUT_MS": "40000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "job-runner": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "sandbox": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "provider-gateway": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "mcp-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "web-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "10000"}, "queue": {"TETRAL_QUEUE_DRAIN_TIMEOUT_MS": "10000"}} {
+	for role, settings := range map[string]map[string]string{"bridge": {"TETRAL_DRAIN_TIMEOUT_MS": "40000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "job-runner": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "sandbox": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "provider-gateway": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "mcp-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "web-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "queue": {"TETRAL_QUEUE_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}} {
 		env := transportEnv(t, objects["apps/v1|Deployment|tetral-system|"+role])
 		for k, v := range settings {
 			if env[k] != v {
@@ -295,4 +296,121 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 	}
 	renderChart(t, helm, chart, "lifecycle.queueDrainMs=25000")
 	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=20000")
+}
+
+func TestProviderGatewayUsesScopedRouting(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
+	for _, profile := range []string{"standard-routed", "hardened"} {
+		objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile))
+		service := objects["v1|Service|tetral-system|provider-gateway"]
+		if transportAt(t, service, "spec", "type") != "ClusterIP" || transportAt(t, service, "spec", "sessionAffinity") != "None" {
+			t.Fatal("Provider Gateway lost ordinary nonsticky ClusterIP routing")
+		}
+		if transportMap(t, transportAt(t, service, "spec"))["clusterIP"] == "None" {
+			t.Fatal("Provider Gateway still advertises per-Pod headless discovery")
+		}
+		rule := objects["networking.istio.io/v1|DestinationRule|tetral-agent-runtime|tetral-runtime-provider"]
+		if transportAt(t, rule, "spec", "workloadSelector", "matchLabels", "app.kubernetes.io/name") != "agent-runtime" {
+			t.Fatal("Provider routing escaped Runtime source scope")
+		}
+		settings := transportMap(t, transportList(t, transportAt(t, rule, "spec", "trafficPolicy", "portLevelSettings"))[0])
+		if transportAt(t, settings, "loadBalancer", "simple") != "LEAST_REQUEST" {
+			t.Fatal("Provider route lost proxy request selection")
+		}
+		route := objects["networking.istio.io/v1|VirtualService|tetral-agent-runtime|tetral-runtime-provider"]
+		http := transportMap(t, transportList(t, transportAt(t, route, "spec", "http"))[0])
+		if fmt.Sprint(transportAt(t, http, "retries", "attempts")) != "0" {
+			t.Fatal("Provider route enabled replay")
+		}
+	}
+	client, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/gateway-client.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(client), "round_robin") {
+		t.Fatal("Runtime client still installs a second replica selection owner")
+	}
+}
+
+func TestRuntimeDeploymentPhaseBudget(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
+	source, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/config.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phaseKeys := map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "runtimeDrainMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "runtimeSettlementMs", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "runtimeLocalJoinMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "runtimeProxyJoinMs"}
+	defaultObjects := uniqueObjects(t, renderChart(t, helm, chart))
+	defaultRuntime := defaultObjects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
+	defaultEnv := transportEnv(t, defaultRuntime)
+	for key := range phaseKeys {
+		match := regexp.MustCompile(key + `:\s*ProviderStreamTimeoutSchema\.default\("([0-9]+)"\)`).FindStringSubmatch(string(source))
+		if len(match) != 2 || defaultEnv[key] != match[1] {
+			t.Fatalf("%s deployment default differs from actual typed Runtime policy: rendered=%s match=%v", key, defaultEnv[key], match)
+		}
+	}
+	for _, profile := range []string{"standard-routed", "hardened"} {
+		objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "lifecycle.runtimeDrainMs=2000", "lifecycle.runtimeSettlementMs=3000", "lifecycle.runtimeLocalJoinMs=1200", "lifecycle.runtimeProxyJoinMs=7001", "lifecycle.runtimeGraceSeconds=19"))
+		runtime := objects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
+		env := transportEnv(t, runtime)
+		for key, expected := range map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "2000", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "3000", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "1200", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "7001"} {
+			if env[key] != expected {
+				t.Fatalf("%s Runtime phase%s=%s want%s", profile, key, env[key], expected)
+			}
+		}
+		if fmt.Sprint(transportAt(t, runtime, "spec", "template", "spec", "terminationGracePeriodSeconds")) != "19" {
+			t.Fatal("Runtime configured Pod grace not projected")
+		}
+		var proxy map[string]any
+		if err := json.Unmarshal([]byte(fmt.Sprint(transportAt(t, runtime, "spec", "template", "metadata", "annotations", "proxy.istio.io/config"))), &proxy); err != nil {
+			t.Fatal(err)
+		}
+		if proxy["terminationDrainDuration"] != "7.001s" {
+			t.Fatalf("%s actual Runtime proxy phase=%v", profile, proxy)
+		}
+	}
+	// Default phases consume85s; exactly5s signal margin fits90s grace.
+	for _, bad := range []string{"lifecycle.runtimeGraceSeconds=89", "lifecycle.runtimeDrainMs=60001", "lifecycle.runtimeDrainMs=65000", "lifecycle.runtimeDrainMs=65001", "lifecycle.runtimeProxyJoinMs=5001", "lifecycle.runtimeLocalJoinMs=0", "lifecycle.runtimeSettlementMs=unbounded", "lifecycle.runtimeGraceSeconds=0"} {
+		requireRenderError(t, helm, chart, []string{bad})
+	}
+	renderChart(t, helm, chart, "lifecycle.runtimeDrainMs=59000", "lifecycle.runtimeGraceSeconds=89")
+	renderChart(t, helm, chart, "lifecycle.runtimeDrainMs=60001", "lifecycle.runtimeGraceSeconds=91")
+}
+
+func TestQueueAndWebDeploymentJoinBudget(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
+	for _, profile := range []string{"standard-routed", "hardened"} {
+		changed := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "lifecycle.cancelJoinMs=1000", "lifecycle.queueDrainMs=200", "lifecycle.webDrainMs=250"))
+		for role, drain := range map[string]string{"queue": "200", "web-connector": "250"} {
+			env := transportEnv(t, changed["apps/v1|Deployment|tetral-system|"+role])
+			key := "TETRAL_QUEUE_DRAIN_TIMEOUT_MS"
+			if role == "web-connector" {
+				key = "TETRAL_SERVICE_DRAIN_TIMEOUT_MS"
+			}
+			if env[key] != drain || env["TETRAL_CANCEL_JOIN_TIMEOUT_MS"] != "1000" {
+				t.Fatalf("%s %s actual drain/join projection=%v", profile, role, env)
+			}
+		}
+	}
+	// Lower Runner's separate drain so an oversized Queue/Web join is rejected
+	// at its own phase boundary, not masked by Runner's45s reserved margin.
+	base := []string{"lifecycle.runnerDrainMs=29000"}
+	for _, entry := range []struct {
+		values []string
+		reason string
+	}{
+		{[]string{"lifecycle.queueDrainMs=25000", "lifecycle.cancelJoinMs=5001"}, "Queue drain and cancellation join must fit 30s"},
+		{[]string{"transport.profile=hardened", "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Hardened Queue drain and cancellation join must fit 25s"},
+		{[]string{"lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Web drain and cancellation join must fit 25s"},
+		{[]string{"transport.profile=hardened", "lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Web drain and cancellation join must fit 25s"},
+	} {
+		requireRenderError(t, helm, chart, append(append([]string{}, base...), entry.values...), entry.reason)
+	}
+	renderChart(t, helm, chart, "lifecycle.queueDrainMs=25000", "lifecycle.cancelJoinMs=5000")
+	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5000")
+	// The hardened allowance follows the configured join rather than a5s copy.
+	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=24000", "lifecycle.cancelJoinMs=1000")
+	renderChart(t, helm, chart, "lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5000")
 }

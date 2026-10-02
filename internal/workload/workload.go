@@ -585,6 +585,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	BeginProcessShutdown(ctx)
 	users.stopAdmission()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()

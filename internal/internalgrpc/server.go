@@ -73,6 +73,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	select {
 	case <-ctx.Done():
+		workload.BeginProcessShutdown(ctx)
 		// Report NOT_SERVING before GracefulStop begins so health watchers and the
 		// readiness layer observe the drain honestly: GracefulStop keeps accepting the
 		// already-open Watch streams, so a stale SERVING status would otherwise linger
@@ -99,6 +100,7 @@ func Run(ctx context.Context, cfg Config) error {
 		<-done
 		return joinErr
 	case err := <-done:
+		workload.BeginProcessShutdown(ctx)
 		return errors.Join(err, forceStopAndJoin(server, cfg))
 	}
 }

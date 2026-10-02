@@ -29,7 +29,14 @@ sidecar.istio.io/nativeSidecar: "true"
 {{- $proxyImage := "" }}
 {{- range (($root.Files.Get "files/dependencies.lock.json" | fromJson).istio.images) }}{{ if eq .component "proxyv2" }}{{ $proxyImage = .reference }}{{ end }}{{ end }}
 sidecar.istio.io/proxyImage: {{ required "locked proxyv2 image is required" $proxyImage | quote }}
-proxy.istio.io/config: {{ if and (eq .role "agent-runtime") (eq $root.Values.transport.profile "hardened") }}'{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s","proxyStatsMatcher":{"inclusionPrefixes":["sds.tetral.runtime.direct_leaf.","sds.tetral.runtime.direct_validation."]}}'{{ else }}'{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'{{ end }}
+{{- $proxyDrain := "5s" -}}
+{{- if eq .role "agent-runtime" -}}
+{{- if eq (mod (int $root.Values.lifecycle.runtimeProxyJoinMs) 1000) 0 -}}
+{{- $proxyDrain = printf "%ds" (div (int $root.Values.lifecycle.runtimeProxyJoinMs) 1000) -}}
+{{- else -}}
+{{- $proxyDrain = printf "%.3fs" (divf (float64 $root.Values.lifecycle.runtimeProxyJoinMs) 1000) -}}
+{{- end -}}{{- end }}
+proxy.istio.io/config: {{ if and (eq .role "agent-runtime") (eq $root.Values.transport.profile "hardened") }}'{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"{{ $proxyDrain }}","proxyStatsMatcher":{"inclusionPrefixes":["sds.tetral.runtime.direct_leaf.","sds.tetral.runtime.direct_validation."]}}'{{ else }}'{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"{{ $proxyDrain }}"}'{{ end }}
 {{- if eq .role "agent-runtime" }}
 traffic.sidecar.istio.io/excludeInboundPorts: {{ if eq $root.Values.transport.profile "hardened" }}"19443"{{ else }}"19090"{{ end }}
 {{- if eq $root.Values.transport.profile "hardened" }}
@@ -71,18 +78,26 @@ replacement with at most two generations per process, including candidates. */}}
 {{- define "tetral.databasePoolSlots" -}}
 {{- $provider := int .Values.replicas.providerGateway -}}
 {{- if .Values.autoscaling.providerGateway.enabled -}}{{- $provider = int .Values.autoscaling.providerGateway.maxReplicas -}}{{- end -}}
-{{- $bridge := int .Values.replicas.bridge -}}
-{{- $runner := int .Values.replicas.jobRunner -}}
-{{- $mcp := int .Values.replicas.mcpConnector -}}
-{{- $api := int .Values.replicas.api -}}
-{{- $auth := int .Values.replicas.auth -}}
-{{- $single := int (include "tetral.surge" (dict "root" . "replicas" 1)) -}}
-{{/* Git Proxy retains its existing fixed HPA maximum of ten. */}}
+{{/* Each named consumer owns one Go pool. Sandbox and Event Stream use
+alternative DSN environment names; neither can be inferred from DATABASE_URL. */}}
+{{- $goProcesses := 1 -}}{{/* nonoverlapping Cleanup CronJob */}}
+{{- range $key := list "bridge" "jobRunner" "api" "auth" "sandbox" -}}
+{{- $replicas := int (get $.Values.replicas $key) -}}
+{{- $goProcesses = add $goProcesses $replicas (int (include "tetral.surge" (dict "root" $ "replicas" $replicas))) -}}
+{{- end -}}
+{{/* Queue and Event Stream remain fixed at one replica each. */}}
+{{- range list "queue" "event-stream" -}}
+{{- $goProcesses = add $goProcesses 1 (int (include "tetral.surge" (dict "root" $ "replicas" 1))) -}}
+{{- end -}}
 {{- $git := int (include "tetral.gitProxyMaxReplicas" .) -}}
-{{- $goProcesses := add $bridge (int (include "tetral.surge" (dict "root" . "replicas" $bridge))) $runner (int (include "tetral.surge" (dict "root" . "replicas" $runner)))  $api (int (include "tetral.surge" (dict "root" . "replicas" $api))) $auth (int (include "tetral.surge" (dict "root" . "replicas" $auth))) (mul 2 (add 1 $single)) $git (int (include "tetral.surge" (dict "root" . "replicas" $git))) 1 -}}
+{{- $goProcesses = add $goProcesses $git (int (include "tetral.surge" (dict "root" . "replicas" $git))) -}}
+{{- $mcp := int .Values.replicas.mcpConnector -}}
 {{- $bunProcesses := add $provider (int (include "tetral.surge" (dict "root" . "replicas" $provider))) $mcp (int (include "tetral.surge" (dict "root" . "replicas" $mcp))) -}}
 {{- add (mul $goProcesses (int .Values.transport.goPoolMax)) (mul $bunProcesses 2 (int .Values.transport.bunPoolMax)) -}}
 {{- end -}}
 
 {{/* Existing Git Proxy HPA bound, shared by the workload and SQL ledger. */}}
 {{- define "tetral.gitProxyMaxReplicas" -}}10{{- end -}}
+
+{{/* Fixed scheduling/signal margin after Runtime's four application/proxy phases. */}}
+{{- define "tetral.runtimeShutdownMarginMs" -}}5000{{- end -}}

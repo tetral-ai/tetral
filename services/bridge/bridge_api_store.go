@@ -387,12 +387,19 @@ func readRuntimeToolResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, true, false)
 }
 
-func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
-	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false, false)
-}
-
 func readRuntimeToolReceiptReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (runtimeToolResult, bool, error) {
 	return readRuntimeToolResult(ctx, tx, scope, toolUseEventID, false, true)
+}
+
+// Ordinary receipt disclosure linearizes with this exact binding proof in the
+// sensitive SELECT's snapshot. A preceding validation alone is insufficient at
+// READ COMMITTED. Retired processes retain only unchanged-binding replay.
+const runtimeReceiptBindingPredicate = ` AND EXISTS (SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
+ ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
+ WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$5 AND binding.binding_generation=$6 AND binding.agent_runtime_pod_uid=$7 AND binding.runtime_process_id=$8)`
+
+func runtimeReceiptBindingArgs(scope *bridgev1.RuntimeScope) []any {
+	return []any{scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId()}
 }
 
 func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool, receiptProof bool) (runtimeToolResult, bool, error) {
@@ -407,10 +414,8 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		    AND tool_use_event_id = $4`
 	args := []any{scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID}
 	if receiptProof {
-		query += ` AND EXISTS (SELECT 1 FROM session_runtime_bindings binding JOIN runtime_processes process
- ON (process.namespace,process.pod_uid,process.runtime_process_id)=(binding.agent_runtime_namespace,binding.agent_runtime_pod_uid,binding.runtime_process_id)
- WHERE binding.workspace_id=$1 AND binding.session_id=$2 AND binding.binding_id=$5 AND binding.binding_generation=$6 AND binding.agent_runtime_pod_uid=$7 AND binding.runtime_process_id=$8)`
-		args = append(args, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(), scope.GetBinding().GetTargetPodUid(), scope.GetBinding().GetRuntimeProcessId())
+		query += runtimeReceiptBindingPredicate
+		args = append(args, runtimeReceiptBindingArgs(scope)...)
 	}
 	if forUpdate {
 		query += `
@@ -425,7 +430,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		&existing.MCPClaimStatus, &existing.MCPClaimID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {
 		if receiptProof {
-			return runtimeToolResult{}, false, runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "accepted executor receipt or binding is stale"))
+			return runtimeToolResult{}, false, runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "accepted executor receipt or binding is stale"))
 		}
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {

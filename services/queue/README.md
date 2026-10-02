@@ -164,13 +164,17 @@ malformed value is a startup failure (`ConfigFromEnv`).
 | `TETRAL_QUEUE_RETRY_MAX_ATTEMPTS` | `10` | service-default attempt budget; the "unset" per-job `0` resolves to this at the lease projection and the dead-letter comparison |
 | `TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS` | `30` | reclaim cadence; required positive |
 | `TETRAL_QUEUE_LEASE_RECLAIM_LIMIT` | `100` | per-scan batch size; required positive |
+| `TETRAL_CANCEL_JOIN_TIMEOUT_MS` | `5000` | positive cancellation/join allocation; drain plus join fits within 30000 ms (25000 ms with the hardened proxy) |
 | `TETRAL_QUEUE_DRAIN_TIMEOUT_MS` | `10000` | concurrent RPC/HTTP/maintenance completion window; 1–25000 ms, leaving cancellation/join time inside the 30-second Pod grace |
 
 Production database startup requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME` alongside `TETRAL_DATABASE_URL`. The shared
 database owner verifies the server identity, refreshes trust for new
 connections, and joins its credential watcher when the command closes the
-pool after service shutdown.
+pool after service shutdown. The executable uses one absolute drain-plus-join
+deadline across RPC, HTTP, maintenance and cleanup. If any producer refuses
+cancellation, it exits with status 1 while dependencies remain retained; reusable
+service calls still wait for their actual users to join.
 
 The retry policy is Queue-Service-owned; consumers carry no delay authority.
 

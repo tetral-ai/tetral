@@ -223,6 +223,9 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	if cfg.ProcessPolicy, err = runtimecontrol.ProcessPolicyFromEnv(env.Getenv); err != nil {
 		return JobRunnerConfig{}, err
 	}
+	if cfg.DrainTimeout > 35*time.Second || cfg.CancelJoinTimeout > 35*time.Second-cfg.DrainTimeout {
+		return JobRunnerConfig{}, workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	}
 	return cfg, nil
 }
 

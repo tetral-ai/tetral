@@ -52,6 +52,7 @@ type Config struct {
 	RetryMaxDelay          time.Duration
 	RetryMaxAttempts       int
 	DrainTimeout           time.Duration
+	CancelJoinTimeout      time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -108,6 +109,21 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if drainMS <= 0 || drainMS > 25000 {
 		return Config{}, workload.NewConfigError(EnvDrainTimeoutMS + " must be between 1 and 25000 milliseconds, leaving join time inside the 30-second Pod grace")
 	}
+	joinMS, err := nonNegativeOrDefault(env.Getenv("TETRAL_CANCEL_JOIN_TIMEOUT_MS"), 5000, "TETRAL_CANCEL_JOIN_TIMEOUT_MS")
+	if err != nil {
+		return Config{}, err
+	}
+	profile := env.Getenv("TETRAL_TRANSPORT_PROFILE")
+	if profile != "" && profile != "standard-routed" && profile != "hardened" {
+		return Config{}, workload.NewConfigError("TETRAL_TRANSPORT_PROFILE must be standard-routed or hardened")
+	}
+	applicationMS := 30000
+	if profile == "hardened" || env.Getenv("TETRAL_ROUTING_PROXY_REQUIRED") == "true" {
+		applicationMS -= 5000
+	}
+	if joinMS <= 0 || joinMS > applicationMS-drainMS {
+		return Config{}, workload.NewConfigError("queue drain and cancellation join exceed the Pod application shutdown allocation")
+	}
 	return Config{
 		HTTPAddress:            httpAddress,
 		GRPCAddress:            grpcAddress,
@@ -119,6 +135,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 		RetryMaxDelay:          time.Duration(retryCapMS) * time.Millisecond,
 		RetryMaxAttempts:       retryMaxAttempts,
 		DrainTimeout:           time.Duration(drainMS) * time.Millisecond,
+		CancelJoinTimeout:      time.Duration(joinMS) * time.Millisecond,
 	}, nil
 }
 

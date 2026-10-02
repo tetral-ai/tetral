@@ -74,3 +74,20 @@ func TestDrainBudgetLeavesRoomForJoinAndProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestWebLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		drain, join string
+		valid       bool
+	}{
+		{"2000", "3000", true}, {"20000", "5000", true}, {"20000", "5001", false}, {"2000", "0", false}, {"2000", "9223372036854775807", false},
+	} {
+		cfg, err := LoadConfig(mapEnv{"TETRAL_WEB_API_KEYS": `["fixture"]`, "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "binding-verifier-key-with-at-least-32-bytes", EnvDrainTimeout: tc.drain, "TETRAL_CANCEL_JOIN_TIMEOUT_MS": tc.join})
+		if (err == nil) != tc.valid {
+			t.Fatalf("%+v error=%v", tc, err)
+		}
+		if tc.valid && tc.join == "3000" && cfg.CancelJoinTimeout != 3*time.Second {
+			t.Fatal("join configuration lost")
+		}
+	}
+}
