@@ -75,15 +75,7 @@ let acceptedInputCommitCalls = 0;
 let acceptedInputCommitCallsInFlight = 0;
 let acceptedInputCommitBarrierEntered = false;
 let acceptedInputCommitBarrierReleased = false;
-let acceptedInputCommitTimeoutTriggered = false;
-let markFirstAcceptedInputCommitDurable: (() => void) | undefined;
-const firstAcceptedInputCommitDurable = new Promise<void>((resolve) => {
-	markFirstAcceptedInputCommitDurable = resolve;
-});
-let releaseFirstAcceptedInputCommit: (() => void) | undefined;
-const firstAcceptedInputCommitRelease = new Promise<void>((resolve) => {
-	releaseFirstAcceptedInputCommit = resolve;
-});
+let acceptedInputCommitMaxInFlight = 0;
 let markSandboxObservationStarted: (() => void) | undefined;
 const sandboxObservationStarted = new Promise<void>((resolve) => {
 	markSandboxObservationStarted = resolve;
@@ -109,18 +101,17 @@ const hosts = await buildRuntimeCoreHosts({
 		commitAcceptedInput: async (acceptedInput, options) => {
 			const commitCall = ++acceptedInputCommitCalls;
 			acceptedInputCommitCallsInFlight += 1;
+			acceptedInputCommitMaxInFlight = Math.max(
+				acceptedInputCommitMaxInFlight,
+				acceptedInputCommitCallsInFlight,
+			);
 			try {
 				if (commitCall === 1) {
 					acceptedInputCommitBarrierEntered = true;
 				}
 				const result = await loader.commitAcceptedInput(acceptedInput, options);
-				if (commitCall === 1) {
-					markFirstAcceptedInputCommitDurable?.();
-					await firstAcceptedInputCommitRelease;
-				}
 				if (commitCall === 2) {
 					acceptedInputCommitBarrierReleased = true;
-					releaseFirstAcceptedInputCommit?.();
 				}
 				return result;
 			} finally {
@@ -139,28 +130,6 @@ const hosts = await buildRuntimeCoreHosts({
 			sleep: async (delayMs, signal) => {
 				if (signal.aborted) return false;
 				waitedMs.push(delayMs);
-				if (
-					acceptedInputCommitBarrierEntered &&
-					!acceptedInputCommitTimeoutTriggered &&
-					acceptedInputCommitCalls === 1 &&
-					acceptedInputCommitCallsInFlight === 1
-				) {
-					await firstAcceptedInputCommitDurable;
-					if (signal.aborted) return false;
-					acceptedInputCommitTimeoutTriggered = true;
-					return true;
-				}
-				if (
-					acceptedInputCommitTimeoutTriggered &&
-					acceptedInputCommitCalls >= 2 &&
-					acceptedInputCommitCallsInFlight > 0
-				) {
-					return await new Promise<boolean>((resolve) => {
-						signal.addEventListener("abort", () => resolve(false), {
-							once: true,
-						});
-					});
-				}
 				return true;
 			},
 		},
@@ -312,6 +281,8 @@ if (input.serveRecovery === true) {
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
 		providerContext: providerRequests[0]?.context ?? [],
 		recoveredTurnEventIds,
 	}));
@@ -359,6 +330,8 @@ if (input.preloadOnly === true) {
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
 		providerContext: [],
 		recoveredTurnEventIds,
 		preloadResult,
@@ -436,6 +409,8 @@ process.stdout.write(
 		waitedMs,
 		acceptedInputCommitBarrierEntered,
 		acceptedInputCommitBarrierReleased,
+		acceptedInputCommitCalls,
+		acceptedInputCommitMaxInFlight,
 		providerContext: providerRequests[0]?.context,
 		recoveredTurnEventIds,
 		preloadResult,

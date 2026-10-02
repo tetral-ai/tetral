@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -753,20 +755,22 @@ func waitForPendingOutputCapture(db *sql.DB, sessionID, excludedWriteID string) 
 }
 
 type providerRescheduleRecoveryComposition struct {
-	ResultType                    string          `json:"resultType"`
-	ProviderInvocations           int             `json:"providerInvocations"`
-	ExecutorInvocations           int             `json:"executorInvocations"`
-	SandboxAcceptanceInvocations  int             `json:"sandboxAcceptanceInvocations"`
-	SandboxObservationInvocations int             `json:"sandboxObservationInvocations"`
-	WaitedMS                      []int64         `json:"waitedMs"`
-	AcceptedInputBarrierEntered   bool            `json:"acceptedInputCommitBarrierEntered"`
-	AcceptedInputBarrierReleased  bool            `json:"acceptedInputCommitBarrierReleased"`
-	ProviderContext               json.RawMessage `json:"providerContext"`
-	RecoveredTurnEvents           []string        `json:"recoveredTurnEventIds"`
-	PreloadResult                 json.RawMessage `json:"preloadResult"`
-	LastSnapshot                  json.RawMessage `json:"lastSnapshot"`
-	TerminationResults            json.RawMessage `json:"terminationResults"`
-	Command                       struct {
+	ResultType                     string          `json:"resultType"`
+	ProviderInvocations            int             `json:"providerInvocations"`
+	ExecutorInvocations            int             `json:"executorInvocations"`
+	SandboxAcceptanceInvocations   int             `json:"sandboxAcceptanceInvocations"`
+	SandboxObservationInvocations  int             `json:"sandboxObservationInvocations"`
+	WaitedMS                       []int64         `json:"waitedMs"`
+	AcceptedInputBarrierEntered    bool            `json:"acceptedInputCommitBarrierEntered"`
+	AcceptedInputBarrierReleased   bool            `json:"acceptedInputCommitBarrierReleased"`
+	AcceptedInputCommitCalls       int             `json:"acceptedInputCommitCalls"`
+	AcceptedInputCommitMaxInFlight int             `json:"acceptedInputCommitMaxInFlight"`
+	ProviderContext                json.RawMessage `json:"providerContext"`
+	RecoveredTurnEvents            []string        `json:"recoveredTurnEventIds"`
+	PreloadResult                  json.RawMessage `json:"preloadResult"`
+	LastSnapshot                   json.RawMessage `json:"lastSnapshot"`
+	TerminationResults             json.RawMessage `json:"terminationResults"`
+	Command                        struct {
 		WorkspaceID       string `json:"workspaceId"`
 		SessionID         string `json:"sessionId"`
 		SessionThreadID   string `json:"sessionThreadId"`
@@ -1258,7 +1262,70 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if err != nil {
 		t.Fatalf("listen for provider reschedule recovery: %v", err)
 	}
-	server := grpc.NewServer()
+	// Drop only this test's first committed input ACK at the real Bridge boundary.
+	// The actual handler returns before the client can retry the same declaration.
+	var commitMu sync.Mutex
+	var commitCalls, activeCommits, maxActiveCommits int
+	var committedInputID, committedReceipt string
+	var firstCommitRequest *bridgev1.CommitInputsRequest
+	var firstCommitResponse *bridgev1.CommitInputsResponse
+	var commitReplayVerified bool
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if info.FullMethod != bridgev1.AgentRuntimeBridgeService_CommitInputs_FullMethodName {
+			return handler(ctx, request)
+		}
+		commitRequest, ok := request.(*bridgev1.CommitInputsRequest)
+		if !ok || commitRequest.GetScope().GetSessionId() != sessionID || commitRequest.GetScope().GetSessionThreadId() != threadID {
+			return nil, status.Error(codes.Internal, "unexpected recovery commit input scope")
+		}
+		commitMu.Lock()
+		commitCalls++
+		attempt := commitCalls
+		activeCommits++
+		maxActiveCommits = max(maxActiveCommits, activeCommits)
+		commitMu.Unlock()
+		defer func() {
+			commitMu.Lock()
+			activeCommits--
+			commitMu.Unlock()
+		}()
+		response, err := handler(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		commitResponse, ok := response.(*bridgev1.CommitInputsResponse)
+		if !ok || commitResponse.GetCommitted() == nil {
+			return nil, status.Error(codes.Internal, "recovery input did not commit")
+		}
+		var inboxStatus, receipt string
+		var receipts int
+		if err := admin.QueryRowContext(ctx, `SELECT
+			(SELECT status FROM session_runtime_inbox
+			 WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND runtime_input_id=$3),
+			(SELECT count(*) FROM session_bridge_operations
+			 WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			   AND operation=$4 AND source_kind='messages' AND idempotency_key=$3),
+			COALESCE((SELECT receipt_json FROM session_bridge_operations
+			 WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+			   AND operation=$4 AND source_kind='messages' AND idempotency_key=$3), '')`,
+			sessionID, threadID, commitRequest.GetRuntimeInputId(), runtimecontrol.OperationCommitInputs,
+		).Scan(&inboxStatus, &receipts, &receipt); err != nil || inboxStatus != "committed" || receipts != 1 || receipt == "" {
+			return nil, status.Errorf(codes.Internal, "independent input commit oracle status=%s receipts=%d error=%v", inboxStatus, receipts, err)
+		}
+		commitMu.Lock()
+		defer commitMu.Unlock()
+		if attempt == 1 {
+			committedInputID, committedReceipt = commitRequest.GetRuntimeInputId(), receipt
+			firstCommitRequest = proto.Clone(commitRequest).(*bridgev1.CommitInputsRequest)
+			firstCommitResponse = proto.Clone(commitResponse).(*bridgev1.CommitInputsResponse)
+			return nil, status.Error(codes.Unavailable, "committed recovery input response lost")
+		}
+		if attempt != 2 || !proto.Equal(firstCommitRequest, commitRequest) || !proto.Equal(firstCommitResponse, commitResponse) || receipt != committedReceipt {
+			return nil, status.Error(codes.Internal, "recovery input replay changed declaration or durable receipt")
+		}
+		commitReplayVerified = true
+		return response, nil
+	}))
 	agentruntimebridge.RegisterBridgeAPI(server, store)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -1498,6 +1565,33 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if !result.AcceptedInputBarrierEntered || !result.AcceptedInputBarrierReleased {
 		t.Fatalf("accepted-input response-loss barrier entered/released = %t/%t; want true/true",
 			result.AcceptedInputBarrierEntered, result.AcceptedInputBarrierReleased)
+	}
+	if result.AcceptedInputCommitCalls != 2 || result.AcceptedInputCommitMaxInFlight != 1 {
+		t.Fatalf("accepted-input joined calls/max in-flight = %d/%d; want 2/1", result.AcceptedInputCommitCalls, result.AcceptedInputCommitMaxInFlight)
+	}
+	commitRetryWaits := 0
+	for _, waited := range result.WaitedMS {
+		if waited == 100 {
+			commitRetryWaits++
+		}
+	}
+	if commitRetryWaits != 1 {
+		t.Fatalf("accepted-input transport retry waits = %v; want one 100ms retry in addition to semantic wait", result.WaitedMS)
+	}
+	commitMu.Lock()
+	calls, activeRPC, maxActive := commitCalls, activeCommits, maxActiveCommits
+	inputID, replayVerified := committedInputID, commitReplayVerified
+	commitMu.Unlock()
+	if calls != 2 || activeRPC != 0 || maxActive != 1 || inputID == "" || !replayVerified {
+		t.Fatalf("real Bridge commit calls/active/max/input/replay = %d/%d/%d/%s/%t; want 2/0/1/exact input/true", calls, activeRPC, maxActive, inputID, replayVerified)
+	}
+	var receiptCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND operation=$3 AND source_kind='messages' AND idempotency_key=$4`,
+		sessionID, threadID, runtimecontrol.OperationCommitInputs, inputID,
+	).Scan(&receiptCount); err != nil || receiptCount != 1 {
+		t.Fatalf("recovered original input receipt count=%d error=%v; want one", receiptCount, err)
 	}
 	providerContext := string(result.ProviderContext)
 	expectedProviderContext := `[{"role":1,"content":[{"text":{"text":"read the original file"}}]},{"role":2,"content":[{"toolCall":{"modelToolCallId":"call_provider_reschedule_original","name":"Read","inputJson":"{\"path\":\"original.txt\"}"}},{"toolResult":{"modelToolCallId":"call_provider_reschedule_original","completed":{"outputJson":"{\"text\":\"status: success\\ncontent:\\noriginal result\"}"}}}]},{"role":1,"content":[{"text":{"text":"continue after recovered tool settlement"}}]}]`
