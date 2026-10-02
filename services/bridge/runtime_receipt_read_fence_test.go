@@ -315,3 +315,57 @@ func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 		})
 	}
 }
+
+// Missing accepted projection data is an integrity error under an unchanged
+// scope, rather than a supersession outcome. The actual RunMemory admission and
+// Queue projection work remain committed while the waiter observes the missing row.
+func TestPostgreSQLMemoryProjectionMissingReceiptKeepsBoundScopeError(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "memory_missing_receipt")
+	seedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_missing_receipt")
+	seedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
+	request := durableMemoryRequestForTest(t, admin, scope, "evt_memory_missing_receipt", `{"action":"create","path":"notes/missing.md","content":"original"}`)
+	tracer := &bridgeExecutionQueryTracer{}
+	rpc := processRegistryRPCWithStore(t, newAwaitNotificationTracedStore(t, runtime, tracer), scope.Binding.TargetPodUid, nil)
+	fired, release := tracer.armBarrier("", "/* runtime receipt scope validation */", 1)
+	type outcome struct {
+		response *bridgev1.RunMemoryResponse
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() { response, err := rpc.RunMemory(context.Background(), request); done <- outcome{response, err} }()
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("actual memory waiter did not reach read-only scope boundary")
+	}
+	var state string
+	var queued int
+	if err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, request.ToolUseEventId).Scan(&state); err != nil || state != "pending" {
+		close(release)
+		t.Fatalf("actual committed memory admission=%s/%v", state, err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE kind=$1`, queue.KindSandboxMemoryProjection).Scan(&queued); err != nil || queued != 1 {
+		close(release)
+		t.Fatalf("accepted projection Queue custody=%d/%v", queued, err)
+	}
+	if _, err := admin.Exec(`DELETE FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, request.ToolUseEventId); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	before := receiptTenantSnapshot(t, admin)
+	close(release)
+	select {
+	case got := <-done:
+		if got.response.GetStale() != nil || status.Code(got.err) != codes.FailedPrecondition || status.Convert(got.err).Message() != "memory tool result is missing" {
+			t.Fatalf("bound missing-memory receipt=%v/%v; want original integrity error", got.response, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing memory waiter did not join")
+	}
+	if after := receiptTenantSnapshot(t, admin); !reflect.DeepEqual(before, after) {
+		t.Fatal("missing memory classification mutated accepted memory/Queue work")
+	}
+}

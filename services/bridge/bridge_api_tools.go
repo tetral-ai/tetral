@@ -804,6 +804,14 @@ func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.C
 			}
 			existing, ok, err := readRuntimeToolReceiptReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 			if err != nil {
+				if runtimecontrol.IsScopeSupersededError(err) {
+					// Classify only the failed read: an intact scope retains the
+					// original missing-result error; no receipt is disclosed.
+					if scopeErr := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, request.GetScope()); scopeErr != nil {
+						return scopeErr
+					}
+					return status.Error(codes.FailedPrecondition, "memory tool result is missing")
+				}
 				return err
 			}
 			if !ok {

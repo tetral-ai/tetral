@@ -822,7 +822,12 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 				  AND receipt.tool_kind='sandbox_background'`+runtimeReceiptBindingPredicate, args...).Scan(
 				&operationState, &resultJSON, &writeSequence)
 			if dbconnect.IsNoRows(err) {
-				return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_BINDING_STALE", "accepted background receipt or binding is stale"))
+				// An empty JOIN can also mean a missing receipt/task. This
+				// error-only check never retries or authorizes a sensitive read.
+				if scopeErr := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, scope); scopeErr != nil {
+					return scopeErr
+				}
+				return err
 			}
 			if err != nil {
 				return err

@@ -3,6 +3,11 @@
   "go_tests": [
     {
       "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMemoryProjectionMissingReceiptKeepsBoundScopeError",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
       "name": "TestPostgreSQLMemoryProjectionReceiptBindingRace",
       "dependencies": ["postgresql"]
     },
