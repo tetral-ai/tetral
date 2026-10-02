@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DockerResources owns one local fixture's containers and network. Register
@@ -238,8 +239,8 @@ func (r *DockerResources) Close(ctx context.Context) error {
 			if err := runQuiet(ctx, "docker", append(args, name)...); err != nil {
 				// A canceled start may have created nothing; list existence
 				// successfully before deciding that removal is unnecessary.
-				exists, inspectErr := dockerResourceExists(ctx, resource.kind, "name", "^"+name+"$")
-				if inspectErr != nil || exists {
+				removed, inspectErr := waitDockerResourceRemoved(ctx, resource.kind, "name", "^"+name+"$")
+				if inspectErr != nil || !removed {
 					failures = append(failures, fmt.Errorf("remove Docker fixture %s: %w", resource.kind, err))
 					remaining = append(remaining, name)
 				}
@@ -272,7 +273,7 @@ func cleanupOrphanedDependencyNetworks(ctx context.Context) error {
 			continue
 		}
 		if err := runQuiet(ctx, "docker", "network", "rm", network); err != nil {
-			if exists, checkErr := dockerResourceExists(ctx, "network", "id", network); checkErr == nil && !exists {
+			if removed, checkErr := waitDockerResourceRemoved(ctx, "network", "id", network); checkErr == nil && removed {
 				continue
 			}
 			return fmt.Errorf("remove orphaned Docker fixture network: %w", err)
@@ -291,6 +292,34 @@ func dockerResourceExists(ctx context.Context, kind, filter, value string) (bool
 	}
 	output, err := dockerOutput(ctx, args...)
 	return output != "", err
+}
+
+// Concurrent collectors and Docker's automatic removal can already own the
+// deletion when rm returns an error. The resource remains listed during that
+// interval. Join its disappearance within a short budget; daemon/query errors
+// and resources that remain present must still fail cleanup.
+func waitDockerResourceRemoved(ctx context.Context, kind, filter, value string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	poll := time.NewTicker(20 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		exists, err := dockerResourceExists(ctx, kind, filter, value)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			return false, err
+		}
+		if !exists {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-poll.C:
+		}
+	}
 }
 
 type boundedDockerBuffer struct {

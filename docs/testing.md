@@ -55,6 +55,13 @@ manifest invariants, Helm rendering tests and Helm lint. Unknown ownership
 continues to select Full. Service-owned `proto/` changes also select protocol
 generation and compatibility checks.
 
+Local transport fixtures use pinned Envoy and Bun images and own their Docker
+containers and networks. PID and process-start labels protect live owners from
+orphan cleanup. Concurrent collectors join an already-started removal for at
+most two seconds, clipped by the caller's deadline; a resource still present or
+an unavailable daemon remains a cleanup failure. Containers close before their
+networks, including after partial fixture startup.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.

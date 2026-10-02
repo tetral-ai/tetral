@@ -51,8 +51,21 @@ func TestNextRunnerRemovesDependencyContainerOwnedByDeadProcess(t *testing.T) {
 		postgresImage, "sh", "-c", "sleep 300"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupOrphanedDependencyContainers(ctx); err != nil {
-		t.Fatal(err)
+	// Full runs independent package processes. Their orphan collectors may
+	// observe the same dead owner and overlap Docker's in-progress removal.
+	start := make(chan struct{})
+	results := make(chan error, 8)
+	for range cap(results) {
+		go func() {
+			<-start
+			results <- cleanupOrphanedDependencyContainers(ctx)
+		}()
+	}
+	close(start)
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Error(err)
+		}
 	}
 	output, err := commandOutput(ctx, "docker", "ps", "-aq", "--filter", "name="+name)
 	if err != nil {

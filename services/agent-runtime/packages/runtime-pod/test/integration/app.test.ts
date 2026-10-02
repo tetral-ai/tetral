@@ -95,6 +95,7 @@ async function startAppFixture(options: {
   readonly tokenReviewClient?: RuntimeTokenReviewClient;
 } = {}) {
   const app = createRuntimePodApp({
+    runtimeProcessId: "process-test",
     config: validConfig(),
     logger: { info: () => undefined, error: () => undefined },
     tokenReviewClient: options.tokenReviewClient ?? new AllowingTokenReviewClient(),

@@ -544,6 +544,7 @@ export async function runMaximumReadTransportProof() {
 		awaitSandboxExecution(
 			_request: AwaitSandboxExecutionRequest,
 			_metadata: Metadata,
+			_options: CallOptions,
 			callback: (error: Error | null, response?: unknown) => void,
 		) {
 			callback(null, { completed: { resultJson, taskId: "" } });

@@ -437,7 +437,7 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 			continue
 		}
 		if err := runQuiet(ctx, "docker", "rm", "-f", container); err != nil {
-			if exists, checkErr := dockerResourceExists(ctx, "container", "id", container); checkErr == nil && !exists {
+			if removed, checkErr := waitDockerResourceRemoved(ctx, "container", "id", container); checkErr == nil && removed {
 				continue
 			}
 			return fmt.Errorf("remove orphaned test dependency container: %w", err)

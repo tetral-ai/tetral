@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,14 @@ func TestDockerResourcesOwnAndCleanFailedFixture(t *testing.T) {
 	address, err := c.Address(ctx, 5432)
 	if err != nil || !strings.HasPrefix(address, "127.0.0.1:") || c.ImageID == "" {
 		t.Fatalf("fixture address=%q identity=%q error=%v", address, c.ImageID, err)
+	}
+	// A failed removal must not be hidden merely because the daemon is alive.
+	// A resource that remains present exhausts the caller's shorter join bound.
+	blocked, stop := context.WithTimeout(ctx, 50*time.Millisecond)
+	removed, removalErr := waitDockerResourceRemoved(blocked, "container", "name", "^"+c.Name+"$")
+	stop()
+	if removed || !errors.Is(removalErr, context.DeadlineExceeded) {
+		t.Fatalf("present resource falsely joined: removed=%t error=%v", removed, removalErr)
 	}
 	if err := cleanupOrphanedDependencyContainers(ctx); err != nil {
 		t.Fatal(err)
