@@ -106,17 +106,24 @@ func TestRuntimeLoadProbeWireBounds(t *testing.T) {
 type observedLoadTransport struct {
 	delegate http.RoundTripper
 	closed   chan struct{}
+	reading  chan struct{}
 }
 type observedLoadBody struct {
 	io.ReadCloser
-	closed chan struct{}
+	closed   chan struct{}
+	reading  chan struct{}
+	readOnce sync.Once
 }
 
+func (b *observedLoadBody) Read(p []byte) (int, error) {
+	b.readOnce.Do(func() { close(b.reading) })
+	return b.ReadCloser.Read(p)
+}
 func (b *observedLoadBody) Close() error { err := b.ReadCloser.Close(); close(b.closed); return err }
 func (tr observedLoadTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	response, err := tr.delegate.RoundTrip(r)
 	if err == nil {
-		response.Body = &observedLoadBody{ReadCloser: response.Body, closed: tr.closed}
+		response.Body = &observedLoadBody{ReadCloser: response.Body, closed: tr.closed, reading: tr.reading}
 	}
 	return response, err
 }
@@ -135,13 +142,11 @@ func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
 			if scenario == "one excess byte" {
 				body += "\n"
 			}
-			partial := make(chan struct{})
 			cancelled := make(chan struct{})
 			client := runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if scenario == "slow body" || scenario == "caller cancellation" {
 					_, _ = io.WriteString(w, "# partial\n")
 					w.(http.Flusher).Flush()
-					close(partial)
 					<-r.Context().Done()
 					close(cancelled)
 					return
@@ -149,7 +154,8 @@ func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			}))
 			closed := make(chan struct{})
-			client.Transport = observedLoadTransport{delegate: client.Transport, closed: closed}
+			reading := make(chan struct{})
+			client.Transport = observedLoadTransport{delegate: client.Transport, closed: closed, reading: reading}
 			policy := DefaultRuntimePlacementPolicy()
 			policy.ProbeTimeout = 100 * time.Millisecond
 			ctx, cancel := context.WithCancel(context.Background())
@@ -160,8 +166,11 @@ func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
 				done <- err
 			}()
 			if scenario == "caller cancellation" {
+				// A server flush does not prove client ownership: cancelling before
+				// RoundTrip returns can prevent any response body reaching the probe.
+				// Cancel only once the production reader owns and starts that body.
 				select {
-				case <-partial:
+				case <-reading:
 				case <-time.After(3 * time.Second):
 					t.Fatal("body read did not begin")
 				}
