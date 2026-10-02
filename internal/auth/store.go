@@ -343,12 +343,12 @@ func (s *APIKeyStore) UpsertBootstrap(ctx context.Context, workspaceID workspace
 	now := storage.Now().Format(time.RFC3339)
 
 	return storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		// Serialize bootstrap startup on the existing workspace row. The bootstrap
-		// workspace index alone cannot arbitrate simultaneous inserts that also
-		// conflict on the global key_digest index. NO KEY UPDATE still permits
-		// unrelated foreign-key references while the bootstrap transaction runs.
-		var lockedWorkspace string
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE`, string(workspaceID)).Scan(&lockedWorkspace); err != nil {
+		// Serialize each workspace's bootstrap startup without requiring Workspace
+		// mutation privileges. The bootstrap workspace index alone cannot arbitrate
+		// simultaneous inserts that also conflict on the global key_digest index.
+		// The transaction releases this namespaced advisory lock on commit/rollback;
+		// a hash collision only serializes otherwise independent bootstrap starts.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('tetral.auth.bootstrap:' || $1::text, 0))`, string(workspaceID)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,created_at)

@@ -44,13 +44,20 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	bootstrap := strings.Repeat("b", auth.MinBootstrapKeyBytes)
+	// Exercise the installed Auth authority, including its SELECT-only access to
+	// workspaces, rather than the broader shared test role used by the API fixture.
+	authDB := storagetest.OpenWorkloadDB(t, admin, "auth").DB
+	var canReadWorkspace, canUpdateWorkspace bool
+	if err := authDB.QueryRowContext(ctx, `SELECT has_table_privilege(current_user,'public.workspaces','SELECT'),has_table_privilege(current_user,'public.workspaces','UPDATE')`).Scan(&canReadWorkspace, &canUpdateWorkspace); err != nil || !canReadWorkspace || canUpdateWorkspace {
+		t.Fatalf("installed Auth workspace privileges: read=%t update=%t err=%v", canReadWorkspace, canUpdateWorkspace, err)
+	}
 	// Concurrent identical bootstrap starts must converge on one authority.
 	authRouters := make([]http.Handler, 2)
 	var starts sync.WaitGroup
 	errs := make(chan error, 2)
 	bootstrapBarrier := &replicaBootstrapBarrier{t: t, ready: make(chan struct{})}
 	for i := range authRouters {
-		pool := storagetest.OpenRuntimeRoleDBWithTracer(t, runtimeDB, bootstrapBarrier)
+		pool := storagetest.OpenRuntimeRoleDBWithTracer(t, authDB, bootstrapBarrier)
 		starts.Add(1)
 		go func(i int) {
 			defer starts.Done()
@@ -427,7 +434,7 @@ type replicaBootstrapBarrier struct {
 }
 
 func (b *replicaBootstrapBarrier) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(data.SQL, "FROM workspaces WHERE id=$1 FOR NO KEY UPDATE") {
+	if strings.Contains(data.SQL, "pg_advisory_xact_lock(hashtextextended('tetral.auth.bootstrap:'") {
 		b.mu.Lock()
 		b.arrived++
 		if b.arrived == 2 {

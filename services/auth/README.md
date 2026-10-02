@@ -84,9 +84,10 @@ so the predicate is one clause repeated verbatim, not two independent filters.
 
 ### Bootstrap refresh (`auth.RefreshBootstrap` → `APIKeyStore.UpsertBootstrap`)
 
-Idempotent against the one `key_kind = 'bootstrap'` row. A PostgreSQL transaction locks the existing workspace row before its bootstrap
-upsert, so both the workspace bootstrap and global digest unique indexes are
-serialized during concurrent startup. Replicas with
+Idempotent against the one `key_kind = 'bootstrap'` row. A PostgreSQL transaction
+takes a workspace-scoped bootstrap advisory lock before its upsert, so both the
+workspace bootstrap and global digest unique indexes are serialized during
+concurrent startup without granting Auth Workspace mutation privileges. Replicas with
 identical configuration converge on one row without a startup race:
 
 | Existing bootstrap row | Action |

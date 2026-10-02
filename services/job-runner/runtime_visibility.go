@@ -109,7 +109,10 @@ func (r KubernetesRuntimeTargetResolver) runtimeProcessDecisionTx(ctx context.Co
 	}
 	var replacement bool
 	if !process.Current || process.RetiredAt.Valid {
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_processes WHERE namespace=$1 AND pod_uid=$2 AND is_current AND phase='accepting' AND retired_at IS NULL AND registration_order>$3)`, binding.Namespace, binding.PodUID, process.RegistrationOrder).Scan(&replacement); err != nil {
+		// A committed promotion permanently supersedes this process. Subsequent
+		// draining or candidate registration cannot undo that fact; accepting is
+		// a placement admission condition, not a condition for repairing old custody.
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_process_pods WHERE namespace=$1 AND pod_uid=$2 AND last_promoted_order>$3)`, binding.Namespace, binding.PodUID, process.RegistrationOrder).Scan(&replacement); err != nil {
 			return "", err
 		}
 	}

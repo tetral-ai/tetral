@@ -51,7 +51,7 @@ func TestValidateBootstrapKeyAcceptsLongerKey(t *testing.T) {
 
 func TestRefreshBootstrapValidatesBeforeUpsert(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	if err := auth.RefreshBootstrap(context.Background(), store, workspace.DefaultID, "weakkey"); err == nil {
 		t.Fatal("expected RefreshBootstrap to reject a weak env key")
 	}
@@ -59,7 +59,7 @@ func TestRefreshBootstrapValidatesBeforeUpsert(t *testing.T) {
 
 func TestRefreshBootstrapInsertsBootstrapRowOnFreshSchema(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(context.Background(), store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("RefreshBootstrap: %v", err)
@@ -76,7 +76,7 @@ func TestRefreshBootstrapInsertsBootstrapRowOnFreshSchema(t *testing.T) {
 
 func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	ctx := context.Background()
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)
@@ -104,7 +104,7 @@ func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 
 func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	ctx := context.Background()
 
 	// Seed bootstrap, then create a standard key, then rotate
@@ -134,7 +134,7 @@ func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 
 func TestRefreshBootstrapNoOpOnUnchangedDigest(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
@@ -188,7 +188,7 @@ func TestRefreshBootstrapNoOpOnUnchangedDigest(t *testing.T) {
 
 func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 
@@ -247,7 +247,7 @@ func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 
 func TestRefreshBootstrapDoesNotReactivateRevokedStandardKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
+	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 

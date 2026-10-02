@@ -71,7 +71,7 @@ classifier:
 | Rechecked evidence | Action |
 | --- | --- |
 | Matching committed release | Continue its handoff receipt; no loss settlement |
-| Promoted accepting replacement process on the same Pod | Fence and repair the old process binding |
+| Later process completed promotion on the same Pod | Fence and repair the old process binding, even after the replacement starts draining |
 | Fresh GET proves old Pod absent or UID replaced | Fenced loss repair |
 | Current accepting process and reusable Kubernetes target | Reuse, including an expired heartbeat |
 | Draining/deleting or temporarily unready current process with fresh heartbeat | Keep custody pending; no new placement |
@@ -82,6 +82,9 @@ A cached deletion timestamp, IP change or missing cache entry alone cannot
 prove loss. Confirming GET runs outside Session transactions with a two-second
 bound. The subsequent transaction rechecks exact binding/process and heartbeat;
 a newer report or release wins over an earlier census observation.
+The durable promotion watermark proves retirement independently of the new
+process's current admission phase. Registering or abandoning a candidate does
+not advance that watermark and cannot displace the current owner.
 
 New placement samples two distinct eligible Pods uniformly, probes their native
 PodIP:8080 `/metrics` concurrently and chooses the lower resident Session count.
