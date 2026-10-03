@@ -76,7 +76,12 @@ func (s *sandboxSuccessorLeaseStore) Lease(ctx context.Context, r queue.LeaseReq
 	jobs, err := s.Store.Lease(ctx, r)
 	for _, job := range jobs {
 		if job.ID == s.selected {
-			s.observed <- job.LeaseToken
+			// Preserve the first exact successor capability without making the
+			// diagnostic observer a barrier to later lease replies.
+			select {
+			case s.observed <- job.LeaseToken:
+			default:
+			}
 		}
 	}
 	return jobs, err
@@ -212,6 +217,20 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 			if n, err := replacementQueue.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{Limit: 20}); err != nil || n != 1 {
 				t.Fatalf("reclaim killed worker=%d/%v", n, err)
 			}
+			maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+			maintenanceJoined := make(chan struct{})
+			go func() {
+				defer close(maintenanceJoined)
+				tetralqueue.RunStalledLeaseMaintenance(maintenanceCtx, replacementQueue, tetralqueue.MaintenanceConfig{Interval: 100 * time.Millisecond, Limit: 20})
+			}()
+			t.Cleanup(func() {
+				stopMaintenance()
+				select {
+				case <-maintenanceJoined:
+				case <-time.After(10 * time.Second):
+					t.Error("Queue maintenance did not join")
+				}
+			})
 			close(release)
 			replacementProvider := &sandboxReplicaProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}, ledger: ledger, entered: make(chan string, 20), release: release}
 			registry, err := sandbox.NewProviderRegistry(map[string]sandbox.ProviderAdapter{driver.DaytonaProviderName: replacementProvider})
@@ -227,7 +246,17 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 			done := make(chan error, 1)
 			successorLeases := &sandboxSuccessorLeaseStore{Store: replacementQueue, selected: jobID, observed: make(chan string, 1)}
 			successorRPC := serveQueueReplica(t, successorLeases, nil)
+			workerJoined := make(chan struct{})
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-workerJoined:
+				case <-time.After(10 * time.Second):
+					t.Error("Sandbox successor did not join")
+				}
+			})
 			go func() {
+				defer close(workerJoined)
 				done <- sandbox.RunSandboxToolExecutionConsumerGroup(work, 2, workers, sandboxReplicaWorkspaceLister{}, 10*time.Millisecond, sandbox.WithQueueAcquisition(sandbox.SandboxQueueFromGRPC(successorRPC)), sandbox.NewPostgreSQLSandboxExecutionCoordinator(replacement, 30*time.Minute), registry, backgroundNotificationMedia{}, sandbox.SandboxToolExecutionRunnerConfig{LeaseOwner: "sandbox-successor", MaxJobs: 1, LeaseDuration: 3 * time.Second, HeartbeatInterval: 200 * time.Millisecond, PreparationTimeout: time.Second}, nil, nil)
 			}()
 			waitHandoffCondition(t, "successor settles all six executions", func() bool {
