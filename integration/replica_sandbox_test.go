@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	sandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -94,6 +95,7 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 			ledger := &sandboxReplicaLedger{submits: map[string]int{}, observes: map[string][]string{}}
 			var pools [2]*dbconnect.Client
 			var stores [2]*queue.PostgreSQLQueueStore
+			var successorLeases *sandboxSuccessorLeaseStore
 			var stops [2]context.CancelFunc
 			var done [2]chan struct{}
 			var cancelWorkByInstance [2]context.CancelFunc
@@ -103,7 +105,16 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 				pool := storagetest.OpenRuntimeRoleDBWithTracer(t, runtimeDB, nil)
 				pools[i] = dbconnect.NewClientForTesting(pool)
 				stores[i] = queue.NewPostgreSQLStore(pools[i])
-				q := sandbox.WithQueueAcquisition(sandbox.SandboxQueueFromGRPC(serveQueueReplica(t, stores[i], &queueReplicaResponseFault{})))
+				var rpcStore tetralqueue.Store = stores[i]
+				if i == 1 {
+					var selectedJob string
+					if err := admin.QueryRowContext(ctx, `SELECT id FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'tool_use_event_id'=$2 AND status='leased'`, queue.KindSandboxToolExecute, ids[0]).Scan(&selectedJob); err != nil {
+						t.Fatal(err)
+					}
+					successorLeases = &sandboxSuccessorLeaseStore{Store: stores[i], selected: selectedJob, observed: make(chan string, 1)}
+					rpcStore = successorLeases
+				}
+				q := sandbox.WithQueueAcquisition(sandbox.SandboxQueueFromGRPC(serveQueueReplica(t, rpcStore, &queueReplicaResponseFault{})))
 				acquire, quiesce := context.WithCancel(ctx)
 				defer quiesce()
 				stops[i] = quiesce
@@ -125,7 +136,8 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 					select {
 					case <-done[index]:
 					case <-time.After(5 * time.Second):
-						t.Error("Sandbox instance did not join")
+						t.Error("Sandbox instance did not join within bound")
+						<-done[index]
 					}
 				})
 				go func() {
@@ -193,9 +205,24 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 			}
 			awaitReplicaQueueExpiry(ctx, t, admin, jobID)
 			close(releases[1])
-			if n, err := stores[1].ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{Limit: 20}); err != nil || n != 1 {
-				t.Fatalf("expired worker lease reclamation=%d/%v", n, err)
-			}
+			// A stopped owner leaves one expired capability. A subsequent heartbeat
+			// failure may leave another, so recovery needs the actual Queue maintenance
+			// owner throughout settlement, rather than one global reclamation pass.
+			maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+			maintenanceJoined := make(chan struct{})
+			t.Cleanup(func() {
+				stopMaintenance()
+				select {
+				case <-maintenanceJoined:
+				case <-time.After(5 * time.Second):
+					t.Error("Queue maintenance did not join within bound")
+					<-maintenanceJoined
+				}
+			})
+			go func() {
+				defer close(maintenanceJoined)
+				tetralqueue.RunStalledLeaseMaintenance(maintenanceCtx, stores[1], tetralqueue.MaintenanceConfig{Interval: 100 * time.Millisecond, Limit: 20})
+			}()
 			waitHandoffCondition(t, "replacement settles every admitted execution", func() bool {
 				var count int
 				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM queue_jobs WHERE kind=$1 AND status='acknowledged'`, queue.KindSandboxToolExecute).Scan(&count); err != nil {
@@ -208,6 +235,15 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 			case <-done[1]:
 			case <-ctx.Done():
 				t.Fatal("second instance did not join")
+			}
+			var successorToken string
+			select {
+			case successorToken = <-successorLeases.observed:
+			case <-ctx.Done():
+				t.Fatal("selected execution replacement Queue lease not observed")
+			}
+			if successorLeases.selected != jobID || successorToken == "" || successorToken == oldToken {
+				t.Fatal("replacement did not acquire a fresh capability for the original execution")
 			}
 			ledger.mu.Lock()
 			if len(ledger.submits) != 6 {
