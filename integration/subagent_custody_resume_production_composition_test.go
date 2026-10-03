@@ -787,9 +787,8 @@ func TestSubagentFirstMailHotAdmissionAcknowledgesBeforeRequestStart(t *testing.
 		t, fixture.runtimeDB, fixture.admin, runtimeProcess.port, fixture.sessionID, fixture.podUID,
 		nil, nil,
 	)
-	runner.Config.LeaseDuration = 250 * time.Millisecond
-	runner.Config.HeartbeatInterval = time.Hour
 	deliveryContext, cancelDelivery := context.WithCancel(context.Background())
+	defer cancelDelivery()
 	type deliveryResult struct {
 		active bool
 		err    error
@@ -804,15 +803,17 @@ func TestSubagentFirstMailHotAdmissionAcknowledgesBeforeRequestStart(t *testing.
 	case <-time.After(10 * time.Second):
 		t.Fatal("first_mail delivery did not reach the pre-Start transport cut")
 	}
-	cancelDelivery()
+	// Request Start proves Core execution; successful Runner delivery owns acceptance and ACK.
 	select {
 	case result := <-finished:
-		if !result.active {
-			t.Fatalf("cancelled first_mail delivery reported no activity: %v", result.err)
+		if !result.active || result.err != nil {
+			t.Fatalf("first_mail delivery failed before Request Start: active=%t err=%v", result.active, result.err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("cancelled first_mail transport did not return")
+		t.Fatal("first_mail delivery did not acknowledge while Request Start was held")
 	}
+
+	cancelDelivery()
 
 	var inboxStatus, queueStatus string
 	var messages, starts int
