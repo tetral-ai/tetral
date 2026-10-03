@@ -183,12 +183,13 @@ func (l *scriptedNotificationListener) Listen(ctx context.Context, _ string, onR
 	call := l.count
 	l.onNotify = onNotification
 	l.mu.Unlock()
+	// A published fixture call means its readiness callback has completed.
+	onReady()
 	select {
 	case l.calls <- call:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	onReady()
 	if call == 1 {
 		select {
 		case <-l.allowDisconnect:
