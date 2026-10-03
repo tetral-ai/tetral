@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {

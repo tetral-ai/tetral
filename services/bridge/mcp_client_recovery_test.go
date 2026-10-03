@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 )
@@ -202,26 +201,6 @@ func (h *mcpDurableComposition) assertManifest(server, tools, etag string, gener
 	}
 	if actualTools != tools || actualETag != etag || actualGeneration != generation || actualReady != readiness || actualJobs != jobs {
 		h.t.Fatalf("manifest %s actual=(%s,%s,%d,%s,%d) want=(%s,%s,%d,%s,%d)", server, actualTools, actualETag, actualGeneration, actualReady, actualJobs, tools, etag, generation, readiness, jobs)
-	}
-}
-
-func (h *mcpDurableComposition) awaitManifestGeneration(server string, generation int64) {
-	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var actual int64
-		err := h.admin.QueryRow(`SELECT manifest_generation FROM session_mcp_manifests WHERE workspace_id='default' AND session_id='sesn_mcp_durable' AND mcp_server_name=$1`, server).Scan(&actual)
-		if err == nil && actual == generation {
-			return
-		}
-		if time.Now().After(deadline) {
-			h.t.Fatalf("manifest generation=%d/%v want=%d", actual, err, generation)
-		}
-		select {
-		case <-h.ctx.Done():
-			h.t.Fatal(h.ctx.Err())
-		case <-time.After(time.Millisecond):
-		}
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/encryption"
@@ -30,7 +32,6 @@ import (
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	queueservice "github.com/tetral-ai/tetral/services/queue"
 	sandbox "github.com/tetral-ai/tetral/services/sandbox"
-	"google.golang.org/protobuf/proto"
 )
 
 // This composition uses installed workload roles and real SDK, Bridge, Queue,
@@ -52,7 +53,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			seedBridgeAPISession(t, admin, "default", session, thread)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, pod)
 			seedReadySandboxForSharedToolExecution(t, admin, "default", session)
-			startMCPDeliveryCaptures(t, ctx, sandboxDB, queueDB)
+			startMCPDeliveryCaptures(ctx, t, sandboxDB, queueDB)
 			installed := `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"work-github"},{"type":"mcp_toolset","mcp_server_name":"work-slack"}],"mcp_servers":[{"type":"url","name":"work-github","url":"https://api.githubcopilot.com/mcp/"},{"type":"url","name":"work-slack","url":"https://mcp.slack.com/mcp"}]}`
 			mustMCPDeliveryExec(t, admin, `UPDATE sessions SET installed_tools_json=$1,vault_ids_json='["vlt_mcp_durable"]' WHERE id=$2`, installed, session)
 			mustMCPDeliveryExec(t, admin, `INSERT INTO vaults(workspace_id,id,display_name,metadata_json,created_at,updated_at) VALUES('default','vlt_mcp_durable','MCP fixture','{}',now(),now())`)
@@ -88,9 +89,13 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			mcp := startMCPDeliveryChild(t, ctx, "../services/gateway", "packages/mcp-connector/test/fixtures/mcp-durable-composition.ts", map[string]any{"bridgeAddress": endpoint.Address, "gatewayTokenPath": paths["gateway"], "runtimeTokenPath": paths["runtime"], "bridgeTokenPath": paths["bridge"], "workspaceId": "default", "sessionId": session, "threadId": thread, "bindingId": binding, "podUid": pod, "masterKeyHex": key, "bindingKey": string(store.RuntimeBindingTokenHMACKey)}, []string{"TETRAL_TEST_GATEWAY_DATABASE_URL=" + storagetest.RuntimeDatabaseURL(t, gatewayDB)})
+			mcp := startMCPDeliveryChild(ctx, t, "../services/gateway", "packages/mcp-connector/test/fixtures/mcp-durable-composition.ts", map[string]any{"bridgeAddress": endpoint.Address, "gatewayTokenPath": paths["gateway"], "runtimeTokenPath": paths["runtime"], "bridgeTokenPath": paths["bridge"], "workspaceId": "default", "sessionId": session, "threadId": thread, "bindingId": binding, "podUid": pod, "masterKeyHex": key, "bindingKey": string(store.RuntimeBindingTokenHMACKey)}, []string{"TETRAL_TEST_GATEWAY_DATABASE_URL=" + storagetest.RuntimeDatabaseURL(t, gatewayDB)})
 			lister := mcpmanifest.NewConnectorLister(mcp.startup.ConnectorAddress, grpcauth.FileTokenSource{Path: paths["bridge"]})
-			defer lister.Close()
+			defer func() {
+				if err := lister.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			store.MCPManifestLister = lister
 			otherAdapter := map[string]string{"github": "slack", "slack": "github"}[adapter]
 			mcp.action(map[string]any{"kind": "configure", "adapter": otherAdapter, "extraToolName": "other_control"})
@@ -100,7 +105,9 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 					OK       bool
 					Response struct{ ManifestETag string }
 				}
-				json.Unmarshal(mcp.action(map[string]any{"kind": "discover", "adapter": name}), &discovery)
+				if err := json.Unmarshal(mcp.action(map[string]any{"kind": "discover", "adapter": name}), &discovery); err != nil {
+					t.Fatal(err)
+				}
 				tools, etag := baseTools, baseETag
 				if name == otherAdapter {
 					tools, etag = deliveryOtherManifest(t)
@@ -111,7 +118,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 				mustMCPDeliveryExec(t, admin, `INSERT INTO session_mcp_manifests(workspace_id,session_id,mcp_server_name,tools_json,manifest_etag,manifest_generation,readiness,created_at,updated_at)VALUES('default',$1,$2,$3,$4,7,'ready',now(),now())`, session, "work-"+name, tools, etag)
 			}
 			runtimeInput := map[string]any{"workspaceId": "default", "sessionId": session, "durableMode": map[string]any{"bridgeAddress": endpoint.Address, "tokenPath": paths["runtime"], "threadId": thread, "bindingId": binding, "podUid": pod, "runtimeProcessId": "process_" + pod, "serverName": "work-" + adapter}}
-			runtime := startMCPDeliveryChild(t, ctx, "../services/agent-runtime", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", runtimeInput, nil)
+			runtime := startMCPDeliveryChild(ctx, t, "../services/agent-runtime", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", runtimeInput, nil)
 			mustMCPDeliveryExec(t, admin, `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1' WHERE session_id=$1`, session)
 			cold := runtime.observe()
 			assertDeliveryGeneration(t, cold, 7)
@@ -137,7 +144,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			mcp.action(map[string]any{"kind": "reset"})
 			mcp.action(map[string]any{"kind": "configure", "adapter": adapter, "version": "v2"})
 			mcp.action(map[string]any{"kind": "notify", "adapter": adapter})
-			waitMCPDelivery(t, ctx, "actual notification commits generation8", func() bool {
+			waitMCPDelivery(ctx, t, "actual notification commits generation8", func() bool {
 				var generation int64
 				_ = admin.QueryRow(`SELECT manifest_generation FROM session_mcp_manifests WHERE session_id=$1 AND mcp_server_name=$2`, session, "work-"+adapter).Scan(&generation)
 				return generation == 8
@@ -149,7 +156,11 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: pod, PodIP: "127.0.0.1"}})
 			}})
 			sender := jobrunner.NewRuntimePodCommandClient(grpcauth.FileTokenSource{Path: paths["runner"]})
-			defer sender.Close()
+			defer func() {
+				if err := sender.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			observed := &observedRuntimeDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}}
 			runner := &jobrunner.JobRunner{Queue: queueservice.NewServer(queueStore, nil), Deliverer: observed}
 			lease := func(now time.Time) *queue.Job {
@@ -227,7 +238,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			assertDeliveryEvents(t, warm, adapter)
 			mcp.close()
 			runtime.close()
-			replacement := startMCPDeliveryChild(t, ctx, "../services/agent-runtime", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", runtimeInput, nil)
+			replacement := startMCPDeliveryChild(ctx, t, "../services/agent-runtime", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", runtimeInput, nil)
 			fresh := replacement.observe()
 			assertDeliveryGeneration(t, fresh, 8)
 			runtime = replacement
@@ -312,7 +323,7 @@ func mustMCPDeliveryExec(t *testing.T, db *sql.DB, q string, args ...any) {
 		t.Fatal(err)
 	}
 }
-func waitMCPDelivery(t *testing.T, ctx context.Context, label string, predicate func() bool) {
+func waitMCPDelivery(ctx context.Context, t *testing.T, label string, predicate func() bool) {
 	t.Helper()
 	until := time.Now().Add(5 * time.Second)
 	for !predicate() {
@@ -340,7 +351,9 @@ func deliveryManifest(t *testing.T, extra bool) (string, string) {
 	logical := []map[string]any{}
 	for _, tool := range tools {
 		var input any
-		json.Unmarshal([]byte(schema), &input)
+		if err := json.Unmarshal([]byte(schema), &input); err != nil {
+			t.Fatal(err)
+		}
 		logical = append(logical, map[string]any{"name": tool.Name, "description": tool.Description, "input_schema": input})
 	}
 	encoded, _ := json.Marshal(logical)
@@ -361,7 +374,7 @@ type mcpDeliveryChild struct {
 	once    sync.Once
 }
 
-func startMCPDeliveryChild(t *testing.T, ctx context.Context, dir, fixture string, input any, environment []string) *mcpDeliveryChild {
+func startMCPDeliveryChild(ctx context.Context, t *testing.T, dir, fixture string, input any, environment []string) *mcpDeliveryChild {
 	t.Helper()
 	bun, err := exec.LookPath("bun")
 	if err != nil {
@@ -403,7 +416,11 @@ func (c *mcpDeliveryChild) tryAction(action map[string]any) (json.RawMessage, er
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			c.t.Errorf("close owned child response: %v", err)
+		}
+	}()
 	var result json.RawMessage
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		return nil, err
@@ -430,7 +447,7 @@ func (c *mcpDeliveryChild) observe() deliveryRuntimeObservation {
 	return o
 }
 func (c *mcpDeliveryChild) wait(predicate func(deliveryRuntimeObservation) bool, label string) {
-	waitMCPDelivery(c.t, c.ctx, label, func() bool { return predicate(c.observe()) })
+	waitMCPDelivery(c.ctx, c.t, label, func() bool { return predicate(c.observe()) })
 }
 func (c *mcpDeliveryChild) close() {
 	c.once.Do(func() {
@@ -466,7 +483,9 @@ func deliveryOtherManifest(t *testing.T) (string, string) {
 	logical := []map[string]any{}
 	for _, tool := range tools {
 		var input any
-		json.Unmarshal([]byte(schema), &input)
+		if err := json.Unmarshal([]byte(schema), &input); err != nil {
+			t.Fatal(err)
+		}
 		logical = append(logical, map[string]any{"name": tool.Name, "description": tool.Description, "input_schema": input})
 	}
 	encoded, _ := json.Marshal(logical)
@@ -487,7 +506,7 @@ func assertDeliveryOtherRoute(t *testing.T, o deliveryRuntimeObservation, server
 	t.Fatalf("other-server route not retained: %+v", o.CatalogRoutes)
 }
 
-func startMCPDeliveryCaptures(t *testing.T, ctx context.Context, sandboxDB, queueDB *sql.DB) {
+func startMCPDeliveryCaptures(ctx context.Context, t *testing.T, sandboxDB, queueDB *sql.DB) {
 	t.Helper()
 	registry, err := sandbox.NewProviderRegistry(map[string]sandbox.ProviderAdapter{"daytona": handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}})
 	if err != nil {

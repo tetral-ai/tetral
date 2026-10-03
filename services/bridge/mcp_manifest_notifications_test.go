@@ -159,11 +159,12 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 				origins, verification := 0, 0
 				for _, r := range proof.Requests {
 					if r.Method == "tools/list" {
-						if r.Origin == "sdk-notification" {
+						switch r.Origin {
+						case "sdk-notification":
 							origins++
-						} else if r.Origin == "bridge-verification" {
+						case "bridge-verification":
 							verification++
-						} else {
+						default:
 							t.Fatalf("unidentified notification list origin: %+v", r)
 						}
 					}

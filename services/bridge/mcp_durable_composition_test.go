@@ -195,7 +195,9 @@ func newMCPDurableCompositionWithOptions(t *testing.T, options map[string]any) *
 	}
 	t.Cleanup(func() {
 		if h.controlAddress != "" {
-			h.tryAction(map[string]any{"kind": "shutdown"})
+			if _, err := h.tryAction(map[string]any{"kind": "shutdown"}); err != nil {
+				t.Errorf("MCP child shutdown request: %v", err)
+			}
 		}
 		done := make(chan error, 1)
 		go func() { done <- command.Wait() }()
@@ -281,7 +283,11 @@ func (h *mcpDurableComposition) tryAction(action map[string]any) (json.RawMessag
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			h.t.Errorf("close MCP child response: %v", err)
+		}
+	}()
 	var result json.RawMessage
 	err = json.NewDecoder(response.Body).Decode(&result)
 	if err == nil && response.StatusCode != http.StatusOK {

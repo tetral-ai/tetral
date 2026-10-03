@@ -275,7 +275,11 @@ func mcpCredentialCiphertexts(t *testing.T, h *mcpDurableComposition) map[string
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			h.t.Errorf("close credential observation rows: %v", err)
+		}
+	}()
 	result := map[string][]byte{}
 	for rows.Next() {
 		var id string
