@@ -1,6 +1,7 @@
 package agentruntimebridge
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -231,5 +232,57 @@ func TestRuntimeDeclarationStringifyPreservesSpansAndSeparatorEscapes(t *testing
 				t.Fatal("Runtime declaration stringify bytes differ")
 			}
 		})
+	}
+}
+
+// Raw execution/provider tokens participate in custody identity, while provider
+// context decodes duplicate keys and keeps json.Number spellings for storage.
+func TestPreparedToolDeclarationPreservesRawIdentityAndDecodedContext(t *testing.T) {
+	declaration := bridgeToolDeclarationForTest("call", "read", `{"n":-0,"a":2,"\u0061":1.00,"large":9007199254740993,"e":1e+00}`, "allow", "sandbox_execute")
+	prepared, err := normalizeRuntimeToolDeclaration(declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRaw := `{"\u0061":1.00,"a":2,"e":1e+00,"large":9007199254740993,"n":-0}`
+	if string(prepared.projection.ProviderInput) != wantRaw || string(prepared.projection.CanonicalExecutionInput) != wantRaw {
+		t.Fatal("raw canonical tokens changed")
+	}
+	parts, err := runtimeAssistantContextParts(runtimeToolContextDelta(prepared.projection), &prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(parts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `[{"canonicalInput":{"a":2,"e":1e+00,"large":9007199254740993,"n":-0},"modelToolCallId":"call","toolName":"read","type":"tool_call"}]` {
+		t.Fatalf("decoded context = %s", encoded)
+	}
+	request := &bridgev1.WriteEventRequest{Scope: &bridgev1.RuntimeScope{SessionThreadId: "thread"}, RuntimeWriteId: "write", ModelRequestId: "request"}
+	digest, err := writeToolDeclarationDigest(request, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != "1866d504f2792ea14fe3ae8fab3da2c79105ac80a7ffb07db147bb4be9a3eae6" {
+		t.Fatalf("digest = %s; want independently fixed custody identity", digest)
+	}
+}
+func TestPreparedToolContextOwnsDecodedReasoningAndInput(t *testing.T) {
+	declaration := bridgeToolDeclarationForTest("call", "read", `{"x":{"y":1}}`, "allow", "sandbox_execute")
+	declaration.LeadingReasoning = []*bridgev1.RuntimeContextReasoning{{Text: "original", ProviderMetadataJson: bridgeString(`{"x":{"y":2}}`)}}
+	prepared, err := normalizeRuntimeToolDeclaration(declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration.PublicExecutionInputJson = `{"changed":true}`
+	declaration.LeadingReasoning[0].Text = "changed"
+	*declaration.LeadingReasoning[0].ProviderMetadataJson = `{"changed":true}`
+	encoded, err := json.Marshal(prepared.contextParts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"providerMetadata":{"x":{"y":2}},"text":"original","type":"reasoning"},{"canonicalInput":{"x":{"y":1}},"modelToolCallId":"call","toolName":"read","type":"tool_call"}]`
+	if string(encoded) != want {
+		t.Fatalf("prepared context changed through request aliases: %s", encoded)
 	}
 }

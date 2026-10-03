@@ -143,11 +143,9 @@ func writeEventDeclarationDigest(
 	return runtimecontrol.Sha256Hex(canonical), nil
 }
 
-func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, declaration runtimecontrol.ToolProjection) (string, error) {
-	contextDelta, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(declaration))
-	if err != nil {
-		return "", err
-	}
+func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, prepared preparedRuntimeToolDeclaration) (string, error) {
+	declaration := prepared.projection
+	contextDelta := map[string]any{"parts": prepared.contextParts}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"assistant_context_delta": contextDelta,
 		"evaluated_permission":    declaration.EvaluatedPermission,
@@ -528,11 +526,12 @@ func commitWriteEventContextTx(
 	eventID string,
 	modelRequestID string,
 	delta *bridgev1.RuntimeContextDelta,
+	preparedTool *preparedRuntimeToolDeclaration,
 	now time.Time,
 ) (writeEventDurableFacts, error) {
 	facts := writeEventDurableFacts{EventID: eventID}
 	if delta != nil {
-		write, err := appendRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, now)
+		write, err := appendPreparedRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, preparedTool, now)
 		if err != nil {
 			return writeEventDurableFacts{}, err
 		}
@@ -782,6 +781,13 @@ func consumeThreadContextPrefixTx(
 	return nil
 }
 
+func runtimeAssistantContextParts(delta *bridgev1.RuntimeContextDelta, preparedTool *preparedRuntimeToolDeclaration) ([]map[string]any, error) {
+	if preparedTool != nil {
+		return preparedTool.contextParts, nil
+	}
+	return canonicalRuntimeContextParts(delta)
+}
+
 func appendRuntimeAssistantContextTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -790,6 +796,20 @@ func appendRuntimeAssistantContextTx(
 	eventID string,
 	modelRequestID string,
 	delta *bridgev1.RuntimeContextDelta,
+	now time.Time,
+) (durableContextWrite, error) {
+	return appendPreparedRuntimeAssistantContextTx(ctx, tx, scope, eventType, eventID, modelRequestID, delta, nil, now)
+}
+
+func appendPreparedRuntimeAssistantContextTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	eventType string,
+	eventID string,
+	modelRequestID string,
+	delta *bridgev1.RuntimeContextDelta,
+	preparedTool *preparedRuntimeToolDeclaration,
 	now time.Time,
 ) (durableContextWrite, error) {
 	if modelRequestID == "" || delta == nil || len(delta.GetParts()) == 0 {
@@ -845,7 +865,7 @@ func appendRuntimeAssistantContextTx(
 	toolCount := 0
 	textCount := 0
 	createdToolIDs := make([]string, 0)
-	declaredParts, err := canonicalRuntimeContextParts(delta)
+	declaredParts, err := runtimeAssistantContextParts(delta, preparedTool)
 	if err != nil {
 		return durableContextWrite{}, err
 	}

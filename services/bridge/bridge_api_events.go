@@ -48,6 +48,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		return nil, status.Error(codes.InvalidArgument, "invalid write event request")
 	}
 	var toolProjection runtimecontrol.ToolProjection
+	var preparedTool *preparedRuntimeToolDeclaration
 	toolDeclaration := request.GetToolDeclaration()
 	if toolDeclaration != nil {
 		if request.GetModelRequestId() == "" || request.GetEventType() != "" || request.GetPayloadJson() != "" ||
@@ -56,7 +57,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return nil, status.Error(codes.InvalidArgument, "Tool declaration carries unrelated write event fields")
 		}
 		var err error
-		toolProjection, err = normalizeRuntimeToolDeclaration(toolDeclaration)
+		prepared, prepareErr := normalizeRuntimeToolDeclaration(toolDeclaration)
+		err = prepareErr
+		toolProjection = prepared.projection
+		preparedTool = &prepared
 		if err != nil {
 			return nil, err
 		}
@@ -111,7 +115,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	evidence.Kind = "canonicality"
 	var declarationDigest string
 	if toolDeclaration != nil {
-		declarationDigest, err = writeToolDeclarationDigest(request, toolProjection)
+		declarationDigest, err = writeToolDeclarationDigest(request, *preparedTool)
 	} else {
 		declarationDigest, err = writeEventDeclarationDigest(request, payloadJSON, consumedFileAttachments.CanonicalJSON)
 	}
@@ -263,6 +267,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			eventID,
 			request.GetModelRequestId(),
 			assistantContextDelta,
+			preparedTool,
 			now,
 		)
 		if err != nil {
@@ -1091,45 +1096,52 @@ func runtimeToolEventPayloadJSON(projection runtimecontrol.ToolProjection) (stri
 	return runtimecontrol.MarshalJSON(payload)
 }
 
-func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaration) (runtimecontrol.ToolProjection, error) {
+// preparedRuntimeToolDeclaration owns decoded context for one WriteEvent invocation.
+// Digest and append only read these fresh maps; raw projection fields remain unchanged.
+type preparedRuntimeToolDeclaration struct {
+	projection   runtimecontrol.ToolProjection
+	contextParts []map[string]any
+}
+
+func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaration) (preparedRuntimeToolDeclaration, error) {
 	if declaration == nil || !runtimecontrol.RuntimeAlreadyCanonicalIdentifier(declaration.GetModelToolCallId()) ||
 		!runtimecontrol.RuntimeAlreadyCanonicalIdentifier(declaration.GetToolName()) ||
 		!runtimecontrol.RuntimeToolRouteCapabilityAllowed(declaration.GetRouteCapability()) {
-		return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration identity is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration identity is invalid")
 	}
 	inputJSON, err := runtimecontrol.CanonicalRunToolJSON(declaration.GetPublicExecutionInputJson())
 	if err != nil || len(inputJSON) > runtimecontrol.RuntimeToolInputJSONMaxBytes {
-		return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration input is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration input is invalid")
 	}
 	var inputObject map[string]json.RawMessage
 	if json.Unmarshal([]byte(inputJSON), &inputObject) != nil || inputObject == nil {
-		return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration input must be an object")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration input must be an object")
 	}
 	providerInputJSON := inputJSON
 	if declaration.DistinctProviderInputJson != nil {
 		providerInputJSON, err = runtimecontrol.CanonicalRunToolJSON(declaration.GetDistinctProviderInputJson())
 		if err != nil || len(providerInputJSON) > runtimecontrol.RuntimeToolInputJSONMaxBytes {
-			return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration Provider input is invalid")
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration Provider input is invalid")
 		}
 	}
 	if declaration.GetEvaluatedPermission() != "allow" && declaration.GetEvaluatedPermission() != "ask" && declaration.GetEvaluatedPermission() != "deny" {
-		return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration permission is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration permission is invalid")
 	}
 	eventType := "agent.tool_use"
 	mcpServerName := ""
 	switch declaration.GetEventKind() {
 	case bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_TOOL:
 		if declaration.McpServerName != nil {
-			return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "ordinary Tool declaration has an MCP server")
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "ordinary Tool declaration has an MCP server")
 		}
 	case bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_MCP:
 		mcpServerName = declaration.GetMcpServerName()
 		if !runtimecontrol.RuntimeAlreadyCanonicalIdentifier(mcpServerName) {
-			return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "MCP Tool declaration server is invalid")
+			return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "MCP Tool declaration server is invalid")
 		}
 		eventType = "agent.mcp_tool_use"
 	default:
-		return runtimecontrol.ToolProjection{}, status.Error(codes.InvalidArgument, "Tool declaration kind is invalid")
+		return preparedRuntimeToolDeclaration{}, status.Error(codes.InvalidArgument, "Tool declaration kind is invalid")
 	}
 	projection := runtimecontrol.ToolProjection{
 		EventType:               eventType,
@@ -1143,10 +1155,11 @@ func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaratio
 		State:                   "running",
 		LeadingReasoning:        declaration.GetLeadingReasoning(),
 	}
-	if _, err := canonicalRuntimeContextDelta(runtimeToolContextDelta(projection)); err != nil {
-		return runtimecontrol.ToolProjection{}, err
+	parts, err := canonicalRuntimeContextParts(runtimeToolContextDelta(projection))
+	if err != nil {
+		return preparedRuntimeToolDeclaration{}, err
 	}
-	return projection, nil
+	return preparedRuntimeToolDeclaration{projection: projection, contextParts: parts}, nil
 }
 
 func runtimeToolContextDelta(projection runtimecontrol.ToolProjection) *bridgev1.RuntimeContextDelta {

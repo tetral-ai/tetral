@@ -880,7 +880,7 @@ func subagentDeclarationStackLabels(block string) (phase, activity, state string
 		}
 	} else if strings.Contains(block, "runtimeToolEventPayloadJSON(") {
 		phase = "event.payload"
-	} else if strings.Contains(block, "appendRuntimeAssistantContextTx(") {
+	} else if strings.Contains(block, "appendRuntimeAssistantContextTx(") || strings.Contains(block, "appendPreparedRuntimeAssistantContextTx(") {
 		phase = "transaction.context"
 	} else if strings.Contains(block, "withWorkspaceTx(") {
 		phase = "transaction"
