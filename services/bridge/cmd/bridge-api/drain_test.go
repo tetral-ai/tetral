@@ -157,7 +157,27 @@ func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 	if err := runtime.Ping(); err == nil {
 		t.Fatal("Bridge command did not close owned pool after join")
 	}
-	if err := admin.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE pid=$1`, listenerPID).Scan(&listenerCount); err != nil || listenerCount != 0 {
-		t.Fatalf("listener survived process join=%d/%v", listenerCount, err)
+	if stats := runtime.Stats(); stats.OpenConnections != 0 || stats.InUse != 0 || stats.Idle != 0 {
+		t.Fatalf("Bridge retained local pool ownership after join: %+v", stats)
+	}
+	// Driver Close sends Terminate and closes the local socket; PostgreSQL's
+	// backend exit is a separate observation, not an acknowledgement of Close.
+	// Keep the local join strict and bound observation of this exact remote PID.
+	observeCtx, stopObservation := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopObservation()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := admin.QueryRowContext(observeCtx, `SELECT count(*) FROM pg_stat_activity WHERE pid=$1`, listenerPID).Scan(&listenerCount); err != nil {
+			t.Fatalf("inspect listener after process join=%d/%v", listenerCount, err)
+		}
+		if listenerCount == 0 {
+			break
+		}
+		select {
+		case <-observeCtx.Done():
+			t.Fatalf("listener survived bounded observation after process join=%d/%v", listenerCount, observeCtx.Err())
+		case <-ticker.C:
+		}
 	}
 }
