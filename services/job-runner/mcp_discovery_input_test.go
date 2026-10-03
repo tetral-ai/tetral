@@ -3,8 +3,10 @@ package jobrunner
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +42,10 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 	for _, expire := range []bool{false, true} {
 		t.Run(fmt.Sprint("deadline_expired=", expire), func(t *testing.T) {
 			store, admin, job := newInputDiscoveryFixture(t)
+			const serverName = "work-slack"
+			if _, err := admin.Exec(`UPDATE sessions SET installed_tools_json=$1 WHERE workspace_id=$2 AND id=$3`, `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"work-slack"}],"mcp_servers":[{"type":"url","name":"work-slack","url":"https://mcp.slack.com/mcp"}]}`, job.WorkspaceID, job.SessionID); err != nil {
+				t.Fatal(err)
+			}
 			for range 2 {
 				if _, err := store.reserveMCPDiscoveryAttempt(context.Background(), job, time.Minute); err != nil {
 					t.Fatal(err)
@@ -61,6 +67,32 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 			}
 			if !errors.As(err, &exhausted) || exhausted.Retryable || len(lister.requests) != want {
 				t.Fatalf("restart = %v attempts=%d want=%d", err, len(lister.requests), want)
+			}
+			for _, request := range lister.requests {
+				if request.WorkspaceID != job.WorkspaceID || request.SessionID != job.SessionID || request.MCPServerName != serverName {
+					t.Fatalf("configured discovery identity = %+v", request)
+				}
+			}
+			var payload, inboxStatus, readiness string
+			var errorsCount, idleCount, generation int
+			if err := admin.QueryRow(`SELECT payload_json,(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'),(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.status_idle'),(SELECT status FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'`, job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&payload, &errorsCount, &idleCount, &inboxStatus); err != nil {
+				t.Fatal(err)
+			}
+			var actual, wantPayload any
+			if err := json.Unmarshal([]byte(payload), &actual); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(`{"type":"session.error","error":{"mcp_server_name":"work-slack","type":"mcp_connection_failed_error","message":"Configured MCP tools could not be loaded. This input was not executed; a new input can retry.","retry_status":{"type":"exhausted"}}}`), &wantPayload); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actual, wantPayload) || errorsCount != 1 || idleCount != 1 || inboxStatus != "dead_lettered" {
+				t.Fatalf("configured non-GitHub public settlement = %s errors%d idle%d inbox%s", payload, errorsCount, idleCount, inboxStatus)
+			}
+			if err := admin.QueryRow(`SELECT readiness,manifest_generation FROM session_mcp_manifests WHERE workspace_id=$1 AND session_id=$2 AND mcp_server_name=$3`, job.WorkspaceID, job.SessionID, serverName).Scan(&readiness, &generation); err != nil {
+				t.Fatal(err)
+			}
+			if readiness != "unready" || generation != 1 {
+				t.Fatalf("configured failure manifest = %s generation%d", readiness, generation)
 			}
 		})
 	}

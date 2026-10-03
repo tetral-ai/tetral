@@ -99,7 +99,7 @@ export interface McpSDKClientOptions {
 type PhaseIdentity = McpIdentity & { readonly observers?: () => readonly (() => McpExecutionObservation)[] };
 interface RefreshBudget { operationSpent: boolean; refreshTriggered: boolean; observer?: () => McpExecutionObservation; }
 interface OpeningWaiter { deadline: number; budget: RefreshBudget; reject: (error: unknown) => void; }
-interface ConnectionOpening { endpoint: string; controller: AbortController; waiters: Set<OpeningWaiter>; handshakeSpent: boolean; operationSpent: boolean; promise: Promise<{entry: ConnectionEntry; tools: ListToolsResult}>; }
+interface ConnectionOpening { baseKey: string; key: string; endpoint: string; controller: AbortController; waiters: Set<OpeningWaiter>; handshakeSpent: boolean; operationSpent: boolean; promise: Promise<{entry: ConnectionEntry; tools: ListToolsResult}>; }
 interface ConnectionEntry {
   readonly endpoint: string;
   readonly baseKey: string;
@@ -313,17 +313,22 @@ export class McpSDKClient implements McpClient {
     signal.throwIfAborted();
     const baseKey = connectionBaseKey(identity);
     const key = connectionCacheKey(baseKey, credential);
+    // An alias after forced refresh belongs to the same opening, whose current
+    // key may differ from the credential snapshot resolved by this waiter.
+    const admitted = this.#connectionOpenings.get(key);
+    this.retireStaleOpenings(baseKey, admitted?.controller.signal.aborted === false ? admitted.key : key);
     const cached = this.#connections.get(key);
     if (cached !== undefined) {
       if (cached.endpoint === server.endpoint) { this.touch(cached); return {entry: cached}; }
       await this.closeConnection(cached);
     }
     let opening = this.#connectionOpenings.get(key);
+    if (opening?.controller.signal.aborted) opening = undefined;
     if (opening !== undefined && opening.endpoint !== server.endpoint) { opening.controller.abort(new Error("MCP installed endpoint changed.")); await opening.promise.catch(() => undefined); opening = undefined; }
     signal.throwIfAborted();
     if (opening === undefined) {
       const controller = new AbortController();
-      opening = {endpoint: server.endpoint, controller, waiters: new Set(), handshakeSpent: false, operationSpent: false, promise: undefined!};
+      opening = {baseKey, key, endpoint: server.endpoint, controller, waiters: new Set(), handshakeSpent: false, operationSpent: false, promise: undefined!};
       this.#connectionOpenings.set(key, opening);
       const ownedOpening = opening;
       // Start after the first waiter registers; initialization is owned by all remaining waiters.
@@ -411,7 +416,18 @@ export class McpSDKClient implements McpClient {
         this.requireOpeningWaiters(opening);
         const refreshBudget: RefreshBudget = {operationSpent: opening.operationSpent, refreshTriggered: true};
         credential = await this.refreshCredential(identity, server, credential, signal, deadline, refreshBudget);
-        this.#connectionOpenings.set(connectionCacheKey(baseKey, credential), opening);
+        // A different credential admitted while refresh was in flight retires
+        // this owner. Its late raw result cannot overwrite the replacement.
+        signal.throwIfAborted();
+        this.requireOpeningWaiters(opening);
+        const replacementKey = connectionCacheKey(baseKey, credential);
+        const replacementOpening = this.#connectionOpenings.get(replacementKey);
+        if ((replacementOpening !== undefined && replacementOpening !== opening) || this.#connections.has(replacementKey)) {
+          throw new McpConnectorError("mcp_connection_failed", "MCP credential-bound readiness was superseded.");
+        }
+        opening.key = replacementKey;
+        this.retireStaleOpenings(baseKey, replacementKey);
+        this.#connectionOpenings.set(replacementKey, opening);
         for (const waiter of opening.waiters) waiter.budget.refreshTriggered = true;
       } finally { this.#openingClients.delete(client); }
     }
@@ -531,6 +547,18 @@ export class McpSDKClient implements McpClient {
     }, this.#idleTimeoutMs);
     if (typeof entry.idleTimer === "object" && entry.idleTimer !== null && "unref" in entry.idleTimer) {
       (entry.idleTimer as { unref: () => void }).unref();
+    }
+  }
+
+  private retireStaleOpenings(baseKey: string, replacementKey: string): void {
+    for (const pending of new Set(this.#connectionOpenings.values())) {
+      if (pending.baseKey !== baseKey || pending.key === replacementKey) continue;
+      const error = new McpConnectorError("mcp_connection_failed", "MCP credential-bound readiness was superseded.");
+      pending.controller.abort(error);
+      for (const waiter of pending.waiters) waiter.reject(error);
+      // Remove admission aliases immediately; the raw opening/SDK/close
+      // promises remain tracked until their actual callbacks join.
+      for (const [key, owner] of this.#connectionOpenings) if (owner === pending) this.#connectionOpenings.delete(key);
     }
   }
 

@@ -290,7 +290,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.C
 		payload, err := runtimecontrol.MarshalJSON(map[string]any{
 			"type": "session.error", "error": map[string]any{
 				"mcp_server_name": toolset.MCPServerName,
-				"type":            errorType, "message": "Configured GitHub MCP tools could not be loaded. This input was not executed; a new input can retry.",
+				"type":            errorType, "message": "Configured MCP tools could not be loaded. This input was not executed; a new input can retry.",
 				"retry_status": map[string]any{"type": "exhausted"},
 			},
 		})

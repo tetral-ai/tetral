@@ -137,6 +137,89 @@ for(const successful of [false,true])test(`second page HTTP401 ${successful?'suc
  try{if(successful){const listed=await f.client.listTools(identity);expect(listed.map(tool=>tool.name)).toEqual(['new_session']);expect(listed.some(tool=>tool.name==='old_partial')).toBe(false);expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,3,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined]);await expect(f.client.callTool({...call,toolName:'new_session',input:{nonce:'restart-control'}})).resolves.toMatchObject({structuredContent:{ok:true,source:'github-fixture',nonce:'restart-control'}});expect(peer.counts.call).toBe(1);expect(peer.counts.effects).toBe(1);}else{await expect(f.client.listTools(identity)).rejects.toMatchObject({code:'mcp_authentication_failed'});expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,4,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined,'page-two']);expect(f.client.connectionCount()).toBe(0);}const sessions=peer.requests.filter(request=>request.method==='initialize').map(request=>request.session);expect(sessions).toHaveLength(2);expect(sessions[0]).not.toBe(sessions[1]);}finally{await f.client.closeAll();await peer.close();}
 },10000);
 
+for (const mode of ['initialize','tools/list','refresh-ready','refresh-pending','refresh-alias','other-scope'] as const) test(`actual SDK pending credential retirement ${mode}`, async()=>{
+ const oldPeer=peerFor('github'),replacementPeer=peerFor('github');
+ for(const peer of [oldPeer,replacementPeer]){peer.notificationsEnabled=false;peer.credentials.set('Bearer token-old','old');peer.credentials.set('Bearer token-new','replacement');}
+ const refreshing=mode.startsWith('refresh');
+ const oldHeld=oldPeer.hold(refreshing?'tools/list':mode==='other-scope'?'initialize':mode);
+ if(refreshing)oldPeer.faults.set('tools/list',[401]);
+ const replacementHeld=mode==='refresh-pending'||mode==='refresh-alias'?replacementPeer.hold('tools/list'):undefined;
+ const refreshEntered=barrier(),refreshRelease=barrier();
+ let token='token-old',refreshes=0;
+ const sdks:{closeCalls:number;closed:boolean}[]=[],transports:{closeCalls:number;closed:boolean}[]=[];
+ const material=()=>({ok:true as const,mode:'bearer' as const,token,tokenHash:createHash('sha256').update(token).digest('hex'),vaultId:'v',credentialId:'c'});
+ const client=new McpSDKClient({
+  serverResolver:{async resolve(input){return registeredServer('github',input.mcpServerName);}},
+  credentialResolver:{async resolve(){return material();},async refresh(){refreshes++;refreshEntered.resolve();await refreshRelease.promise;return material();}},
+  onToolsListChanged:async()=>undefined,
+  // Both token partitions represent the same approved logical endpoint. Only
+  // the controlled peer differs so the old response can remain held.
+  createTransport:input=>{
+   const state={closeCalls:0,closed:false};transports.push(state);
+   const transport=new StreamableHTTPClientTransport(input.token==='token-old'?oldPeer.url:replacementPeer.url,streamableHTTPTransportOptions(input));
+   const close=transport.close.bind(transport);transport.close=async()=>{state.closeCalls++;await close();state.closed=true;};return transport;
+  },
+  createClient:()=>{
+   const state={closeCalls:0,closed:false};sdks.push(state);
+   const sdk=new DiscoverySDKClient({name:'pending-retirement-fixture',version:'1'},{capabilities:{}});
+   const close=sdk.close.bind(sdk);sdk.close=async()=>{state.closeCalls++;await close();state.closed=true;};return sdk;
+  },
+ });
+ const original=client.callTool({...call,input:{nonce:'old-owner'}}).then(result=>({result}),error=>({error}));
+ let replacement:Promise<unknown>|undefined;
+ try{
+  if(refreshing)await refreshEntered.promise;else await oldHeld.entered;
+  token='token-new';
+  if(mode==='refresh-alias'){
+   refreshRelease.resolve();await replacementHeld!.entered;
+   replacementPeer.faults.set('tools/call',[401,401]);
+   // A caller may have resolved the original snapshot before its owner rotated.
+   // Its original alias still joins that owner and inherits the spent allowance.
+   token='token-old';replacement=client.callTool({...call,input:{nonce:'alias-owner'}});
+   await until(()=>client.pendingWaiterCount()===2);
+   replacementHeld!.release();oldHeld.release();
+   expect(await original).toHaveProperty('error.code','mcp_authentication_failed');
+   await expect(replacement).rejects.toMatchObject({code:'mcp_authentication_failed'});
+   expect(replacementPeer.counts).toMatchObject({initialize:1,list:1,call:2,effects:0});
+  }else{
+   const replacementInput={...call,...(mode==='other-scope'?{workspaceId:'another-workspace'}:{}),input:{nonce:'replacement-owner'}};
+   replacement=client.callTool(replacementInput);
+   if(mode==='refresh-pending'){
+    await replacementHeld!.entered;expect(client.pendingWaiterCount()).toBe(1);
+    refreshRelease.resolve();oldHeld.release();
+    expect(await original).toHaveProperty('error.code','mcp_connection_failed');
+    replacementHeld!.release();
+   }
+   expect(await replacement).toHaveProperty('structuredContent',{ok:true,source:'github-fixture',nonce:'replacement-owner'});
+   oldHeld.release();refreshRelease.resolve();
+   const settled=await original;
+   if(mode==='other-scope'){
+    expect(settled).toHaveProperty('result.structuredContent',{ok:true,source:'github-fixture',nonce:'old-owner'});
+    expect(oldPeer.counts.call).toBe(1);expect(client.connectionCount()).toBe(2);expect(sdks[0]!.closeCalls).toBe(0);
+   }else{
+    expect(settled).toHaveProperty('error.code','mcp_connection_failed');
+    await until(()=>sdks[0]!.closed);
+    expect(oldPeer.counts.call).toBe(0);expect(oldPeer.counts.effects).toBe(0);expect(client.connectionCount()).toBe(1);
+   }
+   expect(await client.callTool({...replacementInput,input:{nonce:'later-replacement'}})).toHaveProperty('structuredContent',{ok:true,source:'github-fixture',nonce:'later-replacement'});
+   expect(replacementPeer.counts).toMatchObject({initialize:1,list:1,call:2,effects:2});
+  }
+  expect(refreshes).toBe(refreshing?1:0);
+  expect(oldPeer.counts).toMatchObject({initialize:1,list:mode==='initialize'?0:1,call:mode==='other-scope'?1:0});
+  await client.closeAll();
+  // Peer cleanup must not supply any SDK/transport retirement. SDK connect
+  // itself invokes close on initialization failure; actual transport closes once.
+  expect(sdks.every(sdk=>sdk.closeCalls>=1&&sdk.closed)).toBe(true);
+  expect(transports.every(transport=>transport.closeCalls===1&&transport.closed)).toBe(true);
+  expect(client.connectionCount()).toBe(0);expect(client.pendingWaiterCount()).toBe(0);
+  await until(()=>oldPeer.pendingRequests===0&&replacementPeer.pendingRequests===0);
+  console.info(JSON.stringify({kind:'mcp-pending-retirement-observation',case:caseName,refreshes,sdks,transports,old:{...oldPeer.counts},replacement:{...replacementPeer.counts},cached:client.connectionCount(),pending:client.pendingWaiterCount(),peerRequestsBeforeCleanup:[oldPeer.pendingRequests,replacementPeer.pendingRequests]}));
+ }finally{
+  oldHeld.release();replacementHeld?.release();refreshRelease.resolve();
+  await original;await replacement?.catch(()=>undefined);await client.closeAll();await oldPeer.close();await replacementPeer.close();
+ }
+},10000);
+
 test('all cancelled readiness owners join and close; later independent request can recover',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const held=peer.hold('tools/list');const f=component(peer);const one=new AbortController(),two=new AbortController();
  const a=f.client.callTool(call,{signal:one.signal}),b=f.client.callTool(call,{signal:two.signal});void a.catch(()=>undefined);void b.catch(()=>undefined);

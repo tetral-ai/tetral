@@ -527,6 +527,9 @@ output validators. Connect plus a successful all-page listing is the readiness
 barrier. Cache identity is `(workspace_id, session_id, configured_server_name,
 vault_id, credential_id, sha256(token))` with unambiguous framing. An installed
 endpoint change retires a mismatched ready/pending entry even under the same key.
+New credential material also retires superseded pending initialization in that
+scope; its waiters fail with `mcp_connection_failed` without replay, while aliases
+of the same refreshed opening keep their shared ownership and spent allowances.
 Concurrent openings coalesce. Each waiter owns its cancellation/deadline; one
 leaving preserves initialization for others, while all leaving aborts it. Failed
 initialization never publishes a ready client. Idle expiry closes and evicts.
