@@ -608,8 +608,18 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 			return err
 		},
 	}
+	baseBridge := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
+	baseBridge.RuntimeBindingTokenHMACKey = []byte("first_mail-loss-signing-key")
+	barrierBridge := &requestStartBarrierBridgeStore{
+		BridgeAPIStore: baseBridge, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, barrierBridge)
+	t.Cleanup(stopBridge)
+	var releaseStartOnce sync.Once
+	releaseStart := func() { releaseStartOnce.Do(func() { close(barrierBridge.release) }) }
+	defer releaseStart()
 	mailRuntime := startAttachmentRecoveryRuntime(
-		t, fixture.bridgeAddress, "complete", fixture.sessionID, fixture.childID,
+		t, bridgeAddress, "complete", fixture.sessionID, fixture.childID,
 		fixture.bindingID, 1, fixture.podUID,
 	)
 	var attemptsBeforeDelivery int
@@ -623,6 +633,12 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 	)
 	if active, err := deliveryRunner.RunOnceWithActivity(context.Background()); err != nil || !active {
 		t.Fatalf("deliver first_mail alongside unrelated interrupt = active:%t err:%v", active, err)
+	}
+	// Delivery/ACK does not order Request Start; hold that declaration for this custody cut.
+	select {
+	case <-barrierBridge.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cross-Thread mail did not reach the held Request Start")
 	}
 	var inboxStatus, queueStatus string
 	var attempts, messages, starts int
@@ -639,6 +655,7 @@ func TestSubagentMailProgressesDuringUnrelatedThreadInterrupt(t *testing.T) {
 	if inboxStatus != "accepted" || queueStatus != queue.StatusAcknowledged || attempts != attemptsBeforeDelivery+1 || messages != 1 || starts != 0 {
 		t.Fatalf("cross-Thread delivery custody = Inbox:%s Queue:%s attempts:%d (before:%d) Messages:%d starts:%d", inboxStatus, queueStatus, attempts, attemptsBeforeDelivery, messages, starts)
 	}
+	releaseStart()
 	started := mailRuntime.providerStart(t)
 	runSubagentOutputCaptureOnce(t, fixture.runtimeDB)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
