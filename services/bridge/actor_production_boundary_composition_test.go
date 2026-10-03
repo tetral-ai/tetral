@@ -88,7 +88,44 @@ func runSubagentProductionComposition(
 	if err != nil {
 		t.Fatalf("listen for subagent ToolRunner composition: %v", err)
 	}
-	server := grpc.NewServer()
+	type declarationAttempt struct {
+		WriteID             string `json:"writeId"`
+		EnteredAtUnixMS     int64  `json:"enteredAtUnixMs"`
+		RemainingDeadlineMS int64  `json:"remainingDeadlineMs"`
+		InputBytes          int    `json:"inputBytes"`
+		Pending             bool   `json:"pending"`
+		ElapsedMS           int64  `json:"elapsedMs"`
+		ReturnCode          string `json:"returnCode,omitempty"`
+	}
+	var declarationMu sync.Mutex
+	var declarationAttempts []*declarationAttempt
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		write, ok := request.(*bridgev1.WriteEventRequest)
+		if !ok || write.GetToolDeclaration() == nil {
+			return handler(ctx, request)
+		}
+		started := time.Now()
+		var remainingMS int64
+		if deadline, ok := ctx.Deadline(); ok {
+			remainingMS = time.Until(deadline).Milliseconds()
+		}
+		observation := &declarationAttempt{
+			WriteID: write.GetRuntimeWriteId()[:min(len(write.GetRuntimeWriteId()), 128)], EnteredAtUnixMS: started.UnixMilli(),
+			RemainingDeadlineMS: remainingMS,
+			InputBytes:          len(write.GetToolDeclaration().GetPublicExecutionInputJson()), Pending: true,
+		}
+		declarationMu.Lock()
+		declarationAttempts = append(declarationAttempts, observation)
+		if len(declarationAttempts) > 3 {
+			declarationAttempts = declarationAttempts[1:]
+		}
+		declarationMu.Unlock()
+		response, err := handler(ctx, request)
+		declarationMu.Lock()
+		observation.Pending, observation.ElapsedMS, observation.ReturnCode = false, time.Since(started).Milliseconds(), status.Code(err).String()
+		declarationMu.Unlock()
+		return response, err
+	}))
 	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, bridgeServer)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -114,7 +151,14 @@ func runSubagentProductionComposition(
 	command.Dir = "../agent-runtime"
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run subagent ToolRunner composition: %v: %s", err, output)
+		// Snapshot pending handlers under the same lock as their actual return observations.
+		declarationMu.Lock()
+		observations, encodeErr := json.Marshal(declarationAttempts)
+		declarationMu.Unlock()
+		if encodeErr != nil {
+			t.Fatal("encode subagent declaration observations")
+		}
+		t.Fatalf("run subagent ToolRunner composition: %v: %s declarationAttempts=%s", err, output, observations)
 	}
 	var result subagentProductionCompositionResult
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -202,6 +246,7 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
+	observeSubagentDeclarationDB(t, admin)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
 	result := runSubagentProductionComposition(
@@ -223,6 +268,68 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 	if children != 0 || operations != 0 || inbox != 0 || jobs != 0 {
 		t.Fatalf("oversized prompt child/operation/inbox/queue mutations = %d/%d/%d/%d", children, operations, inbox, jobs)
 	}
+}
+
+// This clone has no background worker. Sample only bounded backend state while
+// the real composition runs, so a failed declaration can distinguish a DB wait
+// from preparation before SQL. Query text and Tool inputs are never observed.
+func observeSubagentDeclarationDB(t *testing.T, admin *sql.DB) {
+	t.Helper()
+	type sample struct {
+		AtUnixMS int64           `json:"atUnixMs"`
+		Backends json.RawMessage `json:"backends,omitempty"`
+		Failed   bool            `json:"queryFailed,omitempty"`
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	done := make(chan struct{})
+	var samples []sample
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		var previous string
+		// Bound observer work separately from the child watchdog and each query.
+		for attempt := 0; attempt < 120; attempt++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			queryCtx, queryCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			var snapshot string
+			err := admin.QueryRowContext(queryCtx, `SELECT COALESCE(json_agg(json_build_object(
+				'pid',pid,'state',state,'waitType',wait_event_type,'waitEvent',wait_event,
+				'blockingCount',cardinality(pg_blocking_pids(pid))))::text,'[]')
+				FROM (SELECT pid,state,wait_event_type,wait_event FROM pg_stat_activity
+				WHERE datname=current_database() AND pid<>pg_backend_pid()
+				AND backend_type='client backend' ORDER BY pid LIMIT 8) observed`).Scan(&snapshot)
+			queryCancel()
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				samples = append(samples, sample{AtUnixMS: time.Now().UnixMilli(), Failed: true})
+			} else if snapshot != previous {
+				samples = append(samples, sample{AtUnixMS: time.Now().UnixMilli(), Backends: json.RawMessage(snapshot)})
+				previous = snapshot
+			}
+			if len(samples) > 8 {
+				samples = samples[len(samples)-8:]
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		if t.Failed() {
+			observations, err := json.Marshal(samples)
+			if err != nil {
+				t.Error("encode subagent declaration DB observations")
+				return
+			}
+			t.Logf("subagent declaration DB observations=%s", observations)
+		}
+	})
 }
 
 func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) {

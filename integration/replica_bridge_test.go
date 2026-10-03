@@ -145,7 +145,12 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		endpoint := serveReplicaBridge(t, observed, map[string]string{"runtime": pod}, nil)
 		request := bridgeAPIFinishIdleRequest(t, admin, bridgeAPIScope(session, thread, binding, 1, pod), "turn_core_capture_original", `{"type":"end_turn"}`)
 		child := startReplicaFinishIdleCoreChild(t, endpoint.Address, bridgeChildRequest(t, request))
-		waitHandoffCondition(t, "three joined actual pending capture waits", func() bool { return observed.joined.Load() >= 3 })
+		// Returned Bridge waits do not establish independent Sandbox worker dispatch.
+		waitHandoffCondition(t, "original capture provider entered", func() bool { return provider.calls.Load() >= 1 })
+		joinedBaseline := observed.joined.Load()
+		waitHandoffCondition(t, "three joined actual pending capture waits while provider held", func() bool {
+			return observed.joined.Load() >= joinedBaseline+3
+		})
 		writeID, generation, err := waitForPendingOutputCapture(admin, session, "")
 		if err != nil || writeID != request.DurableTurnId || provider.calls.Load() != 1 {
 			t.Fatalf("one original held capture id=%s generation=%d dispatches=%d err=%v", writeID, generation, provider.calls.Load(), err)

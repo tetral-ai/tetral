@@ -1,5 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { Metadata } from "@grpc/grpc-js";
+import { credentials, Metadata } from "@grpc/grpc-js";
+import type { CallOptions, ServiceError } from "@grpc/grpc-js";
+import { AgentRuntimeBridgeServiceClient } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type { WriteEventRequest, WriteEventResponse } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
@@ -13,6 +16,7 @@ import {
 	userMessage,
 } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
+import { bridgeDurableContextGrpcChannelOptions } from "../../src/bounds.js";
 import type { RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 
@@ -39,20 +43,92 @@ const bridgeOptions = {
 	tokenPath: "/unused/test-token",
 	metadataFactory: async () => new Metadata(),
 };
-const writer = new BridgeAPIEventWriter(bridgeOptions);
+const declarationAttempts: {
+	writeId: string;
+	inputBytes: number;
+	startedAtUnixMs: number;
+	invokeElapsedMs?: number;
+	callbackElapsedMs?: number;
+	callbackCode?: number;
+}[] = [];
+const bridgeClient = new AgentRuntimeBridgeServiceClient(
+	bridgeOptions.address,
+	credentials.createInsecure(),
+	bridgeDurableContextGrpcChannelOptions(),
+);
+const writeEvent = bridgeClient.writeEvent.bind(bridgeClient);
+// Observe the real unary handle without changing its options, ACK, or retry owner.
+bridgeClient.writeEvent = ((
+	request: WriteEventRequest,
+	metadata: Metadata,
+	options: Partial<CallOptions>,
+	callback: (error: ServiceError | null, response: WriteEventResponse) => void,
+) => {
+	if (request.toolDeclaration === undefined) return writeEvent(request, metadata, options, callback);
+	const observation: (typeof declarationAttempts)[number] = {
+		writeId: request.runtimeWriteId.slice(0, 128),
+		inputBytes: Buffer.byteLength(request.toolDeclaration.publicExecutionInputJson),
+		startedAtUnixMs: Date.now(),
+	};
+	declarationAttempts.push(observation);
+	if (declarationAttempts.length > 3) declarationAttempts.shift();
+	const started = performance.now();
+	const call = writeEvent(request, metadata, options, (error, response) => {
+		observation.callbackElapsedMs = performance.now() - started;
+		observation.callbackCode = error?.code ?? 0;
+		callback(error, response);
+	});
+	observation.invokeElapsedMs = performance.now() - started;
+	return call;
+}) as typeof bridgeClient.writeEvent;
+const writer = new BridgeAPIEventWriter({ ...bridgeOptions, client: bridgeClient });
 let requestEndCount = 0;
-let resolveSecondRequestEnd!: () => void;
-const secondRequestEnd = new Promise<void>((resolve) => {
-	resolveSecondRequestEnd = resolve;
+let resolveThirdRequestEnd!: () => void;
+const thirdRequestEnd = new Promise<void>((resolve) => {
+	resolveThirdRequestEnd = resolve;
 });
+let releaseThirdRequestEnd!: () => void;
+const thirdRequestEndRelease = new Promise<void>((resolve) => {
+	releaseThirdRequestEnd = resolve;
+});
+let lastFailedWriter:
+	| { readonly method: "append"; readonly eventType: string; readonly errorCode: string; readonly elapsedMs: number }
+	| { readonly method: "settleToolResult" | "writeRequestEnd"; readonly errorCode: string }
+	| undefined;
 const tracedWriter = {
-	append: writer.append.bind(writer),
-	settleToolResult: writer.settleToolResult.bind(writer),
+	append: async (...args: Parameters<typeof writer.append>) => {
+		const started = performance.now();
+		const result = await writer.append(...args);
+		if (!result.ok) {
+			lastFailedWriter = {
+				method: "append",
+				eventType: args[0].event.type,
+				errorCode: result.error.code,
+				elapsedMs: performance.now() - started,
+			};
+		}
+		return result;
+	},
+	settleToolResult: async (...args: Parameters<typeof writer.settleToolResult>) => {
+		const result = await writer.settleToolResult(...args);
+		if (!result.ok) {
+			lastFailedWriter = { method: "settleToolResult", errorCode: result.error.code };
+		}
+		return result;
+	},
 	writeRequestEnd: async (...args: Parameters<typeof writer.writeRequestEnd>) => {
 		const result = await writer.writeRequestEnd(...args);
+		if (!result.ok) {
+			lastFailedWriter = { method: "writeRequestEnd", errorCode: result.error.code };
+		}
 		if (result.ok && result.type !== "stale") {
 			requestEndCount += 1;
-			if (requestEndCount === 3) resolveSecondRequestEnd();
+			if (requestEndCount === 3) {
+				resolveThirdRequestEnd();
+				// Stop after the real third RequestEnd ACK. Returning it before interruption
+				// lets Core enter FinishIdle, whose output-capture worker is outside this fixture.
+				await thirdRequestEndRelease;
+			}
 		}
 		return result;
 	},
@@ -186,8 +262,30 @@ const runFiber = Effect.runFork(
 		),
 	),
 );
-await secondRequestEnd;
-await Effect.runPromise(Fiber.interrupt(runFiber));
+await Promise.race([
+	thirdRequestEnd,
+	Effect.runPromise(Fiber.await(runFiber)).then((exit) => {
+		const observed = {
+			exitTag: exit._tag,
+			...(exit._tag === "Success" ? { resultType: exit.value.type } : {}),
+			...(exit._tag === "Success" && exit.value.type === "failed"
+				? {
+						errorCode: exit.value.error.code,
+						releaseReason: exit.value.releaseSession?.reason,
+					}
+				: {}),
+			requestEndCount,
+			providerInvocations,
+			lastFailedWriter,
+			declarationAttempts,
+		};
+		throw new Error(`ThreadLoop exited before three durable RequestEnd ACKs: ${JSON.stringify(observed)}`);
+	}),
+]);
+// Request interruption before releasing the ACK; joining first would hold both owners.
+const interrupted = Effect.runPromise(Fiber.interrupt(runFiber));
+releaseThirdRequestEnd();
+await interrupted;
 
 process.stdout.write(
 	JSON.stringify({

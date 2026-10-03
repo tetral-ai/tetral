@@ -151,21 +151,24 @@ func (p *runToolCanonicalJSONParser) parseStringToken() (string, error) {
 	if !p.consume('"') {
 		return "", errors.New("missing JSON string")
 	}
-	start := p.offset - 1
-	for p.offset < len(p.raw) {
-		switch p.raw[p.offset] {
+	raw, offset := p.raw, p.offset
+	start := offset - 1
+	for offset < len(raw) {
+		switch raw[offset] {
 		case '"':
-			p.offset++
-			return p.raw[start:p.offset], nil
+			offset++
+			p.offset = offset
+			return raw[start:offset], nil
 		case '\\':
-			p.offset += 2
-			if p.offset <= len(p.raw) && p.raw[p.offset-1] == 'u' {
-				p.offset += 4
+			offset += 2
+			if offset <= len(raw) && raw[offset-1] == 'u' {
+				offset += 4
 			}
 		default:
-			p.offset++
+			offset++
 		}
 	}
+	p.offset = offset
 	return "", errors.New("unterminated JSON string")
 }
 

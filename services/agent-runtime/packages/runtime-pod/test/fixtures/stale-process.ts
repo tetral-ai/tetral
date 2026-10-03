@@ -9,13 +9,17 @@ import { commandEnv } from "./command-process.js";
 
 const [address, sink = "normal"] = process.argv.slice(2);
 if (!address) throw new Error("controlled Bridge address required");
+// Stale-handling and the separate deadline control use parsed production
+// defaults; inherited timing overrides cannot change this process fixture.
+for (const key of [
+  "TETRAL_RUNTIME_REPORT_TIMEOUT_MS",
+  "TETRAL_RUNTIME_REPORT_INTERVAL_MS",
+  "TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
+]) delete process.env[key];
 Object.assign(process.env, commandEnv(), {
   TETRAL_RUNTIME_DRAIN_TIMEOUT_MS: "2000",
   TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS: "2000",
   TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS: "1000",
-  TETRAL_RUNTIME_REPORT_TIMEOUT_MS: "30",
-  TETRAL_RUNTIME_REPORT_INTERVAL_MS: "40",
-  TETRAL_RUNTIME_PROCESS_FRESHNESS_MS: "120",
 });
 const emit = (event: string) =>
   process.stdout.write(JSON.stringify({ event, at: Date.now() }) + "\n");
@@ -34,6 +38,44 @@ await runProcessEntry((processBoundary) =>
         policies: config.bridgeMethodPolicies,
         metadataFactory: async () => new Metadata(),
       });
+      const policy = config.bridgeMethodPolicies.reportRuntimeProcess;
+      process.stdout.write(
+        JSON.stringify({
+          event: "process.policy",
+          report_timeout_ms: policy.kind === "fixed" ? policy.timeoutMs : null,
+          report_interval_ms: config.lifecycle.reportIntervalMs,
+          freshness_ms: config.lifecycle.processFreshnessMs,
+        }) + "\n",
+      );
+      // Observe the actual returned client status independently of the logger sink.
+      // The delegated report retains its generated handle/callback ownership.
+      const report = runtimeProcess.report.bind(runtimeProcess);
+      runtimeProcess.report = async (phase, deadline) => {
+        emit("report.attempt." + phase);
+        try {
+          await report(phase, deadline);
+          emit("report.ack." + phase);
+        } catch (error) {
+          const code =
+            error !== null && typeof error === "object" && "code" in error
+              ? error.code
+              : undefined;
+          process.stdout.write(
+            JSON.stringify({
+              event: "report.returned",
+              phase,
+              code:
+                typeof code === "number" &&
+                Number.isInteger(code) &&
+                code >= 0 &&
+                code <= 16
+                  ? code
+                  : null,
+            }) + "\n",
+          );
+          throw error;
+        }
+      };
       const app = createRuntimePodApp({
         config: {
           ...config,

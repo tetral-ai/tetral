@@ -60,10 +60,36 @@ func WriteJSON(path string, value any) error {
 
 func NewProxyPair(t *testing.T) *ProxyPair {
 	t.Helper()
+	p := &ProxyPair{Directory: t.TempDir()}
+	// Compile under the owning test deadline before starting the separate
+	// 30-second runtime budget: preparation does not measure proxy readiness.
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		t.Fatal("proxy backend preparation requires a bounded test deadline")
+	}
+	prepare, stopPrepare := context.WithDeadline(t.Context(), deadline)
+	defer stopPrepare()
+	prepared := time.Now()
+	binary := filepath.Join(p.Directory, "backend")
+	// #nosec G204 -- fixed Go backend package and flags; only a test-owned output directory varies.
+	build := exec.CommandContext(prepare, "go", "build", "-trimpath", "-o", binary, "./integration/transporttest/cmd/backend")
+	build.Dir = RepositoryRoot(t)
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build pinned-tool fixture backend: %v\n%s", err, output)
+	}
+	t.Logf("fixture backend compiled in %s", time.Since(prepared))
+	check := func(stage string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("local proxy fixture %s: %v", stage, err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	p := &ProxyPair{Directory: t.TempDir()}
-	p.Resources = Must(testinfra.NewDockerResources(ctx, "transport"))
+	var err error
+	p.Resources, err = testinfra.NewDockerResources(ctx, "transport")
+	check("resource preparation", err)
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -71,12 +97,17 @@ func NewProxyPair(t *testing.T) *ProxyPair {
 			t.Errorf("transport fixture cleanup: %v", err)
 		}
 	})
-	image := Must(testinfra.PinnedEnvoyImage(RepositoryRoot(t)))
-	network := Must(p.Resources.Network(ctx))
+	image, err := testinfra.PinnedEnvoyImage(RepositoryRoot(t))
+	check("pinned image", err)
+	network, err := p.Resources.Network(ctx)
+	check("network creation", err)
 	p.Network = network
-	p.Root = Must(NewAuthority("R1"))
-	p.Caller = Must(p.Root.ValidLeaf("caller.transport.test", CallerURI))
-	p.ReceiverLeaf = Must(p.Root.ValidLeaf("receiver.transport.test", ReceiverURI))
+	p.Root, err = NewAuthority("R1")
+	check("authority", err)
+	p.Caller, err = p.Root.ValidLeaf("caller.transport.test", CallerURI)
+	check("caller leaf", err)
+	p.ReceiverLeaf, err = p.Root.ValidLeaf("receiver.transport.test", ReceiverURI)
+	check("receiver leaf", err)
 	for _, entry := range []struct {
 		name string
 		leaf Leaf
@@ -91,16 +122,12 @@ func NewProxyPair(t *testing.T) *ProxyPair {
 			t.Fatal(err)
 		}
 	}
-	binary := filepath.Join(p.Directory, "backend")
-	// #nosec G204 -- fixed Go backend package and flags; only a test-owned output directory varies.
-	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", binary, "./integration/transporttest/cmd/backend")
-	build.Dir = RepositoryRoot(t)
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build pinned-tool fixture backend: %v\n%s", err, output)
-	}
-	backend := Must(p.Resources.Run(ctx, testinfra.ContainerSpec{Image: image, Network: network, Aliases: []string{"backend"}, Mounts: []testinfra.DockerMount{{Source: binary, Target: "/backend", ReadOnly: true}}, Ports: []int{8888}, Entrypoint: "/backend", User: "0"}))
-	p.BackendControl = "http://" + Must(backend.Address(ctx, 8888))
+
+	backend, err := p.Resources.Run(ctx, testinfra.ContainerSpec{Image: image, Network: network, Aliases: []string{"backend"}, Mounts: []testinfra.DockerMount{{Source: binary, Target: "/backend", ReadOnly: true}}, Ports: []int{8888}, Entrypoint: "/backend", User: "0"})
+	check("backend startup", err)
+	address, err := backend.Address(ctx, 8888)
+	check("backend address", err)
+	p.BackendControl = "http://" + address
 	for _, role := range []string{"receiver", "caller"} {
 		port := 10000
 		if role == "caller" {
@@ -110,15 +137,24 @@ func NewProxyPair(t *testing.T) *ProxyPair {
 		if err := WriteJSON(filepath.Join(p.Directory, role, "bootstrap.json"), config); err != nil {
 			t.Fatal(err)
 		}
-		container := Must(p.Resources.Run(ctx, testinfra.ContainerSpec{Image: image, Network: network, Aliases: []string{role}, Mounts: []testinfra.DockerMount{{Source: p.Directory, Target: "/fixture", ReadOnly: true}}, Ports: []int{port, 9901}, Entrypoint: "/usr/local/bin/envoy", Command: []string{"-c", "/fixture/" + role + "/bootstrap.json", "--concurrency", "1", "--log-level", "warning"}, User: "0"}))
+		container, err := p.Resources.Run(ctx, testinfra.ContainerSpec{Image: image, Network: network, Aliases: []string{role}, Mounts: []testinfra.DockerMount{{Source: p.Directory, Target: "/fixture", ReadOnly: true}}, Ports: []int{port, 9901}, Entrypoint: "/usr/local/bin/envoy", Command: []string{"-c", "/fixture/" + role + "/bootstrap.json", "--concurrency", "1", "--log-level", "warning"}, User: "0"})
+		check("proxy startup", err)
 		if role == "receiver" {
 			p.Receiver = container
-			p.ReceiverAddress = Must(container.Address(ctx, port))
-			p.ReceiverAdmin = "http://" + Must(container.Address(ctx, 9901))
+			address, err := container.Address(ctx, port)
+			check("receiver address", err)
+			p.ReceiverAddress = address
+			address, err = container.Address(ctx, 9901)
+			check("receiver admin", err)
+			p.ReceiverAdmin = "http://" + address
 		} else {
 			p.Source = container
-			p.SourceAddress = Must(container.Address(ctx, port))
-			p.SourceAdmin = "http://" + Must(container.Address(ctx, 9901))
+			address, err := container.Address(ctx, port)
+			check("source address", err)
+			p.SourceAddress = address
+			address, err = container.Address(ctx, 9901)
+			check("source admin", err)
+			p.SourceAdmin = "http://" + address
 		}
 		t.Logf("local %s proxy locked reference=%s actual image=%s", role, image, container.ImageID)
 	}
