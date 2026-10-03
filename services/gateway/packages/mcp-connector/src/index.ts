@@ -1,9 +1,9 @@
 /**
  * MCP connector: serves the ListMcpTools and RunMcpTool RPCs of
- * McpConnectorService against the curated MCP server catalog, holding decoded
+ * McpConnectorService against the registered MCP server adapters, holding decoded
  * media in memory and returning refs-only tool results.
  * Package consumers use this barrel to import the connector's public domain
- * surfaces; the barrel delegates behavior to the authentication, catalog,
+ * surfaces; the barrel delegates behavior to the authentication, installed Server resolution,
  * client, credential, formatting, idempotency, and service modules below.
  *
  * OWNS:
@@ -14,7 +14,7 @@
  *   credential-update path (credential-update-path.ts). Every other store
  *   access — credential resolution, session vault lookup — is read-only, and
  *   the connector never writes the attachment store.
- * - Curated catalog membership and request/response bounds (catalog.ts,
+ * - Registered endpoint admission and request/response bounds (adapters/registry.ts,
  *   bounds.ts).
  *
  * STATE MACHINE (tool-result durability). Every durable attachment and
@@ -40,14 +40,17 @@
  *   provider-gateway package.
  *
  * UPDATE-WITH: service.ts, client.ts, bridge-client.ts,
- * credential-update-path.ts, formatter.ts, catalog.ts, bounds.ts.
+ * credential-update-path.ts, formatter.ts, adapters/registry.ts, bounds.ts.
  *
  * @packageDocumentation
  */
 export * from "./auth.js";
 export * from "./bounds.js";
 export * from "./bridge-client.js";
-export * from "./catalog.js";
+export * from "./adapters/registry.js";
+export * from "./adapters/types.js";
+export * from "./server-resolver.js";
+export * from "./execution-budget.js";
 export * from "./client.js";
 export * from "./config.js";
 export * from "./credential.js";

@@ -4,7 +4,7 @@
  * Adapts the generated MCP connector gRPC service to the service shell on the
  * process's dedicated internal listener. Runtime-facing RunMcpTool carries
  * bounded JSON input and refs-only results; Bridge-facing ListMcpTools carries
- * scoped catalog requests and tool definitions. Raw decoded media leaves the
+ * scoped configured Server requests and tool definitions. Raw decoded media leaves the
  * connector only through its separate Bridge commit client. This adapter applies
  * symmetric message limits and preserves only intentional service status errors,
  * mapping every unexpected failure to a bounded internal error. The process
@@ -13,6 +13,7 @@
  * tool execution.
  */
 
+import { McpConnectorError } from "./errors.js";
 import {
   Metadata,
   Server,
@@ -61,7 +62,22 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
     ...mcpGrpcServerKeepaliveOptions(),
   });
   const implementation: McpConnectorServiceServer = {
-    runMcpTool: unaryHandler((request, metadata) => service.runMcpTool(request, metadata)),
+    runMcpTool: (call, callback) => {
+      const controller = new AbortController();
+      const cancel = () => {
+        const deadline = call.getDeadline();
+        const expired = (deadline instanceof Date ? deadline.getTime() : deadline) <= Date.now();
+        controller.abort(expired ? new McpConnectorError("mcp_timeout", "MCP tool call timed out.") : new Error("MCP execution caller cancelled"));
+      };
+      call.on("cancelled", cancel);
+      if (call.cancelled) cancel();
+      const deadline = call.getDeadline();
+      const remaining = (deadline instanceof Date ? deadline.getTime() : deadline) - Date.now();
+      void unary(() => service.runMcpTool(call.request, call.metadata, {
+        signal: controller.signal,
+        ...(Number.isFinite(remaining) ? {timeoutMs: Math.max(1, remaining)} : {}),
+      }), callback).finally(() => call.removeListener("cancelled", cancel));
+    },
     listMcpTools: (call, callback) => {
       const controller = new AbortController();
       const cancel = () => controller.abort(new Error("MCP discovery caller cancelled"));

@@ -1,8 +1,10 @@
+import { registeredServer } from "../fixtures/registered-server.js";
+import { fixtureServerResolver } from "../fixtures/registered-server.js";
 import { expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { McpSDKClient } from "../../src/client.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { recordMcpOAuthRefreshCompleted } from "../../src/logger.js";
@@ -71,7 +73,7 @@ test("concurrent SDK calls share one durable OAuth rotation and terminal failure
     appURL.username = role;
     appURL.password = password;
     app = new Bun.SQL({ url: appURL.toString(), max: 4 });
-    const resolver = new SQLGitHubMcpCredentialResolver(
+    const resolver = new SQLMcpCredentialResolver(
       app as unknown as McpCredentialSQL, keyHex, () => now, fetchFn, undefined, undefined,
       (event) => {
         events.push(event);
@@ -131,8 +133,8 @@ test("concurrent SDK calls share one durable OAuth rotation and terminal failure
   }
 });
 
-function mcpClient(resolver: SQLGitHubMcpCredentialResolver, observeToken: (token: string) => void): McpSDKClient {
-  return new McpSDKClient({
+function mcpClient(resolver: SQLMcpCredentialResolver, observeToken: (token: string) => void): McpSDKClient {
+  return new McpSDKClient({serverResolver: fixtureServerResolver,
     credentialResolver: resolver, onToolsListChanged: async () => undefined,
     createTransport: ({ token }) => {
       observeToken(token ?? "");

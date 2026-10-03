@@ -103,3 +103,28 @@ export function logWorkloadStarted(logger: McpConnectorLogger): void {
     // Listener readiness, not observability delivery, determines startup success.
   }
 }
+
+export interface McpExecutionObservation {
+  readonly claimId: string; readonly toolUseEventId: string;
+  readonly elapsedMs: number; readonly remainingMs: number;
+}
+
+/** Fixed owner-phase observation; never derives diagnostics from dependency messages. */
+export function mcpPhaseCompletedLogRecord(input: {
+  readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName?: string;
+  readonly phase: string; readonly outcome: string; readonly durationMs: number;
+  readonly claimId?: string; readonly toolUseEventId?: string;
+  readonly elapsedMs?: number; readonly remainingMs?: number; readonly attempt?: number;
+}): McpConnectorLogRecord {
+  return {event: `mcp_${input.phase}_completed`, "event.kind": `mcp_${input.phase}_completed`,
+    operation: `mcp_${input.phase}`, component: "mcp-connector", phase: input.phase,
+    outcome: input.outcome, "duration.ms": Math.max(0,input.durationMs),
+    "workspace.id": input.workspaceId, "session.id": input.sessionId,
+    ...(input.mcpServerName === undefined ? {} : {"mcp.server.name": input.mcpServerName}),
+    ...(input.claimId === undefined ? {} : {"request.id": input.claimId}),
+    ...(input.toolUseEventId === undefined ? {} : {"mcp.tool_use_event_id": input.toolUseEventId}),
+    ...(input.elapsedMs === undefined ? {} : {"timeout.elapsed_ms": Math.max(0,input.elapsedMs)}),
+    ...(input.remainingMs === undefined ? {} : {"timeout.remaining_ms": Math.max(0,input.remainingMs)}),
+    ...(input.attempt === undefined ? {} : {attempt: input.attempt}),
+    "diagnostic.repeat": input.claimId === undefined};
+}

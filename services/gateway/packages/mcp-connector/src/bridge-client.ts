@@ -8,6 +8,8 @@
  * acknowledgements, keeps pending media out of stored responses, and reads committed refs-only
  * results back from Bridge's direct durable facts.
  */
+import { mcpPhaseCompletedLogRecord } from "./logger.js";
+import type { McpConnectorLogger } from "./service.js";
 import { credentials, status } from "@grpc/grpc-js";
 import type {
   ClientUnaryCall,
@@ -223,6 +225,7 @@ export class BridgeAPIManifestChangeNotifier {
 
 /** Configures the authenticated Bridge client that owns durable MCP tool-result reservations. */
 export interface BridgeAPIMcpToolResultIdempotencyStoreOptions {
+  readonly logger?: Pick<McpConnectorLogger, "info"> | undefined;
   readonly address: string;
   readonly tokenPath: string;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
@@ -323,6 +326,13 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     return { status: "stale_custody" };
   }
 
+  private async observeFirstCommit<T>(attempt: number, key: IdempotencyKey, context: McpIdempotencyContext, operation: () => Promise<T>): Promise<T> {
+    if (attempt > 0) return operation();
+    const started = performance.now(); let outcome = "failed";
+    try { const value = await operation(); outcome = "ack_received"; return value; }
+    finally { try { this.options.logger?.info(mcpPhaseCompletedLogRecord({...context,toolUseEventId:key.toolUseEventId,phase:"first_commit",outcome,attempt:1,durationMs:performance.now()-started})); } catch { /* receipt ownership is independent of logging */ } }
+  }
+
   async store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, context?: McpIdempotencyContext) {
     if (context === undefined) {
       throw new Error("mcp tool idempotency context is required");
@@ -344,6 +354,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     let result: McpToolCommitResult;
     let committedResponse: RunMcpToolResponse | undefined;
     let outcomeUnknown = false;
+    let recoveryStarted: number | undefined;
+    let recoveryAttempts=0;
     for (let attempt = 0; ; attempt++) {
       if (
         this.stopping ||
@@ -379,7 +391,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
         continue;
       }
       try {
-        const response = await commitMcpToolResult(
+        if(outcomeUnknown){recoveryStarted??=performance.now();recoveryAttempts++;}
+        const response = await this.observeFirstCommit(attempt,key,context, () => commitMcpToolResult(
           this.client,
           activeRequest,
           metadata,
@@ -387,12 +400,13 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
             deadline: new Date(
               Math.min(
                 this.now() + this.commitTimeoutMs,
+                attempt === 0 ? context.firstCommitDeadline ?? Infinity : Infinity,
                 context.deadline ?? Infinity,
                 context.phaseDeadline?.() ?? Infinity,
               ),
             ),
           },
-        );
+        ));
         try {
           result = parseMcpToolCommitResult(response);
           if (result.type !== "stale") {
@@ -460,6 +474,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
       throw new McpIdempotencyStaleCustodyError();
     }
     this.releaseLocalClaim(key, context);
+    if(recoveryStarted!==undefined) { try { this.options.logger?.info(mcpPhaseCompletedLogRecord({...context,toolUseEventId:key.toolUseEventId,phase:"receipt_recovery",outcome:"converged",attempt:recoveryAttempts,durationMs:performance.now()-recoveryStarted})); } catch {} }
     return committedResponse!;
   }
 

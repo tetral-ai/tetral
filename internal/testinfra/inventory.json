@@ -12,6 +12,46 @@
       "dependencies": ["postgresql"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPManifestNotificationsCommitOneGeneration",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPClientRecreationReconcilesManifest",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPAdaptersExecuteThroughDurableClaims",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPServerResolutionPreservesCredentialScope",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/bridge",
+      "name": "TestPostgreSQLMCPOutputValidationSettlesRejectedResults",
+      "dependencies": ["postgresql", "bun-workspaces"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/bridge",
       "name": "TestPostgreSQLMemoryProjectionMissingReceiptKeepsBoundScopeError",
       "dependencies": ["postgresql"]

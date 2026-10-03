@@ -3,12 +3,12 @@ import type { SQLSource } from "@tetral/ts-dbconnect";
 /**
  * @packageDocumentation
  *
- * Resolves the GitHub MCP bearer credential visible through a session's vault
+ * Resolves the registered MCP bearer credential visible through a session's vault
  * set. The resolver scopes reads to the workspace, admits only live OAuth or
  * static bearer rows whose public MCP URL matches the curated server, and
  * fails closed unless exactly one row matches before decrypting its payload.
  * The MCP SDK client calls this module for initial connection material and
- * authentication-failure refreshes; the module calls catalog lookup,
+ * authentication-failure refreshes; the module uses the bound registered adapter,
  * transactional SQL, Web Crypto, and the locked credential update path.
  * Plaintext tokens leave only in successful in-process resolution objects.
  * Selection, decryption, expiry, and locked-refresh failures use bounded error
@@ -17,11 +17,12 @@ import type { SQLSource } from "@tetral/ts-dbconnect";
  */
 
 import { createHash } from "node:crypto";
-import { catalogEntryByName, normalizeCatalogURL } from "./catalog.js";
+import { normalizeMcpEndpoint } from "./adapters/registry.js";
+import type { ResolvedMcpServer } from "./server-resolver.js";
 export { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
-import { SQLVaultGitHubMcpCredentialUpdatePath } from "./credential-update-path.js";
-import type { GitHubMcpCredentialRefreshWriter } from "./credential-update-path.js";
+import { SQLVaultMcpCredentialUpdatePath } from "./credential-update-path.js";
+import type { McpCredentialRefreshWriter } from "./credential-update-path.js";
 import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
 
 type FetchLike = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
@@ -37,12 +38,12 @@ export interface McpCredentialSQL {
 }
 
 /**
- * Supplies per-session GitHub bearer material to the MCP SDK client.
+ * Supplies per-session MCP bearer material to the MCP SDK client.
  * Implementations resolve against durable session-visible credentials on each
  * connection attempt and support one forced refresh after authentication
  * rejection. Successful plaintext material remains an in-process value.
  */
-export interface GitHubMcpCredentialResolver {
+export interface McpCredentialResolver {
   /**
    * Selects and resolves exactly one live credential for the workspace,
    * session, and curated MCP server identity.
@@ -51,8 +52,9 @@ export interface GitHubMcpCredentialResolver {
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
+    readonly resolvedServer: ResolvedMcpServer;
     readonly signal?: AbortSignal | undefined;
-  }): Promise<GitHubMcpCredentialResolution>;
+  }): Promise<McpCredentialResolution>;
   /**
    * Re-resolves the selected row and delegates OAuth write-back when needed.
    * The previous token hash allows a concurrent refresh loser to reuse newly
@@ -62,28 +64,29 @@ export interface GitHubMcpCredentialResolver {
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
+    readonly resolvedServer: ResolvedMcpServer;
     readonly vaultId: string;
     readonly credentialId: string;
     readonly previousTokenHash: string;
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
-  }): Promise<GitHubMcpCredentialResolution>;
+  }): Promise<McpCredentialResolution>;
 }
 
 /**
- * Fail-closed result of resolving GitHub MCP authentication material. Success
+ * Fail-closed result of resolving registered MCP authentication material. Success
  * carries the bearer token for transport injection, its hash for connection
  * identity, and whether this call performed a durable refresh.
  */
-export type GitHubMcpCredentialResolution =
+export type McpCredentialResolution =
   | { readonly ok: true; readonly mode: "bearer"; readonly token: string; readonly tokenHash: string; readonly vaultId: string; readonly credentialId: string; readonly refreshTriggered?: boolean | undefined }
-  | { readonly ok: false; readonly error: GitHubMcpCredentialError };
+  | { readonly ok: false; readonly error: McpCredentialError };
 
 /**
  * Bounded categories for selection, decryption, expiry, and locked-refresh
  * failures. Uncaught selection-query failures are outside this union.
  */
-export type GitHubMcpCredentialError =
+export type McpCredentialError =
   | "credential_required"
   | "ambiguous"
   | "undecryptable"
@@ -91,14 +94,14 @@ export type GitHubMcpCredentialError =
   | "refresh_unavailable"
   | "refresh_failed";
 
-interface GitHubCredentialSQLRow {
+interface McpCredentialSQLRow {
   readonly id: string;
   readonly vault_id: string;
   readonly auth_public_json: string | Record<string, unknown>;
   readonly encrypted_auth?: unknown;
 }
 
-interface GitHubCredentialMatchedRow extends GitHubCredentialSQLRow {
+interface McpCredentialMatchedRow extends McpCredentialSQLRow {
   readonly mcp_server_url: string;
 }
 
@@ -126,25 +129,25 @@ interface OAuthTokenEndpointAuth {
 }
 
 /**
- * PostgreSQL-backed resolver for session-scoped GitHub MCP credentials. It
+ * PostgreSQL-backed resolver for session-scoped MCP credentials. It
  * separates read-only selection and decryption from the injected update owner,
  * which serializes OAuth refresh and performs the credential-row write.
  */
-export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolver {
+export class SQLMcpCredentialResolver implements McpCredentialResolver {
   private readonly sqlSource: SQLSource<McpCredentialSQL>;
-  private readonly refreshWriter: GitHubMcpCredentialRefreshWriter;
+  private readonly refreshWriter: McpCredentialRefreshWriter;
 
   constructor(
     sql: McpCredentialSQL | SQLSource<McpCredentialSQL>,
     private readonly masterKeyHex: string,
     private readonly now: () => Date = () => new Date(),
     fetchFn: FetchLike = fetch,
-    refreshWriter?: GitHubMcpCredentialRefreshWriter,
+    refreshWriter?: McpCredentialRefreshWriter,
     refreshHTTPTimeoutMs?: number,
     onRefreshCompleted?: ((event: McpOAuthRefreshCompletedEvent) => void) | undefined,
   ) {
     this.sqlSource = asSQLSource(sql);
-    this.refreshWriter = refreshWriter ?? new SQLVaultGitHubMcpCredentialUpdatePath(sql, masterKeyHex, now, fetchFn, refreshHTTPTimeoutMs, onRefreshCompleted);
+    this.refreshWriter = refreshWriter ?? new SQLVaultMcpCredentialUpdatePath(sql, masterKeyHex, now, fetchFn, refreshHTTPTimeoutMs, onRefreshCompleted);
   }
 
   /**
@@ -155,10 +158,11 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
+    readonly resolvedServer: ResolvedMcpServer;
     readonly signal?: AbortSignal | undefined;
-  }): Promise<GitHubMcpCredentialResolution> {
-    const catalog = catalogEntryByName(input.mcpServerName);
-    if (catalog === undefined) {
+  }): Promise<McpCredentialResolution> {
+    const adapter = input.resolvedServer.adapter;
+    if (adapter === undefined) {
       return fail("credential_required");
     }
     const rows = await this.loadMatchingRows(input);
@@ -180,12 +184,13 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
+    readonly resolvedServer: ResolvedMcpServer;
     readonly vaultId: string;
     readonly credentialId: string;
     readonly previousTokenHash: string;
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
-  }): Promise<GitHubMcpCredentialResolution> {
+  }): Promise<McpCredentialResolution> {
     const rows = await this.loadMatchingRows(input);
     const row = rows.find((candidate) => candidate.vault_id === input.vaultId && candidate.id === input.credentialId);
     if (row === undefined) {
@@ -202,10 +207,11 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
-  }): Promise<readonly GitHubCredentialMatchedRow[]> {
+    readonly resolvedServer: ResolvedMcpServer;
+  }): Promise<readonly McpCredentialMatchedRow[]> {
     return await this.sqlSource.withSQL(async (sql) => {
-      const catalog = catalogEntryByName(input.mcpServerName);
-      if (catalog === undefined) {
+      const adapter = input.resolvedServer.adapter;
+      if (adapter === undefined) {
         return [];
       }
       if (sql.begin === undefined) {
@@ -213,7 +219,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
       }
       const rows = await sql.begin(async (tx) => {
         await setWorkspaceRLS(tx, input.workspaceId);
-        return await tx<readonly GitHubCredentialSQLRow[]>`
+        return await tx<readonly McpCredentialSQLRow[]>`
           WITH session_vaults AS (
             SELECT jsonb_array_elements_text(vault_ids_json::jsonb) AS vault_id
               FROM sessions
@@ -230,10 +236,10 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
            ORDER BY c.vault_id ASC, c.id ASC
         `;
       });
-      const matched: GitHubCredentialMatchedRow[] = [];
+      const matched: McpCredentialMatchedRow[] = [];
       for (const row of rows) {
         const mcpServerURL = mcpServerURLFromPublicAuth(row.auth_public_json);
-        if (mcpServerURL !== undefined && catalogURLMatches(mcpServerURL, catalog.url)) {
+        if (mcpServerURL !== undefined && endpointMatches(mcpServerURL, adapter.endpoint)) {
           matched.push({ ...row, mcp_server_url: mcpServerURL });
         }
       }
@@ -245,13 +251,14 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
-  }, row: GitHubCredentialMatchedRow | undefined, options: {
+    readonly resolvedServer: ResolvedMcpServer;
+  }, row: McpCredentialMatchedRow | undefined, options: {
     readonly force: boolean;
     readonly previousTokenHash?: string | undefined;
     readonly signal?: AbortSignal | undefined;
-  }): Promise<GitHubMcpCredentialResolution> {
-    const catalog = catalogEntryByName(input.mcpServerName);
-    if (catalog === undefined) {
+  }): Promise<McpCredentialResolution> {
+    const adapter = input.resolvedServer.adapter;
+    if (adapter === undefined) {
       return fail("credential_required");
     }
     if (row === undefined || row.encrypted_auth === undefined || row.encrypted_auth === null) {
@@ -264,7 +271,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     } catch {
       return fail("undecryptable");
     }
-    if (!catalogURLMatches(auth.mcp_server_url ?? "", catalog.url)) {
+    if (!endpointMatches(auth.mcp_server_url ?? "", adapter.endpoint)) {
       return fail("undecryptable");
     }
     if (auth.type === "static_bearer") {
@@ -322,11 +329,11 @@ function oauthRefreshAction(auth: CredentialAuth, now: Date, force: boolean): "u
   return "use";
 }
 
-function fail(error: GitHubMcpCredentialError): GitHubMcpCredentialResolution {
+function fail(error: McpCredentialError): McpCredentialResolution {
   return { ok: false, error };
 }
 
-function useToken(token: string, row: Pick<GitHubCredentialSQLRow, "id" | "vault_id">): GitHubMcpCredentialResolution {
+function useToken(token: string, row: Pick<McpCredentialSQLRow, "id" | "vault_id">): McpCredentialResolution {
   return {
     ok: true,
     mode: "bearer",
@@ -337,9 +344,9 @@ function useToken(token: string, row: Pick<GitHubCredentialSQLRow, "id" | "vault
   };
 }
 
-function catalogURLMatches(candidate: string, catalog: string): boolean {
+function endpointMatches(candidate: string, endpoint: string): boolean {
   try {
-    return normalizeCatalogURL(candidate) === normalizeCatalogURL(catalog);
+    return normalizeMcpEndpoint(candidate) === normalizeMcpEndpoint(endpoint);
   } catch {
     return false;
   }

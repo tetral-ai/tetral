@@ -25,7 +25,8 @@ export interface McpIdempotencyContext {
   readonly bindingGeneration: number;
   readonly runtimePodUid: string;
   readonly runtimeProcessId: string;
-  readonly deadline?: number;
+  readonly deadline?: number | undefined;
+  readonly firstCommitDeadline?: number;
   readonly phaseDeadline?: () => number | undefined;
 }
 

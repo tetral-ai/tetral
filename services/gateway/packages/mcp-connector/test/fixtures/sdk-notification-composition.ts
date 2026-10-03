@@ -1,3 +1,5 @@
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { fixtureServerResolver } from "./registered-server.js";
 import { mock } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,9 +45,10 @@ class ProductionSDKTransport {
 
 mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
   StreamableHTTPClientTransport: ProductionSDKTransport,
+  StreamableHTTPError,
 }));
 mock.module("../../src/credential.js", () => ({
-  SQLGitHubMcpCredentialResolver: class FakeCredentialResolver {
+  SQLMcpCredentialResolver: class FakeCredentialResolver {
     async resolve() {
       return {
         ok: true as const,
@@ -62,6 +65,7 @@ mock.module("../../src/credential.js", () => ({
     }
   },
 }));
+mock.module("../../src/server-resolver.js", () => ({ SQLMcpServerResolver: class { resolve = fixtureServerResolver.resolve; } }));
 mock.module("../../src/auth.js", () => ({
   authenticateMcpCaller: async () => ({
     ok: true as const,

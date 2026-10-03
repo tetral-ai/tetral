@@ -1,3 +1,4 @@
+import { MCP_EXECUTION_TIMEOUT_MS, MCP_FIRST_COMMIT_RESERVE_MS, MCP_CALL_TIMEOUT_MS, MCP_DISCOVERY_TIMEOUT_MS, MCP_SESSION_IDLE_TIMEOUT_MS, MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS, MCP_CONNECT_TIMEOUT_MS, MCP_CLAIM_LEASE_SECONDS } from "./phase-budgets.js";
 import {
   ServiceLifecycleDefaults,
   validServiceLifecycle,
@@ -62,11 +63,12 @@ export const McpBridgePolicyDefaults = Object.freeze({
   relinquishMcpToolResult: 10000,
 });
 export const McpClientPolicyDefaults = Object.freeze({
-  callTimeoutMs: 120000,
-  credentialTimeoutMs: 15000,
-  connectTimeoutMs: 10000,
-  idleTimeoutMs: 1800000,
-  discoveryTimeoutMs: 120000,
+  executionTimeoutMs: MCP_EXECUTION_TIMEOUT_MS,
+  callTimeoutMs: MCP_CALL_TIMEOUT_MS,
+  credentialTimeoutMs: MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS,
+  connectTimeoutMs: MCP_CONNECT_TIMEOUT_MS,
+  idleTimeoutMs: MCP_SESSION_IDLE_TIMEOUT_MS,
+  discoveryTimeoutMs: MCP_DISCOVERY_TIMEOUT_MS,
 });
 export type McpBridgePolicies = Readonly<
   Record<keyof typeof McpBridgePolicyDefaults, number>
@@ -80,6 +82,7 @@ const lifecyclePolicyKeys = {
   commitMcpToolResult: "TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS",
   relinquishMcpToolResult:
     "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+  executionTimeoutMs: "TETRAL_MCP_EXECUTION_TIMEOUT_MS",
   callTimeoutMs: "TETRAL_MCP_CALL_TIMEOUT_MS",
   credentialTimeoutMs: "TETRAL_MCP_CREDENTIAL_TIMEOUT_MS",
   connectTimeoutMs: "TETRAL_MCP_CONNECT_TIMEOUT_MS",
@@ -109,15 +112,9 @@ function parseLifecyclePolicies(
       return undefined;
     parsed[method] = Number(raw);
   }
-  // One 180s claim lease includes credential/connect/execution and the commit reserve.
-  if (
-    parsed.credentialTimeoutMs! +
-      parsed.connectTimeoutMs! +
-      parsed.callTimeoutMs! +
-      parsed.commitMcpToolResult! >=
-    180000
-  )
-    return undefined;
+  // Phase ceilings share one execution deadline; the first commit retains its lease reserve.
+  if (parsed.executionTimeoutMs! > MCP_EXECUTION_TIMEOUT_MS || parsed.commitMcpToolResult! > MCP_FIRST_COMMIT_RESERVE_MS ||
+      parsed.executionTimeoutMs! + parsed.commitMcpToolResult! > MCP_CLAIM_LEASE_SECONDS * 1000) return undefined;
   return {
     bridgePolicies: {
       mcpManifestChanged: parsed.mcpManifestChanged!,
@@ -126,6 +123,7 @@ function parseLifecyclePolicies(
       relinquishMcpToolResult: parsed.relinquishMcpToolResult!,
     },
     clientPolicies: {
+      executionTimeoutMs: parsed.executionTimeoutMs!,
       callTimeoutMs: parsed.callTimeoutMs!,
       credentialTimeoutMs: parsed.credentialTimeoutMs!,
       connectTimeoutMs: parsed.connectTimeoutMs!,

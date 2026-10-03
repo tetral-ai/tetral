@@ -1,3 +1,4 @@
+import { fixtureServerResolver } from "./registered-server.js";
 import { createHmac } from "node:crypto";
 import { access, readFile, rename, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
@@ -78,7 +79,7 @@ const store = new BridgeAPIMcpToolResultIdempotencyStore({
   commitTimeoutMs: 500,
   relinquishTimeoutMs: 500,
 });
-const sdk = new McpSDKClient({
+const sdk = new McpSDKClient({serverResolver: fixtureServerResolver,
   credentialResolver: {
     resolve: async () => ({
       ok: true,

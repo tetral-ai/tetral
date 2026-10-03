@@ -52,8 +52,11 @@ func SessionToolsetsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string
 		if err := json.Unmarshal(raw, &tool); err != nil {
 			return nil, runtimecontrol.PreparationError{Kind: "invalid_session_agent_config", Message: "session agent tool config is invalid", Retryable: false}
 		}
-		if tool.Type != "mcp_toolset" || tool.MCPServerName != "github" {
+		if tool.Type != "mcp_toolset" {
 			continue
+		}
+		if tool.MCPServerName == "" {
+			return nil, runtimecontrol.PreparationError{Kind: "invalid_session_agent_config", Message: "session agent MCP toolset config is invalid", Retryable: false}
 		}
 		if _, ok := seen[tool.MCPServerName]; ok {
 			continue

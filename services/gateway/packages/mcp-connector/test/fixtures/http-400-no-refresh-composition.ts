@@ -1,11 +1,12 @@
+import { fixtureServerResolver } from "./registered-server.js";
 import { createServer } from "node:http";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { McpSDKClient } from "../../src/client.js";
-import type { GitHubMcpCredentialResolver } from "../../src/credential.js";
+import type { McpCredentialResolver } from "../../src/credential.js";
 
 let transport: StreamableHTTPServerTransport | undefined;
 let mcpServer: McpServer | undefined;
@@ -42,6 +43,7 @@ const httpServer = createServer(async (request, response) => {
 			{ name: "http-400-proof", version: "1.0.0" },
 			{ capabilities: { tools: {} } },
 		);
+		mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({tools: [{name: "create_issue", inputSchema: {type: "object"}}]}));
 		await mcpServer.connect(transport as unknown as Transport);
 	}
 	if (transport === undefined) {
@@ -62,7 +64,7 @@ if (address === null || typeof address === "string") {
 }
 const endpoint = new URL(`http://127.0.0.1:${address.port}/mcp`);
 let refreshes = 0;
-const credentialResolver: GitHubMcpCredentialResolver = {
+const credentialResolver: McpCredentialResolver = {
 	resolve: async () => ({
 		ok: true,
 		mode: "bearer",
@@ -83,7 +85,7 @@ const credentialResolver: GitHubMcpCredentialResolver = {
 		};
 	},
 };
-const client = new McpSDKClient({
+const client = new McpSDKClient({serverResolver: fixtureServerResolver,
 	credentialResolver,
 	onToolsListChanged: async () => undefined,
 	createTransport: () => new StreamableHTTPClientTransport(endpoint),

@@ -3,7 +3,7 @@
  *
  * Implements the gRPC-facing orchestration shell for MCP tool discovery and
  * execution. It authenticates internal callers, verifies Runtime bindings for
- * tool calls, enforces readiness and catalog admission, coordinates durable
+ * tool calls, enforces readiness and installed Server admission, coordinates durable
  * claim and commit, and gives every tool call one terminal settlement record.
  * It reports each successfully re-listed manifest to Bridge and retries bounded
  * manifest-change notifications without turning exhaustion into a readiness transition.
@@ -13,6 +13,9 @@
  * binding checks to `RuntimeBindingTokenVerifier`, and changed-manifest
  * delivery to `McpManifestChangeNotifier`.
  */
+import type { McpExecutionObservation } from "./logger.js";
+import { mcpPhaseCompletedLogRecord } from "./logger.js";
+import { McpExecutionBudget, MCP_EXECUTION_TIMEOUT_MS, MCP_FIRST_COMMIT_RESERVE_MS } from "./execution-budget.js";
 import { Metadata, status } from "@grpc/grpc-js";
 import { createHash, randomUUID } from "node:crypto";
 import { semanticErrorFields } from "@tetral/ts-observability";
@@ -30,7 +33,6 @@ import type {
   RunMcpToolRequest,
   RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { catalogEntryByName } from "./catalog.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
 import { McpConnectorError, mcpErrorKind } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
@@ -47,7 +49,7 @@ import type { McpIdempotencyContext, McpIdempotencyStore, PendingRunMcpToolRespo
 import type { McpConnectorRunToolMetric } from "./metrics.js";
 
 /**
- * Authenticates an internal gRPC request before its readiness, catalog,
+ * Authenticates an internal gRPC request before its readiness, configured Server,
  * credential, or MCP work.
  *
  * A successful result supplies the workload identity and pod UID used to bind
@@ -77,7 +79,7 @@ export interface McpClient {
       readonly sessionId: string;
       readonly mcpServerName: string;
     },
-    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number },
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<readonly McpClientTool[]>;
   callTool(
     input: {
@@ -88,7 +90,7 @@ export interface McpClient {
       readonly toolName: string;
       readonly input: Record<string, unknown>;
     },
-    options?: { readonly signal?: AbortSignal },
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<McpCallToolResult>;
   connectionCount?: (() => number) | undefined;
 }
@@ -188,6 +190,8 @@ export interface McpConnectorServiceOptions {
   readonly manifestNotifySleep?: McpManifestNotifySleep | undefined;
   readonly metrics?: McpConnectorMetricsRegistry | undefined;
   readonly activeSessionCount?: (() => number) | undefined;
+  readonly executionTimeoutMs?: number | undefined;
+  readonly monotonicNow?: (() => number) | undefined;
   readonly claimIdFactory?: (() => string) | undefined;
 }
 
@@ -239,7 +243,7 @@ export class McpConnectorServiceShell {
   listMcpTools(
     request: ListMcpToolsRequest,
     metadata: Metadata,
-    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number },
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<ListMcpToolsResponse> {
     return this.track(
       (signal) =>
@@ -254,6 +258,7 @@ export class McpConnectorServiceShell {
       readonly mcpServerName: string;
     },
     signal?: AbortSignal,
+    completeTools?: readonly McpClientTool[],
   ): Promise<{
     readonly status: "notified" | "exhausted";
     readonly manifestEtag: string;
@@ -267,9 +272,11 @@ export class McpConnectorServiceShell {
   runMcpTool(
     request: RunMcpToolRequest,
     metadata: Metadata,
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<RunMcpToolResponse> {
+    const callerDeadline = options?.timeoutMs === undefined ? Infinity : (this.options.monotonicNow ?? (() => performance.now()))() + options.timeoutMs;
     return this.track((signal) =>
-      this.runMcpToolTracked(request, metadata, signal),
+      this.runMcpToolTracked(request, metadata, signal, callerDeadline), options?.signal,
     );
   }
   async shutdown(
@@ -316,7 +323,7 @@ export class McpConnectorServiceShell {
   }
 
   /**
-   * Lists one catalog server's enabled tools for Bridge, removes platform tool
+   * Lists one configured server's enabled tools for Bridge, removes platform tool
    * collisions, and validates the candidate response. Listing is capture only;
    * it cannot advance the identity acknowledged by durable Bridge state.
    * Family-specific collision filtering remains downstream of this service.
@@ -324,7 +331,7 @@ export class McpConnectorServiceShell {
   private async listMcpToolsCore(
     request: ListMcpToolsRequest,
     metadata: Metadata,
-    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number },
+    options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<ListMcpToolsResponse> {
     const caller = await this.authorize(
       metadata,
@@ -334,9 +341,6 @@ export class McpConnectorServiceShell {
     const validation = validateListMcpToolsRequest(request);
     if (!validation.ok) {
       throw new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
-    }
-    if (catalogEntryByName(request.mcpServerName) === undefined) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
     }
     let listed: readonly McpClientTool[];
     try {
@@ -409,6 +413,11 @@ export class McpConnectorServiceShell {
    * Retryable notification failures follow the fixed four-attempt schedule.
    * Exhaustion emits an error record and does not change service readiness.
    */
+  /** Reports execution-created readiness after the ready connection is published. */
+  handleConnectionReady(input: { readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName: string }, tools: readonly McpClientTool[], options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number }): Promise<unknown> {
+    return this.track(signal => this.handleToolsListChangedNotificationCore(input, signal, tools), options?.signal);
+  }
+
   private async handleToolsListChangedNotificationCore(
     input: {
       readonly workspaceId: string;
@@ -416,6 +425,7 @@ export class McpConnectorServiceShell {
       readonly mcpServerName: string;
     },
     signal?: AbortSignal,
+    completeTools?: readonly McpClientTool[],
   ): Promise<{
     readonly status: "notified" | "exhausted";
     readonly manifestEtag: string;
@@ -423,16 +433,16 @@ export class McpConnectorServiceShell {
   }> {
     this.ensureReady();
     const validation = validateListMcpToolsRequest(input);
-    if (!validation.ok || catalogEntryByName(input.mcpServerName) === undefined) {
+    if (!validation.ok) {
       throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
     }
-    const listed = await this.options.client.listTools(
+    const listed = completeTools ?? await this.options.client.listTools(
       {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         mcpServerName: input.mcpServerName,
       },
-      signal === undefined ? undefined : { signal },
+      signal === undefined ? undefined : {signal},
     );
     this.#metrics.recordManifestRefresh();
     const { tools } = filterManifestTools(listed, PlatformBuiltinToolNames);
@@ -503,7 +513,7 @@ export class McpConnectorServiceShell {
 
   /**
    * Runs one Runtime MCP tool request behind caller authentication, binding
-   * verification, catalog admission, and Bridge-backed idempotency.
+   * verification, configured Server admission, and Bridge-backed idempotency.
    *
    * Each returned response or thrown terminal failure records exactly one
    * terminal metric and log. The MCP client owns connection retries, while the
@@ -513,6 +523,7 @@ export class McpConnectorServiceShell {
     request: RunMcpToolRequest,
     metadata: Metadata,
     signal: AbortSignal,
+    callerDeadline = Infinity,
   ): Promise<RunMcpToolResponse> {
     const started = performance.now();
     const claimId = this.#claimIdFactory();
@@ -523,6 +534,7 @@ export class McpConnectorServiceShell {
         started,
         claimId,
         signal,
+        callerDeadline,
       );
     } catch (error) {
       this.recordRunToolFailure(resolvedMcpRequest(request, claimId), runMcpToolThrownErrorKind(error), started);
@@ -536,6 +548,7 @@ export class McpConnectorServiceShell {
     started: number,
     claimId: string,
     signal: AbortSignal,
+    callerDeadline = Infinity,
   ): Promise<RunMcpToolResponse> {
     const caller = await this.authorize(
       metadata,
@@ -553,15 +566,19 @@ export class McpConnectorServiceShell {
     })) {
       throw new GrpcStatusError(status.PERMISSION_DENIED, "runtime binding token rejected");
     }
+    const now = this.options.monotonicNow ?? (() => performance.now());
+    const budget = new McpExecutionBudget(Math.min(this.options.executionTimeoutMs ?? MCP_EXECUTION_TIMEOUT_MS, callerDeadline - now()), now);
     const idempotencyContext: McpIdempotencyContext = {
       ...mcpIdempotencyContext(request, caller.serviceAccount.podUid, claimId),
-      deadline: Date.now() + 180000,
+      deadline: Date.now() + budget.remainingMs(),
       phaseDeadline: () => this.shutdownDeadline,
     };
     const idempotencyKey = {
       toolUseEventId: request.toolUseEventId,
     };
-    const claim = await this.#idempotencyStore.claim(idempotencyKey, idempotencyContext);
+    budget.timeoutMs();
+    signal.throwIfAborted();
+    const claim = await this.observePhase(request, claimId, "claim", budget, () => Promise.resolve(this.#idempotencyStore.claim(idempotencyKey, idempotencyContext)));
     const unresolved = resolvedMcpRequest(request, claimId);
     if (claim.status === "replay") {
       return this.finishRunMcpTool(unresolved, claim.stored.response, claim.stored, started);
@@ -597,14 +614,14 @@ export class McpConnectorServiceShell {
     }
     const executionRequest = resolvedMcpRequest(request, claimId, claim.executor);
     try {
-      const executorAccepted = validateMcpExecutorPayload(claim.executor).ok &&
-        catalogEntryByName(executionRequest.mcpServerName) !== undefined;
+      const executorAccepted = validateMcpExecutorPayload(claim.executor).ok;
       const execution = executorAccepted
-        ? await this.executeTool(
+        ? await this.observePhase(request, claimId, "execution", budget, () => this.executeTool(
             executionRequest,
             JSON.parse(executionRequest.inputJson) as Record<string, unknown>,
             signal,
-          )
+            budget,
+          ))
         : durableExecutorRejection();
       const response = execution.response;
       const responseValidation = validatePendingRunMcpToolResponse(response);
@@ -616,7 +633,7 @@ export class McpConnectorServiceShell {
           response,
           contentItems: execution.contentItems,
           refreshTriggered: execution.refreshTriggered,
-        }, idempotencyContext);
+        }, { ...idempotencyContext, deadline: undefined, firstCommitDeadline: Date.now() + MCP_FIRST_COMMIT_RESERVE_MS });
         return this.finishRunMcpTool(executionRequest, storedResponse, execution, started);
       } catch (error) {
         if (error instanceof McpIdempotencyOutcomeUnknownError)
@@ -646,10 +663,17 @@ export class McpConnectorServiceShell {
     }
   }
 
+  private async observePhase<T>(request: RunMcpToolRequest, claimId: string, phase: string, budget: McpExecutionBudget, operation: () => Promise<T>): Promise<T> {
+    const now = this.options.monotonicNow ?? (() => performance.now()); const started = now(); let outcome = "failed";
+    try { const value = await operation(); outcome = "completed"; return value; }
+    finally { safeConnectorLog(this.options.logger,"info",mcpPhaseCompletedLogRecord({...request,claimId,phase,outcome,durationMs:now()-started,elapsedMs:budget.elapsedMs(),remainingMs:budget.remainingMs(),attempt:1})); }
+  }
+
   private async executeTool(
     request: ResolvedMcpToolRequest,
     input: Record<string, unknown>,
     signal: AbortSignal,
+    budget: McpExecutionBudget,
   ): Promise<{
     readonly response: PendingRunMcpToolResponse;
     readonly contentItems: number;
@@ -665,9 +689,11 @@ export class McpConnectorServiceShell {
           toolName: request.toolName,
           input,
         },
-        signal === undefined ? undefined : { signal },
+        { signal, timeoutMs: budget.timeoutMs(), executionObservation: () => ({claimId: request.claimId,toolUseEventId:request.toolUseEventId,elapsedMs:budget.elapsedMs(),remainingMs:budget.remainingMs()}) },
       );
+      budget.timeoutMs();
       const formatted = formatMcpToolResult(result);
+      budget.timeoutMs();
       if (result.isError === true) {
         return {
           response: {

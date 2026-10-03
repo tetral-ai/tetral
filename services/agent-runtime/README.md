@@ -659,6 +659,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |
 | `runtime-pod/test/unit/bridge-client.test.ts`, `core-writer-policy.test.ts` | Bridge clients/input committers, parsed method policy through actual Core assembly, bounded attempts and independent failed-run observation |
+| `integration/mcp_runtime_manifest_delivery_test.go` (repository root) | actual SDK notification → Bridge manifest generation → Queue lease → Job Runner → Runtime catalog application, busy rejection and same-job retry, duplicate/stale commands, next Core provider request, and replacement Bridge cold load after both Connector owners close |
 | `integration/replica_runtime_handoff_test.go` (repository root) | real-process checkpoint, reviewer and fault continuation, exact durable custody/context, binding races and joined exit |
 | `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |
 | `protocol/test/unit/bounds.test.ts` | shared bound constants |

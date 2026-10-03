@@ -16,7 +16,8 @@ export const MCP_DISCOVERY_MAX_PAGES = 100;
 export const MCP_DISCOVERY_MAX_TOOLS = 1024;
 /** Raw definitions include SDK-only metadata; Bridge separately caps its projection at 256 KiB. */
 export const MCP_DISCOVERY_MAX_BYTES = 1024 * 1024;
-export const MCP_DISCOVERY_TIMEOUT_MS = 120_000;
+import { MCP_DISCOVERY_TIMEOUT_MS } from "./phase-budgets.js";
+export { MCP_DISCOVERY_TIMEOUT_MS } from "./phase-budgets.js";
 
 export type DiscoveryFailureReason = "page_bound" | "tool_bound" | "byte_bound" | "repeated_cursor" | "invalid_response";
 

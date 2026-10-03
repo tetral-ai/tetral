@@ -1,3 +1,4 @@
+import { fixtureServerResolver } from "./registered-server.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -23,7 +24,7 @@ sdkServer.setRequestHandler(ListToolsRequestSchema, async () => {
 const sleeps: number[] = [];
 const notificationResults: Array<Awaited<ReturnType<McpConnectorServiceShell["handleToolsListChangedNotification"]>>> = [];
 let service: McpConnectorServiceShell;
-const client = new McpSDKClient({
+const client = new McpSDKClient({serverResolver: fixtureServerResolver,
   createTransport: () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     void sdkServer.connect(serverTransport);

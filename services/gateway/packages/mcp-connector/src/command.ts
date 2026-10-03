@@ -19,7 +19,8 @@ import { authenticateMcpCaller, KubernetesTokenReviewClient, validateKubernetesT
 import { BridgeAPIManifestChangeNotifier, BridgeAPIMcpToolResultIdempotencyStore } from "./bridge-client.js";
 import { McpSDKClient } from "./client.js";
 import { loadMcpConnectorConfigFromProcessEnv } from "./config.js";
-import { SQLGitHubMcpCredentialResolver } from "./credential.js";
+import { SQLMcpServerResolver } from "./server-resolver.js";
+import { SQLMcpCredentialResolver } from "./credential.js";
 import { createMcpConnectorHttpServer } from "./http-server.js";
 import { createJsonLogger, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
@@ -211,7 +212,8 @@ export async function runMcpConnectorCommand(options: {
       options.client ??
       new McpSDKClient({
         ...config.config.clientPolicies,
-        credentialResolver: new SQLGitHubMcpCredentialResolver(
+        serverResolver: new SQLMcpServerResolver(sql),
+        credentialResolver: new SQLMcpCredentialResolver(
           sql,
           config.config.vaultKeyHex,
           undefined,
@@ -226,6 +228,7 @@ export async function runMcpConnectorCommand(options: {
             ),
         ),
         logger,
+        onConnectionReady: async (input, tools, options) => { await service.handleConnectionReady(input, tools, options); },
         onToolsListChanged: async (input) => {
           await service.handleToolsListChangedNotification(input);
         },
@@ -242,6 +245,7 @@ export async function runMcpConnectorCommand(options: {
       apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
     });
     const idempotencyStore = new BridgeAPIMcpToolResultIdempotencyStore({
+      logger,
       address: config.config.bridgeApiGrpcAddress,
       tokenPath: config.config.bridgeTokenPath,
       claimTimeoutMs: config.config.bridgePolicies.claimMcpToolResult,
@@ -275,6 +279,7 @@ export async function runMcpConnectorCommand(options: {
       }),
       metrics,
       idempotencyStore,
+      executionTimeoutMs: config.config.clientPolicies.executionTimeoutMs,
       activeSessionCount: () => typeof client.connectionCount === "function" ? client.connectionCount() : 0,
       manifestChangeNotifier,
       authenticator: {

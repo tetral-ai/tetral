@@ -1,7 +1,8 @@
+import { fixtureServerResolver } from "../fixtures/registered-server.js";
 import { expect, test } from "bun:test";
 import { McpSDKClient } from "../../src/client.js";
 import { runMcpConnectorCommand } from "../../src/command.js";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import { loadMcpConnectorConfigFromProcessEnv } from "../../src/config.js";
 import { commandEnv, commandFixture } from "../fixtures/command-process.js";
@@ -142,8 +143,8 @@ test("reusable MCP command retains SQL past client deadline until raw credential
 }, 5000);
 
 function credentialClient(sql: McpCredentialSQL) {
-  return new McpSDKClient({
-    credentialResolver: new SQLGitHubMcpCredentialResolver(
+  return new McpSDKClient({serverResolver: fixtureServerResolver,
+    credentialResolver: new SQLMcpCredentialResolver(
       sql,
       "00".repeat(32),
     ),

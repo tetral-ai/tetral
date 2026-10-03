@@ -474,7 +474,7 @@ and active lifecycle facts directly from durable rows.
 ### MCP durable claim/commit idempotency
 
 - **Contract.** MCP tool calls (`bridge_api_mcp.go`, `internal/mcpmanifest/client.go`)
-  are Bridge-backed because the mcp-connector owns no writable store. `Claim
+  are Bridge-backed because the mcp-connector owns no writable Tool Result store. `Claim
   McpToolResult` replays a stored result on hash match, fences concurrent
   execution with a leased reservation, or admits execution; `CommitMcpTool
   Result` stores the refs-only result and creates its transient-attachment rows
@@ -507,7 +507,18 @@ and active lifecycle facts directly from durable rows.
 - **Conformance.** `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`,
   `mcp_collision_split_test.go`, `mcp_connector_production_composition_test.go`,
   plus the cross-owner compositions under `integration/` and initial discovery
-  suites owned by [Job Runner](../job-runner/README.md).
+  suites owned by [Job Runner](../job-runner/README.md). The actual SDK HTTP compositions in
+  `mcp_server_resolution_test.go`, `mcp_output_validation_test.go`,
+  `mcp_oauth_refresh_test.go`, `mcp_oauth_concurrency_test.go`,
+  `mcp_adapter_execution_test.go`, `mcp_client_recovery_test.go`,
+  `mcp_manifest_notifications_test.go` and `mcp_execution_budget_test.go`
+  run against private PostgreSQL clones with installed Bridge and Gateway
+  roles. They distinguish discovery and verification requests, prove encrypted
+  credential scope and rotation, and compare original Runtime outcomes with
+  durable receipts and replay. Held external responses prove cancellation of
+  transport work; an already accepted external effect remains counted.
+  `integration/mcp_runtime_manifest_delivery_test.go` consumes the resulting
+  Queue carrier through Job Runner and the real Runtime command listener.
 
 ### Resource roots snapshot and credential-expiry readiness gate
 

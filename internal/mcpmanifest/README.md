@@ -12,3 +12,9 @@ A repeated etag can restore unready state; an etag is not generation authority.
 No helper opens a transaction, reads process environment or imports either
 service's business package. ConnectorLister is the actual outbound gRPC client
 used by both process constructors; credentials are supplied by the caller.
+
+Installed discovery follows the Session snapshot's configured MCP server names,
+including multiple supported adapters. The installed server's endpoint selects
+the adapter at the Connector boundary; a configured name is not a provider ID.
+Enabled unsupported or missing server selections fail explicitly before external
+traffic rather than disappearing from discovery.

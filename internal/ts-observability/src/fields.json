@@ -217,6 +217,7 @@
   "timeout.elapsed_ms",
   "timeout.inter_event_gap_ms",
   "timeout.kind",
+  "timeout.remaining_ms",
   "tool.declaration.kind",
   "tool.definition.family",
   "tool.definition.name",

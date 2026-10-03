@@ -1,8 +1,9 @@
+import { fixtureServerResolver } from "./registered-server.js";
 import { readFile } from "node:fs/promises";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { McpSDKClient } from "../../src/client.js";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
@@ -90,7 +91,7 @@ const logger: McpConnectorLogger = {
   info: (record) => records.push(record),
   error: (record) => records.push(record),
 };
-const resolver = new SQLGitHubMcpCredentialResolver(
+const resolver = new SQLMcpCredentialResolver(
   scopedSQL,
   masterKeyHex,
   () => new Date(),
@@ -106,7 +107,7 @@ const resolver = new SQLGitHubMcpCredentialResolver(
   undefined,
   (event) => refreshEvents.push(event),
 );
-const client = new McpSDKClient({
+const client = new McpSDKClient({serverResolver: fixtureServerResolver,
   credentialResolver: resolver,
   onToolsListChanged: async () => undefined,
   createTransport: ({ token }) => {

@@ -170,9 +170,10 @@ MCP's typed Bridge policies mirror the Runtime descriptor: manifest notification
 five seconds and claim/commit/relinquish ten seconds. SDK defaults remain
 credential 15 seconds, connect ten seconds, call and discovery 120 seconds, and
 idle eviction 1,800 seconds. `TETRAL_BRIDGE_<METHOD>_TIMEOUT_MS` and
-`TETRAL_MCP_{CREDENTIAL,CONNECT,CALL,DISCOVERY}_TIMEOUT_MS` configure these actual
-operations. The credential, connect, call, and commit reserves must fit the
-180-second execution claim lease. A lost immutable result-commit response can
+`TETRAL_MCP_{CREDENTIAL,CONNECT,CALL,DISCOVERY,EXECUTION}_TIMEOUT_MS` configure these actual
+operations. Phase ceilings clip to the shared execution allowance. The execution
+allowance is at most 170 seconds and first Commit is at most ten seconds within
+the 180-second claim lease. A lost immutable result-commit response can
 rejoin its named receipt; an unknown execution outcome cannot be replayed or
 converted into a fabricated result.
 
@@ -404,7 +405,7 @@ explicit reviewed action, never a side effect of a failing run.
 terminates tool calls of `kind = mcp` on its own gRPC port (`McpConnectorService`,
 defined beside the provider service in
 `proto/tetral/provider_gateway/v1/provider_gateway.proto`), holds the MCP client
-sessions to a **closed catalog of curated servers**, discovers each server's
+sessions to registered GitHub and Slack server adapters, discovers each server's
 tools, resolves the per-call MCP credential from the session's vault, executes
 the tool, maps the result through a closed content formatter, and classifies
 failures into a bounded taxonomy. It contains no provider-lowering code and never
@@ -417,16 +418,20 @@ package depends only on `packages/protocol` and is statically forbidden from
 importing `packages/lowering` or `packages/provider-gateway`
 (`static-boundaries.test.ts`).
 
-The catalog is one entry — GitHub — in `MCP_CATALOG`
-(`packages/mcp-connector/src/catalog.ts`). `assertCatalogURL` refuses any
-connection whose URL, after single-trailing-slash normalization
-(`normalizeCatalogURL`), is not in the constant; catalog-only admission is
-enforced upstream and this is defense in depth. Adding a server is a code change.
+The immutable adapter registry (`packages/mcp-connector/src/adapters/registry.ts`)
+admits GitHub at `https://api.githubcopilot.com/mcp/` and Slack at
+`https://mcp.slack.com/mcp`. Endpoint matching removes at most one trailing slash;
+it preserves case, authority, query, fragment and path spelling. Adding a server
+requires a registered adapter. Adapters own endpoints and service headers; the
+generic client owns bearer Authorization; the pinned SDK owns MCP protocol and session headers.
 
-The entry also pins the Engine-owned toolset selection `default,actions`, sent
-verbatim as the `X-MCP-Toolsets` header on every newly created transport —
-including connection recreation after credential replacement — alongside the
-Vault-based `Authorization: Bearer` header (`streamableHTTPTransportOptions`).
+`SQLMcpServerResolver` reads Workspace-scoped
+`sessions.installed_tools_json.mcp_servers`. Configured names such as `work-slack`
+are independent of adapter IDs and tool names. One attempt binds that resolved
+endpoint to credential selection, refresh and transport construction. GitHub's
+adapter pins `X-MCP-Toolsets: default,actions`; Slack sends no GitHub header.
+Every new transport combines adapter headers with Vault bearer authorization.
+
 `default` is GitHub's supported alias for its baseline issue/PR toolsets, so
 those tools stay available without enumerating constituents; `actions` adds
 exactly the four Actions tools: `actions_list` (list workflows, runs, jobs, and
@@ -454,8 +459,8 @@ per-thread runtime binding token.
 | Authenticate | TokenReview the Runtime workload token, then verify the binding token | gRPC `Unauthenticated` / `PermissionDenied` before any side effect |
 | Validate | `validateRunMcpToolRequest` (`bounds.ts`) | gRPC `INVALID_ARGUMENT` |
 | Claim | Create one execution-attempt `claimId`, then call `ClaimMcpToolResult` with `(scope, tool_use_event_id, claimId)`; Bridge loads the durable server, tool, and canonical input and compares its normalized hash internally | same-claim replay renews the lease; an unexpired different claim remains in flight; an expired lease admits a new claim; a terminal result replays directly |
-| Resolve credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
-| Establish + execute | Lazy-connect the MCP client, call the tool within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
+| Resolve Server + credential | Match one session-vault credential (table below) | fail closed, no MCP call is made |
+| Establish + execute | Complete SDK connect and every discovery page before caching or calling; call within `MCP_CALL_TIMEOUT_SECONDS` (120) | reconnect/auth policy below; timeout → `mcp_timeout` |
 | Format | `formatMcpToolResult` → `result_text` + at most one attachment, decoded bytes held in memory only | bounds rejection before commit |
 | Commit | `CommitMcpToolResult` with the same `claimId` plus result/media; Bridge fences the current claimant, creates transient-attachment rows, and persists the refs-only result in one transaction | stale claimant → custody lost; post-effect commit failure → retryable `runtime_error` |
 | Relinquish | `RelinquishMcpToolResult` with the same `claimId`, only after a deterministic post-acquisition failure has proved no result commit is uncertain | exact active claim is deleted and may be immediately reacquired; stored/different claims return stale; lost ACK replays duplicate |
@@ -472,8 +477,8 @@ reconnect policy map to `status = runtime_error`.
 
 #### Credential resolution by vault match (`packages/mcp-connector/src/credential.ts`)
 
-`SQLGitHubMcpCredentialResolver` searches the session's immutable vault set for a
-credential whose `auth_public_json.mcp_server_url` equals the catalog URL
+`SQLMcpCredentialResolver` searches the session's immutable vault set for a
+credential whose `auth_public_json.mcp_server_url` equals the resolved registered endpoint
 (single-trailing-slash normalized). Eligible auth types are `mcp_oauth` and
 `static_bearer`; archived credentials are treated as absent. A "usable"
 credential decrypts and is either unexpired or refreshable. Resolved material is
@@ -489,7 +494,7 @@ delivered as `Authorization: Bearer <token>`.
 | `mcp_oauth` expired, refresh block present | single-flight refresh, then use |
 | `mcp_oauth` expired, refresh fails | fail closed `refresh_failed` — the row is not mutated |
 
-The bounded error set is `GitHubMcpCredentialError` (`credential_required |
+The bounded error set is `McpCredentialError` (`credential_required |
 ambiguous | undecryptable | expired | refresh_failed`); an uncaught
 selection-query failure is outside it. Decrypted plaintext exists only in process
 memory and inside TLS to the server — never logged, never returned to Runtime,
@@ -497,39 +502,49 @@ never persisted here.
 
 #### Single-flight OAuth refresh (`packages/mcp-connector/src/credential-update-path.ts`)
 
-GitHub OAuth refresh tokens rotate on use, so two consumers must never burn one
-rotating token concurrently. `SQLVaultGitHubMcpCredentialUpdatePath` serializes
+OAuth refresh tokens can rotate on use, so two consumers must never burn one
+rotating token concurrently. `SQLVaultMcpCredentialUpdatePath` serializes
 refresh on a `SELECT … FOR UPDATE` (or advisory lock) keyed by `(workspace_id,
 vault_id, credential_id)` for the refresh HTTP call plus write-back. Losers block,
 re-read the row, and use the newer material without refreshing once `expires_at`
 has moved forward. Proactive refresh at resolution triggers only when `expires_at
 <= now + REFRESH_SKEW_SECONDS` (60 s, `credential-constants.ts`); a reactive path
-(upstream 401/403) invokes one single-flight refresh regardless of expiry. A
+(typed HTTP 401/403) invokes one single-flight refresh regardless of expiry. A
 refresh failure marks the resolution `refresh_failed` and leaves the row
-unmutated. One `RunMcpTool` operation traverses at most one proactive, one
-establishment-reactive, and one operation-reactive refresh — no path loops a
-refresh on a repeated same-phase failure.
+unmutated. Each cold operation permits one handshake refresh and one operation refresh.
+Cold execution shares its operation allowance between readiness listing and the
+call; spending it during listing forbids another call refresh. Rebuild after an
+operation refresh permits no further refresh, including during connect/list.
+Pending initialization shares spent allowances with every waiter, including
+late joiners; a new independent operation on a ready entry gets a fresh operation
+allowance. OAuth uses the configured token endpoint and confidential-client
+policy. An HTTP-200 `{ok:false}` token response fails without row mutation.
 
 #### MCP client connection (`packages/mcp-connector/src/client.ts`)
 
-`McpSDKClient` wraps the SDK's `StreamableHTTPClientTransport` (Bearer header
-plus the catalog's `X-MCP-Toolsets` selection via
-`streamableHTTPTransportOptions`). Clients are cached by `(workspace_id,
-session_id, mcp_server_name, sha256(token))`; a per-call resolution that yields
-different material creates a new client and closes the old, so credential
-switches need no coordination.
+`McpSDKClient` uses the pinned SDK's `StreamableHTTPClientTransport` and SDK
+output validators. Connect plus a successful all-page listing is the readiness
+barrier. Cache identity is `(workspace_id, session_id, configured_server_name,
+vault_id, credential_id, sha256(token))` with unambiguous framing. An installed
+endpoint change retires a mismatched ready/pending entry even under the same key.
+Concurrent openings coalesce. Each waiter owns its cancellation/deadline; one
+leaving preserves initialization for others, while all leaving aborts it. Failed
+initialization never publishes a ready client. Idle expiry closes and evicts.
+Only the SDK retains output schema metadata; full definitions remain local to
+initialization, explicit discovery or manifest reporting. Warm calls do not list.
 
 | State | Trigger | Transition |
 | --- | --- | --- |
-| Establish | first use (discovery or first call) | lazy `initialize` handshake, `MCP_CONNECT_TIMEOUT_MS` (10 s) |
+| Establish | first use (discovery or first call) | `initialize` handshake within 10 s plus complete listing before readiness |
 | Idle close | `MCP_SESSION_IDLE_SECONDS` (1800) without a call | close the client |
 | Reconnect | connection loss | 3 attempts, backoff 1 s / 4 s / 16 s (`MCP_RECONNECT_DELAYS_MS`, `MCP_RECONNECT_MAX_RETRIES`); in-flight call reports `retry_status: retrying` then `exhausted` |
-| Auth retry | server 401/403 | one single-flight refresh + one retry; a second auth failure is `terminal` → `mcp_authentication_failed` |
+| Auth retry | typed HTTP 401/403 or pinned SDK auth error | bounded handshake/operation allowances above; repeated auth failure is terminal |
 | Exhaustion settlement | terminal reconnect exhaustion | the connector's own `Client.onerror` synthesizes `mcp_connection_failed` / `retry_status = exhausted`, settles every in-flight call on that client exactly once, evicts the cached entry, and clears the idle timer; late responses are ignored |
 
-Exhaustion settlement (~21 s after loss) pre-empts the 120 s `mcp_timeout`, which
-remains for non-connection stalls — one failure yields exactly one
-classification. The SDK fires `onerror` but never `onclose`, so a client→entry
+With default ceilings and sufficient shared/caller time, exhaustion settlement
+(~21 s after loss) precedes the 120 s call ceiling. A shorter shared budget or
+caller deadline can expire sooner with `mcp_timeout`. The first terminal
+outcome determines the classification. The SDK fires `onerror` but never `onclose`, so a client→entry
 index performs the eviction; without it the dead client would stay cached.
 
 #### Durable idempotency and reservation lease
@@ -556,30 +571,34 @@ cannot strand the call. Two properties keep the fence honest: the Claim RPC
 carries `MCP_CLAIM_RPC_TIMEOUT_MS` (below the lease) so a delayed acknowledgement
 becomes `DEADLINE_EXCEEDED` rather than acting on a superseded reservation; and
 Commit fences on the reservation owner, so at most one result is ever persisted.
-RESIDUAL, stated not hidden: an operation whose full authorized path — a 120 s
-call, an operation-reactive refresh, and a second 120 s call — outruns the lease
-can let two replicas *execute* the external side effect. Double-persist is already
-excluded by the owner-fenced Commit; the short-lease-with-heartbeat fix is
-deferred to a dedicated cycle. On replay a media attachment whose transient ref is
+A monotonic 170-second preparation/execution budget starts before Claim dispatch
+and covers credentials, connect, discovery, synchronous manifest preparation,
+call and formatting. Every phase/retry is clipped by its phase ceiling and the
+remaining shared budget; shorter caller deadlines are preserved. Expiry stops
+new external dispatch and cancels owned work. The first Commit attempt retains a
+10-second reserve within the 180-second lease. A lost Commit ACK continues the
+same immutable result/claim receipt recovery beyond that reserve; it never grants
+another external invocation or extends the lease. On replay a media attachment whose transient ref is
 no longer resolvable renders an omission line `[MCP attachment unavailable:
 <mime> (<size>)]` rather than serving stale bytes.
 
 #### Discovery and manifest delivery
 
 The connector alone can reach the server, so it **produces** the manifest; Bridge
-**delivers** it (Bridge and Job Runner can reach the MCP Connector; the connector cannot reach
-Runtime). `ListMcpTools` returns each tool's `{name, description, input_schema}`
+**accepts and enqueues** it, and Job Runner **delivers** it (Bridge and Job Runner
+can reach the MCP Connector; the connector cannot reach Runtime). `ListMcpTools` returns each tool's `{name, description, input_schema}`
 verbatim, plus a `manifest_etag` (content hash via `manifestEtag`) and
 `omitted_tools` (platform-tool name collisions the connector filtered via
 `filterManifestTools`, `reason = builtin_name_collision`). Bridge captures the
-manifest to a durable `session_mcp_manifests` row before delivering, assigns a
+manifest to a durable `session_mcp_manifests` row before enqueuing delivery, assigns a
 monotonic `manifest_generation`, and enforces the 256 KiB per-server manifest
 bound at acceptance. Supersession keys on generation monotonicity, never on etag
 inequality — a flapping A→B→A etag must not clobber newer state — and the etag is
 identity-only, so the family-filtered delivered subset need not re-hash. At
-runtime every `tools/list_changed` notification triggers a re-list, and each
+execution-created readiness, the Connector client reports its complete
+operation-local list after publication; every `tools/list_changed` notification triggers a re-list, and each
 successful re-list is reported to Bridge even when its etag matches an earlier
-notification. The initial upstream list precedes notification retry and is
+notification. Bridge verification can re-list the published client without initializer recursion. The initial upstream list precedes notification retry and is
 non-mutating on failure. The connector retries a within-cap notification with 4
 total attempts (`MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS`, 1 s / 4 s / 16 s). Notify
 exhaustion is a structured connector log only, never a readiness flip; the next
@@ -616,8 +635,8 @@ without a cursor, within the same deadline.
 
 Protocol/bound failures use a discovery-specific error and the existing typed
 `manifest_invalid` trailer, with safe reason/page/tool counts in operator logs.
-JSON-RPC invalid-parameter errors retain their original classification; an
-off-catalog rejection or rejected request is not logged as a pagination-bound
+SDK output-schema rejection settles non-success without refresh or re-execution. JSON-RPC 401/403 and SDK validation errors containing those numbers are not authentication provenance; HTTP 500 bodies mentioning 401 are not authentication. JSON-RPC invalid-parameter errors retain their original classification; an
+unregistered-endpoint rejection or rejected request is not logged as a pagination-bound
 violation. Discovery timeouts name tool discovery, including SDK timeout paths;
 tool-call timeouts continue to name the tool call. During discovery, terminal or
 exhausted connection failures map to the `server_unavailable` trailer, including
@@ -639,13 +658,18 @@ time, and that denial returns as a model-visible `tool_error` result, never a
 success. The connector performs no Actions permission preflight and infers no
 missing scope from an absent tool.
 
+The explicit GitHub/Slack live runner and environment adapter contract are
+[documented separately](packages/mcp-connector/test/live/README.md). Its offline
+validation is part of local checks; actual deployment binding and external
+execution supply separate live evidence.
+
 #### Tool-system mapping
 
 | Concern | Rule |
 | --- | --- |
 | Definition | MCP `{name, description, inputSchema}` verbatim |
 | Route | `gateway`, `kind = mcp` |
-| Scheduler | `parallel_safe`, no conflict key (server-side effects are GitHub's own concurrency domain) |
+| Scheduler | `parallel_safe`, no conflict key (server-side effects remain the external service's concurrency domain) |
 | Name collision | the connector filters platform-tool collisions into `omitted_tools` and logs a warning; family-builtin collisions are Bridge's to filter, so the connector stays family-blind |
 | Schema | the same per-provider schema transform every tool gets in lowering; no MCP-specific branch |
 
@@ -683,7 +707,7 @@ compatibility, so appending unconditionally would duplicate it).
 | `mcp_connection_failed` | reconnect exhausted / terminal | `session.error` wrapping `mcp_connection_failed_error`; call settles `runtime_error` |
 | `mcp_authentication_failed` | auth retry failed (an existing credential was rejected) | `session.error` wrapping `mcp_authentication_failed_error`; call settles `runtime_error` |
 | `mcp_credential_required` | zero matching credential to try | `session.error` wrapping `mcp_authentication_failed_error` with `retry_status = terminal`; call settles `runtime_error` |
-| `mcp_timeout` | call exceeded `MCP_CALL_TIMEOUT_SECONDS` (120) | `tool_error` result naming the timeout |
+| `mcp_timeout` | shared preparation/execution allowance, an owning phase ceiling, or a shorter caller deadline exhausted (including before external dispatch) | `tool_error` result naming the timeout |
 | `mcp_claim_conflict` | Claim stored-result hash mismatch | `session.error` wrapping `unknown_error` with `retry_status = terminal`; call settles `runtime_error` |
 | `mcp_in_flight` | live unexpired reservation on claim | retryable `runtime_error`, no `session.error` |
 | `mcp_commit_failed` | post-effect Commit/store failure after the side effect ran | retryable `runtime_error`, no `session.error` |
@@ -730,38 +754,56 @@ it preserves the stated invariants and passes the named suites.
 - **Conformance.** `service.test.ts`, `bounds.test.ts`, `auth.test.ts`,
   `http-server.test.ts`.
 
-#### MCP catalog and client transport
+The shared logger emits fixed owner phase records for server/credential resolution,
+refresh, connect, complete readiness, manifest preparation, call, Claim and first
+Commit. Execution records carry the original claim and Tool Use, phase attempt,
+monotonic elapsed and remaining shared budget. A shared opening reports each
+participating execution. Lost ACK convergence emits a separate `receipt_recovery`
+record for the original claim. Scope-only repeated diagnostics use the shared
+limiter; logs never include credentials, SDK error bodies, schemas or tool results.
 
-- **Contract.** `MCP_CATALOG` / `assertCatalogURL` (`catalog.ts`) and
-  `McpSDKClient` over `StreamableHTTPClientTransport` (`client.ts`).
-- **Lifecycle.** Lazy establish on first use, idle close at 1800 s, bounded
-  reconnect, terminal-exhaustion settlement with cache eviction.
-- **Invariants.** The connector opens a connection only to a catalog URL (defense
-  in depth on top of upstream admission). Every newly created transport carries
-  the catalog's `X-MCP-Toolsets: default,actions` selection alongside bearer
-  authorization. Discovery follows opaque `nextCursor` values within one listing
-  until absent and composes a single manifest; repeated cursors and the
-  page/tool/byte bounds and the shared deadline fail
-  the listing terminally and a partial page sequence is never published as a
-  successful manifest. Reconnect exhaustion is synthesized in
-  the handler, never mapped from SDK wording, and settles every in-flight call on
-  the client exactly once. The connection cache key includes `sha256(token)`, so a
-  credential switch is a new client.
-- **Conformance.** `catalog.test.ts`, `client.test.ts`, `discovery.test.ts` (real SDK and gRPC).
+#### MCP adapters and client transport
+
+- **Contract.** The immutable `MCP_ADAPTERS` registry (`adapters/registry.ts`),
+  Workspace-scoped `SQLMcpServerResolver` (`server-resolver.ts`) and `McpSDKClient`
+  over the pinned SDK's `StreamableHTTPClientTransport` (`client.ts`). Installed
+  Session configuration owns names; one resolved endpoint binds credential
+  selection and transport construction throughout an attempt.
+- **Lifecycle.** Lazy establish on first use, complete SDK connect and every
+  discovery page before cache publication or calling, idle close at 1800 s,
+  bounded reconnect, terminal-exhaustion settlement with cache eviction.
+- **Invariants.** Only registered endpoints are allowed. GitHub transports carry
+  `X-MCP-Toolsets: default,actions`; Slack transports do not. The SDK owns protocol
+  and session headers; the common connector owns bearer authorization. Discovery
+  follows opaque cursors into one complete list; repeated cursors, page/tool/byte
+  bounds and the shared deadline fail without publishing partial definitions.
+  There is no second retained tool-definition cache. The composite cache key is
+  Workspace, Session, configured name, Vault, credential ID and `sha256(token)`;
+  an endpoint mismatch retires an entry even if that key remains equal. Pending
+  waiters share readiness and inherit spent refresh allowances. Each caller keeps
+  its own deadline; shared SDK phases use the finite opening allowance and phase
+  ceiling, and the initializer aborts when its last waiter leaves. Reconnect
+  exhaustion is synthesized by the connector and settles every in-flight call
+  exactly once; SDK message wording never establishes authentication provenance.
+- **Conformance.** `catalog.test.ts`, `adapter-routing.test.ts`, `client.test.ts`,
+  `client-readiness.test.ts`, `discovery.test.ts`, `execution-budget.test.ts` and
+  `rpc-readiness.test.ts` exercise the owning boundaries, including real SDK HTTP.
 
 #### Credential resolution and single-flight refresh
 
-- **Contract.** `SQLGitHubMcpCredentialResolver` (`credential.ts`) and
-  `SQLVaultGitHubMcpCredentialUpdatePath` (`credential-update-path.ts`); scope key
+- **Contract.** `SQLMcpCredentialResolver` (`credential.ts`) and
+  `SQLVaultMcpCredentialUpdatePath` (`credential-update-path.ts`); scope key
   `(workspace_id, vault_id, credential_id)`.
 - **Lifecycle.** One read per call; the single sanctioned durable write is the
   OAuth refresh write-back under a row-level single-flight lock.
 - **Invariants.** Match is by normalized `mcp_server_url`; the bounded
-  `GitHubMcpCredentialError` set each fails closed and leaks no internal step; a
+  `McpCredentialError` set each fails closed and leaks no internal step; a
   rotating refresh token is never burned twice concurrently; per-operation refresh
-  ceiling of one per phase; `refreshTriggered` means a successful rotation
-  contributed to the returned call, while issuer attempts are counted at the
-  locked refresh owner; plaintext never logged or persisted.
+  ceiling of one per phase; on a returned call, `refreshTriggered` records refresh
+  path participation or inherited refreshed material, including reuse of another
+  refresher's winner. It does not prove a new issuer rotation or credential write;
+  issuer attempts are counted at the locked refresh owner. Plaintext is never
+  logged or persisted.
 - **Conformance.** `credential.test.ts`, `credential-postgresql.test.ts`, and the
   `test/testdata/mcp-credential-vectors.json` vector set (each vector exercised by
   the credential suite).
@@ -803,7 +845,7 @@ it preserves the stated invariants and passes the named suites.
 | `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
 | `auth.test.ts` | TokenReview admission of the Runtime tool execution and Bridge/Job Runner discovery identities; wrong methods and every other caller rejected |
 | `bounds.test.ts` | Request/response envelope validation |
-| `catalog.test.ts` | Closed catalog, URL normalization, connection refusal to any non-catalog URL |
+| `catalog.test.ts` | Registered adapters, exact endpoint normalization and rejection of unregistered endpoints |
 | `client.test.ts` | Connection cache keying, idle close, reconnect backoff, auth-retry, terminal-exhaustion settlement and cache eviction |
 | `credential.test.ts`, `credential-postgresql.test.ts` | The full match/fail-closed enumeration, single-flight refresh, rotation write-back, and the `mcp-credential-vectors.json` set |
 | `bridge-client.test.ts` | Claim/Commit idempotency, owner fence, commit message-size admission, and `McpManifestChanged` retry classification |
@@ -812,7 +854,7 @@ it preserves the stated invariants and passes the named suites.
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and the no-`lowering`/no-`provider-gateway` import guard |
 | `config.test.ts`, `logger.test.ts` | Env config parsing (including allowed service accounts) and the leak-free structured log envelope |
 
-If a PR changes the catalog, the credential match or refresh path, the connection
+If a PR changes the adapter registry, the installed Server resolver, the credential match or refresh path, the connection
 policy, the idempotency or manifest RPCs, the formatter table, or the error
 taxonomy in this package, it updates the matching section here and the named
 conformance suites.

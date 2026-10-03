@@ -1,3 +1,4 @@
+import { fixtureServerResolver } from "./registered-server.js";
 // Test-owned process fixture exercises acquired MCP listeners, SDK client and SQL.
 import { runMcpConnectorCommand } from "../../src/command.js";
 import { McpSDKClient } from "../../src/client.js";
@@ -32,7 +33,7 @@ export function commandFixture(mode: string, event: (name: string) => void = () 
   };
   const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & { close: () => Promise<void> });
   sql.close = async () => close("database");
-  const client = new McpSDKClient({
+  const client = new McpSDKClient({serverResolver: fixtureServerResolver,
     credentialResolver: { resolve: async () => { throw new Error("unused resolve"); }, refresh: async () => { throw new Error("unused refresh"); } },
     onToolsListChanged: async () => undefined,
   });

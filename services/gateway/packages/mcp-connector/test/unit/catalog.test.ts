@@ -1,27 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { assertCatalogURL, catalogEntryByName, MCP_CATALOG } from "../../src/catalog.js";
+import { requireAdapter, adapterById, MCP_ADAPTERS } from "../../src/adapters/registry.js";
 
-describe("MCP catalog", () => {
-  test("pins the closed GitHub catalog entry", () => {
-    expect(MCP_CATALOG).toEqual([
-      { name: "github", url: "https://api.githubcopilot.com/mcp/", toolsets: "default,actions" },
+describe("MCP adapter registry", () => {
+  test("pins registered GitHub and Slack endpoints", () => {
+    expect(MCP_ADAPTERS).toEqual([
+      { id: "github", endpoint: "https://api.githubcopilot.com/mcp/", requestHeaders: { "X-MCP-Toolsets": "default,actions" } },
+      { id: "slack", endpoint: "https://mcp.slack.com/mcp", requestHeaders: {} },
     ]);
-    expect(catalogEntryByName("github")).toEqual(MCP_CATALOG[0]);
+    expect(adapterById("github")).toEqual(MCP_ADAPTERS[0]!);
   });
 
   test("keeps the default alias rather than enumerating its constituent toolsets", () => {
-    expect(MCP_CATALOG[0]?.toolsets).toBe("default,actions");
-    expect(MCP_CATALOG[0]?.toolsets.split(",")).toEqual(["default", "actions"]);
+    expect(MCP_ADAPTERS[0]?.requestHeaders["X-MCP-Toolsets"]).toBe("default,actions");
+    expect(MCP_ADAPTERS[0]?.requestHeaders["X-MCP-Toolsets"]?.split(",")).toEqual(["default", "actions"]);
   });
 
-  test("accepts only catalog URL variants and rejects off-catalog URLs", () => {
-    expect(assertCatalogURL("https://api.githubcopilot.com/mcp")).toEqual(MCP_CATALOG[0]);
-    expect(() => assertCatalogURL("https://API.GITHUBCOPILOT.COM/mcp")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://api.githubcopilot.com:443/mcp")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://not-github.example.com/mcp")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://api.githubcopilot.com/mcp//")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://api.githubcopilot.com/mcp/?token=secret")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://api.githubcopilot.com/mcp/#fragment")).toThrow("curated catalog");
-    expect(() => assertCatalogURL("https://user:pass@api.githubcopilot.com/mcp/")).toThrow("curated catalog");
+  test("accepts only registered endpoint variants and rejects unregistered URLs", () => {
+    expect(requireAdapter("https://api.githubcopilot.com/mcp")).toEqual(MCP_ADAPTERS[0]!);
+    expect(() => requireAdapter("https://API.GITHUBCOPILOT.COM/mcp")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://api.githubcopilot.com:443/mcp")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://not-github.example.com/mcp")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://api.githubcopilot.com/mcp//")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://api.githubcopilot.com/mcp/?token=secret")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://api.githubcopilot.com/mcp/#fragment")).toThrow("Unsupported MCP server endpoint");
+    expect(() => requireAdapter("https://user:pass@api.githubcopilot.com/mcp/")).toThrow("Unsupported MCP server endpoint");
   });
 });

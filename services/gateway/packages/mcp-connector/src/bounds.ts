@@ -53,7 +53,7 @@ export function validateMcpExecutorPayload(payload: McpExecutorPayload): Validat
   return { ok: true };
 }
 
-/** Validates the tenant scope and catalog name carried by a tool-discovery request. */
+/** Validates the tenant scope and configured Server name carried by a tool-discovery request. */
 export function validateListMcpToolsRequest(request: ListMcpToolsRequest): ValidationResult {
   if (
     invalidBytes(request.workspaceId, MaxIdBytes) ||

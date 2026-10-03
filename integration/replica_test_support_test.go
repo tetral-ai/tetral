@@ -45,10 +45,14 @@ func serveReplicaBridgeIdentities(t *testing.T, store bridge.BridgeAPIStore, ide
 	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		md, _ := metadata.FromIncomingContext(ctx)
 		values := md.Get("authorization")
-		if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		if len(values) != 1 {
 			return nil, status.Error(codes.Unauthenticated, "verified fixture identity required")
 		}
-		identity, ok := identities[strings.TrimPrefix(values[0], "Bearer ")]
+		parts := strings.Split(values[0], " ")
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") || parts[1] == "" {
+			return nil, status.Error(codes.Unauthenticated, "verified fixture identity required")
+		}
+		identity, ok := identities[parts[1]]
 		if !ok {
 			return nil, status.Error(codes.Unauthenticated, "unknown fixture identity")
 		}

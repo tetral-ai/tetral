@@ -131,6 +131,12 @@ describe("MCP connector config", () => {
   });
 });
 
+test("execution total clips larger phase ceilings and rejects invalid phase/lease policies",()=>{
+ const shorter=loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_EXECUTION_TIMEOUT_MS:"60000"});expect(shorter.ok).toBe(true);if(shorter.ok){expect(shorter.config.clientPolicies.executionTimeoutMs).toBe(60000);expect(shorter.config.clientPolicies.callTimeoutMs).toBe(120000);}
+ for(const key of ["TETRAL_MCP_EXECUTION_TIMEOUT_MS","TETRAL_MCP_CALL_TIMEOUT_MS","TETRAL_MCP_CREDENTIAL_TIMEOUT_MS","TETRAL_MCP_CONNECT_TIMEOUT_MS","TETRAL_MCP_DISCOVERY_TIMEOUT_MS","TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS","TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS"])for(const invalid of ["0","-1","1.5","2147483648","bad"])expect(loadMcpConnectorConfigFromEnv({...validEnv(),[key]:invalid}).ok).toBe(false);
+ expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_MCP_EXECUTION_TIMEOUT_MS:"170001"}).ok).toBe(false);expect(loadMcpConnectorConfigFromEnv({...validEnv(),TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS:"10001"}).ok).toBe(false);
+});
+
 function validEnv(): Record<string, string> {
   return {
     TETRAL_MCP_CONNECTOR_GRPC_ADDR: "127.0.0.1:0",

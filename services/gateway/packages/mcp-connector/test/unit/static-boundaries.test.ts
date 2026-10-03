@@ -70,7 +70,7 @@ describe("mcp-connector static boundaries", () => {
   test("credential resolver delegates OAuth write-back to the Vault update path", () => {
     const credential = readFileSync(join(import.meta.dir, "../../src/credential.ts"), "utf8");
 
-    expect(credential).toContain("SQLVaultGitHubMcpCredentialUpdatePath");
+    expect(credential).toContain("SQLVaultMcpCredentialUpdatePath");
     expect(credential).toContain("refreshWriter.refreshOAuthCredential");
     for (const forbidden of [
       "FOR UPDATE",

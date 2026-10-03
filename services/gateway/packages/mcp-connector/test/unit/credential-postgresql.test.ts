@@ -1,6 +1,7 @@
+import { registeredServer } from "../fixtures/registered-server.js";
 import { expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { SQLGitHubMcpCredentialResolver } from "../../src/credential.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 
 const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
@@ -48,18 +49,18 @@ test.skipIf(databaseURL === undefined)("resolves credentials through forced work
     appURL.password = password;
     app = new Bun.SQL({ url: appURL.toString(), max: 1 });
     await app.unsafe(`SET search_path TO ${schema}`);
-    const resolver = new SQLGitHubMcpCredentialResolver(app as unknown as McpCredentialSQL, keyHex);
+    const resolver = new SQLMcpCredentialResolver(app as unknown as McpCredentialSQL, keyHex);
 
     const resolved = await resolver.resolve({
       workspaceId: "wksp_rls",
       sessionId: "sesn_rls",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
     expect(resolved).toMatchObject({ ok: true, mode: "bearer", token: "rls-token-sentinel" });
     const wrongWorkspace = await resolver.resolve({
       workspaceId: "wksp_other",
       sessionId: "sesn_rls",
-      mcpServerName: "github",
+      mcpServerName: "github", resolvedServer: registeredServer(),
     });
     expect(wrongWorkspace).toEqual({ ok: false, error: "credential_required" });
   } finally {

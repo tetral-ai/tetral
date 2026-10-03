@@ -63,6 +63,9 @@ let service: McpConnectorServiceShell;
 const credentialSQL: McpCredentialSQL = async <T = unknown>(
   strings: TemplateStringsArray,
 ): Promise<T> => {
+  if (strings.join("").includes("SELECT installed_tools_json")) {
+    return [{installed_tools_json:{mcp_servers:[{type:"url",name:"github",url:"https://api.githubcopilot.com/mcp/"}]}}] as T;
+  }
   if (strings.join("").includes("WITH session_vaults")) {
     emit("credential.held");
     entered();

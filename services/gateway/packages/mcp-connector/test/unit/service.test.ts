@@ -37,17 +37,18 @@ describe("McpConnectorServiceShell", () => {
     release();expect(await observed).toBeInstanceOf(Error);await worker;
     await service.shutdown(new Date(Date.now()+30));
   });
-  test("refuses non-catalog server names before client I/O", async () => {
+  test("surfaces configured-server resolution rejection from the client owner", async () => {
     const client = new RecordingMcpClient();
+    client.listToolsError = new McpConnectorError("mcp_invalid_input", "Configured MCP server is unsupported.");
     const service = createService(client);
 
     await expect(service.listMcpTools({
       workspaceId: "wksp_1",
       sessionId: "sesn_1",
       mcpServerName: "not-github",
-    }, new Metadata())).rejects.toMatchObject({ code: status.INVALID_ARGUMENT });
+    }, new Metadata())).rejects.toMatchObject({ code: "mcp_invalid_input" });
 
-    expect(client.calls).toEqual([]);
+    expect(client.calls).toEqual(["listTools"]);
   });
 
   test("omits platform collisions while leaving family collisions to Bridge", async () => {
@@ -524,13 +525,16 @@ describe("McpConnectorServiceShell", () => {
     expect(client.calls).toEqual([]);
   });
 
-  test("terminally settles post-acquisition executor and catalog rejection on the exact claim", async () => {
+  test("terminally settles post-acquisition executor and configured-server resolution rejection on the exact claim", async () => {
     for (const executor of [
       { ...durableExecutor(), inputJson: "[]" },
-      { ...durableExecutor(), mcpServerName: "not-catalogued" },
+      { ...durableExecutor(), toolName: "" },
+      { ...durableExecutor(), mcpServerName: "unsupported-installed" },
     ]) {
       const store = new RecordingExecutorRejectionStore(executor);
       const client = new RecordingMcpClient();
+      const resolutionRejected=executor.mcpServerName==="unsupported-installed";
+      if(resolutionRejected)client.callToolError=new McpConnectorError("mcp_invalid_input","Configured MCP server is unavailable or unsupported.");
       const response = await createService(
         client,
         new RecordingManifestChangeNotifier(),
@@ -539,15 +543,16 @@ describe("McpConnectorServiceShell", () => {
         store,
       ).runMcpTool(validRunRequest(), authorizationMetadata());
 
-      expect(response).toMatchObject({
-        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-        resultText: "MCP tool execution metadata was rejected.",
-        errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
-      });
-      expect(client.calls).toEqual([]);
+      expect(response).toMatchObject(resolutionRejected?{
+        status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,resultText:"Configured MCP server is unavailable or unsupported.",errorKind:McpErrorKind.MCP_ERROR_KIND_INVALID_INPUT,
+      }:{status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,resultText:"MCP tool execution metadata was rejected.",errorKind:McpErrorKind.MCP_ERROR_KIND_INTERNAL});
+      expect(client.calls).toEqual(resolutionRejected?["callTool"]:[]);
       expect(store.stores).toHaveLength(1);
       expect(store.failures).toEqual([]);
       expect(store.claimContext?.claimId).toBe(store.storeContext?.claimId);
+      expect(store.claimKey).toEqual(store.storeKey);
+      expect(store.claimKey).toEqual({toolUseEventId:validRunRequest().toolUseEventId});
+      expect(store.stores[0]!.response).toMatchObject({status:response.status,errorKind:response.errorKind,resultText:response.resultText});
     }
   });
 
@@ -592,8 +597,8 @@ describe("McpConnectorServiceShell", () => {
       errorKind: McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED,
       retryStatus: McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
     });
-    expect(logger.records).toHaveLength(1);
-    expect(logger.records[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
+    expect(logger.terminalRecords).toHaveLength(1);
+    expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
   });
 
@@ -634,8 +639,8 @@ describe("McpConnectorServiceShell", () => {
       });
 
       await expect(service.runMcpTool(testCase.request ?? validRunRequest(), authorizationMetadata()), testCase.name).rejects.toBeDefined();
-      expect(logger.records, testCase.name).toHaveLength(1);
-      expect(logger.records[0], testCase.name).toMatchObject({
+      expect(logger.terminalRecords, testCase.name).toHaveLength(1);
+      expect(logger.terminalRecords[0], testCase.name).toMatchObject({
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         status: "runtime_error",
@@ -781,8 +786,8 @@ describe("McpConnectorServiceShell", () => {
       resultText: "MCP server rejected the arguments.",
       errorKind: McpErrorKind.MCP_ERROR_KIND_INVALID_INPUT,
     });
-    expect(logger.records).toHaveLength(1);
-    expect(logger.records[0]).toMatchObject({
+    expect(logger.terminalRecords).toHaveLength(1);
+    expect(logger.terminalRecords[0]).toMatchObject({
       "request.id": expect.stringMatching(/^mcpclaim_/),
       "workspace.id": "wksp_1",
       "session.id": "sesn_1",
@@ -797,7 +802,7 @@ describe("McpConnectorServiceShell", () => {
       "error.code": "mcp_invalid_input",
       "error.message_safe": "MCP connector call failed.",
     });
-    expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
+    expect(Object.keys(logger.terminalRecords[0] as Record<string, unknown>).sort()).toEqual([
       "component",
       "duration.ms",
       "error.class",
@@ -817,7 +822,7 @@ describe("McpConnectorServiceShell", () => {
       "tool.use.event.id",
       "workspace.id",
     ].sort());
-    expect(JSON.stringify(logger.records[0])).not.toContain("MCP server rejected the arguments.");
+    expect(JSON.stringify(logger.terminalRecords[0])).not.toContain("MCP server rejected the arguments.");
   });
 
   test("maps terminal MCP authentication failure into the event envelope fields", async () => {
@@ -1244,6 +1249,7 @@ class StaleCustodyIdempotencyStore implements McpIdempotencyStore {
 }
 
 class RecordingExecutorRejectionStore implements McpIdempotencyStore {
+  claimKey:unknown;storeKey:unknown;
   claimContext: McpIdempotencyContext | undefined;
   storeContext: McpIdempotencyContext | undefined;
   readonly stores: PendingStoredRunMcpToolResponse[] = [];
@@ -1253,6 +1259,7 @@ class RecordingExecutorRejectionStore implements McpIdempotencyStore {
 
   claim(_key: unknown, context?: McpIdempotencyContext): ReturnType<McpIdempotencyStore["claim"]> {
     this.claimContext = context;
+    this.claimKey=_key;
     return { status: "new", executor: this.executor };
   }
 
@@ -1262,6 +1269,7 @@ class RecordingExecutorRejectionStore implements McpIdempotencyStore {
     context?: McpIdempotencyContext,
   ): ReturnType<McpIdempotencyStore["store"]> {
     this.stores.push(stored);
+    this.storeKey=_key;
     this.storeContext = context;
     return {
       status: stored.response.status,
@@ -1439,6 +1447,7 @@ class AllowingAuthenticator implements McpAuthenticator {
 class MemoryLogger implements McpConnectorLogger {
   readonly records: unknown[] = [];
   readonly levels: Array<"info" | "warn" | "error"> = [];
+  get terminalRecords(): unknown[] { return this.records.filter(record => (record as {"event.kind"?:unknown})["event.kind"] === "mcpconnector.call"); }
 
   info(record: unknown): void {
     this.records.push(record);

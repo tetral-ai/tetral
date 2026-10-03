@@ -219,6 +219,7 @@ var approvedDiagnosticFields = map[string]bool{
 	"thread.role":                       true,
 	"ticket_id":                         true,
 	"timeout.elapsed_ms":                true,
+	"timeout.remaining_ms":              true,
 	"timeout.inter_event_gap_ms":        true,
 	"timeout.kind":                      true,
 	"tool.declaration.kind":             true,
