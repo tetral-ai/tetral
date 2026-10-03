@@ -160,7 +160,7 @@ func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {
 		}
 		<-ctx.Done()
 		exits <- struct{}{}
-		return nil, status.Error(codes.Canceled, "fixture observed cancellation")
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}))
 	agentruntimev1.RegisterAgentRuntimePodServiceServer(server, &policyRuntimeServer{})
 	joined := make(chan struct{})

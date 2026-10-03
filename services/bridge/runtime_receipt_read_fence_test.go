@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"reflect"
@@ -24,6 +25,71 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
+type backgroundReceiptAdmission struct {
+	scope                              *bridgev1.RuntimeScope
+	receiptID, taskID, requestID, kind string
+	totalJobs                          int
+	call                               func(context.Context) error
+}
+
+// A caller deadline alone does not prove admission. Observe the first committed
+// read boundary and exact Queue capability before deliberately expiring the real
+// TCP caller; join its server owner before replacement or result publication.
+func admitPendingBackgroundReceipt(t *testing.T, admin *sql.DB, tracer *bridgeExecutionQueryTracer, returned <-chan struct{}, admission backgroundReceiptAdmission) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fired, release := tracer.armBarrier("", "/* runtime receipt scope validation */", 1)
+	var releaseOnce sync.Once
+	releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseBarrier()
+	done := make(chan error, 1)
+	go func() { done <- admission.call(ctx) }()
+	select {
+	case <-fired:
+	case err := <-done:
+		t.Fatalf("background call returned before committed receipt boundary: %v", err)
+	case <-ctx.Done():
+		t.Fatal("caller expired before committed background receipt boundary")
+	}
+	var state, kind, requestID, taskID string
+	if err := admin.QueryRow(`SELECT background_operation_state, background_operation_kind, background_request_id, background_task_id
+	 FROM session_runtime_tool_results WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+		admission.scope.WorkspaceId, admission.scope.SessionId, admission.scope.SessionThreadId, admission.receiptID,
+	).Scan(&state, &kind, &requestID, &taskID); err != nil || state != "pending" || kind != admission.kind || requestID != admission.requestID || taskID != admission.taskID {
+		t.Fatalf("committed background receipt=%s/%s/%s/%s/%v", state, kind, requestID, taskID, err)
+	}
+	var jobs, matching int
+	if err := admin.QueryRow(`SELECT count(*), count(*) FILTER (WHERE workspace_id=$2 AND payload_json::jsonb->>'session_id'=$3
+	 AND payload_json::jsonb->>'task_id'=$4 AND payload_json::jsonb->>'request_id'=$5)
+	 FROM queue_jobs WHERE kind=$1`, queue.KindSandboxBackgroundCommand, admission.scope.WorkspaceId, admission.scope.SessionId, admission.taskID, admission.requestID,
+	).Scan(&jobs, &matching); err != nil || jobs != admission.totalJobs || matching != 1 {
+		t.Fatalf("accepted background Queue=%d matching=%d/%v; want %d/1", jobs, matching, err, admission.totalJobs)
+	}
+	before := receiptTenantSnapshot(t, admin)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("caller expired before independent committed receipt/Queue proof: %v", err)
+	}
+	<-ctx.Done()
+	releaseBarrier()
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("actual accepted %s wait=%v", admission.kind, err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("expired background caller did not join")
+	}
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expired background server handler did not join")
+	}
+	if after := receiptTenantSnapshot(t, admin); !reflect.DeepEqual(before, after) {
+		t.Fatal("caller expiry mutated accepted background receipt/Sandbox/Queue custody")
+	}
+}
+
 func TestPostgreSQLBackgroundReceiptBindingCut(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -34,18 +100,27 @@ func TestPostgreSQLBackgroundReceiptBindingCut(t *testing.T) {
 	seedBridgeAPIToolDeclarationProjection(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, "call_review_background_cut", "write_stdin", `{"session_id":"task_review_background_cut","chars":"once"}`, "background_command")
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool)
 	seedBridgeAPIBackgroundTask(t, admin, "default", scope.SessionId, scope.SessionThreadId, scope.Binding.BindingId, task, "evt_review_background_source")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	_, err := store.SendCommandInput(ctx, &bridgev1.SendCommandInputRequest{Scope: scope, TaskId: task, ToolUseEventId: tool, OperationId: "op_review_background"})
-	cancel()
-	if status.Code(err) != codes.DeadlineExceeded {
-		t.Fatalf("accepted wait=%v", err)
-	}
-	if _, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json='{"original":true}',result_digest='fixture_terminal' WHERE workspace_id='default' AND tool_use_event_id=$1`, tool); err != nil {
-		t.Fatal(err)
-	}
 	tracer := &bridgeExecutionQueryTracer{}
 	traced := newAwaitNotificationTracedStore(t, runtime, tracer)
+	rpc, returned := receiptJoinedRPC(t, traced, scope.Binding.TargetPodUid)
+	admitPendingBackgroundReceipt(t, admin, tracer, returned, backgroundReceiptAdmission{
+		scope: scope, receiptID: tool, taskID: task, requestID: "op_review_background", kind: "stdin", totalJobs: 1,
+		call: func(ctx context.Context) error {
+			_, err := rpc.SendCommandInput(ctx, &bridgev1.SendCommandInputRequest{Scope: scope, TaskId: task, ToolUseEventId: tool, OperationId: "op_review_background"})
+			return err
+		},
+	})
+	updated, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json='{"original":true}',result_digest='fixture_terminal' WHERE workspace_id='default' AND tool_use_event_id=$1`, tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := updated.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("terminal background receipt=%d/%v; want 1", count, err)
+	}
 	fired, release := tracer.armBarrier("", "/* runtime receipt scope validation */", 1)
+	var releaseOnce sync.Once
+	releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseBarrier()
 	type outcome struct {
 		result commandOperationResult
 		err    error
@@ -58,15 +133,15 @@ func TestPostgreSQLBackgroundReceiptBindingCut(t *testing.T) {
 	select {
 	case <-fired:
 	case <-time.After(time.Second * 3):
-		close(release)
+		releaseBarrier()
 		t.Fatal("scope validation barrier unreached")
 	}
 	if _, err := admin.Exec(`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, scope.SessionId); err != nil {
-		close(release)
+		releaseBarrier()
 		t.Fatal(err)
 	}
 	before := receiptTenantSnapshot(t, admin)
-	close(release)
+	releaseBarrier()
 	select {
 	case got := <-done:
 		t.Logf("after binding deletion: result=%s error=%v", got.result.ResultJSON, got.err)
@@ -162,7 +237,7 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 				seedBridgeAPIBackgroundTask(t, admin, "default", scope.SessionId, scope.SessionThreadId, scope.Binding.BindingId, task, "evt_receipt_source")
 				tracer := &bridgeExecutionQueryTracer{}
 				traced := newAwaitNotificationTracedStore(t, runtime, tracer)
-				rpc := processRegistryRPCWithStore(t, traced, scope.Binding.TargetPodUid, nil)
+				rpc, returned := receiptJoinedRPC(t, traced, scope.Binding.TargetPodUid)
 				type outcome struct {
 					content string
 					stale   bool
@@ -181,22 +256,25 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 						return outcome{v.GetDuplicate().GetResultJson(), v.GetStale() != nil, e}
 					}
 				}
-				admit := func(operation string) {
-					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-					got := call(ctx, operation)
-					cancel()
-					if status.Code(got.err) != codes.DeadlineExceeded {
-						t.Fatalf("actual accepted %s wait=%+v", operation, got)
+				receiptFor := func(operation string) string {
+					if operation == "cancel" {
+						return backgroundCommandReceiptID("op_receipt_cancel")
 					}
+					return tool
+				}
+				jobs := 0
+				admit := func(operation string) {
+					jobs++
+					admitPendingBackgroundReceipt(t, admin, tracer, returned, backgroundReceiptAdmission{
+						scope: scope, receiptID: receiptFor(operation), taskID: task, requestID: "op_receipt_" + operation, kind: operation, totalJobs: jobs,
+						call: func(ctx context.Context) error { return call(ctx, operation).err },
+					})
 				}
 				if kind == "cancel" {
 					admit("stdin")
 				}
 				admit(kind)
-				receipt := tool
-				if kind == "cancel" {
-					receipt = backgroundCommandReceiptID("op_receipt_cancel")
-				}
+				receipt := receiptFor(kind)
 				replacement := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: scope.Binding.TargetPodUid, ID: "replacement_receipt_consumer"}
 				registered, err := runtimecontrol.RegisterProcess(context.Background(), dbconnect.NewClientForTesting(runtime), replacement)
 				if err != nil {
@@ -206,26 +284,33 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 					t.Fatal(err)
 				}
 				fired, release := tracer.armBarrier("", "/* runtime receipt scope validation */", 1)
+				var releaseOnce sync.Once
+				releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+				defer releaseBarrier()
 				done := make(chan outcome, 1)
 				go func() { done <- call(context.Background(), kind) }()
 				select {
 				case <-fired:
+				case got := <-done:
+					t.Fatalf("actual public receipt returned before read barrier: %+v", got)
 				case <-time.After(3 * time.Second):
-					close(release)
 					t.Fatal("actual public receipt read barrier not reached")
 				}
-				if _, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json='{"original":true}',result_digest='fixture_terminal' WHERE workspace_id='default' AND tool_use_event_id=$1`, receipt); err != nil {
-					close(release)
+				updated, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json='{"original":true}',result_digest='fixture_terminal' WHERE workspace_id='default' AND tool_use_event_id=$1`, receipt)
+				if err != nil {
 					t.Fatal(err)
+				}
+				if count, err := updated.RowsAffected(); err != nil || count != 1 {
+					t.Fatalf("terminal background receipt=%d/%v; want 1", count, err)
 				}
 				if cut {
 					if _, err := admin.Exec(`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, scope.SessionId); err != nil {
-						close(release)
+						releaseBarrier()
 						t.Fatal(err)
 					}
 				}
 				before := receiptTenantSnapshot(t, admin)
-				close(release)
+				releaseBarrier()
 				select {
 				case got := <-done:
 					if got.err != nil || got.stale != cut || (cut && got.content != "") || (!cut && got.content != `{"original":true}`) {
@@ -244,7 +329,7 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 
 // Observe the actual handler's return separately from the TCP caller deadline:
 // client expiry can precede server cancellation and transaction cleanup.
-func memoryReceiptJoinedRPC(t *testing.T, store *PostgreSQLBridgeAPIStore, podUID string) (bridgev1.AgentRuntimeBridgeServiceClient, <-chan struct{}) {
+func receiptJoinedRPC(t *testing.T, store *PostgreSQLBridgeAPIStore, podUID string) (bridgev1.AgentRuntimeBridgeServiceClient, <-chan struct{}) {
 	t.Helper()
 	identity := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: podUID}
 	returned := make(chan struct{}, 2)
@@ -277,7 +362,7 @@ func memoryReceiptJoinedRPC(t *testing.T, store *PostgreSQLBridgeAPIStore, podUI
 		case <-time.After(5 * time.Second):
 			server.Stop()
 			<-joined
-			t.Error("memory receipt RPC exceeded graceful join")
+			t.Error("receipt RPC exceeded graceful join")
 		}
 		_ = listener.Close()
 		<-served
@@ -299,7 +384,7 @@ func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 			request := durableMemoryRequestForTest(t, admin, scope, "evt_memory_projection_receipt", `{"action":"create","path":"notes/replay.md","content":"original"}`)
 			tracer := &bridgeExecutionQueryTracer{}
 			traced := newAwaitNotificationTracedStore(t, runtime, tracer)
-			rpc, handlerReturned := memoryReceiptJoinedRPC(t, traced, scope.Binding.TargetPodUid)
+			rpc, handlerReturned := receiptJoinedRPC(t, traced, scope.Binding.TargetPodUid)
 			// The real caller deadline is outside the unchanged 3s admission
 			// phase and inside the unchanged 30s projection wait. Admission is
 			// proved by the committed scope boundary and independent SQL.

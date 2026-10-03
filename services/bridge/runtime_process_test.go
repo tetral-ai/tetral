@@ -2,6 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
+	"database/sql"
 	"net"
 	"testing"
 	"time"
@@ -343,15 +344,22 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 	for _, variant := range []string{"configured server deadline", "earlier caller deadline", "parent cancellation"} {
 		t.Run(variant, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			client := dbconnect.NewClientForTesting(runtime)
+			store := NewPostgreSQLBridgeAPIStore(client)
 			store.ProcessPolicy.ReportTimeout = 80 * time.Millisecond
-			rpc := processRegistryRPCWithStore(t, store, "pod-report-deadline", nil)
+			rpc, returned := receiptJoinedRPC(t, store, "pod-report-deadline")
 			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
 			registered, err := rpc.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: "report-deadline"})
 			if err != nil {
 				t.Fatal(err)
 			}
+			select {
+			case <-returned:
+			case <-ctx.Done():
+				t.Fatal("registration handler did not join")
+			}
+			beforePromotion := reportDeadlinePromotionSnapshot(t, admin, "pod-report-deadline")
 			var before string
 			if err := admin.QueryRow(`SELECT to_jsonb(process)::text FROM runtime_processes process WHERE runtime_process_id=$1`, registered.RuntimeProcessId).Scan(&before); err != nil {
 				t.Fatal(err)
@@ -413,6 +421,11 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 			if elapsed := time.Since(start); elapsed > time.Second {
 				t.Fatalf("configured report bound=%s", elapsed)
 			}
+			select {
+			case <-returned:
+			case <-ctx.Done():
+				t.Fatal("expired report handler did not join")
+			}
 			var after string
 			if err := admin.QueryRow(`SELECT to_jsonb(process)::text FROM runtime_processes process WHERE runtime_process_id=$1`, registered.RuntimeProcessId).Scan(&after); err != nil {
 				t.Fatal(err)
@@ -423,9 +436,60 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 			if err := blocker.Commit(); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rpc.ReportRuntimeProcess(ctx, report); err != nil {
-				t.Fatalf("subsequent exact report poisoned by cancelled lock=%v", err)
+			lockProbe, err := admin.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
 			}
+			defer func() { _ = lockProbe.Rollback() }()
+			var order int64
+			if err := lockProbe.QueryRowContext(ctx, `SELECT last_promoted_order FROM runtime_process_pods WHERE namespace='tetral-agent-runtime' AND pod_uid='pod-report-deadline' FOR UPDATE NOWAIT`).Scan(&order); err != nil {
+				t.Fatalf("independent Pod NOWAIT lock: %v", err)
+			}
+			var id string
+			if err := lockProbe.QueryRowContext(ctx, `SELECT runtime_process_id FROM runtime_processes WHERE namespace='tetral-agent-runtime' AND pod_uid='pod-report-deadline' AND runtime_process_id=$1 FOR UPDATE NOWAIT`, registered.RuntimeProcessId).Scan(&id); err != nil {
+				t.Fatalf("independent candidate NOWAIT lock: %v", err)
+			}
+			if err := lockProbe.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if order != 0 || id != registered.RuntimeProcessId || reportDeadlinePromotionSnapshot(t, admin, "pod-report-deadline") != beforePromotion {
+				t.Fatal("cancelled report changed full promotion state")
+			}
+			if err := client.Ping(ctx); err != nil {
+				t.Fatalf("same actual runtime pool not ready: %v", err)
+			}
+			t.Logf("independent cleanup: initial=%s handler joined; Pod+candidate NOWAIT reusable; promotion state unchanged; same pool ready", variant)
+			// The independent NOWAIT locks prove cancellation cleanup. A separate
+			// normal-policy receiver proves exact-receipt liveness without imposing
+			// the fault receiver's 80ms budget on a healthy promotion transaction.
+			normalStore := NewPostgreSQLBridgeAPIStore(client)
+			normalRPC := processRegistryRPCWithStore(t, normalStore, "pod-report-deadline", nil)
+			response, err := normalRPC.ReportRuntimeProcess(ctx, report)
+			if err != nil {
+				t.Fatalf("normal-policy exact report after cancelled handler and independent lock reuse: %v", err)
+			}
+			if response.GetRuntimeProcessId() != registered.RuntimeProcessId || !response.GetCurrent() || response.GetPhase() != report.Phase {
+				t.Fatalf("exact followup response=%v", response)
+			}
+			var current bool
+			var phase, receipt string
+			var promoted, registeredOrder int64
+			if err := admin.QueryRow(`SELECT process.is_current,process.phase,process.registration_receipt,process.registration_order,pod.last_promoted_order FROM runtime_processes process JOIN runtime_process_pods pod USING(namespace,pod_uid) WHERE process.runtime_process_id=$1`, registered.RuntimeProcessId).Scan(&current, &phase, &receipt, &registeredOrder, &promoted); err != nil {
+				t.Fatal(err)
+			}
+			if !current || phase != "accepting" || receipt != registered.RegistrationReceipt || registeredOrder != registered.RegistrationOrder || promoted != registeredOrder {
+				t.Fatal("followup ACK disagrees with exact committed promotion tuple")
+			}
+			t.Log("normal-policy exact receipt ACK and committed promotion tuple verified")
 		})
 	}
+}
+
+func reportDeadlinePromotionSnapshot(t *testing.T, admin *sql.DB, podUID string) string {
+	t.Helper()
+	var state string
+	if err := admin.QueryRow(`SELECT jsonb_build_object('processes',(SELECT jsonb_agg(to_jsonb(process) ORDER BY process.registration_order) FROM runtime_processes process WHERE namespace='tetral-agent-runtime' AND pod_uid=$1),'pod',(SELECT to_jsonb(pod) FROM runtime_process_pods pod WHERE namespace='tetral-agent-runtime' AND pod_uid=$1))::text`, podUID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
