@@ -87,7 +87,7 @@
 //	session_git_tickets                                    Sandbox Service GitHub materialization (mint/rotate)             git-proxy per-request validation
 //	session_mcp_manifests                                  Bridge only                                                      Bridge LoadContext, manifest patch delivery
 //	session_background_tasks                               Sandbox Service (execution/result); Bridge (conversation commit) Runtime task read/send/cancel, cleanup
-//	request_usage_details                                  Bridge only (WriteRequestEnd)                                    session usage projection, audit/billing
+//	request_usage_details                                  Bridge (WriteRequestEnd); Job Runner (synthetic terminal End)     session usage projection, audit/billing
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
 //	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
 //	                                                                                                                         Bridge LoadContext

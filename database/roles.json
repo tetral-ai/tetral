@@ -198,6 +198,7 @@
         "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_events": ["SELECT", "INSERT", "UPDATE"],
         "session_event_stream_changes": ["SELECT", "INSERT"],
+        "request_usage_details": ["SELECT", "INSERT"],
         "session_messages": ["SELECT", "UPDATE"],
         "session_mcp_manifests": ["SELECT", "INSERT", "UPDATE"],
         "session_turn_retries": ["SELECT", "UPDATE"],
