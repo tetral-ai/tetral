@@ -360,7 +360,10 @@ const semanticTimeoutStreamer = {
 			}
 		}
 		providerRequestContexts.push(JSON.stringify(request.request.context));
-		await writeRuntimeState();
+		const failedPartialRequest =
+			(scenario === "semantic_tool_route" && providerInvocations === 2) ||
+			(scenario !== "semantic_tool_route" && providerInvocations <= 2);
+		if (!failedPartialRequest) await writeRuntimeState();
 		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
 			yield {
 				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
@@ -389,10 +392,7 @@ const semanticTimeoutStreamer = {
 			};
 			return;
 		}
-		if (
-			(scenario === "semantic_tool_route" && providerInvocations === 2) ||
-			(scenario !== "semantic_tool_route" && providerInvocations <= 2)
-		) {
+		if (failedPartialRequest) {
 			yield {
 				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
@@ -409,6 +409,9 @@ const semanticTimeoutStreamer = {
 				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
+			// This case requires a completed partial before the semantic stall.
+			// Observation-file I/O must not consume its pre-progress watchdog.
+			await writeRuntimeState();
 			for (let index = 0; index < 40; index += 1) {
 				request.onTransportActivity?.();
 				await new Promise((resolve) => setTimeout(resolve, 5));
