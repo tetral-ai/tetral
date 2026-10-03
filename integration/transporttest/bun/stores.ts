@@ -1,10 +1,19 @@
 import { openPostgresSQLOwner } from "../../../internal/ts-dbconnect/src/owner.ts";
 import { SQLGatewayCredentialStore } from "../../../services/gateway/packages/provider-gateway/src/providers/credentials.ts";
-import { SQLGitHubMcpCredentialResolver } from "../../../services/gateway/packages/mcp-connector/src/credential.ts";
+import { SQLMcpCredentialResolver } from "../../../services/gateway/packages/mcp-connector/src/credential.ts";
 import type { GatewayCredentialSQL } from "../../../services/gateway/packages/provider-gateway/src/providers/credentials.ts";
 import type { McpCredentialSQL } from "../../../services/gateway/packages/mcp-connector/src/credential.ts";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "../../../services/gateway/packages/provider-gateway/src/providers/openai-oauth-refresh.ts";
-import { SQLVaultGitHubMcpCredentialUpdatePath } from "../../../services/gateway/packages/mcp-connector/src/credential-update-path.ts";
+import { SQLVaultMcpCredentialUpdatePath } from "../../../services/gateway/packages/mcp-connector/src/credential-update-path.ts";
+
+import { adapterByEndpoint } from "../../../services/gateway/packages/mcp-connector/src/adapters/registry.ts";
+import type { ResolvedMcpServer } from "../../../services/gateway/packages/mcp-connector/src/server-resolver.ts";
+import type { McpCredentialUpdateRow } from "../../../services/gateway/packages/mcp-connector/src/credential-update-path.ts";
+
+// Fixed registered identity for the protected SQL-owner composition.
+const adapter = adapterByEndpoint("https://api.githubcopilot.com/mcp/");
+if (adapter === undefined) throw new Error("fixture MCP adapter is unavailable");
+const resolvedServer: ResolvedMcpServer = Object.freeze({configuredName:"github",endpoint:adapter.endpoint,adapter});
 
 const config = await Bun.file(process.argv[2]!).json() as { url: string; caPath: string; serverName: string };
 const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -21,7 +30,7 @@ const owner = await openPostgresSQLOwner({ url: config.url, tls: config, pool: {
   },
 });
 const provider = new SQLGatewayCredentialStore(owner as unknown as {withSQL<T>(operation:(sql:GatewayCredentialSQL)=>Promise<T>):Promise<T>});
-const mcp = new SQLGitHubMcpCredentialResolver(owner as unknown as {withSQL<T>(operation:(sql:McpCredentialSQL)=>Promise<T>):Promise<T>},key);
+const mcp = new SQLMcpCredentialResolver(owner as unknown as {withSQL<T>(operation:(sql:McpCredentialSQL)=>Promise<T>):Promise<T>},key);
 let issuerCalls = 0, refreshDone = false, releaseIssuer: (() => void) | undefined;
 const issuerGate = new Promise<void>((resolve) => { releaseIssuer = resolve; });
 const issuer = async () => {
@@ -30,7 +39,7 @@ const issuer = async () => {
   return Response.json({access_token:"rotated-access",refresh_token:"rotated-refresh",expires_in:3600});
 };
 const providerWriter = new SQLOpenAIOAuthCredentialRefreshWriter({sql:owner as unknown as {withSQL<T>(operation:(sql:GatewayCredentialSQL)=>Promise<T>):Promise<T>},masterKeyHex:key,fetch:issuer});
-const mcpWriter = new SQLVaultGitHubMcpCredentialUpdatePath(owner as unknown as {withSQL<T>(operation:(sql:McpCredentialSQL)=>Promise<T>):Promise<T>},key,()=>new Date(),issuer);
+const mcpWriter = new SQLVaultMcpCredentialUpdatePath(owner as unknown as {withSQL<T>(operation:(sql:McpCredentialSQL)=>Promise<T>):Promise<T>},key,()=>new Date(),issuer);
 let providerRefresh: ReturnType<typeof providerWriter.refreshOpenAIOAuthCredential> | undefined;
 let mcpRefresh: ReturnType<typeof mcpWriter.refreshOAuthCredential> | undefined;
 let release: (() => void) | undefined, held: Promise<unknown> | undefined;
@@ -43,7 +52,8 @@ const server = Bun.serve({hostname:"0.0.0.0",port:8888,async fetch(request){
     if (path === "/refresh-start") {
       await owner.withSQL(async(sql)=> await sql`UPDATE credentials SET archived_at=NULL WHERE id='cred_mcp_oauth'`);
       providerRefresh = providerWriter.refreshOpenAIOAuthCredential({workspaceId:"wksp_fixture",abortSignal:AbortSignal.timeout(10000),credential:{source:"session",authType:"provider_oauth",providerId:"openai",supplyMode:"openai-chatgpt-oauth",vaultId:"vlt_fixture",credentialId:"cred_oauth",accessMode:"oauth",accessToken:"old-access",refreshToken:"old-refresh",expiresAt:"2000-01-01T00:00:00.000Z",accountId:"acct_fixture"}});
-      const [row] = await owner.withSQL(async(sql)=> await sql`SELECT id,vault_id,encrypted_auth,auth_public_json FROM credentials WHERE id='cred_mcp_oauth'`);
+      const [row] = await owner.withSQL(async(sql)=> await sql<readonly McpCredentialUpdateRow[]>`SELECT id,vault_id,encrypted_auth,auth_public_json,auth_public_json::jsonb->>'mcp_server_url' AS mcp_server_url FROM credentials WHERE id='cred_mcp_oauth'`);
+      if (row === undefined) throw new Error("fixture selected MCP credential is unavailable");
       mcpRefresh = mcpWriter.refreshOAuthCredential({workspaceId:"wksp_fixture",sessionId:"sesn_fixture",mcpServerName:"github",row,vaultId:"vlt_fixture",credentialId:"cred_mcp_oauth",force:true});
       return Response.json({started:true});
     }
@@ -58,7 +68,7 @@ const server = Bun.serve({hostname:"0.0.0.0",port:8888,async fetch(request){
     if (path === "/read") {
       const rows = await provider.loadActiveSessionProviderAuth({workspaceId:"wksp_fixture",sessionId:"sesn_fixture"});
       const absent = await provider.loadActiveSessionProviderAuth({workspaceId:"wksp_wrong",sessionId:"sesn_fixture"});
-      const token = await mcp.resolve({workspaceId:"wksp_fixture",sessionId:"sesn_fixture",mcpServerName:"github"});
+      const token = await mcp.resolve({workspaceId:"wksp_fixture",sessionId:"sesn_fixture",mcpServerName:resolvedServer.configuredName,resolvedServer});
       if(rows.length!==1||absent.length!==0||!token.ok||token.mode!=="bearer"||token.token!=="fixture-token") throw new Error("actual credential store result differs");
       const [{pid}] = await owner.withSQL(async(sql)=> await sql`SELECT pg_backend_pid() AS pid`);
       return Response.json({ok:true,pid});
