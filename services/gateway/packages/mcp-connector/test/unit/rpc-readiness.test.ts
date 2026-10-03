@@ -57,8 +57,16 @@ async function composition(sinkFails=false, loseAck=false, clock?: ClockCharges)
  service=new McpConnectorServiceShell({monotonicNow:clock?.now,client,idempotencyStore:store,manifestChangeNotifier:notifier,authenticator:{async authenticate({metadata}){return metadata.get('authorization')[0]==='Bearer component-caller'?{ok:true,serviceAccount:{namespace:'tetral-agent-runtime',name:'agent-runtime',podUid:'rpc-pod'}}:{ok:false,code:'Unauthenticated',message:'caller rejected'};}},runtimeBindingTokenVerifier:createRuntimeBindingTokenVerifier({hmacKey:key}),ready:()=>true,logger});
  const server=createMcpConnectorGrpcServer(service);const connectorPort=await server.bind('127.0.0.1:0');rpc=new McpConnectorServiceClient('127.0.0.1:'+connectorPort,credentials.createInsecure());
  const run=(event:string,timeoutMs=5000)=>new Promise<RunMcpToolResponse>((resolve,reject)=>rpc!.runMcpTool(request(event),metadata(),{deadline:new Date(Date.now()+timeoutMs)},(error,response)=>error?reject(error):resolve(response)));
+ const start=(event:string,timeoutMs?:number)=>{
+  let call!:ReturnType<McpConnectorServiceClient['runMcpTool']>;
+  const outcome=new Promise<RunMcpToolResponse>((resolve,reject)=>{
+   const callback=(error:Error|null,response:RunMcpToolResponse)=>error?reject(error):resolve(response);
+   call=timeoutMs===undefined?rpc!.runMcpTool(request(event),metadata(),callback):rpc!.runMcpTool(request(event),metadata(),{deadline:new Date(Date.now()+timeoutMs)},callback);
+  });
+  return {outcome,cancel:()=>call.cancel()};
+ };
  const runShell=(event:string,timeoutMs?:number)=>service.runMcpTool(request(event),metadata(),timeoutMs===undefined?undefined:{timeoutMs});
- return {peer,client,commits,run,runShell,clientTimeouts,sdkTimeouts,lines,logger,notifications:()=>notifications,verifierLists:()=>verifierLists,close:async()=>{rpc!.close();await service.shutdown(new Date(Date.now()+5000));await client.closeAll();await store.close();await notifier.close();await server.shutdown();bridge.forceShutdown();await peer.close();}};
+ return {peer,client,commits,run,start,runShell,clientTimeouts,sdkTimeouts,lines,logger,notifications:()=>notifications,verifierLists:()=>verifierLists,close:async()=>{rpc!.close();await service.shutdown(new Date(Date.now()+5000));await client.closeAll();await store.close();await notifier.close();await server.shutdown();bridge.forceShutdown();await peer.close();}};
 }
 function metadata(){const metadata=new Metadata();metadata.set('authorization','Bearer component-caller');return metadata;}
 function request(toolUseEventId:string):RunMcpToolRequest{
@@ -75,6 +83,30 @@ test('actual caller gRPC deadline cancels held HTTP and commits mcp_timeout on o
  const f=await composition();await f.client.listTools({workspaceId:'wksp_rpc',sessionId:'sesn_rpc',mcpServerName:'work-github'});const held=f.peer.hold('tools/call');
  const operation=f.run('sevt_rpc_deadline',1000);void operation.catch(()=>undefined);
  try{await held.entered;await expect(operation).rejects.toMatchObject({code:4});await until(()=>f.commits.length===1&&f.peer.counts.cancelledCalls===1);const result=JSON.parse(f.commits[0]!.resultJson);expect(result.response).toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,error_kind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);expect(f.peer.counts.effects).toBe(1);await expect(f.run('sevt_rpc_deadline')).resolves.toMatchObject({errorKind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);}finally{held.release();await f.close();}
+},10000);
+
+for(const phase of ['before-dispatch','after-dispatch'] as const)for(const finite of [true,false])test(`actual gRPC early caller cancellation ${phase} ${finite?'finite':'unbounded'}`,async()=>{
+ const f=await composition();
+ if(phase==='after-dispatch')await f.client.listTools({workspaceId:'wksp_rpc',sessionId:'sesn_rpc',mcpServerName:'work-github'});
+ const held=f.peer.hold(phase==='before-dispatch'?'tools/list':'tools/call');
+ const event=`sevt_rpc_cancel_${phase}_${finite}`;
+ const operation=f.start(event,finite?5000:undefined);void operation.outcome.catch(()=>undefined);
+ try{
+  await held.entered;operation.cancel();
+  // The actual generated client reports explicit cancellation, not expiry.
+  await expect(operation.outcome).rejects.toMatchObject({code:status.CANCELLED});
+  await until(()=>f.commits.length===1&&(phase==='before-dispatch'||f.peer.counts.cancelledCalls===1));
+  const response=JSON.parse(f.commits[0]!.resultJson).response;
+  const expectedKind=finite?McpErrorKind.MCP_ERROR_KIND_TIMEOUT:McpErrorKind.MCP_ERROR_KIND_INTERNAL;
+  expect(response).toMatchObject({status:finite?RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,error_kind:expectedKind});
+  const execution=f.lines.map(line=>JSON.parse(line)).find(record=>record.phase==='execution');
+  expect(execution['timeout.remaining_ms']).toBeGreaterThan(0);
+  expect(f.commits[0]!.toolUseEventId).toBe(event);expect(f.commits[0]!.claimId).toBe(execution['request.id']);
+  expect(f.peer.counts.call).toBe(phase==='before-dispatch'?0:1);expect(f.peer.counts.effects).toBe(phase==='before-dispatch'?0:1);
+  held.release();await expect(f.run(event)).resolves.toMatchObject({errorKind:expectedKind});
+  expect(f.commits).toHaveLength(1);expect(f.peer.counts.call).toBe(phase==='before-dispatch'?0:1);
+  console.info(JSON.stringify({kind:'mcp-caller-abandonment-observation',case:caseName,phase,finite,grpcCode:status.CANCELLED,remainingMs:execution['timeout.remaining_ms'],errorKind:expectedKind,originalClaim:true,commits:f.commits.length,counts:{...f.peer.counts}}));
+ }finally{held.release();await f.close();}
 },10000);
 
 

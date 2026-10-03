@@ -66,8 +66,11 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
       const controller = new AbortController();
       const cancel = () => {
         const deadline = call.getDeadline();
-        const expired = (deadline instanceof Date ? deadline.getTime() : deadline) <= Date.now();
-        controller.abort(expired ? new McpConnectorError("mcp_timeout", "MCP tool call timed out.") : new Error("MCP execution caller cancelled"));
+        // grpc-js reconstructs this deadline from a relative wire timeout;
+        // cancellation cannot distinguish client expiry from early abandonment.
+        // Both end a finite caller's execution allowance without replay authority.
+        const bounded = Number.isFinite(deadline instanceof Date ? deadline.getTime() : deadline);
+        controller.abort(bounded ? new McpConnectorError("mcp_timeout", "MCP tool call timed out.") : new Error("MCP execution caller cancelled"));
       };
       call.on("cancelled", cancel);
       if (call.cancelled) cancel();

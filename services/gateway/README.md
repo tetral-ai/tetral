@@ -585,6 +585,11 @@ another external invocation or extends the lease. On replay a media attachment w
 no longer resolvable renders an omission line `[MCP attachment unavailable:
 <mime> (<size>)]` rather than serving stale bytes.
 
+A finite-bound `RunMcpTool` caller cancellation settles `mcp_timeout`, including
+early abandonment while the reconstructed server deadline still has time.
+Transport cancellation carries no client reason; settlement retains the original
+claim and does not authorize another external invocation.
+
 #### Discovery and manifest delivery
 
 The connector alone can reach the server, so it **produces** the manifest; Bridge
@@ -710,7 +715,7 @@ compatibility, so appending unconditionally would duplicate it).
 | `mcp_connection_failed` | reconnect exhausted / terminal | `session.error` wrapping `mcp_connection_failed_error`; call settles `runtime_error` |
 | `mcp_authentication_failed` | auth retry failed (an existing credential was rejected) | `session.error` wrapping `mcp_authentication_failed_error`; call settles `runtime_error` |
 | `mcp_credential_required` | zero matching credential to try | `session.error` wrapping `mcp_authentication_failed_error` with `retry_status = terminal`; call settles `runtime_error` |
-| `mcp_timeout` | shared preparation/execution allowance, an owning phase ceiling, or a shorter caller deadline exhausted (including before external dispatch) | `tool_error` result naming the timeout |
+| `mcp_timeout` | shared preparation/execution allowance or an owning phase ceiling exhausted, or a finite-bound execution caller expired or abandoned its request (including before external dispatch) | `tool_error` result naming the timeout |
 | `mcp_claim_conflict` | Claim stored-result hash mismatch | `session.error` wrapping `unknown_error` with `retry_status = terminal`; call settles `runtime_error` |
 | `mcp_in_flight` | live unexpired reservation on claim | retryable `runtime_error`, no `session.error` |
 | `mcp_commit_failed` | post-effect Commit/store failure after the side effect ran | retryable `runtime_error`, no `session.error` |
