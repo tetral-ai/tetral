@@ -309,11 +309,17 @@ func serveReplicaWeb(t *testing.T, service *web.Service, metrics *web.Metrics) g
 
 func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	_, blobCfg := replicaMinIOStoresWithConfig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
+	// Compilation/setup uses the enclosing test deadline; the real child owns
+	// the separate non-Runtime process profile: 2s drain, 3s join, 15s watchdog.
+	prepareCtx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		var cancelPrepare context.CancelFunc
+		prepareCtx, cancelPrepare = context.WithDeadline(prepareCtx, deadline)
+		defer cancelPrepare()
+	}
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "web-connector")
-	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./services/web-connector/cmd/web-connector")
+	build := exec.CommandContext(prepareCtx, "go", "build", "-o", binary, "./services/web-connector/cmd/web-connector")
 	build.Dir = ".."
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build Web command: %v %s", err, output)
@@ -374,17 +380,21 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 		t.Fatal(err)
 	}
 	defer func() { _ = logFile.Close() }()
-	command := exec.CommandContext(ctx, binary)
-	command.Stdout = logFile
-	command.Stderr = logFile
-	command.Env = append(os.Environ(),
-		"TETRAL_DEPLOYMENT_ENVIRONMENT=test", "TETRAL_SERVICE_VERSION=replica-fixture", "TETRAL_SERVICE_DRAIN_TIMEOUT_MS=200",
+	commandEnv := append(os.Environ(),
+		"TETRAL_DEPLOYMENT_ENVIRONMENT=test", "TETRAL_SERVICE_VERSION=replica-fixture", "TETRAL_SERVICE_DRAIN_TIMEOUT_MS=2000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS=3000",
 		"TETRAL_WEB_SEARCH_ENDPOINT="+external.URL+"/search", "TETRAL_WEB_READER_ENDPOINT="+external.URL+"/reader", "TETRAL_WEB_API_KEYS=[\"fixture\"]",
 		"TETRAL_WEB_CONNECTOR_GRPC_ADDR="+addresses[0], "TETRAL_WEB_CONNECTOR_METRICS_ADDR="+addresses[1], "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY="+replicaWebKey,
 		"TETRAL_INTERNAL_GRPC_AUDIENCE=tetral-internal-grpc", "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS=tetral-agent-runtime/agent-runtime",
 		"KUBERNETES_API_SERVER_URL="+external.URL, "KUBERNETES_API_CA_CERT_PATH="+caPath, "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH="+tokenPath, "SSL_CERT_FILE="+caPath,
 		"TETRAL_BLOB_ENDPOINT="+objectProxy.URL, "TETRAL_BLOB_REGION="+blobCfg.Region, "TETRAL_BLOB_BUCKET="+blobCfg.Bucket, "TETRAL_BLOB_ACCESS_KEY="+blobCfg.AccessKey, "TETRAL_BLOB_SECRET_KEY="+blobCfg.SecretKey,
 		"TETRAL_BLOB_LOCAL_TEST_MODE=false", "TETRAL_BLOB_ALLOW_INSECURE=false", "TETRAL_BLOB_TLS_CA_PATH="+caPath, "TETRAL_BLOB_TLS_SERVER_NAME=example.com")
+	// Start the absolute runtime watchdog only after all child preparation.
+	ctx, cancel := context.WithTimeout(prepareCtx, 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary)
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.Env = commandEnv
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -395,15 +405,23 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 		releaseBackend()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(3 * time.Second):
 			t.Error("Web child did not join")
 		}
 	}()
+	get := func(ctx context.Context, path string) (*http.Response, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addresses[1]+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		return http.DefaultClient.Do(request)
+	}
 	waitReady := func(want int) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			response, err := http.Get("http://" + addresses[1] + "/ready")
+		readyCtx, cancelReady := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelReady()
+		for readyCtx.Err() == nil {
+			response, err := get(readyCtx, "/ready")
 			if err == nil {
 				_ = response.Body.Close()
 				if response.StatusCode == want {
@@ -414,11 +432,12 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 			case err := <-done:
 				data, _ := os.ReadFile(logPath)
 				t.Fatalf("Web exited before readiness %d: %v %s", want, err, data)
-			default:
+			case <-readyCtx.Done():
+				t.Fatalf("Web readiness never became %d: %v", want, readyCtx.Err())
+			case <-time.After(10 * time.Millisecond):
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
-		t.Fatalf("Web readiness never became %d", want)
+		t.Fatalf("Web readiness never became %d: %v", want, readyCtx.Err())
 	}
 	waitReady(200)
 	connection, err := grpc.NewClient(addresses[0], grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -441,19 +460,27 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	case err := <-result:
 		data, _ := os.ReadFile(logPath)
 		t.Fatalf("Web failed before backend: %v %s", err, data)
+	case <-ctx.Done():
+		t.Fatalf("Web backend request barrier absent: %v", ctx.Err())
 	case <-time.After(5 * time.Second):
 		t.Fatal("Web backend request barrier absent")
 	}
+	signaledAt := time.Now()
 	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	waitReady(503)
-	response, err := http.Get("http://" + addresses[1] + "/metrics")
+	metricsCtx, cancelMetrics := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelMetrics()
+	response, err := get(metricsCtx, "/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
-	metrics, _ := io.ReadAll(response.Body)
+	metrics, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(metrics), "web_draining 1") || !strings.Contains(string(metrics), "web_requests_active 1") {
 		t.Fatalf("drain metrics=%s", metrics)
 	}
@@ -467,14 +494,16 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	}
 	select {
 	case <-backendJoined:
+	case <-ctx.Done():
+		t.Fatalf("backend handler did not cancel/join: %v", ctx.Err())
 	case <-time.After(5 * time.Second):
 		t.Fatal("backend handler did not cancel/join")
 	}
+	var rpcErr error
 	select {
-	case err := <-result:
-		if !force && err != nil {
-			t.Fatal(err)
-		}
+	case rpcErr = <-result:
+	case <-ctx.Done():
+		t.Fatalf("actual RPC did not terminate: %v", ctx.Err())
 	case <-time.After(5 * time.Second):
 		t.Fatal("actual RPC did not terminate")
 	}
@@ -484,15 +513,23 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 			data, _ := os.ReadFile(logPath)
 			t.Fatalf("Web child failed: %v %s", err, data)
 		}
+	case <-ctx.Done():
+		t.Fatalf("Web command did not exit after joined request: %v", ctx.Err())
 	case <-time.After(5 * time.Second):
 		t.Fatal("Web command did not exit after joined request")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("Web runtime watchdog expired before joined proof: %v", err)
+	}
+	data, _ := os.ReadFile(logPath)
+	if !force && rpcErr != nil {
+		t.Fatalf("Web RPC failed after backend/RPC/child joined: %v %s", rpcErr, data)
 	}
 	if cancelled.Load() != force || calls.Load() != 1 {
 		t.Fatalf("backend cancellation=%t force=%t calls=%d", cancelled.Load(), force, calls.Load())
 	}
-	data, _ := os.ReadFile(logPath)
 	if !strings.Contains(string(data), "web.drain.joined") || !strings.Contains(string(data), `"closeout.active_count":0`) {
 		t.Fatalf("joined lifecycle log missing: %s", data)
 	}
-	t.Logf("real Web child SIGTERM: force=%t; readiness/admission closed, protected MinIO alive through join, HTTP context exit, RPC completion, process joined", force)
+	t.Logf("real Web child SIGTERM: force=%t drain=2s cancel_join=3s runtime_watchdog=15s; readiness/admission closed, protected MinIO alive through join, HTTP context exit, RPC completion, process joined after %s", force, time.Since(signaledAt))
 }

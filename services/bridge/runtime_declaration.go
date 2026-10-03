@@ -38,7 +38,14 @@ func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 func runtimeJSONStringifyBytes(encoded []byte) []byte {
 	result := make([]byte, 0, len(encoded))
 	for offset := 0; offset < len(encoded); {
-		separator := offset+6 <= len(encoded) && encoded[offset] == '\\' &&
+		next := bytes.IndexByte(encoded[offset:], '\\')
+		if next < 0 {
+			result = append(result, encoded[offset:]...)
+			break
+		}
+		result = append(result, encoded[offset:offset+next]...)
+		offset += next
+		separator := offset+6 <= len(encoded) &&
 			(string(encoded[offset:offset+6]) == `\u2028` || string(encoded[offset:offset+6]) == `\u2029`)
 		if separator {
 			precedingSlashes := 0

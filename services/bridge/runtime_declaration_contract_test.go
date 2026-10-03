@@ -208,3 +208,28 @@ func TestRuntimeContextDeltaRejectsUnpairedUnicodeSurrogates(t *testing.T) {
 }
 
 func bridgeString(value string) *string { return &value }
+
+func TestRuntimeDeclarationStringifyPreservesSpansAndSeparatorEscapes(t *testing.T) {
+	span := strings.Repeat("x", 2048)
+	for _, test := range []struct {
+		name, encoded, want string
+	}{
+		{name: "unescaped span", encoded: span, want: span},
+		{
+			name:    "spans around separators and escaped backslashes",
+			encoded: span + `\u2028` + span + `\\u2028` + span + `\u2029` + span,
+			want:    span + "\u2028" + span + `\\u2028` + span + "\u2029" + span,
+		},
+		{
+			name:    "odd and even backslash parity",
+			encoded: span + `\\\u2028` + span + `\\\\u2029` + span,
+			want:    span + `\\` + "\u2028" + span + `\\\\u2029` + span,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if string(runtimeJSONStringifyBytes([]byte(test.encoded))) != test.want {
+				t.Fatal("Runtime declaration stringify bytes differ")
+			}
+		})
+	}
+}
