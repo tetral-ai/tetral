@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -30,6 +31,12 @@ import (
 // The edge is the existing local SDK topology: Auth signs the principal, then
 // API/Event Stream validate it. Object storage is the actual isolated MinIO.
 func startContentSDKPublicEdge(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
+	return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
+		return eventstream.NewRouter(reader, verifier, eventstream.WithStreamPollInterval(time.Millisecond), eventstream.WithStreamMaxEmptyPolls(1))
+	})
+}
+
+func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventsFactory func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string) {
 	t.Helper()
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
 	if err != nil {
@@ -65,7 +72,7 @@ func startContentSDKPublicEdge(t *testing.T, pools *storagetest.WorkloadDB, obje
 	apiServer := httptest.NewServer(apiRouter)
 	t.Cleanup(apiServer.Close)
 	reader := internaleventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)))
-	events := httptest.NewServer(eventstream.NewRouter(reader, verifier, eventstream.WithStreamPollInterval(time.Millisecond), eventstream.WithStreamMaxEmptyPolls(1)))
+	events := httptest.NewServer(eventsFactory(reader, verifier, signer.PublicKeyBase64()))
 	t.Cleanup(events.Close)
 	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, events.URL)
 	if err != nil {

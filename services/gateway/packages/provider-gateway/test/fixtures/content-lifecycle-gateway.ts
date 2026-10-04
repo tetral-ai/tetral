@@ -6,6 +6,10 @@ import { createHmac, createHash } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { publicStreamingScript, type PublicStreamingScenario } from "../../../../../../integration/testdata/public-streaming-provider.js";
+import { createNatsPreviewPublisher } from "../../src/providers/preview-nats.js";
+import type { PreviewNatsConfig } from "../../src/providers/preview-config.js";
+import { createPublicStreamingPublisherControls, type PublicPublisherControl } from "../../../../../../integration/testdata/public-streaming-publisher.js";
 import { BridgeAPIAttachmentResolver } from "../../src/attachments.js";
 import { Metadata, Server, status } from "@grpc/grpc-js";
 import { createProviderGatewayApp } from "../../src/app.js";
@@ -26,7 +30,7 @@ import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/pr
 export const ContentLifecycleBindingKey="content-lifecycle-test-binding-key-32";
 export const ContentLifecyclePodUid="pod_content_lifecycle";
 const MasterKey="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-export type ContentLifecycleScenario="interleaved"|"text"|"text-large"|"truncated"|"error-after-partial"|"empty-text"|"empty-then-valid"|"metadata-only"|"done"|"error-after-complete-prefix"|"multiple-large"|"empty-storm"|"durable-interleaved"|"empty-blocks-storm"|"durable-write"|"durable-bash"|"durable-write-queued"|"durable-read-three"|"tool-whitespace"|"reasoning-only"|"tool-before-text"|"unicode-text"|"compaction-primer"|"compaction-summary"|"resource-after-tool"|"resource-after-write";
+export type ContentLifecycleScenario=PublicStreamingScenario|"interleaved"|"text"|"text-large"|"truncated"|"error-after-partial"|"empty-text"|"empty-then-valid"|"metadata-only"|"done"|"error-after-complete-prefix"|"multiple-large"|"empty-storm"|"durable-interleaved"|"empty-blocks-storm"|"durable-write"|"durable-bash"|"durable-write-queued"|"durable-read-three"|"tool-whitespace"|"reasoning-only"|"tool-before-text"|"unicode-text"|"compaction-primer"|"compaction-summary"|"resource-after-tool"|"resource-after-write";
 export interface ContentLifecycleGatewayFixtureOptions {
  /** Full-topology cases use the installed Gateway role and real credential store. */
  readonly databaseUrl?:string;
@@ -55,6 +59,10 @@ export interface ContentLifecycleGatewayFixtureOptions {
  readonly holdFirstWriteCallback?:boolean;
  readonly recordContext?:boolean;
  readonly concurrentProviderBarrier?:{readonly count:number;readonly retainedBytesPerRequest:number};
+ readonly previewNats?:PreviewNatsConfig;
+ readonly previewPublisherControls?:{readonly holdInitialConnect?:boolean;readonly holdAfterNativeConnect?:boolean};
+ readonly holdPreviewFragments?:boolean;
+ readonly holdEveryRequest?:boolean;
  readonly holdFinish?:boolean;
  readonly holdAfterFirstComplete?:boolean;
 }
@@ -72,16 +80,22 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
  if(options.textCodeUnitsCycle!==undefined&&(options.textCodeUnitsCycle.length!==2||options.textCodeUnitsCycle.some(value=>!Number.isSafeInteger(value)||value<1||value>16*1024*1024-2)))throw new Error("invalid fixture size cycle");
  if(options.sourceYieldEveryRecords!==undefined&&(!Number.isSafeInteger(options.sourceYieldEveryRecords)||options.sourceYieldEveryRecords<1||options.sourceYieldEveryRecords>8192))throw new Error("invalid fixture source batching");
  // Chunking skips the per-record gates, so it excludes every option that holds or paces individual records.
- if(options.sourceRecordsPerChunk!==undefined&&(!Number.isSafeInteger(options.sourceRecordsPerChunk)||options.sourceRecordsPerChunk<1||options.sourceRecordsPerChunk>8192||options.holdFinish||options.holdAfterFirstComplete||options.concurrentProviderBarrier!==undefined||options.deltaDelayMs!==undefined||options.sourceYieldEveryRecords!==undefined||options.sourcePackaging!==undefined))throw new Error("invalid fixture source chunking");
+ if(options.sourceRecordsPerChunk!==undefined&&(!Number.isSafeInteger(options.sourceRecordsPerChunk)||options.sourceRecordsPerChunk<1||options.sourceRecordsPerChunk>8192||options.holdFinish||options.holdAfterFirstComplete||options.concurrentProviderBarrier!==undefined||options.deltaDelayMs!==undefined||options.sourceYieldEveryRecords!==undefined||options.sourcePackaging!==undefined||options.holdPreviewFragments))throw new Error("invalid fixture source chunking");
  if(options.sourcePackaging!==undefined&&(options.sourcePackaging!=="single-chunk"||options.holdFinish||options.holdAfterFirstComplete||options.concurrentProviderBarrier!==undefined||options.textCodeUnitsCycle!==undefined))throw new Error("invalid fixture source packaging");
  const preparedSource=options.sourcePackaging==="single-chunk"?(()=>{const records=Array.from(sseScript(scenario,textCodeUnits,fragmentCodeUnits,options.blockCount??3,options.emptyRecords??10000));return {bytes:new TextEncoder().encode(records.join("")),recordCount:records.length};})():undefined;
- const finishGate=gate(options.holdFinish??false),prefixGate=gate(options.holdAfterFirstComplete??false);
+ let fragmentPermits=0,fragmentWaiters:Array<()=>void>=[],fragmentWaiting=0,fragmentReleased=0,fragmentClosing=false;
+ const releaseFragment=():void=>{fragmentReleased++;const waiter=fragmentWaiters.shift();if(waiter)waiter();else fragmentPermits++;};
+ const awaitFragment=async():Promise<void>=>{if(!options.holdPreviewFragments||fragmentClosing)return;if(fragmentPermits>0){fragmentPermits--;return;}fragmentWaiting++;try{await new Promise<void>(resolve=>fragmentWaiters.push(resolve));}finally{fragmentWaiting--;}};
+ const closeFragments=():void=>{fragmentClosing=true;for(const waiter of fragmentWaiters.splice(0))waiter();};
+ let finishGate=gate(options.holdFinish??false);const prefixGate=gate(options.holdAfterFirstComplete??false);
  const barrierOptions=options.concurrentProviderBarrier;
  if(barrierOptions!==undefined&&(!Number.isSafeInteger(barrierOptions.count)||barrierOptions.count<1||barrierOptions.count>8||!Number.isSafeInteger(barrierOptions.retainedBytesPerRequest)||barrierOptions.retainedBytesPerRequest<1||barrierOptions.retainedBytesPerRequest>=textCodeUnits||scenario!=="text-large"))throw new Error("invalid provider barrier controls");
  const providerBarrierGate=gate(barrierOptions!==undefined),providerBarrier={sourceArrivals:0,assemblyArrivals:0,ready:false,released:barrierOptions===undefined};
  const releaseProviderBarrier=():void=>{if(!providerBarrier.ready)throw new Error("provider barrier not ready");providerBarrier.released=true;providerBarrierGate.release();};
  const nativeAttachments:Array<{requestOrdinal:number;kind:string;mediaType:string;sizeBytes:number;sha256:string}>= [];
  const nativeContexts:Array<{requestOrdinal:number;messages:unknown[]}>= [];
+ const previewOutcomes:Array<{event:string;outcome:string}>=[];
+ const capturePreview=(record:Record<string,unknown>):void=>{const kind=record["event.kind"],outcome=record["transport.outcome"];if(typeof kind==="string"&&kind.startsWith("preview.")&&typeof outcome==="string"&&previewOutcomes.length<64)previewOutcomes.push({event:kind,outcome});};
  const admissionFailures:Array<{requestId?:string;validationMember?:string;errorClass?:string;errorCode?:string}> = [];
  const captureAdmission=(record:Record<string,unknown>):void=>{if(record.event!=="provider_request_streamed"||record["request.outcome"]!=="failed"||admissionFailures.length>=16)return;admissionFailures.push({...(typeof record["request.id"]==="string"?{requestId:record["request.id"]}:{}),...(typeof record["validation.member"]==="string"?{validationMember:record["validation.member"]}:{}),...(typeof record["error.class"]==="string"?{errorClass:record["error.class"]}:{}),...(typeof record["error.code"]==="string"?{errorCode:record["error.code"]}:{})});};
  let providerCalls=0,sourceRecords=0,activeProviderSources=0,sourceCancellations=0,joinedSources=0;
@@ -102,7 +116,7 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
  const scenariosBySession=new Map<string,ContentLifecycleScenario[]>();
  const requestScenario=new AsyncLocalStorage<{sessionId:string;requestId:string;scenario:ContentLifecycleScenario}>();
  const configureScenarios=(sessionId:string,scenarios:readonly ContentLifecycleScenario[]):void=>{
-  const allowed=new Set<ContentLifecycleScenario>(["durable-interleaved","durable-write","done","text","compaction-primer","compaction-summary"]);
+  const allowed=new Set<ContentLifecycleScenario>(["durable-interleaved","durable-write","done","text","compaction-primer","compaction-summary","public-cycle","public-load"]);
   if(!options.sessionScenarioPlans||sessionId.length===0||scenarios.length===0||scenarios.length>3||scenarios.some(value=>!allowed.has(value))||scenariosBySession.has(sessionId))throw new Error("fixture scenario plan invalid");
   scenariosBySession.set(sessionId,[...scenarios]);
  };
@@ -110,6 +124,7 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
  const cutProviderRpc=():void=>{for(const call of activeCalls)call.emit("error",Object.assign(new Error("fixture provider RPC interrupted"),{code:status.UNAVAILABLE,details:"fixture provider RPC interrupted"}));};
  const fetchImpl=async (_url:unknown,init?:RequestInit):Promise<Response>=>{
   providerCalls++;
+  if(options.holdEveryRequest&&providerCalls>1){if(activeProviderSources!==0)throw new Error("per-request fixture gates require sequential provider requests");finishGate=gate(options.holdFinish??false);fragmentClosing=false;fragmentPermits=0;}
   const nativeRequest=_url instanceof Request?_url:new Request(_url as string,init);
   const nativeBody=await nativeRequest.clone().text();
   if(nativeBody!=="") {
@@ -131,7 +146,7 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
   const selectedScenario=requestScenario.getStore()?.scenario??(providerCalls>1&&options.followupScenario!==undefined?options.followupScenario:scenario);
   const script=sseScript(selectedScenario,options.textCodeUnitsCycle?.[(providerCalls-1)%2]??textCodeUnits,fragmentCodeUnits,options.blockCount??3,options.emptyRecords??10000,options.sessionScenarioPlans?requestScenario.getStore()?.requestId:undefined);
   let closed=false,sourceTextCodeUnits=0,barrierArrived=false,localSourceRecords=0,preparedRead=false;
-  const close=():void=>{if(closed)return;closed=true;activeProviderSources--;joinedSources++;nativeRequest.signal?.removeEventListener("abort",abort);finishGate.release();prefixGate.release();};
+  const close=():void=>{if(closed)return;closed=true;activeProviderSources--;joinedSources++;nativeRequest.signal?.removeEventListener("abort",abort);finishGate.release();prefixGate.release();closeFragments();};
   let bodyController:ReadableStreamDefaultController<Uint8Array>|undefined;
   const abort=():void=>{sourceCancellations++;bodyController?.error(new DOMException("Fixture provider aborted.","AbortError"));close();};
   const body=new ReadableStream<Uint8Array>({
@@ -142,6 +157,8 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
     let next=script.next();if(next.done){controller.close();close();return;}if((options.deltaDelayMs??0)>0)await new Promise(resolve=>setTimeout(resolve,options.deltaDelayMs));if(closed)return;if(next.value.startsWith("event: message_delta")||next.value.startsWith("event: fixture_resource_gate"))await finishGate.wait;
     if(next.value.startsWith("event: fixture_resource_gate")){next=script.next();if(next.done){controller.close();close();return;}}
      if(next.value.includes('"index":2')&&next.value.startsWith("event: content_block_start"))await prefixGate.wait;
+     if(closed)return;
+     if(next.value.startsWith("event: content_block_delta")&&next.value.includes('"type":"text_delta"'))await awaitFragment();
      if(closed)return;
      if(next.value.startsWith("event: content_block_delta")){const data=JSON.parse(next.value.split("\n")[1]!.slice(6));if(data.delta?.type==="text_delta")sourceTextCodeUnits+=data.delta.text.length;}
      if(options.sourceYieldEveryRecords!==undefined&&localSourceRecords>0&&localSourceRecords%options.sourceYieldEveryRecords===0)await new Promise(resolve=>setTimeout(resolve,0));
@@ -216,7 +233,11 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
   tokenDirectory=await mkdtemp(join(tmpdir(),"tetral-content-gateway-"));const tokenPath=join(tokenDirectory,"bridge-token");
   await writeFile(tokenPath,options.bridgeToken,{mode:0o600});attachmentResolver=new BridgeAPIAttachmentResolver({address:options.bridgeAddress,tokenPath});
  }
- const app=createProviderGatewayApp({config:{...fixtureConfig(),runtimeBindingTokenHMACKey:options.bindingKey??ContentLifecycleBindingKey},logger:{info:captureAdmission,error:captureAdmission},tokenReviewClient:{createTokenReview:async()=>({authenticated:true,audiences:["tetral-internal-grpc"],username:"system:serviceaccount:tetral-agent-runtime:agent-runtime",podUid:options.runtimePodUid??ContentLifecyclePodUid})},credentialResolver,providerStreamer,attachmentResolver,assemblyBounds:options.assemblyBounds??DefaultProviderAssemblyBounds,observeAssemblyResources:(resources,requestId)=>{assembly=resources;assemblySnapshots.set(requestId,resources);
+ if(options.previewPublisherControls!==undefined&&options.previewNats===undefined)throw new Error("publisher controls require actual NATS configuration");
+ const publisherControls=options.previewPublisherControls===undefined?undefined:createPublicStreamingPublisherControls(options.previewPublisherControls.holdInitialConnect,options.previewPublisherControls.holdAfterNativeConnect);
+ const previewPublisher=options.previewNats===undefined?undefined:await createNatsPreviewPublisher(options.previewNats,{info:capturePreview,error:capturePreview},publisherControls===undefined?{}:{connectionFactory:publisherControls.connectionFactory});
+ const injectedPreviewPublisher=previewPublisher===undefined?undefined:{...previewPublisher,close:()=>{publisherControls?.markShutdown();return previewPublisher.close();}};
+ const app=createProviderGatewayApp({...(injectedPreviewPublisher===undefined?{}:{previewPublisher:injectedPreviewPublisher}),config:{...fixtureConfig(),runtimeBindingTokenHMACKey:options.bindingKey??ContentLifecycleBindingKey},logger:{info:captureAdmission,error:captureAdmission},tokenReviewClient:{createTokenReview:async()=>({authenticated:true,audiences:["tetral-internal-grpc"],username:"system:serviceaccount:tetral-agent-runtime:agent-runtime",podUid:options.runtimePodUid??ContentLifecyclePodUid})},credentialResolver,providerStreamer,attachmentResolver,assemblyBounds:options.assemblyBounds??DefaultProviderAssemblyBounds,observeAssemblyResources:(resources,requestId)=>{assembly=resources;assemblySnapshots.set(requestId,resources);
   if(barrierOptions!==undefined){providerBarrier.assemblyArrivals=[...assemblySnapshots.values()].filter(value=>value.retainedBytes>=barrierOptions.retainedBytesPerRequest).length;providerBarrier.ready=providerBarrier.sourceArrivals>=barrierOptions.count&&providerBarrier.assemblyArrivals>=barrierOptions.count;}
   for(const key of Object.keys(peakAssembly) as (keyof ProviderAssemblyResources)[]){let total=0;for(const value of assemblySnapshots.values())total+=value[key];peakAssembly[key]=Math.max(peakAssembly[key],total);}if(resources.openBlocks===0)sample();}});
  const closeCredentialStore=async():Promise<void>=>{await sqlOwner?.close({deadline:new Date(Date.now()+5000)});credentialStoreClosed=true;};
@@ -227,7 +248,7 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
   // Test-only reachability observation; normal production request cleanup does not force GC.
   Bun.gc(true);await new Promise(resolve=>setTimeout(resolve,0));Bun.gc(true);
   return {naturalMemory,forcedMemory:process.memoryUsage(),settleElapsedMs:performance.now()-start};
- },cutProviderRpc,configureScenarios,releaseProviderBarrier,releaseFinish:finishGate.release,releasePrefix:prefixGate.release,address:`127.0.0.1:${started.grpcPort}`,request:(overrides:Partial<ProviderRequest>={})=>contentLifecycleRequest(overrides,options),metadata:contentLifecycleMetadata,observations:()=>({pendingScenarioPlans:scenariosBySession.size,memory:latestMemory,memorySampleElapsedMs:lastMemorySampleAt-measurementStartedAt,assemblyTotals:Object.fromEntries(Object.keys(peakAssembly).map(key=>[key,[...assemblySnapshots.values()].reduce((sum,value)=>sum+value[key as keyof ProviderAssemblyResources],0)])),credentialStore:sqlOwner===undefined?"fixture":"sql",credentialStoreClosed,providerCalls,nativeContexts,providerBarrier,nativeIterators,admissionFailures,nativeAttachments,sessionCredentialReads,platformSelections,sourceRecords,activeProviderSources,sourceCancellations,joinedSources,sdk,assembly,peakAssembly,peakActiveProviderSources,writer,writerCalls,cpuMicros:process.cpuUsage(baselineCpu),measurementElapsedMs:performance.now()-measurementStartedAt,eventLoop:{lagMaxMs:loopLagMaxMs,lagSumMs:loopLagSumMs,samples:loopLagSamples},baselineMemory,finalMemory,peakHeap,peakRss,sdkTotals:{sourceRecords:[...sdkSnapshots.values()].reduce((sum,value)=>sum+value.sourceRecords,0),active:[...sdkSnapshots.values()].filter(value=>value.active).length},bounds:{assembly:options.assemblyBounds??DefaultProviderAssemblyBounds}}),shutdown:async()=>{providerBarrierGate.release();finishGate.release();prefixGate.release();try{await app.shutdown();}finally{await closeCredentialStore();await attachmentResolver?.close();if(tokenDirectory!==undefined)await rm(tokenDirectory,{recursive:true,force:true});if(sampler!==undefined)clearInterval(sampler);sample();if(options.measureResources)Bun.gc(true);finalMemory=process.memoryUsage();}}};
+ },publisherControl:(operation:PublicPublisherControl)=>{if(publisherControls===undefined)throw new Error("publisher controls disabled");return publisherControls.control(operation);},releasePublisherControls:()=>publisherControls?.release(),releaseFragment,cutProviderRpc,configureScenarios,releaseProviderBarrier,releaseFinish:()=>finishGate.release(),releasePrefix:prefixGate.release,address:`127.0.0.1:${started.grpcPort}`,request:(overrides:Partial<ProviderRequest>={})=>contentLifecycleRequest(overrides,options),metadata:contentLifecycleMetadata,observations:()=>({fragmentWaiting,fragmentReleased,previewMetrics:previewPublisher?.metrics.render(),previewOutcomes,publisherControls:publisherControls?.observation(),pendingScenarioPlans:scenariosBySession.size,memory:latestMemory,memorySampleElapsedMs:lastMemorySampleAt-measurementStartedAt,assemblyTotals:Object.fromEntries(Object.keys(peakAssembly).map(key=>[key,[...assemblySnapshots.values()].reduce((sum,value)=>sum+value[key as keyof ProviderAssemblyResources],0)])),credentialStore:sqlOwner===undefined?"fixture":"sql",credentialStoreClosed,providerCalls,nativeContexts,providerBarrier,nativeIterators,admissionFailures,nativeAttachments,sessionCredentialReads,platformSelections,sourceRecords,activeProviderSources,sourceCancellations,joinedSources,sdk,assembly,peakAssembly,peakActiveProviderSources,writer,writerCalls,cpuMicros:process.cpuUsage(baselineCpu),measurementElapsedMs:performance.now()-measurementStartedAt,eventLoop:{lagMaxMs:loopLagMaxMs,lagSumMs:loopLagSumMs,samples:loopLagSamples},baselineMemory,finalMemory,peakHeap,peakRss,sdkTotals:{sourceRecords:[...sdkSnapshots.values()].reduce((sum,value)=>sum+value.sourceRecords,0),active:[...sdkSnapshots.values()].filter(value=>value.active).length},bounds:{assembly:options.assemblyBounds??DefaultProviderAssemblyBounds}}),shutdown:async()=>{closeFragments();providerBarrierGate.release();finishGate.release();prefixGate.release();try{await app.shutdown();}finally{await closeCredentialStore();await attachmentResolver?.close();if(tokenDirectory!==undefined)await rm(tokenDirectory,{recursive:true,force:true});if(sampler!==undefined)clearInterval(sampler);sample();if(options.measureResources)Bun.gc(true);finalMemory=process.memoryUsage();}}};
 }
 function semanticNativePart(part:unknown):unknown {
  if(typeof part!=="object"||part===null)return part;
@@ -238,6 +259,7 @@ function semanticNativePart(part:unknown):unknown {
 }
 function event(value:Record<string,unknown>):string {return `event: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`;}
 function* sseScript(scenario:ContentLifecycleScenario,textCodeUnits:number,fragmentCodeUnits:number,blockCount:number,emptyRecords:number,requestId?:string):Generator<string> {
+ if(scenario.startsWith("public-")){yield* publicStreamingScript(scenario as PublicStreamingScenario);return;}
  const durable=scenario==="resource-after-tool"||scenario==="resource-after-write"||scenario==="durable-interleaved"||scenario==="durable-write"||scenario==="durable-bash"||scenario==="durable-write-queued"||scenario==="durable-read-three";
  const signedReasoning=durable||scenario==="reasoning-only";
  yield event({type:"message_start",message:{id:"msg_fixture",type:"message",role:"assistant",model:"claude-opus-4-8",content:[],stop_reason:null,stop_sequence:null,usage:{input_tokens:scenario==="compaction-primer"?968000:1,output_tokens:1}}});
@@ -317,17 +339,19 @@ if(import.meta.main){
  const input=createInterface({input:process.stdin});
  input.on("line",async line=>{
   try {
-   const message=JSON.parse(line) as {kind:string;options?:ContentLifecycleGatewayFixtureOptions;sessionId?:string;scenarios?:ContentLifecycleScenario[]};
+   const message=JSON.parse(line) as {kind:string;options?:ContentLifecycleGatewayFixtureOptions;sessionId?:string;scenarios?:ContentLifecycleScenario[];operation?:PublicPublisherControl};
    if(message.kind==="start"){fixture=await createContentLifecycleGatewayFixture(message.options);send({kind:"ready",address:fixture.address,protocolVersion:2,request:fixture.request(),observation:fixture.observations()});}
    else if(message.kind==="configure_scenarios"){fixture?.configureScenarios(message.sessionId??"",message.scenarios??[]);send({kind:"configured_scenarios"});}
    else if(message.kind==="observe_settled"){const settled=await fixture?.settleResources();send({kind:"settled",...settled,...fixture?.observations()});}
    else if(message.kind==="observe")send({kind:"observation",...fixture?.observations()});
    else if(message.kind==="release_provider_barrier"){fixture?.releaseProviderBarrier();process.stdout.write(JSON.stringify({kind:"provider_barrier_released"})+"\n");}
    else if(message.kind==="cut_provider_rpc"){fixture?.cutProviderRpc();send({kind:"provider_rpc_cut"});}
+   else if(message.kind==="publisher_control"){if(message.operation===undefined)throw new Error("publisher control operation required");send({kind:"publisher_controlled",publisherControls:fixture?.publisherControl(message.operation)});}
+   else if(message.kind==="release_fragment"){fixture?.releaseFragment();send({kind:"released_fragment"});}
    else if(message.kind==="release_finish"){fixture?.releaseFinish();send({kind:"released_finish"});}
    else if(message.kind==="release_prefix"){fixture?.releasePrefix();send({kind:"released_prefix"});}
    else if(message.kind==="stop"){await fixture?.shutdown();send({kind:"stopped",...fixture?.observations()});process.exit(0);}
   }catch{send({kind:"fixture_error"});process.exitCode=1;}
  });
- input.on("close",async()=>{await fixture?.shutdown();process.exit(0);});
+ input.on("close",async()=>{fixture?.releasePublisherControls();await fixture?.shutdown();process.exit(0);});
 }

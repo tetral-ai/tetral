@@ -46,20 +46,24 @@ type contentE2EOptions struct {
 	Budget                time.Duration
 	ApprovalMode          string
 	ACKMode, ACKEventType string
+	// Public streaming reuses the real execution topology with its own read edge.
+	PublicEdge func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore) (string, string)
 }
 type contentE2E struct {
 	controlMu                   sync.Mutex
 	environmentID, approvalMode string
 	nextSession, controlOrdinal int
 
-	db       *sql.DB
-	objects  *blob.S3BlobStore
-	sdk      *contentSDKChild
-	runtime  *contentRuntimeChild
-	gateway  *contentGatewayChild
-	provider *contentE2EProvider
-	session  string
-	lost     *contentLostReceiptStore
+	db              *sql.DB
+	objects         *blob.S3BlobStore
+	sdk             *contentSDKChild
+	runtime         *contentRuntimeChild
+	gateway         *contentGatewayChild
+	provider        *contentE2EProvider
+	session         string
+	lost            *contentLostReceiptStore
+	baseURL, apiKey string
+	recoverRuntime  func(*testing.T)
 }
 
 // Only external Pod discovery and provider/command I/O are controlled. Session
@@ -96,7 +100,11 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	if readErr != nil || closeErr != nil || string(probeBytes) != "ready" {
 		t.Fatal("MinIO readiness put/read failed")
 	}
-	base, key := startContentSDKPublicEdge(t, pools, objects)
+	edgeFactory := overrides.PublicEdge
+	if edgeFactory == nil {
+		edgeFactory = startContentSDKPublicEdge
+	}
+	base, key := edgeFactory(t, pools, objects)
 	sdk := startContentSDKChildContext(ctx, t, base, key)
 	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_content_sdk")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "content-e2e"})
 	if err != nil {
@@ -255,7 +263,26 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	if overrides.StopProvider != nil {
 		t.Cleanup(overrides.StopProvider)
 	}
-	return &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, sdk: sdk, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault}
+	result := &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, sdk: sdk, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault, baseURL: base, apiKey: key}
+	result.recoverRuntime = func(t *testing.T) {
+		runtime.killAtContentBoundary(t)
+		successor := startContentRuntimeChildContext(ctx, t, endpoint.Address, gateway.address, pod, "recovered_"+pod, "content-runtime-token", runtimeOptions)
+		ready := successor.marker(t, "ready")
+		var address string
+		if json.Unmarshal(ready["httpUrl"], &address) != nil || address == "" {
+			t.Fatal("successor Runtime readiness missing")
+		}
+		repair := contentCrashDeliveryStore(t, pools.OpenWorkload(t, "job_runner", nil), &contentCrashRuntime{contentRuntimeChild: successor, httpURL: address}, pod)
+		count, err := repair.RepairLostRuntimeBindings(ctx, "default")
+		if err != nil || count < 0 || count > 1 {
+			t.Fatalf("actual superseded Runtime repair=%d/%v", count, err)
+		}
+		// The already-running delivery worker invokes the same production repair
+		// owner. Either caller can win; the committed synthetic End is the oracle.
+		waitContentSQLCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'error_kind'='runtime_pod_lost'`, created.Session.ID, 1)
+		t.Logf("actual Runtime-loss synthetic End committed; explicit repair count=%d", count)
+	}
+	return result
 }
 
 type contentLostReceiptStore struct {

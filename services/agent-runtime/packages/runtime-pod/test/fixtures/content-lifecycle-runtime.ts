@@ -86,7 +86,7 @@ const dependencies=await buildRuntimePodCommandDependencies({config:{...parsed.c
   },threadLoop:{...options.threadLoop,
    ...(input.approvalMode===undefined?{}:{approvalMode:input.approvalMode,runtimePolicy:session=>({...options.threadLoop.runtimePolicy?.(session),approvalMode:input.approvalMode!})}),
    sessionEventWriter:{
-    append:async envelope=>{const result=await writer.append(envelope);if(result.ok&&result.type!=="stale"){
+    append:async envelope=>{if(envelope.preallocatedEventId!==undefined)await trace("event-submission",{eventType:envelope.event.type,eventId:envelope.preallocatedEventId,writeId:envelope.writeId,modelRequestId:envelope.modelRequestId??""});const started=performance.now();const result=await writer.append(envelope);if(!result.ok)await trace("event-write-failed",{eventType:envelope.event.type,writeId:envelope.writeId,errorCode:result.error.code,elapsedMs:performance.now()-started});if(result.ok&&result.type!=="stale"){
      await trace("event-ack",{eventType:envelope.event.type,eventId:result.eventId,writeId:envelope.writeId});
      if(envelope.event.type==="agent.tool_use"||envelope.event.type==="agent.mcp_tool_use"){declared=true;await marker("tool-declared",{eventId:result.eventId,modelRequestId:envelope.modelRequestId});}
     }return result;},

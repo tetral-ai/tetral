@@ -117,7 +117,30 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 	defer func() { _ = response.Body.Close() }()
 	copySDKIntegrationResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
+	if strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+		// This test edge must forward live SSE as it arrives. Buffered io.Copy
+		// only happened to work for older fixtures that immediately closed.
+		controller := http.NewResponseController(w)
+		if controller.Flush() != nil {
+			return
+		}
+		_, _ = io.Copy(sdkIntegrationFlushWriter{writer: w, controller: controller}, response.Body)
+		return
+	}
 	_, _ = io.Copy(w, response.Body)
+}
+
+type sdkIntegrationFlushWriter struct {
+	writer     http.ResponseWriter
+	controller *http.ResponseController
+}
+
+func (w sdkIntegrationFlushWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	if err == nil {
+		err = w.controller.Flush()
+	}
+	return n, err
 }
 
 func (edge *sdkIntegrationEdge) authorize(w http.ResponseWriter, request *http.Request, requestID string) (string, bool) {
