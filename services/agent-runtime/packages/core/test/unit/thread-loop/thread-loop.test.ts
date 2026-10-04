@@ -161,9 +161,9 @@ describe("ThreadLoop", () => {
 				Effect.provide(
 					runtimeThreadLoopLayer(loader, {
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "ok" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_cbb10e2ee3df1bd97fcd6f4a6e1ed8d5",text:("ok")},
 							{
 								type: "finish",
 								finishReason: "stop",
@@ -188,7 +188,7 @@ describe("ThreadLoop", () => {
 									"msg_task_during_refresh",
 									"committed after request snapshot",
 								),
-								messageSequence: 1,
+								messageSequence: 2,
 							});
 							return "runtime-binding-token-refreshed";
 						},
@@ -209,7 +209,7 @@ describe("ThreadLoop", () => {
 		);
 		expect(session.state.lastRequestContextAnchorSequence()).toBe(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.find((message) => message.contextKind === "user")?.messageSequence,
 		);
 	});
@@ -251,14 +251,14 @@ describe("ThreadLoop", () => {
 		expect(loader.pendingCalls).toEqual(["sesn_1"]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.map((message) => message.contextKind),
 		).toEqual(["user", "user", "user", "assistant"]);
 		expect(
-			JSON.stringify(session.state.contextManager.entries()),
+			JSON.stringify(session.state.contextManager.historyMessages()),
 		).not.toContain("system prompt");
 		expect(
-			JSON.stringify(session.state.contextManager.entries()),
+			JSON.stringify(session.state.contextManager.historyMessages()),
 		).not.toContain("toolDefinitions");
 	});
 	test("assembles non-persistent runtime inputs into LLMRequest without storing them in hot or durable messages", async () => {
@@ -346,7 +346,7 @@ describe("ThreadLoop", () => {
 			attachments: [],
 			limits: { maxOutputTokens: 321, timeoutMs: 777 },
 		});
-		const hotContext = JSON.stringify(session.state.contextManager.entries());
+		const hotContext = JSON.stringify(session.state.contextManager.historyMessages());
 		for (const canary of [
 			systemCanary,
 			toolDescriptionCanary,
@@ -475,13 +475,9 @@ describe("ThreadLoop", () => {
 							writer,
 							llmService: llmService(
 								[
-									{ type: "text-start", id: "notification-race-text" },
-									{
-										type: "text-delta",
-										id: "notification-race-text",
-										text_delta: "done",
-									},
-									{ type: "text-end", id: "notification-race-text" },
+
+
+									{type:"text-complete" as const,providerPartId:"notification-race-text",eventId:"evt_558585692415a3b124d6850afc19abdc",text:("done")},
 									{ type: "finish", finishReason: "stop" },
 								],
 								(request) => requests.push(request),
@@ -538,13 +534,9 @@ describe("ThreadLoop", () => {
 					).toBe("applied");
 				}
 				return Stream.fromIterable([
-					{ type: "text-start", id: `text-${requests.length}` },
-					{
-						type: "text-delta",
-						id: `text-${requests.length}`,
-						text_delta: `answer ${requests.length}`,
-					},
-					{ type: "text-end", id: `text-${requests.length}` },
+
+
+					{type:"text-complete" as const,providerPartId:`text-${requests.length}`,eventId:"evt_71a7eba64ef3ff2375c50a07c3f85959",text:(`answer ${requests.length}`)},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -632,7 +624,7 @@ describe("ThreadLoop", () => {
 		expect(attempts).toBe(2);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.filter((message) => message.contextKind === "user"),
 		).toHaveLength(1);
 	});
@@ -858,7 +850,7 @@ describe("ThreadLoop", () => {
 			1,
 			"resume this durable input",
 		);
-		session.state.contextManager.replaceEntries([committed]);
+		session.state.contextManager.replaceMessages([committed]);
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
 			{
@@ -917,7 +909,7 @@ describe("ThreadLoop", () => {
 			1,
 			"continue after the durable tool result",
 		);
-		session.state.contextManager.replaceEntries([committed]);
+		session.state.contextManager.replaceMessages([committed]);
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
 			{
@@ -1092,7 +1084,7 @@ describe("ThreadLoop", () => {
 			1,
 			"retry this request",
 		);
-		session.state.contextManager.replaceEntries([message]);
+		session.state.contextManager.replaceMessages([message]);
 		session.state.markPersistentContextLoaded();
 		session.state.installThreadTurn(
 			{
@@ -1168,9 +1160,9 @@ describe("ThreadLoop", () => {
 										providerCalls === 1
 											? [{ type: "provider-error" as const, error: coldRetryFailure }]
 											: [
-													{ type: "text-start" as const, id: "cold-retry-text" },
-													{ type: "text-delta" as const, id: "cold-retry-text", text_delta: "done" },
-													{ type: "text-end" as const, id: "cold-retry-text" },
+
+
+													{type:"text-complete" as const,providerPartId:"cold-retry-text",eventId:"evt_418eb4eb2ee52a59c0b1931271189a6c",text:("done")},
 													{ type: "finish" as const, finishReason: "stop" as const },
 												],
 									);
@@ -1326,7 +1318,7 @@ describe("ThreadLoop", () => {
 		expect(loader.pendingCalls).toEqual([]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.map((message) => message.contextKind),
 		).toEqual(["user", "assistant", "user", "assistant"]);
 	});
@@ -1386,7 +1378,7 @@ describe("ThreadLoop", () => {
 			},
 		});
 		expect(appendedTypes).toEqual([]);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	test("runtime layer gates assistant progress hot context on durable event ACKs", async () => {
 		const order: string[] = [];
@@ -1398,9 +1390,9 @@ describe("ThreadLoop", () => {
 		});
 		let providerSawShell = false;
 		const writer = writerFrom((envelope) => {
-			const openAssistant = session.state.contextManager.openRequestDraft();
+			const openAssistant = session.state.contextManager.currentAssistantMessage();
 			const sealedAssistant = session.state.contextManager
-				.entries()
+				.historyMessages()
 				.find((entry) => entry.contextKind === "assistant");
 			order.push(
 				`event:${envelope.event.type}:open_parts_${openAssistant?.parts.length ?? 0}:sealed_parts_${sealedAssistant?.parts.length ?? 0}`,
@@ -1424,14 +1416,14 @@ describe("ThreadLoop", () => {
 						writer,
 						llmService: llmService(
 							[
-								{ type: "text-start", id: "text-1" },
-								{ type: "text-delta", id: "text-1", text_delta: "hello" },
-								{ type: "text-end", id: "text-1" },
+
+
+								{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_5bf665d1e45c75d23d2ee688c6ea353b",text:("hello")},
 								{ type: "finish", finishReason: "tool-calls" },
 							],
 							() => {
 								const assistant =
-									session.state.contextManager.openRequestDraft();
+									session.state.contextManager.currentAssistantMessage();
 								providerSawShell =
 									assistant !== undefined && assistant.parts.length === 0;
 								order.push("provider:stream");
@@ -1454,14 +1446,14 @@ describe("ThreadLoop", () => {
 			"provider:stream",
 			"event:agent.message:open_parts_0:sealed_parts_0",
 			"event:span.model_request_end:open_parts_1:sealed_parts_0",
-			"event:session.status_idle:open_parts_0:sealed_parts_1",
+			"event:session.status_idle:open_parts_1:sealed_parts_1",
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.map((message) => message.contextKind),
 		).toEqual(["user", "assistant"]);
-		expect(session.state.contextManager.entries().at(-1)?.parts).toEqual([
+		expect(session.state.contextManager.historyMessages().at(-1)?.parts).toEqual([
 			expect.objectContaining({ type: "text", text: "hello" }),
 		]);
 	});
@@ -1519,9 +1511,9 @@ describe("ThreadLoop", () => {
 					]);
 				}
 				return Stream.fromIterable([
-					{ type: "text-start", id: "text-hot-retry" },
-					{ type: "text-delta", id: "text-hot-retry", text_delta: "done" },
-					{ type: "text-end", id: "text-hot-retry" },
+
+
+					{type:"text-complete" as const,providerPartId:"text-hot-retry",eventId:"evt_2c930f5459676802323a15894fc5d408",text:("done")},
 					{ type: "finish", finishReason: "stop" },
 				]);
 			},
@@ -1682,9 +1674,9 @@ describe("ThreadLoop", () => {
 		const toolStatus = (): string => {
 			const parts = [
 				...session.state.contextManager
-					.entries()
+					.historyMessages()
 					.flatMap((entry) => entry.parts),
-				...(session.state.contextManager.openRequestDraft()?.parts ?? []),
+				...(session.state.contextManager.currentAssistantMessage()?.parts ?? []),
 			];
 			const result = parts.find((part) => part.type === "tool_result");
 			if (result?.type === "tool_result") return result.result.type;
@@ -1725,17 +1717,13 @@ describe("ThreadLoop", () => {
 						store,
 						writer,
 						events: [
-							{ type: "step-start", stepIndex: 1 },
-							{ type: "step-finish", finishReason: "tool-calls" },
-							{ type: "reasoning-start", id: "reasoning-1" },
+
+
+							{type:"thinking-started" as const,providerPartId:"reasoning-1",eventId:"evt_b74c007ad1d0541bc02b5e0cf62be8c4"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-1",thinkingEventId:"evt_b74c007ad1d0541bc02b5e0cf62be8c4",text:("thinking")},
 							{
-								type: "reasoning-delta",
-								id: "reasoning-1",
-								text_delta: "thinking",
-							},
-							{ type: "reasoning-end", id: "reasoning-1" },
-							{
-								type: "tool-call",
+								type: "tool-call-complete",
 								id: "tool-1",
 								toolName: "search",
 								input: { q: "x" },
@@ -1777,7 +1765,7 @@ describe("ThreadLoop", () => {
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.find((message) =>
 					message.parts.some((part) => part.type === "tool_call"),
 				),
@@ -1822,9 +1810,9 @@ describe("ThreadLoop", () => {
 						sessionEventWriter: writer,
 						runtime: threadLoopRuntime(),
 						llmService: llmService([
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "hello" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_9bcdc523df825bdfca0ab07e9f8c11ab",text:("hello")},
 						]),
 						storeOperationTimeoutMs: 1000,
 						providerCallRuntime: {
@@ -1850,7 +1838,7 @@ describe("ThreadLoop", () => {
 		]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -2413,7 +2401,7 @@ describe("ThreadState", () => {
 
 		expect(state.commitTaskNotification(notification)).toBe("applied");
 		expect(state.commitTaskNotification(notification)).toBe("duplicate");
-		expect(state.contextManager.entries()).toEqual([committedEntry]);
+		expect(state.contextManager.historyMessages()).toEqual([committedEntry]);
 	});
 
 	test("clear removes pending attachments", () => {

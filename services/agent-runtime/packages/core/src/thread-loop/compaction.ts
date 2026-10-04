@@ -195,13 +195,13 @@ export function consumeCompactionStreamEvent(
 	event: LLMEvent,
 ): void {
 	if (
-		(event.type === "step-finish" || event.type === "finish") &&
+		event.type === "finish" &&
 		event.usage !== undefined
 	) {
 		state.usage = event.usage;
 	}
-	if (event.type === "text-delta") {
-		state.summaryText.push(event.text_delta);
+	if (event.type === "text-complete") {
+		state.summaryText.push(event.text);
 		return;
 	}
 	if (event.type === "finish") {
@@ -215,10 +215,7 @@ export function consumeCompactionStreamEvent(
 		return;
 	}
 	if (
-		event.type === "tool-call" ||
-		event.type === "tool-input-start" ||
-		event.type === "tool-input-delta" ||
-		event.type === "tool-input-end"
+		event.type === "tool-call-complete"
 	) {
 		state.failure = compactionFailure(
 			session,

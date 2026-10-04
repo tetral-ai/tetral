@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
@@ -68,6 +69,8 @@ const runner = new RuntimePodToolRunner({
 		({ preloadThread: async () => ({ ok: true as const }) }) as unknown as RuntimeSubAgentRunHost,
 });
 const session = new ThreadRuntime({
+	threadRole: "main",
+	threadVisibility: "public",
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
 	sessionThreadId: input.sessionThreadId,
@@ -87,7 +90,7 @@ const llmService = {
 		if (providerInvocations === 1) {
 			return Stream.fromIterable([
 				{
-					type: "tool-call" as const,
+					type: "tool-call-complete" as const,
 					id: "call_child_control_exhaustion",
 					toolName: "interrupt_agent",
 					input: { task_name: input.taskName },
@@ -97,9 +100,9 @@ const llmService = {
 			]);
 		}
 		return Stream.fromIterable([
-			{ type: "text-start" as const, id: "parent-continues" },
-			{ type: "text-delta" as const, id: "parent-continues", text_delta: "parent continued" },
-			{ type: "text-end" as const, id: "parent-continues" },
+
+
+			{type:"text-complete" as const,providerPartId:"parent-continues",eventId:`evt_${createHash("sha256").update(JSON.stringify(["child-control-exhaustion-composition.ts", request.sessionId, request.modelRequestId, "parent-continues"])).digest("hex").slice(0,32)}`,text:("parent continued")},
 			{ type: "finish" as const, finishReason: "stop" as const },
 		]);
 	},

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
 import type { SessionEventWriter } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { normalizeRuntimeFailure } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { ProviderStreamAccumulator } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { RequestContentProcessor } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import { ThreadRuntime } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import {
@@ -26,6 +26,8 @@ import {
 import type { InterruptRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { InterruptOrigin } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { Effect } from "effect";
+import installedBuiltinPolicyFixture from "../../../protocol/testdata/installed-builtin-policy.json";
+import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import type { RuntimePodCommandDependencies } from "../../src/command.js";
 import {
 	buildRuntimePodCommandDependencies,
@@ -321,22 +323,18 @@ describe("Runtime Pod command entrypoint", () => {
 						...(producer === "immediate"
 							? {
 									events: [
-										{ type: "text-start" as const, id: "terminal-text" },
-										{
-											type: "text-delta" as const,
-											id: "terminal-text",
-											text_delta: "PROMPT_CANARY",
-										},
-										{ type: "text-end" as const, id: "terminal-text" },
-										{ type: "step-start" as const, stepIndex: 1 },
+
+
+										{type:"text-complete" as const,providerPartId:"terminal-text",eventId:"evt_e4e54ecb9743805d4609baa06deea927",text:("PROMPT_CANARY")},{type:"finish" as const,finishReason:"stop" as const},
+
 									],
 									createProcessor: (processorOptions) => {
-										const processor = new ProviderStreamAccumulator(
+										const processor = new RequestContentProcessor(
 											processorOptions,
 										);
 										const process = processor.process.bind(processor);
 										processor.process = async (source) =>
-											source.event.type === "step-start"
+											source.event.type === "finish"
 												? {
 														ok: false,
 														events: [],
@@ -744,15 +742,9 @@ describe("Runtime Pod command entrypoint", () => {
 			JSON.stringify({
 				config_generation: 7,
 				runtime_config: {
-					installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+					installedTools: [{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "write", enabled: false }, { name: "read", enabled: true, permission_policy: "always_allow" }] }],
 				},
 				approval_mode: "full_access",
-				tools: {
-					configs: [
-						{ name: "Write", enabled: false },
-						{ name: "Read", enabled: true, permission_policy: "always_allow" },
-					],
-				},
 			}),
 		);
 
@@ -760,6 +752,45 @@ describe("Runtime Pod command entrypoint", () => {
 		expect(lookupToolEntry(policy.toolCatalog, "Write")).toBeUndefined();
 		expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeDefined();
 		expect(lookupToolEntry(policy.toolCatalog, "spawn_agent")).toBeDefined();
+	});
+
+	for (const vector of installedBuiltinPolicyFixture) {
+		test(`installed builtin snapshot uses shared literal policy: ${vector.name}`, () => {
+			const payload = JSON.stringify({ runtime_config: { installedTools: vector.installedTools },
+				approval_mode: "ask_for_approval" });
+			const policy = runtimeToolPolicyFromPatchPayload(payload);
+			for (const entry of policy.toolCatalog.entries) {
+				const overrides = vector.expectedOverrides as Readonly<Record<string, string>>;
+				const expected = overrides[entry.name] ?? vector.expectedDefault;
+				if (expected !== "always_allow" && expected !== "always_ask") {
+					throw new Error("shared builtin policy fixture has an invalid expectation");
+				}
+				expect(effectivePermissionPolicy(entry, policy.toolCatalog.configs)).toBe(expected);
+				expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: entry.name,
+					approvalMode: policy.approvalMode }).type).toBe(expected === "always_allow" ? "run" : "ask");
+			}
+		});
+	}
+
+	test("installed builtin defaults survive partial override and approval-only patch", () => {
+		const initial = JSON.stringify({ runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude",
+			default_config: { enabled: true, permission_policy: { type: "always_ask" } },
+			configs: [{ name: "write", permission_policy: { type: "always_allow" } }, { name: "read", enabled: false }] }] },
+			approval_mode: "ask_for_approval", tools: { configs: [{ name: "Write", enabled: false }] } });
+		for (const patches of [[initial], [initial, JSON.stringify({ approval_mode: "approve_for_me" })]]) {
+			const policy = runtimeToolPolicyFromPatchPayloads(patches);
+			expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeUndefined();
+			expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: "Write", approvalMode: policy.approvalMode }).type).toBe("run");
+			expect(evaluateToolGate({ catalog: policy.toolCatalog, toolName: "Bash", approvalMode: policy.approvalMode }).type).toBe(patches.length === 1 ? "ask" : "review_required");
+		}
+	});
+
+	test("installed builtin policy rejects ambiguous aliases and malformed permissions", () => {
+		for (const configs of [[{ name: "read", enabled: true }, { name: "Read", enabled: false }],
+			[{ name: "read", permission_policy: { type: "unknown" } }], [{ name: "github_Search", enabled: true }]]) {
+			expect(() => runtimeToolPolicyFromPatchPayload(JSON.stringify({ runtime_config: { installedTools:
+				[{ type: "tetral_agent_toolset", family: "claude", configs }] } }))).toThrow("runtime installed builtin policy is malformed");
+		}
 	});
 
 	test("single-family cold policy and same-family patches stay generation-fenced", () => {
@@ -902,11 +933,8 @@ describe("Runtime Pod command entrypoint", () => {
 					config_generation: 8,
 					runtime_config: {
 						installedTools: [
-							{ type: "tetral_agent_toolset", family: "claude" },
+							{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "memory", enabled: false }] },
 						],
-					},
-					tools: {
-						configs: [{ name: "memory", enabled: false }],
 					},
 				}),
 			),
@@ -918,12 +946,9 @@ describe("Runtime Pod command entrypoint", () => {
 			JSON.stringify({
 				config_generation: 7,
 				runtime_config: {
-					installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+					installedTools: [{ type: "tetral_agent_toolset", family: "claude", configs: [{ name: "write", enabled: false }] }],
 				},
 				approval_mode: "full_access",
-				tools: {
-					configs: [{ name: "Write", enabled: false }],
-				},
 				tool_policy: {
 					mcpToolsets: [
 						{
@@ -1363,7 +1388,7 @@ describe("Runtime Pod command entrypoint", () => {
 						...options,
 						contextLoader: {
 							loadThreadContext: async () => ({
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 								turnFacts: { events: [], internalRepairs: [] },
 								runtimeBindingToken: "runtime-binding-token-command-test",
 							}),

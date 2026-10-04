@@ -167,7 +167,7 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		 WHERE workspace_id = $1
 		   AND session_id = $2
 		   AND session_thread_id = $3
-		   AND $8 = 'closed_for_runtime'
+		   AND ($8 = 'closed_for_runtime' OR $5 = '')
 		   AND type = 'span.model_request_start'
 		   AND model_request_id IS NOT NULL
 		   AND sequence >= $4
@@ -209,17 +209,48 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		   AND request_end.sequence > request_start.sequence
 		 ORDER BY request_end.sequence ASC
 		 LIMIT 1
-	), selected_thread_latest_idle AS MATERIALIZED (
-		SELECT idle.event_id, idle.sequence
+	), selected_thread_latest_closeout AS MATERIALIZED (
+		SELECT closeout.event_id, closeout.sequence, closeout.type, closeout.runtime_write_id, closeout.payload_json
 		  FROM selected_thread_request_end request_end
-		  JOIN session_events idle
-		    ON idle.workspace_id = $1
-		   AND idle.session_id = $2
-		   AND idle.session_thread_id = $3
-		   AND idle.type IN ('session.status_idle', 'session.thread_status_idle')
-		   AND idle.sequence > request_end.sequence
-		 ORDER BY idle.sequence DESC
+		  JOIN session_events closeout
+		    ON closeout.workspace_id = $1
+		   AND closeout.session_id = $2
+		   AND closeout.session_thread_id = $3
+		   AND closeout.type IN (
+		     'session.status_idle', 'session.thread_status_idle',
+		     'session.status_terminated', 'session.thread_status_terminated'
+		   )
+		   AND closeout.sequence >= $4
+		   AND closeout.sequence > request_end.sequence
+		 ORDER BY closeout.sequence DESC
 		 LIMIT 1
+	), selected_thread_terminal_failure AS MATERIALIZED (
+		-- Termination uses an exact write identity. Exhausted idle instead
+		-- follows the last exhausted failure within this selected durable run.
+		SELECT failure.event_id
+		  FROM selected_thread_latest_closeout closeout
+		  CROSS JOIN LATERAL (
+		    SELECT failure.event_id
+		      FROM session_events failure
+		     WHERE failure.workspace_id = $1
+		       AND failure.session_id = $2
+		       AND failure.session_thread_id = $3
+		       AND failure.type = 'session.error'
+		       AND failure.sequence >= $4
+		       AND failure.sequence > COALESCE((SELECT sequence FROM selected_thread_running), 0)
+		       AND failure.sequence < closeout.sequence
+		       AND (
+		         (closeout.type IN ('session.status_terminated', 'session.thread_status_terminated')
+		          AND closeout.runtime_write_id IS NOT NULL
+		          AND failure.runtime_write_id = closeout.runtime_write_id || ':error')
+		         OR
+		         (closeout.type IN ('session.status_idle', 'session.thread_status_idle')
+		          AND closeout.payload_json::jsonb #>> '{stop_reason,type}' = 'retries_exhausted'
+		          AND failure.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted')
+		       )
+		     ORDER BY failure.sequence DESC
+		     LIMIT 1
+		  ) failure
 	),
 	open_request AS MATERIALIZED (
 		SELECT request_start.sequence, request_start.model_request_id
@@ -372,7 +403,8 @@ const loadContextTurnEventsSQL = `WITH turn_root AS MATERIALIZED (
 		UNION SELECT event_id FROM latest_thread_request_start
 		UNION SELECT event_id FROM selected_thread_running
 		UNION SELECT event_id FROM selected_thread_request_end
-		UNION SELECT event_id FROM selected_thread_latest_idle
+		UNION SELECT event_id FROM selected_thread_latest_closeout
+		UNION SELECT event_id FROM selected_thread_terminal_failure
 		UNION SELECT event_id FROM retained_ends
 		UNION SELECT event_id FROM retained_tools
 		UNION SELECT event_id FROM retained_repairs

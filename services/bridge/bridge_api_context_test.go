@@ -83,18 +83,18 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 	if !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), `"skill_version_id":"sv_context"`) || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context skill") || !strings.Contains(string(payload.RuntimeConfig.SkillsIndex), "context description") {
 		t.Fatalf("skill index = %s; want configured version metadata", payload.RuntimeConfig.SkillsIndex)
 	}
-	if len(payload.ContextEntries) != 1 || payload.ContextEntries[0].MessageSequence != 1 || payload.ContextEntries[0].ContextKind != "user" || len(payload.ContextEntries[0].Parts) != 1 {
-		t.Fatalf("context entries = %#v", payload.ContextEntries)
+	if len(payload.Messages) != 1 || payload.Messages[0].MessageSequence != 1 || payload.Messages[0].ContextKind != "user" || len(payload.Messages[0].Parts) != 1 {
+		t.Fatalf("context entries = %#v", payload.Messages)
 	}
 	var part map[string]any
-	if err := json.Unmarshal(payload.ContextEntries[0].Parts[0], &part); err != nil {
+	if err := json.Unmarshal(payload.Messages[0].Parts[0], &part); err != nil {
 		t.Fatalf("decode part: %v", err)
 	}
 	if part["type"] != "text" || part["text"] != "hello" || len(part) != 2 {
 		t.Fatalf("narrow part = %#v", part)
 	}
-	if payload.OpenRequestDraft != nil {
-		t.Fatalf("open request draft = %#v; want nil", payload.OpenRequestDraft)
+	if payload.CurrentRequestMessage != nil {
+		t.Fatalf("open request draft = %#v; want nil", payload.CurrentRequestMessage)
 	}
 	if response.GetRuntimeBindingToken() == "" {
 		t.Fatal("LoadContext omitted refreshed binding token")

@@ -50,6 +50,11 @@ Bridge, Job Runner and their shared Runtime configuration, MCP manifest and
 durable-control packages form one verification boundary. Affected selection
 includes both Go owners, cross-service integration tests and Runtime/Gateway
 consumers; Go imports alone cannot describe their RPC and Bun test dependencies.
+Content lifecycle changes include the Runtime context and client adapters,
+Gateway assembly and transport, Bridge declarations and context loading, and
+the `integration/content_*` tests and `integration/testdata/content-*` fixtures.
+Each selects the durable Go compositions and both TypeScript consumers, even
+when the changed fixture has no Go import edge.
 Service-owned `k8s/` changes select deployment evidence, including the raw
 manifest invariants, Helm rendering tests and Helm lint. Helm chart changes
 under `deploy/helm/tetral/` also select the integration package, because its

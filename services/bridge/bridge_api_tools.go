@@ -640,6 +640,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			request.GetToolName(),
 			request.GetCanonicalInputJson(),
 			request.GetError(),
+			request.GetReasoningPrefixContextDelta(),
 			now,
 		)
 		if err != nil {
@@ -721,6 +722,9 @@ func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepai
 		return status.Error(codes.InvalidArgument, "internal tool repair canonical input is invalid")
 	}
 	if _, err := canonicalRuntimeToolError(request.GetError()); err != nil {
+		return err
+	}
+	if _, err := canonicalInternalToolRepairPrefix(request.GetReasoningPrefixContextDelta()); err != nil {
 		return err
 	}
 	return nil

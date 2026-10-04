@@ -28,8 +28,11 @@ import { jsonSchema, Output, streamText } from "ai";
 import { providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { lowerProviderRequest, remapOpenAICompatibleMessageMetadataForSDK } from "@tetral/gateway-lowering/src/request.js";
 import { lookupGatewayProviderRules } from "@tetral/gateway-lowering/src/rules/index.js";
+import { createProviderSdkRetentionGuard, ProviderSdkRetentionCalibrationCandidate } from "./sdk-retention-guard.js";
+import type { ProviderSdkRetentionBounds, ProviderSdkRetentionResources } from "./sdk-retention-guard.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
-import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { lookupGatewayModel, routeEffectiveGatewayModelLimits } from "./catalog.js";
 import { createOpenAIOAuthFetch, OpenAICodexResponsesEndpoint, OpenAIOAuthDummyAPIKey } from "./openai-oauth.js";
 import { openAIOAuthCredentialRefreshDue } from "./openai-oauth-refresh.js";
@@ -39,12 +42,13 @@ import type {
   TextStreamPart,
   Tool,
   ToolSet,
+  StreamTextTransform,
 } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
 import type { FetchFunction, ProviderOptions } from "@ai-sdk/provider-utils";
 import type { OpenAIProvider as AIOpenAIProvider, OpenAIProviderSettings as AIOpenAIProviderSettings } from "@ai-sdk/openai";
 import type { OpenAICompatibleProviderSettings as AIOpenAICompatibleProviderSettings } from "@ai-sdk/openai-compatible";
-import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderRules } from "@tetral/gateway-lowering/src/rules/rules.js";
 import type {
   GatewayStreamPart,
@@ -65,6 +69,8 @@ import type { OpenAIOAuthCredentialRefreshWriter } from "./openai-oauth-refresh.
 /** Dependencies and transport overrides used to construct a provider client registry. */
 export interface ProviderClientRegistryOptions {
   readonly streamText?: GatewayStreamTextFunction | undefined;
+  readonly sdkRetentionBounds?: ProviderSdkRetentionBounds;
+  readonly observeSdkRetention?: (resources: ProviderSdkRetentionResources) => void;
   readonly anthropicProviderFactory?: AnthropicProviderFactory | undefined;
   readonly openAIProviderFactory?: OpenAIProviderFactory | undefined;
   readonly openAICompatibleProviderFactory?: OpenAICompatibleProviderFactory | undefined;
@@ -111,6 +117,7 @@ export interface GatewayStreamTextInput {
   readonly topK?: number | undefined;
   readonly headers?: Record<string, string | undefined> | undefined;
   readonly abortSignal?: AbortSignal | undefined;
+  readonly experimental_transform?: StreamTextTransform<ToolSet>;
   readonly maxRetries: 0;
   readonly onError?: ((event: { readonly error: unknown }) => void | Promise<void>) | undefined;
 }
@@ -142,6 +149,7 @@ const MaxProviderRedirects = 5;
  * window before the call.
  */
 export class ProviderClientRegistry implements ProviderRequestStreamer {
+  readonly joinIteratorReturn = true as const;
   private readonly streamText: GatewayStreamTextFunction;
   private readonly anthropicProviderFactory: AnthropicProviderFactory;
   private readonly openAIProviderFactory: OpenAIProviderFactory;
@@ -151,7 +159,29 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   private readonly openAIOAuthCredentialRefreshWriter: OpenAIOAuthCredentialRefreshWriter | undefined;
 
   constructor(options: ProviderClientRegistryOptions = {}) {
-    this.streamText = options.streamText ?? defaultStreamText;
+    const invoke = options.streamText ?? defaultStreamText;
+    this.streamText = (input) => {
+      const controller = new AbortController();
+      const guard = createProviderSdkRetentionGuard({
+        bounds: options.sdkRetentionBounds ?? ProviderSdkRetentionCalibrationCandidate,
+        abort: reason => controller.abort(reason),
+        ...(options.observeSdkRetention === undefined ? {} : {observe:options.observeSdkRetention}),
+      });
+      const signal = input.abortSignal === undefined ? controller.signal : AbortSignal.any([input.abortSignal,controller.signal]);
+      let result: GatewayStreamTextResult;
+      try { result = invoke({...input,abortSignal:signal,experimental_transform:guard.transform}); }
+      catch (error) { controller.abort(); guard.release(); throw error; }
+      return { fullStream: (async function* () {
+        const iterator=result.fullStream[Symbol.asyncIterator]();
+        try {
+          while(true){const next=await iterator.next();if(next.done)return;yield next.value;}
+        } finally {
+          controller.abort();
+          try { await iterator.return?.(); } catch { /* Original stream failure remains authoritative. */ }
+          guard.release();
+        }
+      })() };
+    };
     this.anthropicProviderFactory = options.anthropicProviderFactory ?? ((settings) => createAnthropic(settings));
     this.openAIProviderFactory = options.openAIProviderFactory ?? ((settings) => createOpenAI(settings));
     this.openAICompatibleProviderFactory = options.openAICompatibleProviderFactory ?? ((settings) => createOpenAICompatible(settings));
@@ -282,9 +312,6 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       for (const event of raiser.map(toGatewayStreamPart(part, credential, entry.supplyProviderId))) {
         terminal = isTerminalProviderStreamEvent(event);
         yield event;
-        if (terminal) {
-          return;
-        }
       }
     }
     if (!terminal) {
@@ -398,9 +425,6 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       for (const event of raiser.map(toGatewayStreamPart(part, credential, entry.supplyProviderId))) {
         terminal = isTerminalProviderStreamEvent(event);
         yield event;
-        if (terminal) {
-          return;
-        }
       }
     }
     if (!terminal) {
@@ -480,9 +504,6 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       for (const event of raiser.map(toGatewayStreamPart(part, credential, entry.supplyProviderId))) {
         terminal = isTerminalProviderStreamEvent(event);
         yield event;
-        if (terminal) {
-          return;
-        }
       }
     }
     if (!terminal) {
@@ -812,6 +833,14 @@ function providerFetchTimers(input: {
   };
 }
 
+// Fairness checkpoints preserve source bytes; they are not content admission limits.
+// Segmenting ready input bounds a parser batch when an HTTP reader returns a large chunk.
+// The time checkpoint is checked at pull boundaries, not a realtime preemption guarantee.
+const ProviderResponseReadSegmentBytes=16*1024;
+const ProviderResponseReadYieldBytes=256*1024;
+const ProviderResponseReadYieldChunks=128;
+const ProviderResponseReadYieldMs=8;
+
 function wrapProviderResponseBody(
   response: Response,
   timers: ReturnType<typeof providerFetchTimers>,
@@ -822,35 +851,53 @@ function wrapProviderResponseBody(
     return response;
   }
   const reader = response.body.getReader();
+  let completed = false;
+  let cancellation:Promise<void>|undefined;
+  let bodyController:ReadableStreamDefaultController<Uint8Array>;
+  let pendingChunk:Uint8Array|undefined,pendingOffset=0,bytesSinceTask=0,chunksSinceTask=0,lastTaskAt=performance.now();
+  const cleanup=():void=>{ pendingChunk=undefined;pendingOffset=0;completed=true; timers.clearAll(); timers.signal.removeEventListener("abort",abort); };
+  const abort=():void=>{
+    if(completed)return;
+    const error=timers.timeoutError() ?? timers.signal.reason ?? new DOMException("Provider fetch aborted.","AbortError");
+    cleanup(); bodyController.error(error);
+    // Reader cancellation is owned even when the source has already errored.
+    cancellation=reader.cancel(error).catch(()=>{}).finally(()=>{try{reader.releaseLock();}catch{}});
+  };
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      timers.armChunk();
-      timers.signal.addEventListener("abort", () => {
-        const error = timers.timeoutError() ?? timers.signal.reason ?? new DOMException("Provider fetch aborted.", "AbortError");
-        controller.error(error);
-        void reader.cancel(error);
-        timers.clearAll();
-      }, { once: true });
+      bodyController=controller; timers.armChunk(); timers.signal.addEventListener("abort",abort,{once:true});
+      if(timers.signal.aborted)abort();
     },
     async pull(controller) {
       try {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          timers.clearAll();
-          controller.close();
-          return;
+        if(completed)return;
+        if(pendingChunk===undefined){
+          const chunk = await reader.read();
+          if(completed)return;
+          if (chunk.done) { cleanup(); reader.releaseLock(); controller.close(); return; }
+          // Only actual source reads reset network inactivity and report transport activity.
+          timers.armChunk(); onTransportActivity?.();pendingChunk=chunk.value;pendingOffset=0;
         }
-        timers.armChunk();
-        onTransportActivity?.();
-        controller.enqueue(chunk.value);
+        if(bytesSinceTask>=ProviderResponseReadYieldBytes||chunksSinceTask>=ProviderResponseReadYieldChunks||performance.now()-lastTaskAt>=ProviderResponseReadYieldMs){
+          await new Promise<void>(resolve=>setImmediate(resolve));
+          if(completed)return;
+          bytesSinceTask=0;chunksSinceTask=0;lastTaskAt=performance.now();
+        }
+        const chunkToForward=pendingChunk;if(chunkToForward===undefined)return;
+        const end=Math.min(pendingOffset+ProviderResponseReadSegmentBytes,chunkToForward.byteLength);
+        const segment=chunkToForward.subarray(pendingOffset,end);pendingOffset=end;
+        if(pendingOffset===chunkToForward.byteLength){pendingChunk=undefined;pendingOffset=0;}
+        bytesSinceTask+=segment.byteLength;chunksSinceTask++;controller.enqueue(segment);
       } catch (error) {
-        timers.clearAll();
-        controller.error(timers.timeoutError() ?? error);
+        if(completed)return;
+        const failure=timers.timeoutError() ?? error;
+        cleanup(); reader.releaseLock(); controller.error(failure);
       }
     },
     cancel(reason) {
-      timers.clearAll();
-      return reader.cancel(reason);
+      if(cancellation!==undefined)return cancellation;
+      if(completed)return;
+      cleanup(); cancellation=reader.cancel(reason).finally(()=>reader.releaseLock());return cancellation;
     },
   });
   return new Response(body, {

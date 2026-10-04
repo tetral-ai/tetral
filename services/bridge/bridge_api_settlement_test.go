@@ -31,7 +31,7 @@ func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *test
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_failed_context_start", "mreq_failed_context", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	member, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_failed_context_member", ModelRequestId: "mreq_failed_context",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"acknowledged before failure"}]}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000005"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"acknowledged before failure"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("acknowledged before failure"),
 	})
 	if err != nil || member.GetCommitted() == nil {
@@ -52,7 +52,7 @@ func TestFailedRequestWithoutRetentionDeclarationKeepsAssistantAuditOnly(t *test
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode failed request context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 0 {
+	if payload.CurrentRequestMessage != nil || len(payload.Messages) != 0 {
 		t.Fatalf("audit-only failed Assistant entered cold provider context = %#v", payload)
 	}
 }
@@ -70,6 +70,14 @@ func TestProviderContextRetentionValidationAcceptsMechanicallyValidRuntimeDeclar
 }
 
 func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
+	for _, disposition := range []string{"completed", "failed", "interrupted", "rescheduled", "compacted"} {
+		t.Run(disposition, func(t *testing.T) {
+			testIncompleteToolRetention(t, disposition)
+		})
+	}
+}
+
+func testIncompleteToolRetention(t *testing.T, disposition string) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_incomplete_tool_retention"
@@ -98,7 +106,7 @@ func TestPostgreSQLWriteRequestEndRejectsIncompleteToolRetention(t *testing.T) {
 		Scope: scope, RuntimeWriteId: "rwrite_incomplete_retention_end", ModelRequestId: "mreq_incomplete_retention",
 		FinishReason: "tool_calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", ToolUseEventIds: toolUseIDs[:1],
+			Disposition: disposition, ToolUseEventIds: toolUseIDs[:1],
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -130,7 +138,7 @@ func TestWriteRequestEndReturnsOnlyDirectDurableFacts(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_start_end", "mreq_end", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_member_end", ModelRequestId: "mreq_end",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000006"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("done"),
 	})
 	if err != nil || message.GetCommitted() == nil {
@@ -203,7 +211,7 @@ func TestLoadContextCarriesAcceptedRescheduleAttemptAndDeadline(t *testing.T) {
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_reschedule_start", "mreq_reschedule", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reschedule_member", ModelRequestId: "mreq_reschedule",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"partial"}]}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000007"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"partial"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("partial"),
 	})
 	if err != nil || message.GetCommitted() == nil {

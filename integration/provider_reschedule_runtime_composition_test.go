@@ -1161,7 +1161,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 
 	if message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_partial", ModelRequestId: modelRequestID,
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"discarded partial text"}]}`,
+		PreallocatedEventId: proto.String("evt_00000000000000000000000000000008"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"discarded partial text"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("discarded partial text"),
 	}); err != nil || message.GetCommitted() == nil {
 		t.Fatalf("write failed request partial text: response=%#v err=%v", message, err)

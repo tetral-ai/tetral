@@ -35,7 +35,8 @@ const MaxProviderRequestAttachments = 32
 // aggregate (per-part content and metadata caps unchanged) apply to the union,
 // not to each vector separately. An attached set or a settlement that breaches
 // either limit is rejected as a contract violation before any durable write.
-// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+// Canonical policy: services/gateway/packages/protocol/src/content-limits.json;
+// checked against these actual Bridge limits by content_limits_test.go.
 const (
 	MaxStableReasoningPartsPerRequest = 16
 	MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024

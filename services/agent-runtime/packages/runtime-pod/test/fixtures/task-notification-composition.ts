@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import type {
@@ -91,8 +92,8 @@ const bridgeLoader = new BridgeAPIContextLoader({
 			) => {
 				callback(null, {
 					contextJson: JSON.stringify({
-						contextEntries: [],
-						openRequestDraft: null,
+						messages:[],currentRequestMessage:null,
+
 						turnFacts: { events: [], internalRepairs: [] },
 						thread: {
 							parentThreadId: null,
@@ -160,7 +161,7 @@ const contextLoader = {
 	loadThreadContext:
 		input.bridgeAddress === undefined
 			? async () => ({
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					turnFacts: { events: [], internalRepairs: [] },
 					thread: {
 						role: "main" as const,
@@ -217,16 +218,11 @@ const hosts = await buildRuntimeCoreHosts({
 				providerRequests.push(request);
 				const id = `task-notification-race-${providerInvocations}`;
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id },
-					{
-						type: "text-delta" as const,
-						id,
-						text_delta:
-							providerInvocations === 1
+
+
+					{type:"text-complete" as const,providerPartId:id,eventId:`evt_${createHash("sha256").update(JSON.stringify(["task-notification-composition.ts", input.sessionId, id])).digest("hex").slice(0,32)}`,text:(providerInvocations === 1
 								? "current request completed"
-								: "task notification consumed",
-					},
-					{ type: "text-end" as const, id },
+								: "task notification consumed")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},

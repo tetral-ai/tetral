@@ -119,15 +119,11 @@ const result = await Effect.runPromise(
 					llmService: queuedLLMService(
 						[
 							[
-								{ type: "text-start", id: "text-before-invalid-tool" },
+
+
+								{type:"text-complete" as const,providerPartId:"text-before-invalid-tool",eventId:"evt_fb0da9fcbcc2a8b2e83a85dccc724029",text:("continuing")},
 								{
-									type: "text-delta",
-									id: "text-before-invalid-tool",
-									text_delta: "continuing",
-								},
-								{ type: "text-end", id: "text-before-invalid-tool" },
-								{
-									type: "tool-call",
+									type: "tool-call-complete",
 									id: "call_invalid_tool_repair_fixture",
 									toolName: "exec_command",
 									input: { command: "must not execute" },
@@ -139,13 +135,9 @@ const result = await Effect.runPromise(
 								{ type: "finish", finishReason: "tool-calls" },
 							],
 							[
-								{ type: "text-start", id: "text-invalid-tool-repaired" },
-								{
-									type: "text-delta",
-									id: "text-invalid-tool-repaired",
-									text_delta: "continued",
-								},
-								{ type: "text-end", id: "text-invalid-tool-repaired" },
+
+
+								{type:"text-complete" as const,providerPartId:"text-invalid-tool-repaired",eventId:"evt_faa045888cdef9cb214327292de0a493",text:("continued")},
 								{ type: "finish", finishReason: "stop" },
 							],
 						],

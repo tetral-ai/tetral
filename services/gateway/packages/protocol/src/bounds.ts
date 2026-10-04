@@ -5,17 +5,19 @@
  * Runtime provider stream events, plus byte ceilings shared by provider, MCP, Web, and Runtime
  * callers. The provider-gateway service validates
  * requests after caller authorization and readiness checks but before binding-token verification,
- * admission, attachment and credential resolution, or provider lowering. It also validates provider
- * adapter stream output before forwarding it. Runtime Core applies the stream validator before its
+ * admission, attachment and credential resolution, or provider lowering. It also validates complete
+ * provider frames before forwarding them; private adapter records have their own validator. Runtime Core applies the stream validator before its
  * stateful ordering checks and hot-state updates. Provider-gateway and MCP/Web validators consume
- * the shared limits and validation result; Runtime Core consumes `MaxTextBytes` while assembling
- * provider requests and bounding normalized tool-input previews.
+ * the shared limits and validation result; Runtime Core consumes the canonical completed-content
+ * validators and request limits while constructing provider requests.
  *
  * Validation operates on generated protocol types and enums, measures bounded strings as UTF-8,
  * parses serialized JSON where payload shape matters, and returns one redacted failure message.
  * Each call validates one request or event in isolation; authentication, tenant authorization,
  * cross-event ordering, terminal-state tracking, and provider behavior remain caller responsibilities.
  */
+
+import ContentLimits from "./content-limits.json";
 
 import type {
 	ProviderAttachmentRejection,
@@ -44,20 +46,20 @@ export const MaxTokenBytes = 1024;
 // MaxTextBytes: field-sanity ceiling for the shorter free-text fields carried in a
 // provider request or stream event — system-segment text (validateProviderRequest),
 // tool descriptions, transient-attachment source paths, provider-error messages, and
-// streamed text/reasoning/tool-input fragment deltas (validFragment). It does NOT bound
+// short operational fields. It does NOT bound
 // message text or reasoning parts; those ride the request fuse under
 // MaxProviderContextTextJsonBytes. The 64 KiB value is a fixed sanity ceiling, not
 // sized to any payload.
 // UPDATE-WITH: validateProviderRequest, validateProviderStreamEvent,
-//   validAttachmentRejections, validFragment (all in this file).
-/** Maximum UTF-8 size of short free-text fields and individual streamed fragment deltas. */
+//   validAttachmentRejections (all in this file).
+/** Maximum UTF-8 size of short free-text fields . */
 export const MaxTextBytes = 64 * 1024;
 // MaxProviderContextTextJsonBytes: per-item semantic bound for provider text and
 // reasoning in a ProviderRequest. Runtime accumulation and Gateway
 // validation both measure JSON.stringify(text), so escape-dense content has one contract.
 // UPDATE-WITH: validProviderContextItem in this file.
 /** Maximum canonical JSON-string size of one provider context text or reasoning item. */
-export const MaxProviderContextTextJsonBytes = 16 * 1024 * 1024;
+export const MaxProviderContextTextJsonBytes = ContentLimits.MaxProviderContextTextJsonBytes;
 // A fitted Read result is already a complete JSON-escaped helper envelope of at
 // most 200,000 bytes. Runtime decodes it, adds at most 2,000 line prefixes, and
 // serializes the visible text once. 512 KiB also carries the MCP formatter's
@@ -68,9 +70,9 @@ export const MaxProviderContextTextJsonBytes = 16 * 1024 * 1024;
 //   (RuntimeBoundedTextSchema); services/web-connector/types.go
 //   (maxModelVisibleToolOutputJSONBytes, maxVisibleResultBytes).
 /** Maximum UTF-8 size of provider-request tool output/error JSON. */
-export const MaxProviderRequestToolOutputJsonBytes = 512 * 1024;
+export const MaxProviderRequestToolOutputJsonBytes = ContentLimits.MaxProviderRequestToolOutputJsonBytes;
 /** Maximum UTF-8 size of one provider-produced tool-call input JSON value. */
-export const MaxProviderToolCallInputJsonBytes = 4 * 1024 * 1024;
+export const MaxProviderToolCallInputJsonBytes = ContentLimits.MaxProviderToolCallInputJsonBytes;
 /** Maximum UTF-8 size of provider-native usage JSON. */
 export const MaxProviderUsageJsonBytes = 16 * 1024;
 /** Maximum UTF-8 size of MCP tool input JSON. */
@@ -83,7 +85,7 @@ export const MaxProviderErrorMessageBytes = 8 * 1024;
  */
 export const MaxSchemaBytes = 32 * 1024;
 /** Maximum UTF-8 size of serialized reasoning and provider stream metadata. */
-export const MaxMetadataBytes = 16 * 1024;
+export const MaxMetadataBytes = ContentLimits.MaxMetadataBytes;
 /** Maximum UTF-8 size of descriptive attachment page-range and detail hints. */
 export const MaxAttachmentHintBytes = 128;
 // MaxProviderRequestAttachments: bound on the number of attachments in one provider
@@ -96,9 +98,32 @@ export const MaxAttachmentHintBytes = 128;
 // UPDATE-WITH: validateProviderRequest (request.attachments), validAttachmentRejections
 //   (both in this file).
 /** Maximum attachment count on one provider request or attachment-rejections event. */
-export const MaxProviderRequestAttachments = 32;
+export const MaxProviderRequestAttachments = ContentLimits.MaxProviderRequestAttachments;
 /** Largest positive Runtime binding generation representable by the protocol validators. */
 export const MaxBindingGeneration = 0xffffffff;
+/** Request-wide stable reasoning budget, including completed parts already handed off. */
+export const MaxStableReasoningPartsPerRequest = ContentLimits.MaxStableReasoningPartsPerRequest;
+export const MaxStableReasoningBytesPerRequest = ContentLimits.MaxStableReasoningBytesPerRequest;
+/** Encoded complete-frame fuse shared by Gateway send and Runtime receive. */
+export const MaxProviderResponseFrameBytes = ContentLimits.MaxProviderResponseFrameBytes;
+/** Version 2 carries complete provider blocks with consecutive frame sequences. */
+export const ProviderOutputContractVersion = 2;
+/** Recognizes cryptographically allocated durable content identities. */
+export function validProviderEventId(value: string): boolean {
+  return /^evt_[0-9a-f]{32}$/.test(value);
+}
+/** Completed content contains Unicode scalars and fits the canonical JSON-string budget. */
+export function validProviderCompleteText(value: string): boolean {
+  return hasOnlyUnicodeScalars(value) && validJsonString(value, MaxProviderContextTextJsonBytes);
+}
+/** Validates scalar JSON using the shared provider tool-call input budget. */
+export function validProviderToolCallInputJson(value: string): boolean {
+  return validJson(value, MaxProviderToolCallInputJsonBytes);
+}
+/** Validates bounded scalar provider metadata objects. */
+export function validProviderMetadataJson(value: string): boolean {
+  return validMetadata(value);
+}
 
 const AllowedProviderRequestAttachmentMimes = new Set([
 	"application/pdf",
@@ -140,6 +165,16 @@ export type ValidationResult =
 export function validateProviderRequest(
 	request: ProviderRequest,
 ): ValidationResult {
+  if (request.outputContractVersion !== ProviderOutputContractVersion) {
+    return invalidRequest("unsupported_output_contract", "output_contract_version");
+  }
+  // Start is a Bridge ACK identity with the established bounded-identifier contract.
+  // Only newly Gateway-allocated content identities require the 32-hex shape.
+  if (invalidBytes(request.modelRequestStartEventId, MaxIdBytes) || !hasOnlyUnicodeScalars(request.modelRequestStartEventId)) {
+    return invalidRequest("invalid_start_event_id", "model_request_start_event_id");
+  }
+  // Unknown or missing thread identity never enables previews. Normal complete
+  // delivery remains valid: admission is a separate frozen request decision.
 	for (const [member, value] of [
 		["request_id", request.requestId],
 		["model_request_id", request.modelRequestId],
@@ -322,129 +357,41 @@ export function validateProviderRequest(
  *
  * The event must carry exactly one payload matching a supported event type. Payload-specific checks
  * enforce bounded identifiers and text, JSON and metadata shape, non-negative usage and error values,
- * finish limits, and unique attachment-rejection origins. Fragment ordering and terminal-event
- * sequencing require stream state and are intentionally left to the Runtime consumer.
+ * finish limits, and unique attachment-rejection origins. Complete-block ordering and terminal-event
+ * sequencing require stream state and are checked by Gateway assembly and Runtime consumption.
  */
 export function validateProviderStreamEvent(
 	event: ProviderStreamEvent,
 ): ValidationResult {
-	if (
-		!validEnum(
-			event.type,
-			ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-			ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS,
-		)
-	) {
-		return invalidRequest();
-	}
-	const payloadCount = [
-		event.text,
-		event.reasoning,
-		event.toolInput,
-		event.toolCall,
-		event.finish,
-		event.providerError,
-		event.attachmentRejections,
-	].filter((payload) => payload !== undefined).length;
-	if (payloadCount !== 1) {
-		return invalidRequest();
-	}
-	switch (event.type) {
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
-			return event.text !== undefined &&
-				validFragment(event.text.id, event.text.text, event.text.metadataJson, {
-					textAllowed: false,
-				})
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
-			return event.text !== undefined &&
-				validFragment(event.text.id, event.text.text, event.text.metadataJson, {
-					textAllowed: true,
-				})
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
-			return event.text !== undefined &&
-				validFragment(event.text.id, event.text.text, event.text.metadataJson, {
-					textAllowed: false,
-				})
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START:
-			return event.reasoning !== undefined &&
-				validFragment(
-					event.reasoning.id,
-					event.reasoning.text,
-					event.reasoning.metadataJson,
-					{ textAllowed: false },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
-			return event.reasoning !== undefined &&
-				validFragment(
-					event.reasoning.id,
-					event.reasoning.text,
-					event.reasoning.metadataJson,
-					{ textAllowed: true },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
-			return event.reasoning !== undefined &&
-				validFragment(
-					event.reasoning.id,
-					event.reasoning.text,
-					event.reasoning.metadataJson,
-					{ textAllowed: false },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
-			return event.toolInput !== undefined &&
-				!invalidBytes(event.toolInput.name, MaxIdBytes) &&
-				validFragment(
-					event.toolInput.id,
-					event.toolInput.text,
-					event.toolInput.metadataJson,
-					{ textAllowed: false },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
-			return event.toolInput !== undefined &&
-				!invalidBytes(event.toolInput.name, MaxIdBytes) &&
-				validFragment(
-					event.toolInput.id,
-					event.toolInput.text,
-					event.toolInput.metadataJson,
-					{ textAllowed: true },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
-			return event.toolInput !== undefined &&
-				!invalidBytes(event.toolInput.name, MaxIdBytes) &&
-				validFragment(
-					event.toolInput.id,
-					event.toolInput.text,
-					event.toolInput.metadataJson,
-					{ textAllowed: false },
-				)
-				? { ok: true }
-				: invalidRequest();
-		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
-			return event.toolCall !== undefined &&
-				!invalidBytes(event.toolCall.id, MaxIdBytes) &&
-				!invalidBytes(event.toolCall.name, MaxIdBytes) &&
-				validJson(
-					event.toolCall.inputJson,
-					MaxProviderToolCallInputJsonBytes,
-				) &&
-				validMetadata(event.toolCall.metadataJson)
-				? { ok: true }
-				: invalidRequest();
+  if (!Number.isInteger(event.frameSequence) || event.frameSequence <= 0 || event.frameSequence > 0xffffffff) {
+    return invalidRequest("invalid_frame_sequence", "frame_sequence");
+  }
+  const payloadCount = [event.thinkingStarted, event.textComplete,
+    event.reasoningComplete, event.toolCallComplete, event.finish,
+    event.providerError, event.attachmentRejections].filter(payload => payload !== undefined).length;
+  if (payloadCount !== 1) return invalidRequest();
+  switch (event.type) {
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED:
+      return event.thinkingStarted !== undefined &&
+        !invalidBytes(event.thinkingStarted.providerPartId, MaxIdBytes) &&
+        validProviderEventId(event.thinkingStarted.eventId) ? { ok: true } : invalidRequest();
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE:
+      return event.textComplete !== undefined &&
+        !invalidBytes(event.textComplete.providerPartId, MaxIdBytes) &&
+        validProviderEventId(event.textComplete.eventId) && event.textComplete.text.length > 0 &&
+        validProviderCompleteText(event.textComplete.text) ? { ok: true } : invalidRequest();
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE:
+      return event.reasoningComplete !== undefined &&
+        !invalidBytes(event.reasoningComplete.providerPartId, MaxIdBytes) &&
+        validProviderEventId(event.reasoningComplete.thinkingEventId) &&
+        validProviderCompleteText(event.reasoningComplete.text) &&
+        validMetadata(event.reasoningComplete.providerMetadataJson) ? { ok: true } : invalidRequest();
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE:
+      return event.toolCallComplete !== undefined &&
+        !invalidBytes(event.toolCallComplete.modelToolCallId, MaxIdBytes) &&
+        !invalidBytes(event.toolCallComplete.name, MaxIdBytes) &&
+        validProviderToolCallInputJson(event.toolCallComplete.inputJson) &&
+        validMetadata(event.toolCallComplete.providerMetadataJson) ? { ok: true } : invalidRequest();
 		case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH:
 			return event.finish !== undefined &&
 				validEnumValue(
@@ -611,20 +558,6 @@ function validProviderContextItem(
 	return true;
 }
 
-function validFragment(
-	id: string,
-	text: string,
-	metadataJson: string,
-	options: { readonly textAllowed: boolean },
-): boolean {
-	if (invalidBytes(id, MaxIdBytes) || !validMetadata(metadataJson)) {
-		return false;
-	}
-	return options.textAllowed
-		? text === "" || !invalidBytes(text, MaxTextBytes)
-		: text === "";
-}
-
 function validRequestUsage(usage: RequestUsage): boolean {
 	return (
 		nonNegativeInteger(usage.inputTotalTokens) &&
@@ -768,7 +701,7 @@ function hasOnlyUnicodeScalarsInJson(value: unknown): boolean {
 	);
 }
 
-function hasOnlyUnicodeScalars(value: string): boolean {
+export function hasOnlyUnicodeScalars(value: string): boolean {
 	for (let index = 0; index < value.length; index += 1) {
 		const code = value.charCodeAt(index);
 		if (code >= 0xd800 && code <= 0xdbff) {

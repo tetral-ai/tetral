@@ -212,7 +212,7 @@ describe("Thread-turn semantic characterization", () => {
 				internalRepairs: scenario.internalRepairs,
 			});
 			const checkpoint = extractThreadTurnCheckpoint({
-				contextEntries: [
+				messages: [
 					{
 						messageSequence: 1,
 						contextKind: "user",

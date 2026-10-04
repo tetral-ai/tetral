@@ -3,10 +3,13 @@ package integration
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -152,12 +156,116 @@ func startTaskNotificationRuntimeComposition(t *testing.T, inputPath string, req
 
 func (r *runningTaskNotificationRuntime) wait(t *testing.T) taskNotificationRuntimeCompositionOutput {
 	t.Helper()
-	if err := r.command.Wait(); err != nil {
-		t.Fatalf("resident Runtime composition: %v: %s", err, r.output.String())
+	joined := make(chan error, 1)
+	go func() { joined <- r.command.Wait() }()
+	var joinErr error
+	select {
+	case joinErr = <-joined:
+	case <-time.After(20 * time.Second):
+		_ = r.command.Process.Kill()
+		joinErr = <-joined
+		t.Fatalf("resident Runtime did not join within 20s: %v: %s", joinErr, r.output.String())
+	}
+	if joinErr != nil {
+		t.Fatalf("resident Runtime composition: %v: %s", joinErr, r.output.String())
 	}
 	var composed taskNotificationRuntimeCompositionOutput
 	if err := json.Unmarshal(r.output.Bytes(), &composed); err != nil {
 		t.Fatalf("decode resident Runtime composition: %v: %s", err, r.output.String())
+	}
+	return composed
+}
+
+func (r *runningTaskNotificationRuntime) waitWithOutputCapture(t *testing.T, runtime, admin *sql.DB, sessionID, threadID string) taskNotificationRuntimeCompositionOutput {
+	t.Helper()
+	// A successful Request End precedes FinishIdle. Select the actual turn's
+	// durable capture before serving its Queue owner; arbitrary one-shot work
+	// could instead acknowledge a prior capture without releasing this turn.
+	var writeID string
+	var generation int
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := admin.QueryRowContext(context.Background(), `SELECT finish_idle_write_id,capture_generation
+			FROM sandbox_output_capture_operations WHERE workspace_id='default'
+			AND session_id=$1 AND session_thread_id=$2 AND state='pending'`, sessionID, threadID).Scan(&writeID, &generation)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) || time.Now().After(deadline) {
+			t.Fatalf("task-notification turn did not enqueue output capture: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var queued int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND status='pending'
+		AND payload_json::jsonb->>'session_id'=$2
+		AND payload_json::jsonb->>'finish_idle_write_id'=$3
+		AND (payload_json::jsonb->>'capture_generation')::int=$4`,
+		queue.KindSandboxOutputCapture, sessionID, writeID, generation).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("task-notification output-capture Queue ownership = %d/%v", queued, err)
+	}
+	providers, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}},
+	})
+	if err != nil {
+		t.Fatalf("build task-notification capture provider registry: %v", err)
+	}
+	worker := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)), nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(dbconnect.NewClientForTesting(runtime)),
+		Providers: providers, BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "task-notification-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: time.Second,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := worker.RunOnceWithActivity(ctx); err != nil {
+				if ctx.Err() != nil {
+					err = nil
+				}
+				workerDone <- err
+				return
+			}
+			select {
+			case <-ctx.Done():
+				workerDone <- nil
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		if err := <-workerDone; err != nil {
+			t.Errorf("task-notification output-capture owner: %v", err)
+		}
+	}()
+	composed := r.wait(t)
+	var adopted int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND finish_idle_write_id=$3 AND capture_generation=$4 AND state='adopted'`,
+		sessionID, threadID, writeID, generation).Scan(&adopted); err != nil || adopted != 1 {
+		var facts string
+		factsErr := admin.QueryRowContext(context.Background(), `SELECT jsonb_build_object(
+			'capture',(SELECT jsonb_build_object('state',state,'failure_kind',failure_kind,
+				'failure_detail',left(failure_detail,256)) FROM sandbox_output_capture_operations
+				WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+				AND finish_idle_write_id=$3 AND capture_generation=$4),
+			'queue',(SELECT COALESCE(jsonb_agg(jsonb_build_object('status',status)),'[]'::jsonb)
+				FROM queue_jobs WHERE workspace_id='default' AND kind=$5
+				AND payload_json::jsonb->>'session_id'=$1
+				AND payload_json::jsonb->>'finish_idle_write_id'=$3
+				AND (payload_json::jsonb->>'capture_generation')::int=$4))::text`,
+			sessionID, threadID, writeID, generation, queue.KindSandboxOutputCapture).Scan(&facts)
+		t.Fatalf("task-notification selected capture was not adopted before join: %d/%v; capture facts=%s/%v", adopted, err, facts, factsErr)
 	}
 	return composed
 }
@@ -352,7 +460,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 	if err != nil || !active {
 		t.Fatalf("deliver task notification through generated Runtime gRPC = active:%t err:%v", active, err)
 	}
-	composed := runningRuntime.wait(t)
+	composed := runningRuntime.waitWithOutputCapture(t, runtime, admin, sessionID, threadID)
 	var accepted struct {
 		OK      bool `json:"ok"`
 		Applied bool `json:"applied"`
@@ -414,17 +522,37 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		t.Fatalf("parked notification wake lifecycle = providers:%d runtime-ends:%d starts:%d durable-ends:%d; want 1/1/1/1",
 			composed.ProviderInvocations, composed.RequestEndCount, requestStartCount, requestEndCount)
 	}
-	var providerContext []struct {
-		Content []struct {
-			Text *struct {
-				Text string `json:"text"`
-			} `json:"text"`
-		} `json:"content"`
+	// The durable seed includes the source command's completed call/result pair.
+	// Unified context preserves that Assistant before the new notification User.
+	// Compare every native member and role, including the exact serialized inputs.
+	expectedProviderContext := []any{
+		map[string]any{
+			"role": float64(2),
+			"content": []any{
+				map[string]any{"toolCall": map[string]any{
+					"modelToolCallId": "call_" + sourceID,
+					"name":            "exec_command",
+					"inputJson":       "{}",
+				}},
+				map[string]any{"toolResult": map[string]any{
+					"modelToolCallId": "call_" + sourceID,
+					"completed": map[string]any{
+						"outputJson": `{"text":"Background command accepted."}`,
+					},
+				}},
+			},
+		},
+		map[string]any{
+			"role": float64(1),
+			"content": []any{
+				map[string]any{"text": map[string]any{"text": runtimeRequest.GetNotificationJson()}},
+			},
+		},
 	}
+	var providerContext any
 	if len(composed.ProviderContexts) != 1 || json.Unmarshal(composed.ProviderContexts[0], &providerContext) != nil ||
-		len(providerContext) != 1 || len(providerContext[0].Content) != 1 || providerContext[0].Content[0].Text == nil ||
-		providerContext[0].Content[0].Text.Text != storedMessageText {
-		t.Fatalf("parked notification Provider context = %s; want exact task identity and result", composed.ProviderContexts)
+		!reflect.DeepEqual(providerContext, expectedProviderContext) {
+		t.Fatalf("parked notification Provider context = %s; want exact source Assistant call/result and notification User: %#v", composed.ProviderContexts, expectedProviderContext)
 	}
 }
 

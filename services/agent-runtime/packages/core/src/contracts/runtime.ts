@@ -11,6 +11,10 @@
 
 import {
 	MaxIdBytes,
+ MaxMetadataBytes,
+	validProviderEventId,
+	MaxStableReasoningPartsPerRequest,
+	MaxStableReasoningBytesPerRequest,
 	MaxProviderContextTextJsonBytes,
 	MaxProviderRequestToolOutputJsonBytes,
 	MaxProviderToolCallInputJsonBytes,
@@ -89,7 +93,7 @@ const IdentifierSchema = z.string().min(1);
 const TimestampSchema = z.string().datetime({ offset: true });
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
 const PositiveIntegerSchema = z.number().int().positive();
-const RuntimeProviderMetadataMaxBytes = 16 * 1024;
+const RuntimeProviderMetadataMaxBytes = MaxMetadataBytes;
 // Stable-reasoning durable bounds for one model request, enforced as a SINGLE
 // budget across BOTH durability vectors: the per-tool anchored-prefix attach
 // (WriteEvent) and the request-end settlement set (WriteRequestEnd).
@@ -101,8 +105,7 @@ const RuntimeProviderMetadataMaxBytes = 16 * 1024;
 // refuses, and a smaller one would drop parts Bridge would have accepted.
 // UPDATE-WITH: services/bridge/bridge_api_store.go,
 //              services/bridge/bridge_api_settlement.go
-export const MaxStableReasoningPartsPerRequest = 16;
-export const MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024;
+export { MaxStableReasoningPartsPerRequest, MaxStableReasoningBytesPerRequest };
 
 /** Encodes the exact reasoning metadata bytes sent to and counted by Bridge. */
 // UPDATE-WITH: services/bridge/bridge_api_settlement.go
@@ -483,7 +486,7 @@ export const RuntimeContextKindSchema = z.enum([
 ]);
 export type RuntimeContextKind = z.infer<typeof RuntimeContextKindSchema>;
 
-/** Ordered sealed provider history. Database identities and audit time do not enter this model. */
+/** Ordered committed content. Request ownership and lifecycle live in ThreadState. */
 export const RuntimeContextEntrySchema = z.strictObject({
 	messageSequence: PositiveIntegerSchema,
 	contextKind: RuntimeContextKindSchema,
@@ -491,15 +494,9 @@ export const RuntimeContextEntrySchema = z.strictObject({
 });
 export type RuntimeContextEntry = z.infer<typeof RuntimeContextEntrySchema>;
 
-/** Assistant content persisted for an open Request but excluded from provider history. */
-export const RuntimeOpenRequestDraftSchema = z.strictObject({
-	modelRequestId: RuntimeContextIdentifierSchema,
-	messageSequence: PositiveIntegerSchema,
-	parts: z.array(RuntimeContextPartSchema),
-});
-export type RuntimeOpenRequestDraft = z.infer<
-	typeof RuntimeOpenRequestDraftSchema
->;
+/** Reference to the current durable request's committed Assistant content. */
+export const RuntimeCurrentRequestMessageSchema = z.strictObject({modelRequestId:RuntimeContextIdentifierSchema,assistantMessageSequence:PositiveIntegerSchema});
+export type RuntimeCurrentRequestMessage = z.infer<typeof RuntimeCurrentRequestMessageSchema>;
 
 /** Request-local Assistant member before its durable operation settles. */
 export const RuntimeAssistantDraftPartSchema = z.discriminatedUnion("type", [
@@ -573,6 +570,10 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
 	toolName: SanitizedIdentifierSchema,
 	repairKey: SanitizedIdentifierSchema,
 	canonicalInput: RuntimeJsonValueSchema,
+	reasoningPrefixContextDelta: RuntimeAssistantContextAppendSchema.refine(
+		append => append.parts.every(part => part.type === "reasoning"),
+		"internal repair prefix must contain reasoning only",
+	).optional(),
 	error: RuntimeToolErrorSchema,
 });
 export type RuntimeInternalToolRepairCommit = z.infer<
@@ -985,6 +986,7 @@ export const SessionEventEnvelopeSchema = z
 		targetPodUid: SanitizedIdentifierSchema,
 		runtimeProcessId: SanitizedIdentifierSchema,
 		writeId: SanitizedIdentifierSchema,
+		preallocatedEventId:z.string().refine(validProviderEventId).optional(),
 		event: SessionEventWriterAppendEventSchema,
 		assistantContextAppend: RuntimeAssistantContextAppendSchema.optional(),
 		modelRequestId: SanitizedIdentifierSchema.optional(),
@@ -1009,6 +1011,8 @@ export const SessionEventEnvelopeSchema = z
 		toolRouteCapability: RuntimeToolRouteCapabilitySchema.optional(),
 	})
 	.superRefine((envelope, context) => {
+  const suppliedIdentityEvent=envelope.event.type==="agent.message"||envelope.event.type==="agent.thinking";
+  if(suppliedIdentityEvent ? envelope.preallocatedEventId===undefined||envelope.modelRequestId===undefined : envelope.preallocatedEventId!==undefined)context.addIssue({code:"custom",message:"supplied Gateway event identity is required only for model message/thinking"});
 		const memberEvent =
 			envelope.event.type === "agent.message" ||
 			envelope.event.type === "agent.tool_use" ||

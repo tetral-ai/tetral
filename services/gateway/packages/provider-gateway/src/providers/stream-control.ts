@@ -40,6 +40,8 @@ export interface ProviderStreamControlOptions {
   readonly isSemanticProgress: (event: unknown) => boolean;
   readonly transportActivityAt?: (() => number) | undefined;
   readonly clock?: ProviderStreamClock | undefined;
+  /** Native provider streams abort their source and join iterator closure before request release. */
+  readonly joinIteratorReturn?: boolean;
 }
 
 /** Provides timer operations used to test stream deadlines deterministically. */
@@ -99,7 +101,8 @@ export async function* controlProviderStream<T>(
     }
   } finally {
     const returned = iterator.return?.();
-    returned?.catch(() => undefined);
+    if(options.joinIteratorReturn===true){try{await returned;}catch{/* Preserve original fault. */}}
+    else returned?.catch(() => undefined);
   }
 }
 

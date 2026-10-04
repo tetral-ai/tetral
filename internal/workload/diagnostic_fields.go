@@ -5,6 +5,7 @@ package workload
 var approvedDiagnosticFields = map[string]bool{
 	"alert.family":                      true,
 	"approval.failure_kind":             true,
+	"approval.source":                   true,
 	"attachment.deleted":                true,
 	"attachment.failed":                 true,
 	"attachment.marked":                 true,
@@ -158,6 +159,7 @@ var approvedDiagnosticFields = map[string]bool{
 	"recovery.resource":                 true,
 	"rejection.kind":                    true,
 	"repaired.count":                    true,
+	"request.kind":                      true,
 	"request.id":                        true,
 	"request.outcome":                   true,
 	"resolution":                        true,

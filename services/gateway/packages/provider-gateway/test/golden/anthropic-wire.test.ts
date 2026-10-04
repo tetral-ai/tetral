@@ -1,3 +1,5 @@
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
@@ -5,15 +7,14 @@ import { classifyProviderStreamError } from "@tetral/gateway-lowering/src/errors
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import type {
 	ProviderRequest,
-	ProviderStreamEvent,
+
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
 	ProviderContextRole,
 	ProviderFinishReason,
 	ProviderRequestKind,
-	ProviderStreamEventType,
+
 	providerFinishReasonToJSON,
-	providerStreamEventTypeToJSON,
 	SystemCacheHint,
 	SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -2777,8 +2778,8 @@ async function expectProviderEventsFixture(
 ): Promise<void> {
 	const expected =
 		await readGoldenJsonFixture<GoldenEventsFixture>(relativePath);
-	const eventTypes = events.map((event) =>
-		providerStreamEventTypeToJSON(event.type),
+	const eventTypes: string[] = events.map((event) =>
+		event.type,
 	);
 	if (expected.eventTypeRuns !== undefined) {
 		expect(eventTypeRuns(eventTypes)).toEqual(expected.eventTypeRuns);
@@ -3393,7 +3394,7 @@ async function collectEventsDisconnectingWhen(
 	};
 	const diagnostic = (stage: string): string => {
 		const eventTypes = output.map((event) =>
-			providerStreamEventTypeToJSON(event.type),
+			event.type,
 		);
 		return `timed out waiting for provider stream ${stage} after ${watchdogMs} ms; received event types: ${JSON.stringify(eventTypes)}`;
 	};

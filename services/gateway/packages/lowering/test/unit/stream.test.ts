@@ -1,7 +1,9 @@
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import {
   ProviderFinishReason,
-  ProviderStreamEventType,
+
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderStreamRaiser } from "../../src/stream.js";
 
@@ -159,13 +161,19 @@ describe("Gateway stream raising", () => {
     expect(event?.reasoning?.metadataJson).not.toContain("https://storage.example");
   });
 
-  test("bounds provider metadata JSON", () => {
+  test("preserves opaque resubmission metadata verbatim even when it resembles telemetry", () => {
+    const raiser = new ProviderStreamRaiser({ usageWireFamily: "openai-wire", modelLimits: TestModelLimits });
+    const signature = "https://fixture.invalid/sk-signature-fixture";
+    const encrypted = "bearer opaque-encrypted-fixture";
+    const event = raiser.map({type:"reasoning-start",metadata:{anthropic:{signature},openai:{reasoningEncryptedContent:encrypted},headers:{authorization:"bearer credential-fixture"}}})[0]!;
+    expect(JSON.parse(event.reasoning!.metadataJson)).toEqual({anthropic:{signature},openai:{reasoningEncryptedContent:encrypted},headers:"[redacted]"});
+  });
+
+  test("fails closed rather than dropping oversized provider metadata", () => {
     const raiser = new ProviderStreamRaiser(
       { usageWireFamily: "openai-wire", modelLimits: TestModelLimits },
     );
 
-    const [event] = raiser.map({ type: "text-start", metadata: { payload: "x".repeat(17 * 1024) } });
-
-    expect(event?.text?.metadataJson).toBe("{}");
+    expect(() => raiser.map({ type: "reasoning-start", metadata: { anthropic: { signature: "x".repeat(17 * 1024) } } })).toThrow("Provider metadata exceeded its content bound.");
   });
 });

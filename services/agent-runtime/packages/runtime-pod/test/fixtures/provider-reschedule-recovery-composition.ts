@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
@@ -239,13 +240,9 @@ const hosts = await buildRuntimeCoreHosts({
 					})));
 				}
 				return Stream.fromIterable([
-					{ type: "text-start" as const, id: "recovered-text" },
-					{
-						type: "text-delta" as const,
-						id: "recovered-text",
-						text_delta: "recovered",
-					},
-					{ type: "text-end" as const, id: "recovered-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"recovered-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["provider-reschedule-recovery-composition.ts", request.sessionId, request.modelRequestId, "recovered-text"])).digest("hex").slice(0,32)}`,text:("recovered")},
 					{ type: "finish" as const, finishReason: "stop" as const },
 				]);
 			},
@@ -433,7 +430,7 @@ if (input.preloadOnly === true) {
 }
 const loaded = await loader.loadThreadContext(command);
 const checkpoint = extractThreadTurnCheckpoint({
-	contextEntries: loaded.contextEntries,
+	messages: loaded.messages,
 	facts: loaded.turnFacts,
 });
 const routes = extractColdThreadToolRouteView({
@@ -443,9 +440,11 @@ const routes = extractColdThreadToolRouteView({
 });
 const session = new ThreadRuntime({
 	...command,
+	threadRole: loaded.thread?.role,
+	threadVisibility: loaded.thread?.visibility,
 	runtimeBindingToken: loaded.runtimeBindingToken,
 });
-session.state.contextManager.replaceEntries(productionEntries as never);
+session.state.contextManager.replaceMessages(productionEntries as never);
 session.state.markPersistentContextLoaded();
 session.state.installThreadTurn(checkpoint, routes);
 const result = await Effect.runPromise(
@@ -471,9 +470,9 @@ const result = await Effect.runPromise(
 						providerInvocations += 1;
 						providerRequests.push(request);
 						return Stream.fromIterable([
-							{ type: "text-start" as const, id: "recovered-text" },
-							{ type: "text-delta" as const, id: "recovered-text", text_delta: "recovered" },
-							{ type: "text-end" as const, id: "recovered-text" },
+
+
+							{type:"text-complete" as const,providerPartId:"recovered-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["provider-reschedule-recovery-composition.ts", request.sessionId, request.modelRequestId, "recovered-after-cold"])).digest("hex").slice(0,32)}`,text:("recovered")},
 							{ type: "finish" as const, finishReason: "stop" as const },
 						]);
 					},

@@ -52,16 +52,35 @@ runs only after the prior succeeds.
 | Catalog lookup | Model → rules + client | unknown model → `provider_unavailable` (non-retryable) |
 | Lower | `lowerProviderRequest` (hop ①, pure, once per turn) | lowering failure closes the turn |
 | Credential + call | Resolve credential, attempt the provider stream inside the pool failover loop | see credential and pool tables |
-| Raise + write | `ProviderStreamRaiser.map` each SDK stream part → `ProviderStreamEvent`, written with gRPC drain backpressure | terminal event only |
+| Raise + assemble + write | Private normalized SDK records → `ProviderBlockAssembler` → complete protobuf frames; one frame held through its write callback and any required drain | partial blocks discarded; complete prefix retained |
 
-The stream event set is closed: `text-*`, `reasoning-*`, `tool-input-*`,
-`tool-call`, `finish`, `provider-error`, and the pre-stream
-`attachment-rejections` report. Ordering and terminal rules the gateway must
-never violate: `finish` and `provider-error` are terminal and mutually
-exclusive; `usage` rides `finish` only; every fragment id starts before its
-delta/end and never restarts after end; `tool-call` arrives once per id and its
-name matches the streamed tool-input; `attachment-rejections` is non-terminal,
-emitted at most once, before provider streaming begins.
+The v2 wire carries `ThinkingStarted`, `TextComplete`, `ReasoningComplete`,
+`ToolCallComplete`, Finish, ProviderError, and the pre-stream attachment-rejection
+report. Every frame has a consecutive `frame_sequence` beginning at one. Requests
+must explicitly set `output_contract_version = 2`; absent, older, or unknown
+versions fail before attachment, credential, or provider work. There is no fragment
+wire fallback. Runtime supplies the acknowledged `model_request_start_event_id`,
+thread role, and visibility from its loaded identity.
+
+Fragment starts, deltas, ends, and streamed tool arguments stay inside Gateway's
+private normalized union. The assembler checks their lifecycle, immutable tool
+names, completion uniqueness, Unicode scalars, final metadata, and successful EOF.
+Finish cannot hide an open text/reasoning block or tool input awaiting its complete
+call. A provider attempt closes the credential failover fence at its first private
+normalized event, even when the assembler has emitted no complete frame yet.
+
+Text IDs are allocated on first nonempty content; empty text blocks produce no
+frame. Thinking IDs are allocated at reasoning start; `ThinkingStarted` contains
+only the provider part ID and event ID. Signed empty reasoning remains complete
+content. The injected best-effort preview offer admits only main/public ordinary
+requests, never includes reasoning bodies or signatures, and cannot change formal
+delivery when disabled or throwing. Public preview publication belongs to the
+public event-stream owner.
+
+Finish and ProviderError are mutually exclusive terminal frames. Usage rides
+Finish only. Attachment rejections are nonterminal and appear at most once before
+provider streaming. Incomplete content is discarded on failure; delivered complete
+frames retain their normal Runtime settlement semantics.
 
 ### Credential resolution by `request_kind`
 
@@ -196,7 +215,14 @@ it preserves the stated invariants and passes the named suites.
   request channel is pinned at 64 MiB at both ends and is exercised with the
   1,050,000-token catalog-capacity vectors, including escape-dense tool-result
   history. Provider stream events have an
-  independent 8 MiB carrier for bounded tool-call input. Provider deltas and raw
+  independent 32 MiB encoded protobuf carrier, prechecked before send. The response
+  server explicitly sets the native HTTP2 session accounting budget to 256 MiB;
+  grpc-js's MAX_SAFE_INTEGER default resets multiplexed large responses on declared
+  Bun 1.3.14 in the bounded primitive control. This budget is not a JavaScript heap/RSS cap. Complete text
+  retains the 16 MiB canonical JSON limit, tool input 4 MiB, metadata 16 KiB, and
+  reasoning 16 parts / 2 MiB per request. These shared contracts are defined once in
+  `packages/protocol/src/content-limits.json`, imported by TS and checked against
+  the Go Bridge projection. Provider deltas and raw
   provider chunks are hot-only and never forwarded; the gateway never writes
   events, messages, or usage; credentials never reach Runtime or Bridge; a
   deterministic request-shape rejection is `INVALID_ARGUMENT` and non-retryable.
@@ -313,7 +339,47 @@ it preserves the stated invariants and passes the named suites.
   cross-origin credential stripping). The one divergent transport is
   `providers/openai-oauth.ts` (authorization swap, subscription-URL rewrite,
   system text carried as the call's `instructions`).
-- **Lifecycle.** One SDK stream per turn; SDK client retries are disabled.
+- **Lifecycle.** One SDK stream per attempt; SDK client retries are disabled.
+  The native iterator consumes terminal EOF and awaits closure on exit. Provider
+  body cancellation is joined and releases its reader lock; no unread response
+  body remains owned after cleanup.
+- **Input scheduling.** The response wrapper reads on demand and forwards each
+  source chunk in ordered segments of at most 16 KiB. At pull boundaries it yields
+  to the event loop after 256 KiB, 128 segments, or 8 ms, so already-buffered SDK
+  input still gives cancellation and timers an opportunity to run. These are
+  scheduling checkpoints, not a latency guarantee or an admission limit. Only a
+  new source read resets network inactivity; segmenting an existing chunk does
+  not. Cancellation clears the pending chunk and joins reader cancellation.
+- **Write custody.** Cancellation, transport error, and the absolute deadline stop
+  further frames promptly. A submitted frame stays charged until its callback
+  settles or the actual Writable closes; successful delivery also requires any
+  needed drain. Handler and server shutdown join these custody promises. A close
+  witness releases application ownership; it does not claim peer consumption.
+- **Retention.** The pinned `ai@6.0.168` SDK retains recorded content, step results,
+  and an unread `baseStream` tee branch. `providers/sdk-retention-guard.ts` installs
+  an `experimental_transform` before those owners, counts every forwarded record
+  and its serialized payload before enqueueing, and stops the source on exhaustion.
+  Record order, lifecycle, metadata, and required signatures are preserved.
+  `providers/block-assembler.ts` separately coalesces text/reasoning segments and
+  accounts for live content, cumulative content, open blocks, identities, and
+  reasoning request limits. Streamed tool argument bytes and the SDK-provided
+  complete call JSON both count toward the cumulative budget. Incremental scalar
+  accounting validates fragments without retaining a second arguments string. Required metadata overflow fails explicitly rather
+  than silently dropping a signature.
+- **Operating policy.** Constructor-injected assembly and SDK bounds are owned by
+  `providers/resource-policy.ts` and `providers/sdk-retention-guard.ts`. The current
+  calibration candidates add rejection boundaries beyond legal per-block content;
+  they require resource and compatibility acceptance before selecting shipped
+  defaults. They are not new public environment overrides. Resource exhaustion
+  produces a fatal, nonretryable request error, never a truncated successful block.
+- **Observations.** The service emits content-free `provider.stage_completed`
+  samples for dispatch → first private content fragment, first fragment → first
+  complete semantic frame, and complete frame → local write callback. Each sample
+  carries a closed outcome/content kind, duration, canonical bytes, and encoded
+  frame bytes. Missing-content failure/cancellation samples retain the denominator.
+  Live assembly gauges and pending complete-frame bytes distinguish ownership
+  release from allocator RSS. Frame ownership lasts through callback and any
+  required drain. Logging and metric sink failures cannot affect delivery.
 - **Liveness.** First-event and inter-event watchdogs bound transport stalls.
   Independently, a 60-second semantic-progress watchdog is measured from the
   last non-empty text/reasoning delta or Tool Call/input delta. Metadata,
@@ -376,7 +442,7 @@ it preserves the stated invariants and passes the named suites.
 | Suite | Proves |
 | --- | --- |
 | `packages/lowering/test/unit/*-request.test.ts` | Each provider's request-lowering rule cells (table-driven, one case set per rule id) |
-| `packages/lowering/test/unit/stream.test.ts` | SDK stream part → `ProviderStreamEvent` mapping, dropped parts, ordering/terminal negatives |
+| `packages/lowering/test/unit/stream.test.ts` | SDK stream part → private normalized record mapping, dropped parts, ordering/terminal negatives |
 | `packages/lowering/test/unit/usage.test.ts` | Usage normalization including the anthropic-wire vs openai-wire family split and cache-hit numbers |
 | `packages/lowering/test/unit/errors.test.ts` | Error classification and the retryable overrides (5xx, in-stream 5xx, context overflow, entitlement) |
 | `packages/lowering/test/rules-coverage.test.ts` | Every enumerated rule id has at least one test — the matrix-to-test mapping, enforced by CI |
@@ -384,7 +450,7 @@ it preserves the stated invariants and passes the named suites.
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
 | `leak-guards.test.ts` | No key/token sentinel appears in any captured log, event, or error payload |
-| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (high event count + trailers + clean status) |
+| `service.test.ts`, `grpc-server.test.ts` | End-to-end streaming turn, drain backpressure, cancellation, header/inter-chunk and semantic-progress timeouts, admission cap, and the Bun/grpc-js tripwire (many private records → complete frames + trailers + clean status) |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |

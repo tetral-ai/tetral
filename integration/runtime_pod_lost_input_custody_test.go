@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -250,11 +251,27 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode replacement Context: %v", err)
 	}
-	if len(payload.ContextEntries) != 3 {
-		t.Fatalf("replacement Context messages = %s; want three mixed-kind inputs", loaded.GetContextJson())
+	if len(payload.Messages) != 4 {
+		t.Fatalf("replacement Context messages = %s; want source Assistant and three mixed-kind inputs", loaded.GetContextJson())
+	}
+	source := payload.Messages[0]
+	if source.ContextKind != "assistant" || source.MessageSequence != 1 || len(source.Parts) != 2 {
+		t.Fatalf("source Assistant identity changed: %+v", source)
+	}
+	for index, literal := range []string{
+		`{"type":"tool_call","modelToolCallId":"call_evt_pod_loss_task_source","toolName":"exec_command","canonicalInput":{}}`,
+		`{"type":"tool_result","modelToolCallId":"call_evt_pod_loss_task_source","result":{"type":"completed","output":{"text":"Background command accepted."}}}`,
+	} {
+		var got, want any
+		if json.Unmarshal(source.Parts[index], &got) != nil || json.Unmarshal([]byte(literal), &want) != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("source Assistant part changed: got=%s want=%s", source.Parts[index], literal)
+		}
 	}
 	var contextTexts []string
-	for _, entry := range payload.ContextEntries {
+	for index, entry := range payload.Messages[1:] {
+		if entry.MessageSequence != int64(index+2) || entry.ContextKind != []string{"user", "runtime_notification", "user"}[index] {
+			t.Fatalf("replacement input identity/order changed: %+v", entry)
+		}
 		var part struct {
 			Text string `json:"text"`
 		}

@@ -323,7 +323,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("decode MCP production cold context: %v", err)
 	}
 	var mainCalls, mainResults, cleanupCalls, cleanupResults int
-	for _, entry := range payload.ContextEntries {
+	for _, entry := range payload.Messages {
 		for _, raw := range entry.Parts {
 			var part struct {
 				Type            string `json:"type"`

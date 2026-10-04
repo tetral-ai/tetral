@@ -1,3 +1,4 @@
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
@@ -54,7 +55,7 @@ describe("Provider Gateway leak guards", () => {
     const fixture = await readFile(OpenAIFixtureUrl, "utf8");
     const mock = createMockProviderServer(fixture);
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
-    let providerEvents: readonly ProviderStreamEvent[];
+    let providerEvents: readonly NormalizedProviderEvent[];
     try {
       providerEvents = await collectEvents(registry.stream({
         request: openAIRequest(),
@@ -180,8 +181,8 @@ async function readGoldenFixtures(): Promise<readonly string[]> {
   return await Promise.all(names.map(async (name) => await readFile(new URL(name, FixturesDir), "utf8")));
 }
 
-async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {
-  const output: ProviderStreamEvent[] = [];
+async function collectEvents<T>(events: AsyncIterable<T>): Promise<readonly T[]> {
+  const output: T[] = [];
   for await (const event of events) {
     output.push(event);
   }

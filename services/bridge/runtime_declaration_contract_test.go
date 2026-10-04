@@ -1,16 +1,106 @@
 package agentruntimebridge
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
+
+func TestModelContentDeclarationDigestPreservesSuppliedIdentity(t *testing.T) {
+	// These canonical bytes and hashes were written independently of the
+	// declaration encoder. Keep payload and private reasoning identities in
+	// the same digest without making reasoning a public thinking payload.
+	tests := []struct {
+		name    string
+		request *bridgev1.WriteEventRequest
+		literal string
+		hash    string
+	}{
+		{
+			name: "text with signed reasoning",
+			request: &bridgev1.WriteEventRequest{
+				Scope: &bridgev1.RuntimeScope{SessionThreadId: "thread"}, RuntimeWriteId: "write", ModelRequestId: "request",
+				EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"alpha"}]}`,
+				PreallocatedEventId: bridgeString("evt_00000000000000000000000000000001"),
+				AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
+					{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: "reason-before-text", ProviderMetadataJson: bridgeString(`{"anthropic":{"signature":"fixture-signature-text"}}`)}}},
+					{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "alpha"}}},
+				}},
+			},
+			literal: `{"assistant_context_delta":{"parts":[{"providerMetadata":{"anthropic":{"signature":"fixture-signature-text"}},"text":"reason-before-text","type":"reasoning"},{"text":"alpha","type":"text"}]},"event_type":"agent.message","model_request_id":"request","operation_kind":"write_event","payload":{"content":[{"text":"alpha","type":"text"}],"type":"agent.message"},"preallocated_event_id":"evt_00000000000000000000000000000001","runtime_write_id":"write","session_thread_id":"thread"}`,
+			hash:    "7e7b167979662fa4318b04685ad443dee0680d86109ef3edf3c76b82747e7c6e",
+		},
+		{
+			name: "content-free thinking",
+			request: &bridgev1.WriteEventRequest{
+				Scope: &bridgev1.RuntimeScope{SessionThreadId: "thread"}, RuntimeWriteId: "thinking-write", ModelRequestId: "request",
+				EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, PreallocatedEventId: bridgeString("evt_00000000000000000000000000000002"),
+			},
+			literal: `{"assistant_context_delta":null,"event_type":"agent.thinking","model_request_id":"request","operation_kind":"write_event","payload":{"type":"agent.thinking"},"preallocated_event_id":"evt_00000000000000000000000000000002","runtime_write_id":"thinking-write","session_thread_id":"thread"}`,
+			hash:    "f2906fe1e77636e8350c969a11297a6ef0268d8ac4ad5b299d7853c5b8465f43",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := fmt.Sprintf("%x", sha256.Sum256([]byte(test.literal))); got != test.hash {
+				t.Fatalf("independent literal hash = %s; want %s", got, test.hash)
+			}
+			got, err := writeEventDeclarationDigest(test.request, test.request.PayloadJson, "[]")
+			if err != nil || got != test.hash {
+				t.Fatalf("declaration digest = %s/%v; want fixed %s", got, err, test.hash)
+			}
+			changed := proto.Clone(test.request).(*bridgev1.WriteEventRequest)
+			changed.PreallocatedEventId = bridgeString("evt_00000000000000000000000000000003")
+			next, err := writeEventDeclarationDigest(changed, changed.PayloadJson, "[]")
+			if err != nil || next == got {
+				t.Fatalf("changed supplied identity retained digest = %s/%v", next, err)
+			}
+		})
+	}
+}
+
+func TestWriteEventRejectsInvalidSuppliedIdentityBeforePersistence(t *testing.T) {
+	valid := "evt_00000000000000000000000000000001"
+	for _, eventType := range []string{"agent.message", "agent.thinking"} {
+		for _, value := range []*string{nil, bridgeString(""), bridgeString("evt_1"), bridgeString("evt_0000000000000000000000000000000A"), bridgeString(valid + " ")} {
+			name := eventType + "/missing"
+			if value != nil {
+				name = eventType + "/" + *value
+			}
+			t.Run(name, func(t *testing.T) {
+				// No database client exists. A validation failure must precede
+				// every operation receipt read as well as every new mutation.
+				_, err := (&PostgreSQLBridgeAPIStore{}).WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+					RuntimeWriteId: "write", ModelRequestId: "request", EventType: eventType, PayloadJson: `{}`, PreallocatedEventId: value,
+				})
+				if status.Code(err) != codes.InvalidArgument {
+					t.Fatalf("error = %v; want InvalidArgument", err)
+				}
+			})
+		}
+	}
+	for _, request := range []*bridgev1.WriteEventRequest{
+		{RuntimeWriteId: "write", EventType: "agent.thinking", PayloadJson: `{}`, PreallocatedEventId: &valid},
+		{RuntimeWriteId: "write", EventType: "span.model_request_start", ModelRequestId: "request", PayloadJson: `{}`, PreallocatedEventId: &valid},
+		{RuntimeWriteId: "write", ToolDeclaration: &bridgev1.RuntimeToolDeclaration{}, ModelRequestId: "request", PreallocatedEventId: bridgeString("")},
+		{RuntimeWriteId: "write", EventType: "agent.tool_result", PayloadJson: `{}`, PreallocatedEventId: &valid},
+	} {
+		_, err := (&PostgreSQLBridgeAPIStore{}).WriteEvent(context.Background(), request)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("forbidden identity error = %v; want InvalidArgument", err)
+		}
+	}
+}
 
 func TestRuntimeContextDeltaAcceptsOnlyNarrowProviderParts(t *testing.T) {
 	delta := &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{
@@ -173,6 +263,60 @@ func TestStoredRuntimeContextAcceptsProviderIdentifiersWithoutSensitiveTextClass
 	}
 }
 
+func TestRuntimeContextSeparatorBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		limit          int
+		prefix, suffix string
+		delta          func(string, string) *bridgev1.RuntimeContextDelta
+	}{
+		{"text", runtimecontrol.RuntimeContextTextJSONMaxBytes, `"`, `"`, func(text, _ string) *bridgev1.RuntimeContextDelta {
+			return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: text}}}}}
+		}},
+		{"input", runtimecontrol.RuntimeToolInputJSONMaxBytes, `{"x":"`, `"}`, func(_, wire string) *bridgev1.RuntimeContextDelta {
+			return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_ToolCall{ToolCall: &bridgev1.RuntimeContextToolCall{ModelToolCallId: "call", ToolName: "Read", ProviderInputJson: wire}}}}}
+		}},
+		{"metadata", runtimecontrol.RuntimeProviderMetadataMaxBytes, `{"x":"`, `"}`, func(_, wire string) *bridgev1.RuntimeContextDelta {
+			return &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: "reason", ProviderMetadataJson: &wire}}}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bodySize := tc.limit - len(tc.prefix) - len(tc.suffix)
+			// Independent JSON.stringify oracle: literal backslash-u is seven
+			// bytes, the actual separator is three, and each ASCII filler is one.
+			text := strings.Repeat(`\u2028`+"\u2029", bodySize/10) + strings.Repeat("x", bodySize%10)
+			body := strings.Repeat(`\\u2028`+"\u2029", bodySize/10) + strings.Repeat("x", bodySize%10)
+			wire := tc.prefix + body + tc.suffix
+			if len(wire) != tc.limit {
+				t.Fatalf("independent wire size=%d want%d", len(wire), tc.limit)
+			}
+			if _, err := canonicalRuntimeContextParts(tc.delta(text, wire)); err != nil {
+				t.Fatalf("exact bound rejected: %v", err)
+			}
+			if _, err := canonicalRuntimeContextParts(tc.delta(text+"x", tc.prefix+body+"x"+tc.suffix)); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("one byte over bound error=%v want InvalidArgument", err)
+			}
+		})
+	}
+}
+
+func TestStableReasoningBudgetCountsJSONStringifyMetadata(t *testing.T) {
+	metadata := map[string]any{"a": `\u2028`, "b": "\u2029"}
+	const wire = "{\"a\":\"\\\\u2028\",\"b\":\"\u2029\"}"
+	if len(wire) != 25 {
+		t.Fatal("independent metadata wire literal must be 25 bytes")
+	}
+	text := strings.Repeat("x", MaxStableReasoningBytesPerRequest-25)
+	part := map[string]any{"type": "reasoning", "text": text, "providerMetadata": metadata}
+	if err := validateStableReasoningBudget([]any{part}); err != nil {
+		t.Fatalf("exact aggregate JSON.stringify budget rejected: %v", err)
+	}
+	part["text"] = text + "x"
+	if err := validateStableReasoningBudget([]any{part}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("one byte over aggregate budget error=%v want InvalidArgument", err)
+	}
+}
+
 func TestRuntimeContextDeltaRejectsUnpairedUnicodeSurrogates(t *testing.T) {
 	invalid := []struct {
 		name  string
@@ -228,7 +372,7 @@ func TestRuntimeDeclarationStringifyPreservesSpansAndSeparatorEscapes(t *testing
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if string(runtimeJSONStringifyBytes([]byte(test.encoded))) != test.want {
+			if string(runtimecontrol.RestoreJSONStringifySeparatorEscapes([]byte(test.encoded))) != test.want {
 				t.Fatal("Runtime declaration stringify bytes differ")
 			}
 		})

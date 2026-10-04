@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { NormalizedProviderEventType as ProviderStreamEventType } from "../../src/normalized-stream.js";
 import { MaxProviderErrorMessageBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { ProviderStreamTimeoutError, classifyOpenAIProviderError, classifyProviderStreamError, providerErrorEvent } from "../../src/errors.js";
 

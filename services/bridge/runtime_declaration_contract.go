@@ -107,6 +107,31 @@ func canonicalRuntimeContextDelta(delta *bridgev1.RuntimeContextDelta) (any, err
 	return map[string]any{"parts": parts}, nil
 }
 
+// Empty prefixes have the same semantic identity as an absent prefix. A repair
+// reserves one member and atomically appends its stable reasoning before the pair.
+func canonicalInternalToolRepairPrefix(delta *bridgev1.RuntimeContextDelta) (any, error) {
+	if delta == nil || len(delta.GetParts()) == 0 {
+		return nil, nil
+	}
+	for _, part := range delta.GetParts() {
+		if part == nil || part.GetReasoning() == nil {
+			return nil, status.Error(codes.InvalidArgument, "internal tool repair prefix must contain only reasoning")
+		}
+	}
+	parts, err := canonicalRuntimeContextParts(delta)
+	if err != nil {
+		return nil, err
+	}
+	budgetParts := make([]any, len(parts))
+	for i, part := range parts {
+		budgetParts[i] = part
+	}
+	if err := validateStableReasoningBudget(budgetParts); err != nil {
+		return nil, err
+	}
+	return map[string]any{"parts": parts}, nil
+}
+
 func canonicalRuntimeToolError(value *bridgev1.RuntimeToolError) (map[string]any, error) {
 	if value == nil {
 		return nil, status.Error(codes.InvalidArgument, "runtime tool error is invalid")

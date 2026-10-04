@@ -64,6 +64,14 @@ describe("Runtime Pod server bind addresses", () => {
 			11,
 			"success",
 		);
+		metricsRegistry.observeContentCommitLatency("text", "content_commit", 25, "duplicate", "approval_reviewer");
+		metricsRegistry.observeContentCommitLatency("request_end", "request_end_apply", 7, "failed", "agent_provider_request");
+		metricsRegistry.observeContinuationLatency("permit_wait", 17, "cancelled", "agent_provider_request");
+		metricsRegistry.recordApprovalWaitDelta(1, "agent_provider_request", "user");
+		metricsRegistry.recordApprovalWaitDelta(-1, "agent_provider_request", "user");
+		metricsRegistry.observeContinuationLatency("approval_wait", 37, "cancelled", "agent_provider_request", "user");
+		metricsRegistry.recordApprovalWaitUnavailable("agent_provider_request", "user");
+		metricsRegistry.recordContentSubmissionDelta(1, 123);
 		metricsRegistry.recordCleanupCommandOutcome("completed");
 		metricsRegistry.recordCloseoutEvent({
 			event: "runtime_closeout_stalled",
@@ -91,6 +99,17 @@ describe("Runtime Pod server bind addresses", () => {
 			expect(body).toContain("runtimepod_active_fibers 1");
 			expect(body).toContain("runtimepod_active_tool_fibers 2");
 			expect(body).toContain("runtimepod_pending_approvals 1");
+			expect(body).toContain('runtimepod_content_commit_latency_ms_count{kind="text",outcome="duplicate",phase="content_commit",request_kind="approval_reviewer"} 1');
+			expect(body).toContain('runtimepod_content_commit_latency_ms_sum{kind="request_end",outcome="failed",phase="request_end_apply",request_kind="agent_provider_request"} 7');
+			expect(body).toContain('runtimepod_continuation_latency_ms_sum{operation="permit_wait",outcome="cancelled",request_kind="agent_provider_request"} 17');
+			expect(body).toContain('runtimepod_pending_content_entries 1');
+			expect(body).toContain('runtimepod_pending_content_bytes 123');
+			expect(body).toContain('runtimepod_approval_wait_started_total{approval_source="user",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_approval_wait_outstanding{approval_source="user",request_kind="agent_provider_request"} 0');
+			expect(body).toContain('runtimepod_approval_wait_unavailable_total{approval_source="user",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_continuation_latency_ms_count{approval_source="user",operation="approval_wait",outcome="cancelled",request_kind="agent_provider_request"} 1');
+			expect(body).toContain('runtimepod_continuation_latency_ms_sum{approval_source="user",operation="approval_wait",outcome="cancelled",request_kind="agent_provider_request"} 37');
+			expect(body).not.toContain('outcome="unavailable"');
 			expect(body).toContain(
 				'runtimepod_provider_stream_duration_ms_count{kind="agent_provider_request",outcome="success"} 1',
 			);

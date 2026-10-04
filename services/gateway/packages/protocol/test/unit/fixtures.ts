@@ -12,6 +12,10 @@ import type {
 export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   const request: ProviderRequest = {
     requestId: "req_1",
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_00000000000000000000000000000000",
+    threadRole: 1,
+    threadVisibility: 1,
     modelRequestId: "mreq_1",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
     workspaceId: "wksp_1",

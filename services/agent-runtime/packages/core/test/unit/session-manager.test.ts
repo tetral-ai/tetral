@@ -16,10 +16,12 @@ import type {
 	RuntimeHotStateMetrics,
 	RuntimeMetricsSink,
 } from "../../src/runtime/metrics.js";
+import { NoopRuntimeMetricsSink } from "../../src/runtime/metrics.js";
 import * as SessionManager from "../../src/session/session-manager.js";
 import type { FailedRunCloseoutResult } from "../../src/thread-loop/closeout.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
+import type { ThreadTurnCheckpoint } from "../../src/thread-loop/turn/checkpoint.js";
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
@@ -1092,6 +1094,33 @@ class RecordingRuntimeMetrics implements RuntimeMetricsSink {
 }
 
 describe("SessionManager", () => {
+	test("cleanup observation does not validate a failed route checkpoint before closing its run scope", async () => {
+		const samples: Array<{ operation: string; outcome: string }> = [];
+		const threadLoop = makeControlledThreadLoop();
+		await withSessionManager(sessionManagerLayer(threadLoop, { metrics: {
+			...NoopRuntimeMetricsSink,
+			observeContinuationLatency: (operation, _duration, outcome) => samples.push({ operation, outcome }),
+		} }), async manager => {
+			const sessionId = "sesn_cleanup_invalid_route";
+			expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput(sessionId))).toMatchObject({ ok: true, started: true });
+			await waitForRuns(threadLoop, 1);
+			const run = threadLoop.runs[0]!;
+			run.session.state.installThreadCheckpoint({
+				executionRunId: "running", pendingInputContextSequences: [],
+				request: { modelRequestId: "request", requestStartEventId: "start", requestKind: "agent_provider_request", contextThroughMessageSequence: 1,
+					toolMembers: [{ memberKind: "public_tool_use", toolUseEventId: "lost-use", modelToolCallId: "read-note", toolName: "Read" }],
+					requestEnd: { eventId: "end", isError: true, providerContextRetention: { disposition: "failed", assistantMessageSequence: 2, toolUseEventIds: ["lost-use"], repairEventIds: [] } },
+				},
+			});
+			expect(() => run.session.state.threadTurnTransition()).toThrow("sealed non-terminal Tool Use has no route");
+			run.session.state.invalidateResidentState();
+			run.release(fatalRunResult("terminated"));
+			await waitForCondition(() => run.session.state.requestObservationScope() === undefined, "failed residency release");
+			expect(await Effect.runPromise(manager.inspectThread(threadControl(sessionId, "inspect_cleanup")))).toMatchObject({ ok: true, observed: false });
+			expect(samples.filter(sample => sample.operation === "cleanup_join")).toEqual([{ operation: "cleanup_join", outcome: "success" }]);
+		});
+	});
+
 	test("reviewer cancellation removes its queued input before idle admission can reenter", async () => {
 		const sessionId = "sesn_reviewer_cancel_reentry";
 		const reviewerThreadId = "thrd_reviewer_cancel_reentry";
@@ -1375,7 +1404,7 @@ describe("SessionManager", () => {
 								siblingThreadId,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread: {
 								parentThreadId,
 								role: "approval_reviewer",
@@ -1469,7 +1498,7 @@ describe("SessionManager", () => {
 								reviewerThreadId,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread: {
 								parentThreadId,
 								role: "approval_reviewer",
@@ -1752,7 +1781,7 @@ describe("SessionManager", () => {
 				loadThreadContext: async () => ({
 					...threadControl(sessionId, trigger.runtimeInputId, threadId),
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					pendingAgentMail: [mail],
 				}),
 			}),
@@ -1784,7 +1813,7 @@ describe("SessionManager", () => {
 					manager.preloadThread({
 						...threadControl(sessionId, "rin_preload", threadId),
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 					}),
 				);
 				const interrupt = {
@@ -1830,7 +1859,7 @@ describe("SessionManager", () => {
 						manager.preloadThread({
 							...threadControl(sessionId, "rin_preload_joined", threadId),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 						}),
 					),
 				).toMatchObject({ ok: true, applied: true });
@@ -1903,6 +1932,48 @@ describe("SessionManager", () => {
 						runtimeShutdownRequested: false,
 					},
 				]);
+				const checkpoint: ThreadTurnCheckpoint = {
+					pendingInputContextSequences: [],
+					request: {
+						modelRequestId: "mreq_idle_interrupt",
+						requestStartEventId: "sevt_idle_interrupt_start",
+						requestKind: "agent_provider_request",
+						contextThroughMessageSequence: 0,
+						requestEnd: {
+							eventId: "sevt_idle_interrupt_end",
+							isError: false,
+			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
+						},
+						toolMembers: [
+							{
+								memberKind: "public_tool_use",
+								modelToolCallId: "call_sevt_idle_interrupt_tool",
+								toolUseEventId: "sevt_idle_interrupt_tool",
+								toolName: "Write",
+							},
+							{
+								memberKind: "public_tool_use",
+								modelToolCallId: "call_sevt_idle_interrupt_sandbox",
+								toolUseEventId: "sevt_idle_interrupt_sandbox",
+								toolName: "Write",
+							},
+						],
+					},
+					idleCloseout: {
+						eventId: "sevt_idle_interrupt_requires_action",
+						stopReason: "requires_action",
+					},
+				};
+				session.state.installThreadCheckpoint(checkpoint);
+				const approvalMessage = pendingApprovalAssistantEntry("sesn_1", "sevt_idle_interrupt_tool");
+				const sandboxCall = pendingApprovalAssistantEntry("sesn_1", "sevt_idle_interrupt_sandbox").parts[0]!;
+				const approvalCall=approvalMessage.parts[0]!;
+				if(approvalCall.type!=="tool_call"||sandboxCall.type!=="tool_call")throw new Error("idle Tool fixture has no canonical call");
+				session.state.contextManager.appendEntry({ ...approvalMessage, parts: [
+					{ ...approvalCall, canonicalInput: { file_path: "src/a.ts" } },
+					{ ...sandboxCall, canonicalInput: { file_path: "src/b.ts" } },
+				] });
+				session.state.installCurrentRequestMessage({ modelRequestId: "mreq_idle_interrupt", assistantMessageSequence: approvalMessage.messageSequence });
 				session.state.recordPendingApprovalToolJob({
 					toolUseEventId: "sevt_idle_interrupt_tool",
 					modelRequestId: "mreq_idle_interrupt",
@@ -1915,12 +1986,12 @@ describe("SessionManager", () => {
 						"sesn_1",
 						"sevt_idle_interrupt_tool",
 					),
-					entry: {} as never,
+					entry: { inputContract: { kind: "json_object" } } as never,
 					job: {
-						id: "mreq_idle_interrupt:tool-1",
+						id: "mreq_idle_interrupt:call_sevt_idle_interrupt_tool",
 						modelOrder: 0,
 						toolUseEventId: "sevt_idle_interrupt_tool",
-						modelToolCallId: "tool-1",
+						modelToolCallId: "call_sevt_idle_interrupt_tool",
 						kind: "builtin",
 						name: "Write",
 						route: { kind: "gateway", operation: "RunWeb" },
@@ -1930,33 +2001,22 @@ describe("SessionManager", () => {
 						approvalSource: "user",
 					},
 				});
-				const approvalMessage = pendingApprovalAssistantEntry(
-					"sesn_1",
-					"sevt_idle_interrupt_tool",
-				);
-				const sandboxMessage = pendingApprovalAssistantEntry(
-					"sesn_1",
-					"sevt_idle_interrupt_sandbox",
-					2,
-				);
-				session.state.contextManager.appendEntry(approvalMessage);
-				session.state.contextManager.appendEntry(sandboxMessage);
 				session.state.recordPendingSandboxExecutionJob({
 					recoveryKind: "sandbox_execution",
 					toolUseEventId: "sevt_idle_interrupt_sandbox",
 					modelRequestId: "mreq_idle_interrupt",
 					source: { providerId: "fake", modelId: "fake-chat" },
-					assistantMessageSequence: sandboxMessage.messageSequence,
+					assistantMessageSequence: approvalMessage.messageSequence,
 					toolPart: pendingApprovalToolPart(
 						"sesn_1",
 						"sevt_idle_interrupt_sandbox",
 					),
-					entry: {} as never,
+					entry: { inputContract: { kind: "json_object" } } as never,
 					job: {
-						id: "mreq_idle_interrupt:tool-2",
+						id: "mreq_idle_interrupt:call_sevt_idle_interrupt_sandbox",
 						modelOrder: 1,
 						toolUseEventId: "sevt_idle_interrupt_sandbox",
-						modelToolCallId: "tool-2",
+						modelToolCallId: "call_sevt_idle_interrupt_sandbox",
 						kind: "builtin",
 						name: "Write",
 						route: {
@@ -1969,40 +2029,8 @@ describe("SessionManager", () => {
 						gateState: "runnable",
 					},
 				});
-				session.state.installThreadTurn(
-					{
-						pendingInputContextSequences: [],
-						request: {
-							modelRequestId: "mreq_idle_interrupt",
-							requestStartEventId: "sevt_idle_interrupt_start",
-							requestKind: "agent_provider_request",
-							contextThroughMessageSequence: 0,
-							requestEnd: {
-								eventId: "sevt_idle_interrupt_end",
-								isError: false,
-			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-							},
-							toolMembers: [
-								{
-									memberKind: "public_tool_use",
-									modelToolCallId: "tool-1",
-									toolUseEventId: "sevt_idle_interrupt_tool",
-									toolName: "Write",
-								},
-								{
-									memberKind: "public_tool_use",
-									modelToolCallId: "tool-2",
-									toolUseEventId: "sevt_idle_interrupt_sandbox",
-									toolName: "Write",
-								},
-							],
-						},
-						idleCloseout: {
-							eventId: "sevt_idle_interrupt_requires_action",
-							stopReason: "requires_action",
-						},
-					},
-					{
+
+				session.state.installThreadTurn(checkpoint, {
 						routes: [
 							{
 								toolUseEventId: "sevt_idle_interrupt_tool",
@@ -2013,8 +2041,7 @@ describe("SessionManager", () => {
 								disposition: "resume_sandbox_execution",
 							},
 						],
-					},
-				);
+					});
 				let idleInterruptCommits = 0;
 				const interruptAttachment = {
 					transient: {
@@ -2079,7 +2106,7 @@ describe("SessionManager", () => {
 				expect(idleInterruptCommits).toBe(1);
 				expect(
 					session.state.contextManager
-						.entries()
+						.historyMessages()
 						.flatMap((entry) => entry.parts)
 						.flatMap((part) =>
 							part.type === "tool_result"
@@ -2111,7 +2138,9 @@ describe("SessionManager", () => {
 					nextStep: { action: "await_input" },
 				});
 				expect(idleInterruptCommits).toBe(1);
-				expect(session.state.contextManager.entries()).toHaveLength(2);
+				// Both calls and their results stay in the request's single Assistant owner.
+				expect(session.state.contextManager.historyMessages()).toHaveLength(1);
+				expect(session.state.contextManager.historyMessages()[0]?.parts.filter(part => part.type === "tool_call")).toHaveLength(2);
 				expect(threadLoop.runs).toHaveLength(1);
 				expect(threadLoop.interruptions).toHaveLength(1);
 			},
@@ -2130,7 +2159,7 @@ describe("SessionManager", () => {
 					return {
 						...command,
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 					};
 				},
 			}),
@@ -2284,7 +2313,7 @@ describe("SessionManager", () => {
 					return {
 						...command,
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 					};
 				},
 			}),
@@ -2758,7 +2787,7 @@ describe("SessionManager", () => {
 						manager.preloadThread({
 							...threadControl("sesn_1", "rin_preload_config"),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 						}),
 					),
 				).toMatchObject({ ok: true, applied: true });
@@ -2827,7 +2856,7 @@ describe("SessionManager", () => {
 					),
 				).toMatchObject({ ok: true, applied: true });
 				expect(
-					threadLoop.runs[0]!.session.state.contextManager.entries().flatMap(
+					threadLoop.runs[0]!.session.state.contextManager.historyMessages().flatMap(
 						(entry) => entry.parts,
 					),
 				).not.toContainEqual(
@@ -2864,7 +2893,7 @@ describe("SessionManager", () => {
 								threadId,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread: {
 								parentThreadId: "thrd_task_notification_resume_parent",
 								role: "subagent",
@@ -2977,7 +3006,7 @@ describe("SessionManager", () => {
 			return {
 				...command,
 				runtimeBindingToken: `runtime-binding-token-${command.sessionThreadId}`,
-				contextEntries: [],
+				currentRequestMessage:null,messages: [],
 				thread:
 					command.sessionThreadId === "thrd_shared_initializer"
 						? { role: "main", visibility: "public", status: "idle" }
@@ -3104,7 +3133,7 @@ describe("SessionManager", () => {
 								status: "idle",
 							},
 							runtimeBindingToken: "runtime-binding-token-child",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 						}),
 					),
 				).toEqual({
@@ -3152,7 +3181,7 @@ describe("SessionManager", () => {
 								"rin_preload_background",
 							),
 							runtimeBindingToken: "runtime-binding-token-background",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 						}),
 					),
 				).toEqual({
@@ -3218,7 +3247,7 @@ describe("SessionManager", () => {
 					manager.preloadThread({
 						...threadControl(sessionID, "rin_preload_agent_mail", threadID),
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						thread,
 						pendingAgentMail: [mail],
 					}),
@@ -3244,7 +3273,7 @@ describe("SessionManager", () => {
 							"thrd_preload_agent_mail_empty",
 						),
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						thread,
 						pendingAgentMail: [],
 					}),
@@ -3296,7 +3325,7 @@ describe("SessionManager", () => {
 								threadID,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread,
 							pendingAgentMail: mails,
 						}),
@@ -3352,7 +3381,7 @@ describe("SessionManager", () => {
 							threadID,
 						),
 						runtimeBindingToken: "runtime-binding-token",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						thread,
 					}),
 				),
@@ -3421,7 +3450,7 @@ describe("SessionManager", () => {
 								"rin_preload_attachments",
 							),
 							runtimeBindingToken: "runtime-binding-token-attachments",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							pendingAttachments,
 						}),
 					),
@@ -3475,7 +3504,7 @@ describe("SessionManager", () => {
 					manager.preloadThread({
 						...control,
 						runtimeBindingToken: "runtime-binding-token-mcp-cold",
-						contextEntries: [coldUserEntry("sesn_mcp_cold_pending")],
+						currentRequestMessage:null,messages: [coldUserEntry("sesn_mcp_cold_pending")],
 						runtimeConfigPatch: {
 							...control,
 							configIdentity: "runtime_config",
@@ -3595,7 +3624,7 @@ describe("SessionManager", () => {
 					return {
 						...loadCommand,
 						runtimeBindingToken: "runtime-binding-token-recovery-install-join",
-						contextEntries: [
+						currentRequestMessage:null,messages: [
 							RuntimeContextEntrySchema.parse({
 								messageSequence: 1,
 								contextKind: "user",
@@ -3684,7 +3713,7 @@ describe("SessionManager", () => {
 					return {
 						...loadCommand,
 						runtimeBindingToken: "runtime-binding-token-recovery-install-failure",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						thread: { role: "main", visibility: "public", status: "idle" },
 					};
 				},
@@ -3741,43 +3770,35 @@ describe("SessionManager", () => {
 				expect(session).toBeDefined();
 				threadLoop.runs[0]?.release();
 				await waitForThreadIdle(manager, sessionId, mainThreadId);
-				session?.state.installThreadTurn(
-					{
-						pendingInputContextSequences: [],
-						request: {
-							modelRequestId: "mreq_close_command_order",
-							requestStartEventId: "sevt_close_command_request",
-							requestKind: "agent_provider_request",
-							contextThroughMessageSequence: 0,
-							toolMembers: [
-								{
-									memberKind: "public_tool_use",
-									modelToolCallId: "call_close_command_tool",
-									toolUseEventId,
-									toolName: "Write",
-								},
-							],
-						},
-					},
-					{
-						routes: [
+
+				const checkpoint: ThreadTurnCheckpoint = {
+					pendingInputContextSequences: [],
+					request: {
+						modelRequestId: "mreq_close_command_order",
+						requestStartEventId: "sevt_close_command_request",
+						requestKind: "agent_provider_request",
+						contextThroughMessageSequence: 0,
+						toolMembers: [
 							{
+								memberKind: "public_tool_use",
+								modelToolCallId: "call_close_command_tool",
 								toolUseEventId,
-								disposition: "requires_user_action",
+								toolName: "Write",
 							},
 						],
 					},
-				);
+				};
+				session?.state.installThreadCheckpoint(checkpoint);
+				const assistantMessage = pendingApprovalAssistantEntry(sessionId, toolUseEventId, 2);
+				session?.state.contextManager.appendEntry({ ...assistantMessage, parts: assistantMessage.parts.map(part => part.type === "tool_call" ? { ...part, modelToolCallId: "call_close_command_tool", canonicalInput: { file_path: "close-order.txt" } } : part) });
+				session?.state.installCurrentRequestMessage({ modelRequestId: "mreq_close_command_order", assistantMessageSequence: assistantMessage.messageSequence });
 				session?.state.recordPendingApprovalToolJob({
 					toolUseEventId,
 					modelRequestId: "mreq_close_command_order",
 					source: { providerId: "fake", modelId: "fake-chat" },
-					assistantMessageSequence: pendingApprovalAssistantEntry(
-						sessionId,
-						toolUseEventId,
-					).messageSequence,
-					toolPart: pendingApprovalToolPart(sessionId, toolUseEventId),
-					entry: {} as never,
+					assistantMessageSequence: assistantMessage.messageSequence,
+					toolPart: { ...pendingApprovalToolPart(sessionId, toolUseEventId), modelToolCallId: "call_close_command_tool" },
+					entry: { inputContract: { kind: "json_object" } } as never,
 					job: {
 						id: "mreq_close_command_order:call_close_command_tool",
 						modelOrder: 0,
@@ -3792,6 +3813,14 @@ describe("SessionManager", () => {
 						approvalSource: "user",
 					},
 				});
+				session?.state.installThreadTurn(checkpoint, {
+						routes: [
+							{
+								toolUseEventId,
+								disposition: "requires_user_action",
+							},
+						],
+					});
 				expect(
 					await Effect.runPromise(
 						manager.preloadThread({
@@ -3801,7 +3830,7 @@ describe("SessionManager", () => {
 								siblingThreadId,
 							),
 							runtimeBindingToken: "runtime-binding-token-close-order",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread: {
 								parentThreadId: mainThreadId,
 								role: "subagent",
@@ -3824,10 +3853,11 @@ describe("SessionManager", () => {
 						async (declaration) => {
 							reportCommitStarted();
 							await commitGate;
-							return buildRuntimeControlCommitResult(
+							const result = buildRuntimeControlCommitResult(
 								"tool_confirmation",
 								declaration,
 							);
+							return result.ok ? { ...result, assignedContextSequences: [3] } : result;
 						},
 					),
 				);
@@ -3909,7 +3939,7 @@ describe("SessionManager", () => {
 				const cold = {
 					...threadControl("sesn_manifest_observation", "rin_manifest_cold"),
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 				};
 				expect(
 					await Effect.runPromise(manager.preloadThread(cold)),
@@ -4011,7 +4041,7 @@ describe("SessionManager", () => {
 					manager.preloadThread({
 						...control,
 						runtimeBindingToken: "runtime-binding-token-seed-order",
-						contextEntries: [coldUserEntry("sesn_seed_before_install")],
+						currentRequestMessage:null,messages: [coldUserEntry("sesn_seed_before_install")],
 						runtimeConfigPatch: {
 							...control,
 							configIdentity: "runtime_config",
@@ -4089,7 +4119,7 @@ describe("SessionManager", () => {
 						manager.preloadThread({
 							...control,
 							runtimeBindingToken: "runtime-binding-token-overlap",
-							contextEntries: [message],
+							currentRequestMessage:null,messages: [message],
 							pendingToolUses: [
 								{
 									...shared,
@@ -4133,48 +4163,40 @@ describe("SessionManager", () => {
 				await waitForRuns(threadLoop, 1);
 				const session = threadLoop.runs[0]?.session;
 				expect(session).toBeDefined();
-				session?.state.installThreadTurn(
-					{
-						pendingInputContextSequences: [],
-						request: {
-							modelRequestId: "mreq_1",
-							requestStartEventId: "sevt_request_start_1",
-							requestKind: "agent_provider_request",
-							contextThroughMessageSequence: 0,
-							requestEnd: {
-								eventId: "sevt_request_end_1",
-								isError: false,
+
+				const checkpoint: ThreadTurnCheckpoint = {
+					pendingInputContextSequences: [],
+					request: {
+						modelRequestId: "mreq_1",
+						requestStartEventId: "sevt_request_start_1",
+						requestKind: "agent_provider_request",
+						contextThroughMessageSequence: 0,
+						requestEnd: {
+							eventId: "sevt_request_end_1",
+							isError: false,
 			providerContextRetention: { disposition: "completed", toolUseEventIds: [], repairEventIds: [] },
-							},
-							toolMembers: [
-								{
-									memberKind: "public_tool_use",
-									modelToolCallId: "tool-1",
-									toolUseEventId: "sevt_tool_1",
-									toolName: "Write",
-								},
-							],
 						},
-					},
-					{
-						routes: [
+						toolMembers: [
 							{
+								memberKind: "public_tool_use",
+								modelToolCallId: "tool-1",
 								toolUseEventId: "sevt_tool_1",
-								disposition: "requires_user_action",
+								toolName: "Write",
 							},
 						],
 					},
-				);
+				};
+				session?.state.installThreadCheckpoint(checkpoint);
+				const assistantMessage = pendingApprovalAssistantEntry("sesn_1", "sevt_tool_1", 2);
+				session?.state.contextManager.appendEntry({ ...assistantMessage, parts: assistantMessage.parts.map(part => part.type === "tool_call" ? { ...part, modelToolCallId: "tool-1", canonicalInput: { file_path: "src/a.ts" } } : part) });
+				session?.state.installCurrentRequestMessage({ modelRequestId: "mreq_1", assistantMessageSequence: assistantMessage.messageSequence });
 				session?.state.recordPendingApprovalToolJob({
 					toolUseEventId: "sevt_tool_1",
 					modelRequestId: "mreq_1",
 					source: { providerId: "fake", modelId: "fake-chat" },
-					assistantMessageSequence: pendingApprovalAssistantEntry(
-						"sesn_1",
-						"sevt_tool_1",
-					).messageSequence,
-					toolPart: pendingApprovalToolPart("sesn_1", "sevt_tool_1"),
-					entry: {} as never,
+					assistantMessageSequence: assistantMessage.messageSequence,
+					toolPart: { ...pendingApprovalToolPart("sesn_1", "sevt_tool_1"), modelToolCallId: "tool-1" },
+					entry: { inputContract: { kind: "json_object" } } as never,
 					job: {
 						id: "mreq_1:tool-1",
 						modelOrder: 0,
@@ -4189,6 +4211,14 @@ describe("SessionManager", () => {
 						approvalSource: "user",
 					},
 				});
+				session?.state.installThreadTurn(checkpoint, {
+						routes: [
+							{
+								toolUseEventId: "sevt_tool_1",
+								disposition: "requires_user_action",
+							},
+						],
+					});
 
 				const confirmationCommand = {
 					...threadControl("sesn_1"),
@@ -4205,7 +4235,7 @@ describe("SessionManager", () => {
 						"tool_confirmation",
 						declaration,
 					);
-					return result;
+					return result.ok ? { ...result, assignedContextSequences: [3] } : result;
 				};
 				expect(
 					await Effect.runPromise(
@@ -4221,11 +4251,11 @@ describe("SessionManager", () => {
 					created: false,
 					applied: true,
 				});
-				expect(session?.state.contextManager.entries().at(-1)?.parts).toEqual([
+				expect(session?.state.contextManager.historyMessages().at(-1)?.parts).toEqual([
 					expect.objectContaining({ type: "text", text: "Approval allowed" }),
 				]);
 				const confirmationMessage = session?.state.contextManager
-					.entries()
+					.historyMessages()
 					.at(-1);
 				expect(confirmationMessage).toBeDefined();
 				expect(
@@ -4234,7 +4264,7 @@ describe("SessionManager", () => {
 				).toEqual([confirmationMessage!.messageSequence]);
 				expect(threadLoop.runs).toHaveLength(1);
 				const messagesAfterConfirmation =
-					session?.state.contextManager.entries().length;
+					session?.state.contextManager.historyMessages().length;
 				session?.state.removePendingApprovalToolJob("sevt_tool_1");
 				expect(
 					await Effect.runPromise(
@@ -4251,7 +4281,7 @@ describe("SessionManager", () => {
 					applied: false,
 				});
 				expect(confirmationCommits).toBe(2);
-				expect(session?.state.contextManager.entries()).toHaveLength(
+				expect(session?.state.contextManager.historyMessages()).toHaveLength(
 					messagesAfterConfirmation ?? 0,
 				);
 
@@ -4281,24 +4311,29 @@ describe("SessionManager", () => {
 				});
 				await waitForRuns(threadLoop, 1);
 				const session = threadLoop.runs[0]!.session;
+				const assistantMessage = pendingApprovalAssistantEntry(sessionId, "sevt_stale_control_tool", 2);
+				session.state.installThreadCheckpoint({ pendingInputContextSequences: [], request: {
+					modelRequestId: "mreq_stale_control", requestStartEventId: "sevt_stale_control_start",
+					requestKind: "agent_provider_request", contextThroughMessageSequence: 0,
+					toolMembers: [{ memberKind: "public_tool_use", modelToolCallId: "call_sevt_stale_control_tool", toolUseEventId: "sevt_stale_control_tool", toolName: "Write" }],
+				} });
+				session.state.contextManager.appendEntry(assistantMessage);
+				session.state.installCurrentRequestMessage({ modelRequestId: "mreq_stale_control", assistantMessageSequence: assistantMessage.messageSequence });
 				session.state.recordPendingApprovalToolJob({
 					toolUseEventId: "sevt_stale_control_tool",
 					modelRequestId: "mreq_stale_control",
 					source: { providerId: "fake", modelId: "fake-chat" },
-					assistantMessageSequence: pendingApprovalAssistantEntry(
-						sessionId,
-						"sevt_stale_control_tool",
-					).messageSequence,
+					assistantMessageSequence: assistantMessage.messageSequence,
 					toolPart: pendingApprovalToolPart(
 						sessionId,
 						"sevt_stale_control_tool",
 					),
-					entry: {} as never,
+					entry: { inputContract: { kind: "json_object" } } as never,
 					job: {
-						id: "mreq_stale_control:tool-1",
+						id: "mreq_stale_control:call_sevt_stale_control_tool",
 						modelOrder: 0,
 						toolUseEventId: "sevt_stale_control_tool",
-						modelToolCallId: "tool-1",
+						modelToolCallId: "call_sevt_stale_control_tool",
 						kind: "builtin",
 						name: "Write",
 						route: { kind: "gateway", operation: "RunWeb" },
@@ -4430,7 +4465,7 @@ describe("SessionManager", () => {
 									sessionThreadId,
 								),
 								runtimeBindingToken: "runtime-binding-token",
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 							}),
 						),
 					).toMatchObject({ ok: true, applied: true });
@@ -4497,7 +4532,7 @@ describe("SessionManager", () => {
 									sessionThreadId,
 								),
 								runtimeBindingToken: "runtime-binding-token",
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 							}),
 						),
 					).toMatchObject({ ok: true, applied: true });
@@ -4905,7 +4940,7 @@ describe("SessionManager", () => {
 				loadThreadContext: async (command) => ({
 					...command,
 					runtimeBindingToken: "runtime-binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					pendingAgentMail: [mail],
 					thread: { role: "main", visibility: "public", status: "idle" },
 				}),
@@ -5053,7 +5088,7 @@ describe("SessionManager", () => {
 					return {
 						...command,
 						runtimeBindingToken: "runtime-binding-token-shutdown-install",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						thread: { role: "main", visibility: "public", status: "idle" },
 					};
 				},
@@ -5131,7 +5166,7 @@ describe("SessionManager", () => {
 				await waitForRuns(threadLoop, 2);
 				expect(threadLoop.runs[1]?.session).toBe(firstSession);
 				expect(
-					threadLoop.runs[1]?.session.state.contextManager.entries(),
+					threadLoop.runs[1]?.session.state.contextManager.historyMessages(),
 				).toHaveLength(1);
 				threadLoop.runs[1]?.release();
 
@@ -5159,7 +5194,7 @@ describe("SessionManager", () => {
 				await waitForRuns(threadLoop, 3);
 				expect(threadLoop.runs[2]?.session).toBe(firstSession);
 				expect(
-					threadLoop.runs[2]?.session.state.contextManager.entries(),
+					threadLoop.runs[2]?.session.state.contextManager.historyMessages(),
 				).toHaveLength(1);
 				threadLoop.runs[2]?.release();
 			},
@@ -5524,7 +5559,7 @@ describe("SessionManager", () => {
 						...threadControl(sessionId, "rin_parent_preload", parentThreadId),
 						thread: { role: "main", visibility: "public", status: "idle" },
 						runtimeBindingToken: "runtime-binding-token-parent",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 					}),
 				);
 				await Effect.runPromise(
@@ -5551,7 +5586,7 @@ describe("SessionManager", () => {
 						),
 						thread: { role: "subagent", visibility: "public", status: "idle" },
 						runtimeBindingToken: "runtime-binding-token-unrelated",
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 					}),
 				);
 				await waitForRuns(threadLoop, 2);
@@ -5958,7 +5993,7 @@ describe("SessionManager", () => {
 								threadId,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 						}),
 					),
 				).toMatchObject({ ok: true, applied: true });
@@ -6082,7 +6117,7 @@ describe("SessionManager", () => {
 								threadID,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread,
 						}),
 					),
@@ -6213,7 +6248,7 @@ describe("SessionManager", () => {
 							manager.preloadThread({
 								...threadControl(sessionId, "rin_preload", childId),
 								runtimeBindingToken: "runtime-binding-token",
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 								thread: {
 									parentThreadId: `thrd_${sessionId}`,
 									role: "subagent",
@@ -6556,7 +6591,7 @@ describe("SessionManager", () => {
 
 			await waitForRuns(threadLoop, 2);
 			expect(
-				threadLoop.runs[0]?.session.state.contextManager.entries(),
+				threadLoop.runs[0]?.session.state.contextManager.historyMessages(),
 			).toEqual([]);
 			expect(
 				await Effect.runPromise(
@@ -6633,7 +6668,7 @@ describe("SessionManager", () => {
 			await waitForCrashRuns(threadLoop, 2);
 			expect(threadLoop.runs[1]?.sessionId).toBe("replacement_fail");
 			expect(
-				threadLoop.runs[0]?.session.state.contextManager.entries(),
+				threadLoop.runs[0]?.session.state.contextManager.historyMessages(),
 			).toEqual([]);
 			expect(
 				await Effect.runPromise(
@@ -6690,7 +6725,7 @@ describe("SessionManager", () => {
 			await waitForCrashRuns(threadLoop, 2);
 			expect(threadLoop.runs[1]?.session).not.toBe(firstSession);
 			expect(
-				threadLoop.runs[1]?.session.state.contextManager.entries(),
+				threadLoop.runs[1]?.session.state.contextManager.historyMessages(),
 			).toEqual([]);
 		});
 	});
@@ -7341,7 +7376,7 @@ describe("SessionManager", () => {
 								thread.id,
 							),
 							runtimeBindingToken: "runtime-binding-token",
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							thread: thread.metadata,
 						}),
 					),
@@ -7448,7 +7483,7 @@ describe("SessionManager", () => {
 							manager.preloadThread({
 								...threadControl(sessionId, `rin_preload_${thread.id}`, thread.id),
 								runtimeBindingToken: "runtime-binding-token",
-								contextEntries: [],
+								currentRequestMessage:null,messages: [],
 								thread: thread.metadata,
 							}),
 						),
@@ -7674,7 +7709,7 @@ describe("SessionManager", () => {
 				manager.preloadThread({
 					...threadControl("idle"),
 					runtimeBindingToken: "binding-token",
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 				}),
 			);
 			const released: string[] = [];
@@ -7711,7 +7746,8 @@ describe("SessionManager", () => {
 				manager.preloadThread({
 					...threadControl("rejected"),
 					runtimeBindingToken: "binding-token",
-					contextEntries: [],
+					currentRequestMessage: null,
+					messages: [],
 				}),
 			);
 			const order: string[] = [];

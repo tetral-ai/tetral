@@ -1,3 +1,5 @@
+import type { NormalizedProviderEvent } from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
@@ -6,7 +8,6 @@ import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-cat
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import {
 	ProviderFinishReason,
-	ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { createGatewayGrpcServer } from "../../../../../gateway/packages/provider-gateway/src/grpc-server.js";
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
@@ -346,7 +347,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 	},
 });
 const semanticTimeoutStreamer = {
-	stream: async function* (request: ProviderRequestStreamInput) {
+	stream: async function* (request: ProviderRequestStreamInput): AsyncGenerator<NormalizedProviderEvent> {
 		providerInvocations += 1;
 		if (
 			scenario === "semantic_tool_route" &&
@@ -366,7 +367,7 @@ const semanticTimeoutStreamer = {
 		if (!failedPartialRequest) await writeRuntimeState();
 		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
 				toolCall: {
 					id: "call_semantic_tool_route",
 					name: "Read",
@@ -375,7 +376,7 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
 				finish: {
 					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
 					contextWindowTokens: 200_000,
@@ -394,11 +395,11 @@ const semanticTimeoutStreamer = {
 		}
 		if (failedPartialRequest) {
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
 				text: {
 					id: `failed-partial-${providerInvocations}`,
 					text: `failed partial ${providerInvocations}`,
@@ -406,7 +407,7 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
 			// This case requires a completed partial before the semantic stall.
@@ -419,19 +420,19 @@ const semanticTimeoutStreamer = {
 			return;
 		}
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
 			text: { id: "recovered", text: "recovered input", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
 			finish: {
 				reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
 				contextWindowTokens: 200_000,

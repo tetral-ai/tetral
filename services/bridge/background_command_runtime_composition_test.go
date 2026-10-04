@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -255,6 +256,8 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 			t.Fatalf("shutdown cancellation rows = %d/%v; want zero", cancelRows, err)
 		}
 		controlInputValue["mode"] = "rejoin"
+		rejoinReadyPath := filepath.Join(t.TempDir(), "background-rejoin-ready.json")
+		controlInputValue["rejoinReadyPath"] = rejoinReadyPath
 		replacementInput, err := json.Marshal(controlInputValue)
 		if err != nil {
 			t.Fatalf("marshal replacement background control: %v", err)
@@ -265,6 +268,53 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		}
 		replacementCommand, replacementStdout, replacementStderr := startBunComposition(t, runtimeRoot, bunPath,
 			"packages/runtime-pod/test/fixtures/background-command-abort-composition.ts", replacementInputPath)
+		var controlMessageSequence int64
+		if err := admin.QueryRowContext(context.Background(), `SELECT sequence FROM session_messages
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4`,
+			workspaceID, sessionID, threadID, controlRequestID).Scan(&controlMessageSequence); err != nil {
+			t.Fatalf("read original control Assistant identity: %v", err)
+		}
+		var readyJSON []byte
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			readyJSON, err = os.ReadFile(rejoinReadyPath)
+			if err == nil {
+				break
+			}
+			if !os.IsNotExist(err) {
+				t.Fatalf("read replacement background readiness: %v", err)
+			}
+			select {
+			case commandErr := <-replacementCommand:
+				t.Fatalf("replacement exited before nonterminal owner readiness: %v\nstdout=%s\nstderr=%s", commandErr, replacementStdout.String(), replacementStderr.String())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		var ready any
+		if err != nil || json.Unmarshal(readyJSON, &ready) != nil {
+			t.Fatalf("replacement did not publish nonterminal owner readiness: %v", err)
+		}
+		canonicalInput := map[string]any{"session_id": taskID, "chars": ""}
+		expectedReady := map[string]any{
+			"currentRequestMessage": map[string]any{
+				"modelRequestId": controlRequestID, "assistantMessageSequence": float64(controlMessageSequence),
+			},
+			"reference": map[string]any{
+				"toolUseEventId": controlToolUseEventID, "modelRequestId": controlRequestID,
+				"modelToolCallId": "call_background_abort_control", "assistantMessageSequence": float64(controlMessageSequence),
+				"disposition": "hot_execution",
+			},
+			"message": map[string]any{
+				"messageSequence": float64(controlMessageSequence), "contextKind": "assistant",
+				"parts": []any{map[string]any{
+					"type": "tool_call", "modelToolCallId": "call_background_abort_control",
+					"toolName": "write_stdin", "canonicalInput": canonicalInput,
+				}},
+			},
+			"input": canonicalInput,
+		}
+		if !reflect.DeepEqual(ready, expectedReady) {
+			t.Fatalf("replacement background owner = %s; want exact original nonterminal call: %#v", readyJSON, expectedReady)
+		}
 		provider.pollCompletes.Store(true)
 		backgroundRunner := &tetralsandbox.SandboxBackgroundCommandJobRunner{
 			Queue: tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
@@ -400,10 +450,16 @@ func startBunComposition(t *testing.T, workdir, bunPath, fixture, inputPath stri
 		t.Fatalf("start %s: %v", fixture, err)
 	}
 	finished := make(chan error, 1)
+	joined := make(chan struct{})
 	go func() {
+		defer close(joined)
 		defer cancel()
 		finished <- command.Wait()
 	}()
+	t.Cleanup(func() {
+		cancel()
+		<-joined
+	})
 	return finished, stdout, stderr
 }
 
@@ -415,6 +471,10 @@ type backgroundAbortBridgeServer struct {
 	cancelRequests   []*bridgev1.CancelCommandRequest
 	cancelACKDropped bool
 	replayDelay      time.Duration
+}
+
+func (s *backgroundAbortBridgeServer) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
+	return s.store.LoadContext(ctx, request)
 }
 
 func (s *backgroundAbortBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {

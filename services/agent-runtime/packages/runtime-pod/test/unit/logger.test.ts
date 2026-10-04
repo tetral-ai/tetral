@@ -7,12 +7,30 @@ import {
 	providerToolDeclarationRejectedLogRecord,
 	runtimeCloseoutLogRecord,
 	runtimeTerminalSettlementLogRecord,
+	runtimeContentCommitLogRecord,
+	runtimeOperationLogRecord,
 	shutdownFailureLogRecord,
 	startupFailureLogRecord,
 	workloadStartedLogRecord,
 } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
+	test("approval raw samples preserve closed source and omit unavailable latency", () => {
+		const lines: string[] = [];
+		const logger = createJsonLogger({ write: line => lines.push(line), diagnostics: { level: "debug", burst: 10, maxRecordBytes: 16384, summaryIntervalMs: 30000 } });
+		for (const approvalSource of ["user", "auto_reviewer"] as const) {
+			logger.debug(runtimeOperationLogRecord({ workspaceId: "workspace", sessionId: "session", sessionThreadId: "thread",
+				requestKind: "agent_provider_request", operation: "approval_wait", approvalSource, outcome: "cancelled", durationMs: 37 }));
+			logger.debug(runtimeOperationLogRecord({ workspaceId: "workspace", sessionId: "session", sessionThreadId: "thread",
+				requestKind: "agent_provider_request", operation: "approval_wait", approvalSource, outcome: "unavailable", timingUnavailable: true }));
+		}
+		expect(lines).toHaveLength(4);
+		const records = lines.map(line => JSON.parse(line) as Record<string, unknown>);
+		expect(records.map(record => record["approval.source"])).toEqual(["user", "user", "auto_reviewer", "auto_reviewer"]);
+		expect(records.map(record => record["duration.ms"])).toEqual([37, undefined, 37, undefined]);
+		expect(records[1]?.outcome).toBe("unavailable");
+		expect(records[1]?.event).toBe("runtime_operation_timing_unavailable");
+	});
 	test("accepted-input commit record contains only stable identity and bounded outcome", () => {
 		const record = acceptedInputCommitLogRecord({
 			workspaceId: "wksp_1",
@@ -343,4 +361,19 @@ describe("Runtime Pod JSON logger", () => {
 		expect(JSON.stringify(record)).not.toContain("PROVIDER_BODY_CANARY");
 		expect(JSON.stringify(record)).not.toContain("RAW_ERROR_CANARY");
 	});
+});
+
+
+test("healthy content commit diagnostics stay silent at Info and expose a bounded Debug tuple",()=>{
+ const lines:string[]=[];
+ const logger=createJsonLogger({write:line=>lines.push(line)});
+ const record=runtimeContentCommitLogRecord({workspaceId:"workspace",sessionId:"session",sessionThreadId:"thread",modelRequestId:"request",kind:"text",phase:"content_apply",durationMs:3,outcome:"committed",requestKind:"agent_provider_request",canonicalJsonBytes:123});
+ for(let n=0;n<1000;n++)logger.debug(record);
+ expect(lines).toEqual([]);
+ const debug=createJsonLogger({write:line=>lines.push(line),diagnostics:{level:"debug",maxRecordBytes:16384,summaryIntervalMs:30000,burst:1}});
+ debug.debug(record);
+ expect(lines).toHaveLength(1);
+ const actual=JSON.parse(lines[0]!);
+ expect(actual).toMatchObject({"workspace.id":"workspace","session.id":"session","thread.id":"thread","model_request.id":"request",kind:"text","request.kind":"agent_provider_request","duration.ms":3,"output.size_bytes":123});
+ expect(actual).not.toHaveProperty("text");expect(actual).not.toHaveProperty("providerPartId");expect(actual).not.toHaveProperty("input");
 });

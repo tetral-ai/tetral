@@ -18,6 +18,7 @@ import { createGatewayGrpcServer } from "./grpc-server.js";
 import { createGatewayHttpServer } from "./http-server.js";
 import { logWorkloadStarted, startupFailureLogRecord } from "./logger.js";
 import { ProviderGatewayServiceShell } from "./service.js";
+import type { ProviderAssemblyBounds, ProviderPreviewOffer, ProviderAssemblyResources } from "./providers/block-assembler.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { GatewayGrpcServer } from "./grpc-server.js";
 import type { GatewayHttpServer } from "./http-server.js";
@@ -35,6 +36,10 @@ export interface ProviderGatewayAppOptions {
   readonly attachmentResolver?: ProviderAttachmentResolver | undefined;
   readonly providerStreamer?: ProviderRequestStreamer | undefined;
   readonly bootstrap?: () => Promise<void>;
+  readonly assemblyBounds?: ProviderAssemblyBounds;
+  readonly allocateEventId?: () => string;
+  readonly offerPreview?: ProviderPreviewOffer;
+  readonly observeAssemblyResources?: (resources:ProviderAssemblyResources,requestId:string)=>void;
 }
 
 /** Exposes the composed service shell together with process health, readiness, and listener lifecycle. */
@@ -77,6 +82,10 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
     attachmentResolver: options.attachmentResolver,
     providerStreamer: options.providerStreamer,
     maxConcurrentTurns: options.config.maxConcurrentTurns,
+    ...(options.assemblyBounds === undefined ? {} : {assemblyBounds:options.assemblyBounds}),
+    ...(options.allocateEventId === undefined ? {} : {allocateEventId:options.allocateEventId}),
+    ...(options.offerPreview === undefined ? {} : {offerPreview:options.offerPreview}),
+    ...(options.observeAssemblyResources === undefined ? {} : {observeAssemblyResources:options.observeAssemblyResources}),
     authenticator: {
       authenticate: async ({ metadata, method }) =>
         await authenticateGatewayCaller({

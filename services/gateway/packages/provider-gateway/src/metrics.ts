@@ -1,3 +1,4 @@
+import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 /**
  * @packageDocumentation
  *
@@ -14,6 +15,29 @@
 /** Aggregates process-local admitted-turn observations for operations exposition. */
 export class ProviderGatewayMetricsRegistry {
   #activeProviderStreams = 0;
+  #assemblyResources: ProviderAssemblyResources = {retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0};
+  #stages = {provider_first_fragment:{count:0,sum:0},provider_first_complete:{count:0,sum:0},complete_frame_write:{count:0,sum:0}};
+  #pendingFrameBytes = 0;
+  #stageOutcomes: Record<ProviderStageOutcome, number> = { success: 0, error: 0, cancelled: 0 };
+  observeProviderStage(sample: ProviderStageSample): void {
+    const value = this.#stages[sample.stage];
+    value.count++;
+    value.sum += Math.max(0, sample.durationMs);
+    this.#stageOutcomes[sample.outcome]++;
+  }
+  holdCompleteFrame(bytes: number): () => void {
+    this.#pendingFrameBytes += bytes;
+    let released = false;
+    return () => { if (!released) { released = true; this.#pendingFrameBytes -= bytes; } };
+  }
+  startContentAssembly(): { readonly observe: (resources:ProviderAssemblyResources)=>void; readonly close:()=>void } {
+    let previous:ProviderAssemblyResources={retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0};
+    const observe=(resources:ProviderAssemblyResources):void=>{
+      for(const key of Object.keys(previous) as (keyof ProviderAssemblyResources)[]) this.#assemblyResources = {...this.#assemblyResources,[key]:this.#assemblyResources[key]+resources[key]-previous[key]};
+      previous=resources;
+    };
+    return {observe,close:()=>observe({retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0})};
+  }
   #providerStreamsTotal = 0;
   #providerStreamFailuresTotal = 0;
   #providerStreamDurationMsSum = 0;
@@ -50,6 +74,13 @@ export class ProviderGatewayMetricsRegistry {
       metric("providergateway_provider_streams_total", "Provider streams admitted by Provider Gateway.", "counter", this.#providerStreamsTotal),
       metric("providergateway_provider_stream_failures_total", "Provider streams that ended with a classified failure.", "counter", this.#providerStreamFailuresTotal),
       metric("providergateway_provider_stream_duration_ms_sum", "Cumulative provider stream duration in milliseconds.", "counter", this.#providerStreamDurationMsSum),
+      ...Object.entries(this.#stages).flatMap(([stage,value])=>[
+        metric(`providergateway_${stage}_ms_sum`,"Cumulative provider stage duration in milliseconds.","counter",value.sum),
+        metric(`providergateway_${stage}_total`,"Observed provider stages.","counter",value.count),
+      ]),
+      ...Object.entries(this.#stageOutcomes).map(([outcome,count])=>metric(`providergateway_provider_stage_${outcome}_total`,"Provider stage samples by closed outcome.","counter",count)),
+      metric("providergateway_complete_frame_pending_bytes", "Encoded complete frames held through write callback and required drain.", "gauge", this.#pendingFrameBytes),
+      ...Object.entries(this.#assemblyResources).map(([key,value])=>metric(`providergateway_content_${key.replace(/[A-Z]/g,letter=>`_${letter.toLowerCase()}`)}`,"Live request-local provider content resources.","gauge",value)),
       metric("process_heap_used_bytes", "JavaScript heap bytes currently used by the process.", "gauge", memory.heapUsed),
       metric("process_rss_bytes", "Resident set size bytes for the process.", "gauge", memory.rss),
     ].join("");
@@ -65,4 +96,16 @@ function formatMetricValue(value: number): string {
     return "0";
   }
   return String(Math.max(0, value));
+}
+
+/** Closed per-operation observations; raw samples are emitted by the owning service. */
+export type ProviderStageOutcome = "success" | "error" | "cancelled";
+export type ProviderContentKind = "none" | "text" | "reasoning" | "tool";
+export interface ProviderStageSample {
+  readonly stage: "provider_first_fragment" | "provider_first_complete" | "complete_frame_write";
+  readonly outcome: ProviderStageOutcome;
+  readonly kind: ProviderContentKind;
+  readonly durationMs: number;
+  readonly canonicalBytes: number;
+  readonly encodedBytes: number;
 }

@@ -1,3 +1,4 @@
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { Metadata } from "@grpc/grpc-js";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -20,6 +21,10 @@ if (address === undefined || attachmentRef === undefined) {
 }
 
 const request: ProviderRequest = {
+  outputContractVersion:2,
+  modelRequestStartEventId:"evt_1000000000000001",
+  threadRole:1,
+  threadVisibility:1,
   requestId: "req_attachment_composition",
   modelRequestId: "mreq_attachment_composition",
   requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,

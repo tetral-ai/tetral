@@ -7,6 +7,11 @@
  */
 import { readFileSync } from "node:fs";
 import type {
+	RuntimeApprovalSource,
+	RuntimeContinuationOperation,
+	RuntimeContentKind,
+	RuntimeContentCommitPhase,
+	RuntimeContentCommitOutcome,
 	RuntimeCleanupCommandOutcome,
 	RuntimeContextLoadOperation,
 	RuntimeEventWriteOperation,
@@ -63,6 +68,13 @@ interface Observation {
 export interface RuntimePodDomainMetricsSnapshot
 	extends RuntimeHotStateMetrics {
 	readonly activeToolFibers: number;
+ readonly pendingContentEntries?:number;
+ readonly pendingContentBytes?:number;
+ readonly contentCommitLatencyMs?:ReadonlyMap<string,Observation>;
+ readonly continuationLatencyMs?:ReadonlyMap<string,Observation>;
+	readonly approvalWaitStarted?: ReadonlyMap<string, number>;
+	readonly approvalWaitOutstanding?: ReadonlyMap<string, number>;
+	readonly approvalWaitUnavailable?: ReadonlyMap<string, number>;
 	readonly providerStreamDurationMs: ReadonlyMap<string, Observation>;
 	readonly eventWriteLatencyMs: ReadonlyMap<string, Observation>;
 	readonly contextLoadLatencyMs: ReadonlyMap<string, Observation>;
@@ -91,6 +103,13 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		pendingApprovals: 0,
 	};
 	private activeToolFibers = 0;
+ private pendingContentEntries=0;
+ private pendingContentBytes=0;
+ private readonly contentCommitLatencyMs=new Map<string,Observation>();
+ private readonly continuationLatencyMs=new Map<string,Observation>();
+	private readonly approvalWaitStarted = new Map<string, number>();
+	private readonly approvalWaitOutstanding = new Map<string, number>();
+	private readonly approvalWaitUnavailable = new Map<string, number>();
 	private readonly providerStreamDurationMs = new Map<string, Observation>();
 	private readonly eventWriteLatencyMs = new Map<string, Observation>();
 	private readonly contextLoadLatencyMs = new Map<string, Observation>();
@@ -102,6 +121,30 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		RuntimeCloseoutEvent["event"],
 		number
 	>();
+
+ recordContentSubmissionDelta(entries:number,bytes:number):void {
+  this.pendingContentEntries=nonNegative(this.pendingContentEntries+entries);
+  this.pendingContentBytes=nonNegative(this.pendingContentBytes+bytes);
+ }
+ observeContentCommitLatency(kind:RuntimeContentKind,phase:RuntimeContentCommitPhase,durationMs:number,outcome:RuntimeContentCommitOutcome,requestKind:RuntimeProviderStreamKind="agent_provider_request"):void {
+  addObservation(this.contentCommitLatencyMs,labelledKey({kind,phase,outcome,request_kind:requestKind}),durationMs);
+ }
+
+ observeContinuationLatency(operation:RuntimeContinuationOperation,durationMs:number,outcome:RuntimeMetricOutcome,requestKind:RuntimeProviderStreamKind,approvalSource?:RuntimeApprovalSource):void {
+  addObservation(this.continuationLatencyMs,labelledKey({operation,outcome,request_kind:requestKind,
+    ...(approvalSource === undefined ? {} : { approval_source: approvalSource })}),durationMs);
+ }
+
+	recordApprovalWaitDelta(delta: 1 | -1, requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource): void {
+		const key = labelledKey({ request_kind: requestKind, approval_source: source });
+		if (delta === 1) this.approvalWaitStarted.set(key, (this.approvalWaitStarted.get(key) ?? 0) + 1);
+		this.approvalWaitOutstanding.set(key, nonNegative((this.approvalWaitOutstanding.get(key) ?? 0) + delta));
+	}
+
+	recordApprovalWaitUnavailable(requestKind: RuntimeProviderStreamKind, source: RuntimeApprovalSource): void {
+		const key = labelledKey({ request_kind: requestKind, approval_source: source });
+		this.approvalWaitUnavailable.set(key, (this.approvalWaitUnavailable.get(key) ?? 0) + 1);
+	}
 
 	/** Replaces the hot-state gauges after normalizing every value to a finite non-negative number. */
 	recordHotState(snapshot: RuntimeHotStateMetrics): void {
@@ -188,6 +231,13 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		return {
 			...this.hotState,
 			activeToolFibers: this.activeToolFibers,
+   pendingContentEntries:this.pendingContentEntries,
+   pendingContentBytes:this.pendingContentBytes,
+   contentCommitLatencyMs:new Map(this.contentCommitLatencyMs),
+   continuationLatencyMs:new Map(this.continuationLatencyMs),
+			approvalWaitStarted: new Map(this.approvalWaitStarted),
+			approvalWaitOutstanding: new Map(this.approvalWaitOutstanding),
+			approvalWaitUnavailable: new Map(this.approvalWaitUnavailable),
 			providerStreamDurationMs: new Map(this.providerStreamDurationMs),
 			eventWriteLatencyMs: new Map(this.eventWriteLatencyMs),
 			contextLoadLatencyMs: new Map(this.contextLoadLatencyMs),
@@ -317,6 +367,13 @@ export function runtimePodMetricsText(
 			"gauge",
 			runtimeSnapshot.activeToolFibers,
 		),
+  metric("runtimepod_pending_content_entries","Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentEntries??0),
+  metric("runtimepod_pending_content_bytes","Encoded Runtime semantic member submissions awaiting ACK/application.","gauge",runtimeSnapshot.pendingContentBytes??0),
+  observationMetric("runtimepod_continuation_latency_ms","Runtime owning continuation stages in milliseconds.",runtimeSnapshot.continuationLatencyMs??new Map()),
+		labelledMetric("runtimepod_approval_wait_started_total", "Hot residency approval observations started.", "counter", runtimeSnapshot.approvalWaitStarted ?? new Map()),
+		labelledMetric("runtimepod_approval_wait_outstanding", "Hot residency approval observations awaiting a local outcome.", "gauge", runtimeSnapshot.approvalWaitOutstanding ?? new Map()),
+		labelledMetric("runtimepod_approval_wait_unavailable_total", "Cold approvals with no local start timestamp; excluded from latency summaries.", "counter", runtimeSnapshot.approvalWaitUnavailable ?? new Map()),
+  observationMetric("runtimepod_content_commit_latency_ms","Completed content bridge ACK and local application latency in milliseconds.",runtimeSnapshot.contentCommitLatencyMs??new Map()),
 		metric(
 			"runtimepod_pending_approvals",
 			"Runtime Pod pending approval tool jobs.",
@@ -374,6 +431,12 @@ function observationMetric(
 		text += `${name}_count${labels} ${formatMetricValue(observation.count)}\n`;
 		text += `${name}_sum${labels} ${formatMetricValue(observation.sum)}\n`;
 	}
+	return text;
+}
+
+function labelledMetric(name: string, help: string, type: "counter" | "gauge", values: ReadonlyMap<string, number>): string {
+	let text = `# HELP ${name} ${help}\n# TYPE ${name} ${type}\n`;
+	for (const [labels, value] of values) text += `${name}${labels} ${formatMetricValue(value)}\n`;
 	return text;
 }
 

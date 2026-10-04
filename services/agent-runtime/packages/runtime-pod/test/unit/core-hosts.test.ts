@@ -148,6 +148,47 @@ function turnFactsForPendingTool(input: {
 }
 
 describe("Runtime core host production assembly", () => {
+	for (const route of ["approval", "sandbox"] as const) {
+		test(`cold ${route} missing call returns rejection and joins installation cleanup`, async () => {
+			const calls = { inputs: 0, tools: 0, provider: 0 };
+			const pending = {
+				toolUseEventId: "use_missing_call", modelRequestId: "request_missing_call",
+				modelToolCallId: "call_missing", toolName: "Read", input: { file_path: "note.txt" },
+			};
+			const hosts = await buildRuntimeCoreHosts({
+				maxLocalSessions: 1,
+				now: () => "2026-06-16T00:00:00.000Z",
+				...testCoreDependencies({
+					contextLoader: {
+						loadThreadContext: async () => ({
+							messages: [textContextEntry(1, "user", "prior-user"), textContextEntry(2, "assistant", "alpha")],
+							currentRequestMessage: { modelRequestId: pending.modelRequestId, assistantMessageSequence: 2 },
+							turnFacts: turnFactsForPendingTool({ ...pending, family: "agent.tool_use" }),
+							runtimeBindingToken: "binding-token",
+							...(route === "approval" ? { pendingToolUses: [{ ...pending, status: "pending" as const }] } : { pendingSandboxExecutions: [{ ...pending, executionState: "running" as const }] }),
+						}),
+						commitAcceptedInput: async () => {
+							calls.inputs += 1;
+							throw new Error("negative preload must not commit input");
+						},
+					},
+					threadLoop: {
+						llmService: { stream: () => { calls.provider += 1; return Stream.empty; } },
+						runTool: () => { calls.tools += 1; return { type: "completed", output: { text: "unused", truncated: false } }; },
+					},
+				}),
+			});
+			try {
+				const command = commandScope(`sesn_missing_${route}`);
+				expect(await hosts.subAgentRunHost.preloadThread(command)).toMatchObject({ ok: false, reason: "context_load_failed" });
+				expect(await hosts.subAgentRunHost.inspectThread(command)).toMatchObject({ ok: true, observed: false });
+				expect(calls).toEqual({ inputs: 0, tools: 0, provider: 0 });
+			} finally {
+				await hosts.close();
+			}
+		}, 1000);
+	}
+
 	test("reviewer input receipt starts one reviewer request and settles the parent gate once", async () => {
 		const observations: string[] = [];
 		const providerRequests: Array<{
@@ -182,7 +223,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						runtimeBindingToken: "runtime-binding-token-reviewer-composed",
 					}),
@@ -205,18 +246,14 @@ describe("Runtime core host production assembly", () => {
 							providerRequests.push(request);
 							observations.push("provider-request");
 							return Stream.fromIterable([
-								{ type: "text-start" as const, id: "review-decision" },
-								{
-									type: "text-delta" as const,
-									id: "review-decision",
-									text_delta: JSON.stringify({
+
+
+								{type:"text-complete" as const,providerPartId:"review-decision",eventId:"evt_736a596b8cc155cb1d1db84ab7a2fc22",text:(JSON.stringify({
 										outcome: "allow",
 										risk_level: "low",
 										user_authorization: "high",
 										rationale: "composed allow",
-									}),
-								},
-								{ type: "text-end" as const, id: "review-decision" },
+									}))},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]);
 						},
@@ -331,7 +368,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						runtimeBindingToken: "runtime-binding-token-reviewer-composed",
 					}),
@@ -349,18 +386,14 @@ describe("Runtime core host production assembly", () => {
 						stream: () => {
 							providerCalls += 1;
 							const events = Stream.fromIterable([
-								{ type: "text-start" as const, id: `review-${providerCalls}` },
-								{
-									type: "text-delta" as const,
-									id: `review-${providerCalls}`,
-									text_delta: JSON.stringify({
+
+
+								{type:"text-complete" as const,providerPartId:`review-${providerCalls}`,eventId:"evt_cade0a0fa96b61b6957c8e8542940bea",text:(JSON.stringify({
 										outcome: "allow",
 										risk_level: "low",
 										user_authorization: "high",
 										rationale: "composed allow",
-									}),
-								},
-								{ type: "text-end" as const, id: `review-${providerCalls}` },
+									}))},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]);
 							return providerCalls === 1
@@ -506,6 +539,7 @@ describe("Runtime core host production assembly", () => {
 		const acceptedReviewerThreadIds: string[] = [];
 		const lifecycleOrder: string[] = [];
 		let providerCalls = 0;
+		let nextMessageSequence = 1;
 		const baseWriter = writerFrom((envelope) => {
 			if (envelope.event.type === "approval_review.failure") {
 				failureAttempts.push(envelope);
@@ -526,7 +560,7 @@ describe("Runtime core host production assembly", () => {
 				lifecycleOrder.push("idle");
 			}
 			return successfulEventAppend(envelope);
-		});
+		}, () => nextMessageSequence++);
 		const writer: SessionEventWriter = {
 			...baseWriter,
 			writeRequestEnd: async (envelope) => {
@@ -544,17 +578,16 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						runtimeBindingToken: "runtime-binding-token-reviewer-failure",
 					}),
 					commitAcceptedInput: async (input) => {
 						if (input.kind === "approval_review") {
 							acceptedReviewerThreadIds.push(input.sessionThreadId);
-							return acceptedInputResult(
-								input,
-								acceptedReviewerThreadIds.length,
-							);
+							const result = acceptedInputResult(input, nextMessageSequence);
+							nextMessageSequence += input.promptText.length;
+							return result;
 						}
 						return acceptedInputResult(input);
 					},
@@ -594,13 +627,9 @@ describe("Runtime core host production assembly", () => {
 								rationale: "reused trunk",
 							});
 							return Stream.fromIterable([
-								{ type: "text-start" as const, id: `review-${providerCalls}` },
-								{
-									type: "text-delta" as const,
-									id: `review-${providerCalls}`,
-									text_delta: text,
-								},
-								{ type: "text-end" as const, id: `review-${providerCalls}` },
+
+
+								{type:"text-complete" as const,providerPartId:`review-${providerCalls}`,eventId:"evt_a2d296bf9dfe8fc27df9294d871899ed",text:(text)},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]);
 						},
@@ -754,7 +783,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						runtimeBindingToken: "runtime-binding-token-reviewer-rejection",
 					}),
@@ -938,7 +967,7 @@ describe("Runtime core host production assembly", () => {
 					loadThreadContext: async () => {
 						observations.push("load");
 						return {
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							turnFacts: emptyTurnFacts,
 							thread: {
 								role: "main",
@@ -982,7 +1011,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						thread: {
 							parentThreadId,
@@ -1026,7 +1055,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						runtimeBindingToken: "runtime-binding-token-cold-no-lineage",
 						pendingAgentMail: [
@@ -1060,7 +1089,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: emptyTurnFacts,
 						thread: {
 							role: "main",
@@ -1115,7 +1144,7 @@ describe("Runtime core host production assembly", () => {
 					loadThreadContext: async () => {
 						observations.push("load");
 						return {
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							turnFacts: emptyTurnFacts,
 							runtimeBindingToken: "runtime-binding-token-pull",
 						};
@@ -1187,7 +1216,7 @@ describe("Runtime core host production assembly", () => {
 							`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`,
 						);
 						return {
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							turnFacts: emptyTurnFacts,
 							runtimeBindingToken: "runtime-binding-token-cold",
 						};
@@ -1242,7 +1271,7 @@ describe("Runtime core host production assembly", () => {
 						loadStarted.resolve();
 						await releaseLoad.promise;
 						return {
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							turnFacts: emptyTurnFacts,
 							runtimeBindingToken: "runtime-binding-token-singleflight",
 						};
@@ -1253,13 +1282,9 @@ describe("Runtime core host production assembly", () => {
 					llmService: {
 						stream: () =>
 							Stream.fromIterable([
-								{ type: "text-start" as const, id: "singleflight" },
-								{
-									type: "text-delta" as const,
-									id: "singleflight",
-									text_delta: "done",
-								},
-								{ type: "text-end" as const, id: "singleflight" },
+
+
+								{type:"text-complete" as const,providerPartId:"singleflight",eventId:"evt_424d29045a1372c52ea2f9beb1e519e6",text:("done")},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]),
 					},
@@ -1401,7 +1426,9 @@ describe("Runtime core host production assembly", () => {
 							`load:${command.bindingId}:${command.bindingGeneration}`,
 						);
 						return {
-							contextEntries: loadedEntries,
+							currentRequestMessage: { modelRequestId: "mrq_cold_confirm", assistantMessageSequence: 2 },
+							thread: { role: "main", visibility: "public" },
+							messages: loadedEntries,
 							turnFacts: turnFactsForPendingTool({
 								modelRequestId: "mrq_cold_confirm",
 								toolUseEventId: "sevt_tool_1",
@@ -1614,7 +1641,9 @@ describe("Runtime core host production assembly", () => {
 					loadThreadContext: async (command) => {
 						observations.push(`load:${command.sessionThreadId}`);
 						return {
-							contextEntries: loadedEntries,
+							currentRequestMessage: { modelRequestId: "mrq_interrupt_confirm", assistantMessageSequence: 2 },
+							thread: { role: "main", visibility: "public" },
+							messages: loadedEntries,
 							turnFacts: turnFactsForPendingTool({
 								modelRequestId: "mrq_interrupt_confirm",
 								toolUseEventId: "sevt_tool_1",
@@ -1720,7 +1749,7 @@ describe("Runtime core host production assembly", () => {
 							`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`,
 						);
 						return {
-							contextEntries: [],
+							currentRequestMessage:null,messages: [],
 							turnFacts: emptyTurnFacts,
 							runtimeBindingToken: "runtime-binding-token-config",
 						};
@@ -1802,7 +1831,7 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
 						turnFacts: {
 							events: [
 								{
@@ -1873,7 +1902,8 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
+						thread: { role: "main", visibility: "public" },
 						turnFacts: {
 							events: [
 								{
@@ -1927,13 +1957,9 @@ describe("Runtime core host production assembly", () => {
 						stream: (request) => {
 							providerRequests.push(request.modelRequestId);
 							return Stream.fromIterable([
-								{ type: "text-start" as const, id: "current" },
-								{
-									type: "text-delta" as const,
-									id: "current",
-									text_delta: "current response",
-								},
-								{ type: "text-end" as const, id: "current" },
+
+
+								{type:"text-complete" as const,providerPartId:"current",eventId:"evt_b6c175433ab700b7dc5edfd63e56b9ab",text:("current response")},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]);
 						},
@@ -1979,7 +2005,8 @@ describe("Runtime core host production assembly", () => {
 			...testCoreDependencies({
 				contextLoader: {
 					loadThreadContext: async () => ({
-						contextEntries: [],
+						currentRequestMessage:null,messages: [],
+						thread: { role: "main", visibility: "public" },
 						turnFacts: {
 							events: [
 								{
@@ -2061,13 +2088,9 @@ describe("Runtime core host production assembly", () => {
 						stream: (request) => {
 							providerRequests.push(request.modelRequestId);
 							return Stream.fromIterable([
-								{ type: "text-start" as const, id: "successor" },
-								{
-									type: "text-delta" as const,
-									id: "successor",
-									text_delta: "successor response",
-								},
-								{ type: "text-end" as const, id: "successor" },
+
+
+								{type:"text-complete" as const,providerPartId:"successor",eventId:"evt_263f5676b828251de0d2e0b60ff57c5f",text:("successor response")},
 								{ type: "finish" as const, finishReason: "stop" as const },
 							]);
 						},
@@ -2123,7 +2146,7 @@ describe("Runtime core host production assembly", () => {
 							`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`,
 						);
 						return {
-							contextEntries: [committedEntry],
+							currentRequestMessage:null,messages: [committedEntry],
 							turnFacts: emptyTurnFacts,
 							runtimeBindingToken: "runtime-binding-token-task",
 						};
@@ -2314,7 +2337,7 @@ function testCoreDependencies(
 	return {
 		contextLoader: {
 			loadThreadContext: async () => ({
-				contextEntries: [],
+				currentRequestMessage:null,messages: [],
 				turnFacts: emptyTurnFacts,
 				runtimeBindingToken: "runtime-binding-token-test",
 			}),
@@ -2339,13 +2362,9 @@ function testCoreDependencies(
 			llmService: {
 				stream: () =>
 					Stream.fromIterable([
-						{ type: "text-start" as const, id: "text-default" },
-						{
-							type: "text-delta" as const,
-							id: "text-default",
-							text_delta: "ok",
-						},
-						{ type: "text-end" as const, id: "text-default" },
+
+
+						{type:"text-complete" as const,providerPartId:"text-default",eventId:"evt_2127be726e01628a8db6dadc850e779a",text:("ok")},
 						{ type: "finish" as const, finishReason: "stop" as const },
 					]),
 			},
@@ -2375,6 +2394,7 @@ function testSessionEventWriter(onFinishIdle?: () => void): SessionEventWriter {
 
 function writerFrom(
 	append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult,
+	allocateAssistantSequence?: () => number,
 ): SessionEventWriter {
 	let nextAssistantMessageSequence = 2;
 	const appendWithAssignments = (
@@ -2389,7 +2409,7 @@ function writerFrom(
 				: {
 						assistant: {
 							...result.assistant,
-							messageSequence: nextAssistantMessageSequence++,
+							messageSequence: allocateAssistantSequence?.() ?? nextAssistantMessageSequence++,
 						},
 					}),
 		};
@@ -2458,7 +2478,7 @@ function requestEndResult(envelope: SessionEventWriterRequestEndEnvelope) {
 		ok: true as const,
 		type: "committed" as const,
 		requestEndEventId: `evt_${envelope.writeId}`,
-		outcome: { type: "ordinary" as const },
+		outcome: { type: "ordinary" as const, ...(envelope.providerContextRetention.assistantMessageSequence === undefined ? {} : { sealedMessageSequence: envelope.providerContextRetention.assistantMessageSequence }) },
 		interruptToolResults: [],
 	};
 }
@@ -2466,7 +2486,7 @@ function requestEndResult(envelope: SessionEventWriterRequestEndEnvelope) {
 function successfulEventAppend(
 	envelope: SessionEventEnvelope,
 ): SessionEventWriterAppendResult {
-	const eventId = `evt_${envelope.writeId}`;
+	const eventId = envelope.preallocatedEventId ?? `evt_${envelope.writeId}`;
 	return {
 		ok: true,
 		type: "committed",

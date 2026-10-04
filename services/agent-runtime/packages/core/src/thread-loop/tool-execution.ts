@@ -17,7 +17,6 @@ import type {
 	RuntimeFailure,
 	RuntimeJsonObject,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 	RuntimeToolSettlement,
 	RuntimeToolRouteCapability,
@@ -33,7 +32,7 @@ import {
 import type { LLMEvent } from "../llm/llm-event.js";
 import { RuntimePreviewTextMaxBytes } from "../llm/llm-event.js";
 import type {
-	ProviderStreamAccumulator,
+	RequestContentProcessor,
 	PublicToolEvent,
 	RuntimeProcessorSource,
 	ToolSettlementApplicationResult,
@@ -47,7 +46,8 @@ import type {
 	ToolEntry,
 } from "../tools/tool-catalog.js";
 import {
-	effectivePermissionPolicy,
+	executionInputForToolCall,
+ effectivePermissionPolicy,
 	lookupToolEntry,
 } from "../tools/tool-catalog.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
@@ -64,7 +64,7 @@ import type {
 	RuntimePreloadedSandboxExecutionState,
 } from "./input/preload.js";
 
-/** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
+/** Normalizes a concrete tool route outcome before RequestContentProcessor persists it. */
 export type RuntimeToolExecutionResult =
 	| {
 			readonly type: "completed";
@@ -131,7 +131,7 @@ export type RuntimeToolRunner = (
 
 /** Persists one post-ACK tool outcome and publishes the resulting hot projection. */
 export async function commitRuntimeToolSettlement(
-	processor: ProviderStreamAccumulator,
+	processor: RequestContentProcessor,
 	source: RuntimeProcessorSource,
 	modelToolCallId: string,
 	result: Exclude<
@@ -262,7 +262,7 @@ export interface RuntimeToolRegistrationState {
 export function registerRuntimeToolCall(
 	modelRequestId: string,
 	state: RuntimeToolRegistrationState,
-	event: Extract<LLMEvent, { readonly type: "tool-call" }>,
+	event: Extract<LLMEvent, { readonly type: "tool-call-complete" }>,
 ):
 	| { readonly type: "registered"; readonly jobId: string }
 	| { readonly type: "invalid" } {
@@ -297,20 +297,6 @@ export function registerRuntimeToolCall(
 	state.toolEntries[job.id] = entry;
 	state.toolScheduler.addJob(job);
 	return { type: "registered", jobId };
-}
-
-function executionInputForToolCall(
-	entry: ToolEntry,
-	input: RuntimeJsonValue,
-): RuntimeJsonValue | undefined {
-	if (entry.inputContract.kind === "freeform_string") {
-		return typeof input === "string"
-			? { [entry.inputContract.executionField]: input }
-			: undefined;
-	}
-	return typeof input === "object" && input !== null && !Array.isArray(input)
-		? input
-		: undefined;
 }
 
 export function publicInputForRegisteredTool(
@@ -392,7 +378,6 @@ export function installLoadedPendingToolUses(
 	resolveToolCatalog: () => ToolCatalog | undefined,
 	pendingToolUses: readonly RuntimePreloadedPendingToolUseState[] | undefined,
 	entries: readonly RuntimeContextEntry[],
-	openRequestDraft: RuntimeOpenRequestDraft | undefined,
 ): { readonly ok: true } | { readonly ok: false; readonly error: unknown } {
 	if (pendingToolUses === undefined || pendingToolUses.length === 0) {
 		return { ok: true };
@@ -422,9 +407,10 @@ export function installLoadedPendingToolUses(
 				);
 			}
 			const input = recoveredExecutionInput(entry, pending.input);
-			const loadedPart = findLoadedPendingToolUsePart(
-				entries,
-				openRequestDraft,
+			const reference=session.state.currentRequestMessage();
+   if(reference?.modelRequestId!==pending.modelRequestId)throw new Error("pending Tool has no current request owner");
+   const loadedPart = findLoadedPendingToolUsePart(
+				entries.filter(message=>message.messageSequence===reference.assistantMessageSequence),
 				pending,
 			);
 			if (loadedPart === undefined) {
@@ -432,6 +418,7 @@ export function installLoadedPendingToolUses(
 					"pending tool use context is missing its sole unresolved Tool Call",
 				);
 			}
+			if(JSON.stringify(input)!==JSON.stringify(executionInputForToolCall(entry,loadedPart.part.state.status==="running"?loadedPart.part.state.input.value:null)))throw new Error("pending Tool input differs from committed call");
 			const decision = pending.decision;
 			const job: ToolJob = {
 				id: `${pending.modelRequestId}:${pending.modelToolCallId}`,
@@ -512,7 +499,6 @@ export function installLoadedSandboxExecutions(
 	resolveToolCatalog: () => ToolCatalog | undefined,
 	executions: readonly RuntimePreloadedSandboxExecutionState[] | undefined,
 	entries: readonly RuntimeContextEntry[],
-	openRequestDraft: RuntimeOpenRequestDraft | undefined,
 ): { readonly ok: true } | { readonly ok: false; readonly error: unknown } {
 	if (executions === undefined || executions.length === 0) {
 		return { ok: true };
@@ -546,9 +532,10 @@ export function installLoadedSandboxExecutions(
 				);
 			}
 			const input = recoveredExecutionInput(entry, execution.input);
-			const loadedPart = findLoadedPendingToolUsePart(
-				entries,
-				openRequestDraft,
+			const reference=session.state.currentRequestMessage();
+   if(reference?.modelRequestId!==execution.modelRequestId)throw new Error("pending Tool has no current request owner");
+   const loadedPart = findLoadedPendingToolUsePart(
+				entries.filter(message=>message.messageSequence===reference.assistantMessageSequence),
 				execution,
 			);
 			if (loadedPart === undefined) {
@@ -556,6 +543,7 @@ export function installLoadedSandboxExecutions(
 					"sandbox execution context is missing its sole unresolved Tool Call",
 				);
 			}
+   if(JSON.stringify(input)!==JSON.stringify(executionInputForToolCall(entry,loadedPart.part.state.status==="running"?loadedPart.part.state.input.value:null)))throw new Error("Sandbox execution input differs from committed call");
 			session.state.recordPendingSandboxExecutionJob({
 				recoveryKind: "sandbox_execution",
 				toolUseEventId: execution.toolUseEventId,
@@ -598,7 +586,6 @@ export function installLoadedSandboxExecutions(
 
 export function findLoadedPendingToolUsePart(
 	entries: readonly RuntimeContextEntry[],
-	openRequestDraft: RuntimeOpenRequestDraft | undefined,
 	pending: Pick<
 		ContextLoader.RuntimeLoadedPendingToolUse,
 		"toolUseEventId" | "modelToolCallId" | "toolName"
@@ -619,14 +606,7 @@ export function findLoadedPendingToolUsePart(
 				messageSequence: entry.messageSequence,
 				parts: entry.parts,
 			})),
-		...(openRequestDraft === undefined
-			? []
-			: [
-					{
-						messageSequence: openRequestDraft.messageSequence,
-						parts: openRequestDraft.parts,
-					},
-				]),
+
 	];
 	const matches = owners.flatMap((owner) =>
 		owner.parts

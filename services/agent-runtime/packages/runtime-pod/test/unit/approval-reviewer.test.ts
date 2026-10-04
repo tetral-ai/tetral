@@ -3003,8 +3003,8 @@ class RecordingReviewerHost {
 	async preloadThread(
 		input: Omit<
 			RuntimeThreadPreloadState,
-			| "contextEntries"
-			| "openRequestDraft"
+			| "messages"
+			| "currentRequestMessage"
 			| "turnCheckpoint"
 			| "turnToolRouteView"
 			| "runtimeBindingToken"

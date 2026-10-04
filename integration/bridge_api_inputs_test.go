@@ -130,8 +130,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if err := json.Unmarshal([]byte(loadResponse.GetContextJson()), &loaded); err != nil {
 		t.Fatalf("decode inter-agent context: %v", err)
 	}
-	if len(loaded.ContextEntries) != 1 || loaded.ContextEntries[0].ContextKind != "user" || len(loaded.ContextEntries[0].Parts) != 1 ||
-		testJSONPathString(t, string(loaded.ContextEntries[0].Parts[0]), "type") != "text" {
+	if len(loaded.Messages) != 1 || loaded.Messages[0].ContextKind != "user" || len(loaded.Messages[0].Parts) != 1 ||
+		testJSONPathString(t, string(loaded.Messages[0].Parts[0]), "type") != "text" {
 		t.Fatalf("loaded inter-agent context = %s; want one user text entry", loadResponse.GetContextJson())
 	}
 	var receivedEventID string

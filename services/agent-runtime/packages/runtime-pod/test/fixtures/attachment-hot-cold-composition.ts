@@ -73,6 +73,8 @@ if (!input.coldOnly) {
 		commitAcceptedInput: async () => hotCommitResult,
 	};
 	const hot = new ThreadRuntime({
+		threadRole: "main",
+		threadVisibility: "public",
 		workspaceId: input.acceptedInput.workspaceId,
 		sessionId: input.acceptedInput.sessionId,
 		sessionThreadId: input.acceptedInput.sessionThreadId,
@@ -99,7 +101,7 @@ const loaded = await loader.loadThreadContext({
 	runtimeProcessId: input.acceptedInput.runtimeProcessId,
 });
 const checkpoint = extractThreadTurnCheckpoint({
-	contextEntries: loaded.contextEntries,
+	messages: loaded.messages,
 	facts: loaded.turnFacts,
 });
 const routes = extractColdThreadToolRouteView({
@@ -108,6 +110,8 @@ const routes = extractColdThreadToolRouteView({
 	pendingSandboxExecutions: loaded.pendingSandboxExecutions ?? [],
 });
 const cold = new ThreadRuntime({
+	threadRole: loaded.thread?.role,
+	threadVisibility: loaded.thread?.visibility,
 	workspaceId: input.acceptedInput.workspaceId,
 	sessionId: input.acceptedInput.sessionId,
 	sessionThreadId: input.acceptedInput.sessionThreadId,
@@ -117,8 +121,9 @@ const cold = new ThreadRuntime({
 	runtimeProcessId: input.acceptedInput.runtimeProcessId,
 	runtimeBindingToken: loaded.runtimeBindingToken,
 });
-cold.state.contextManager.replaceEntries(loaded.contextEntries);
-cold.state.contextManager.installOpenRequestDraft(loaded.openRequestDraft);
+cold.state.contextManager.replaceMessages(loaded.messages);
+cold.state.installThreadCheckpoint(checkpoint);
+cold.state.installCurrentRequestMessage(loaded.currentRequestMessage??undefined);
 cold.state.markPersistentContextLoaded();
 cold.state.installThreadTurn(checkpoint, routes);
 cold.state.replacePendingAttachments(loaded.pendingAttachments ?? []);

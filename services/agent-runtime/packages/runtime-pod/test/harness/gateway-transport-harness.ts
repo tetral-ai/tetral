@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { CallOptions, ClientUnaryCall } from "@grpc/grpc-js";
 import { Metadata, Server, ServerCredentials } from "@grpc/grpc-js";
@@ -21,6 +20,8 @@ import {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
 import { createGatewayGrpcServer } from "../../../../../gateway/packages/provider-gateway/src/grpc-server.js";
+import type {NormalizedProviderEvent} from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import type { ProviderCredentialResolver } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
@@ -216,6 +217,7 @@ export async function runGatewayCapacityProof(): Promise<
 		}
 		return measurements;
 	} finally {
+        client.close();
 		await server.shutdown();
 	}
 }
@@ -263,6 +265,7 @@ export async function runGatewayCapacityFuseMutation(): Promise<void> {
 			requestForRoute(vector.request, CapacityRoutes[0]),
 		);
 	} finally {
+        client.close();
 		await server.shutdown();
 	}
 }
@@ -345,6 +348,7 @@ export async function runGatewayReceiveCapacityFuseMutation(): Promise<void> {
 	try {
 		await collectGatewayEvents(client, request);
 	} finally {
+        client.close();
 		await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
 	}
 }
@@ -374,7 +378,7 @@ export async function runLargeToolInputMappingProof() {
 			stream: async function* () {
 				for (const [index, input] of inputs.entries()) {
 					yield {
-						type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+						type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
 						toolCall: {
 							id: `call_large_memory_${index}`,
 							name: "memory",
@@ -384,7 +388,7 @@ export async function runLargeToolInputMappingProof() {
 					};
 				}
 				yield {
-					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+					type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
 					finish: {
 						reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
 						usage: {
@@ -415,6 +419,7 @@ export async function runLargeToolInputMappingProof() {
 			Stream.runCollect(createLLMService(client).stream(request)),
 		);
 	} finally {
+        client.close();
 		await server.shutdown();
 	}
 }
@@ -461,6 +466,7 @@ export async function runRecordedGLMTransportProof() {
 			{ preconnect: () => undefined },
 		),
 	});
+    const normalizedCounts: Record<string, number> = {};
 	const service = new ProviderGatewayServiceShell({
 		authenticator: {
 			authenticate: async () => ({
@@ -475,7 +481,12 @@ export async function runRecordedGLMTransportProof() {
 		runtimeBindingTokenVerifier: { verify: () => true },
 		ready: () => true,
 		logger: { info: () => undefined, error: () => undefined },
-		providerStreamer: { stream: (input) => providerRegistry.stream(input) },
+		providerStreamer: { stream: async function* (input) {
+            for await (const event of providerRegistry.stream(input)) {
+                normalizedCounts[event.type] = (normalizedCounts[event.type] ?? 0) + 1;
+                yield event;
+            }
+        } },
 		credentialResolver: {
 			resolve: async () => ({
 				ok: true,
@@ -502,12 +513,14 @@ export async function runRecordedGLMTransportProof() {
 		metadataFactory: async () => new Metadata(),
 	});
 	try {
-		return Array.from(
+		const events = Array.from(
 			await Effect.runPromise(
 				Stream.runCollect(createLLMService(client).stream(request)),
 			),
 		);
+        return { events, normalizedCounts };
 	} finally {
+        client.close();
 		server.server.forceShutdown();
 	}
 }
@@ -669,6 +682,7 @@ export async function runMaximumReadTransportProof() {
 	try {
 		await collectGatewayEvents(client, request);
 	} finally {
+        client.close();
 		await server.shutdown();
 	}
 	const projected = toGatewayProviderContext([
@@ -708,12 +722,13 @@ export async function runGatewayReceiveFuseProof() {
 	const implementation: ProviderGatewayServiceServer = {
 		streamProviderRequest(call) {
 			call.write({
-				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-				toolCall: {
-					id: "call_oversized",
+				type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE,
+                frameSequence: 1,
+				toolCallComplete: {
+					modelToolCallId: "call_oversized",
 					name: "oversized",
-					inputJson: JSON.stringify({ content: "x".repeat(8 * 1024 * 1024) }),
-					metadataJson: "{}",
+					inputJson: JSON.stringify({ content: "x".repeat(32 * 1024 * 1024) }),
+					providerMetadataJson: "{}",
 				},
 			});
 			call.end();
@@ -724,7 +739,7 @@ export async function runGatewayReceiveFuseProof() {
 	};
 	const server = new Server({
 		"grpc.max_receive_message_length": 32 * 1024 * 1024,
-		"grpc.max_send_message_length": 16 * 1024 * 1024,
+		"grpc.max_send_message_length": 64 * 1024 * 1024,
 	});
 	server.addService(ProviderGatewayServiceService, implementation);
 	const port = await new Promise<number>((resolve, reject) => {
@@ -749,6 +764,7 @@ export async function runGatewayReceiveFuseProof() {
 	try {
 		return await collectGatewayError(client, request);
 	} finally {
+        client.close();
 		await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
 	}
 }
@@ -791,7 +807,7 @@ export async function runGatewayAbsentRetryDelayProof() {
 		providerStreamer: {
 			stream: async function* () {
 				yield {
-					type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+					type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
 					providerError: {
 						metadataJson: "{}",
 						error: {
@@ -829,6 +845,7 @@ export async function runGatewayAbsentRetryDelayProof() {
 		}
 		return terminal.error;
 	} finally {
+        client.close();
 		server.server.forceShutdown();
 	}
 }
@@ -867,6 +884,7 @@ async function collectPreEventGatewayFailure(
 			),
 		);
 	} finally {
+        client.close();
 		server.server.forceShutdown();
 	}
 }
@@ -922,9 +940,9 @@ function capacityCredentialResolver(): ProviderCredentialResolver {
 	} as unknown as ProviderCredentialResolver;
 }
 
-async function* successfulCapacityStream(request: ProviderRequest) {
+async function* successfulCapacityStream(request: ProviderRequest): AsyncGenerator<NormalizedProviderEvent> {
 	yield {
-		type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+		type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
 		finish: {
 			reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
 			usage: {
@@ -1051,7 +1069,7 @@ async function capacityVectors(): Promise<
 		{
 			...assembledVector(
 				"escape_dense_output_history",
-				loadedEscapeDense.contextEntries,
+				loadedEscapeDense.messages,
 				undefined,
 				escapeDenseMarkers,
 			),
@@ -1064,7 +1082,8 @@ async function loadCapacityContext(
 	contextEntries: readonly RuntimeContextEntry[],
 ) {
 	const contextJson = JSON.stringify({
-		contextEntries,
+		messages: contextEntries,
+        currentRequestMessage: null,
 		turnFacts: { events: [], internalRepairs: [] },
 		thread: {
 			parentThreadId: null,
@@ -1105,7 +1124,7 @@ async function loadCapacityContext(
 		runtimeProcessId: "process-test",
 	});
 	return {
-		contextEntries: loaded.contextEntries,
+		messages: loaded.messages,
 		contextBytes: Buffer.byteLength(contextJson, "utf8"),
 	};
 }
@@ -1122,6 +1141,8 @@ function assembledVector(
 	}
 	const assembled = assembleProviderCallRequest({
 		identity: {
+            threadRole: "main",
+            threadVisibility: "public",
 			workspaceId: "wksp_capacity",
 			sessionId: "sesn_capacity",
 			sessionThreadId: "thr_capacity",
@@ -1172,7 +1193,7 @@ function assembledVector(
 	return {
 		name,
 		estimatedTokens: estimatedRuntimeContextTokens(runtimeContext),
-		request: assembled.request,
+		request: { ...assembled.request, modelRequestStartEventId: "evt_00000000000000000000000000000001" },
 		wireMarkers: [...SystemWireMarkers, ...wireMarkers],
 	};
 }

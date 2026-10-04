@@ -34,11 +34,12 @@ import type {
 	ToolPermissionPolicy,
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import {
+	canonicalBuiltinToolName,
 	createApprovalReviewerToolCatalog,
 	createToolCatalog,
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolApprovalMode } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
-import type { RuntimePodApp } from "./app.js";
+import type { RuntimePodApp, RuntimePodAppOptions } from "./app.js";
 import { BridgeRuntimeProcess } from "./runtime-process.js";
 import { waitForRoutingProxy } from "./routing-proxy.js";
 import { createRuntimePodApp } from "./app.js";
@@ -82,6 +83,8 @@ import {
 	runtimeCloseoutLogRecord,
 	runtimeMCPManifestUpdateLogRecord,
 	runtimeTerminalSettlementLogRecord,
+	runtimeContentCommitLogRecord,
+	runtimeOperationLogRecord,
 	startupFailureLogRecord,
 } from "./logger.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -117,6 +120,7 @@ export interface RuntimePodCommandOptions {
  * the complete production object graph.
  */
 export interface RuntimePodDependencyBuilderOptions {
+	readonly readContainerMemory?: RuntimePodAppOptions["readContainerMemory"];
 	readonly runtimeProcessFactory?: (
 		id: string,
 		config: RuntimePodConfig,
@@ -392,6 +396,8 @@ export async function buildRuntimePodCommandDependencies(input: {
 			recordAcceptedInputCommit: (event) => {
 				input.logger.info(acceptedInputCommitLogRecord(event));
 			},
+			recordOperation: event => { input.logger.debug?.(runtimeOperationLogRecord(event)); },
+			recordContentCommit:event=>{input.logger.debug?.(runtimeContentCommitLogRecord(event));},
 			recordRuntimeTerminalSettlement: (event) => {
 				try {
 					input.logger.error(runtimeTerminalSettlementLogRecord(event));
@@ -465,6 +471,9 @@ export async function buildRuntimePodCommandDependencies(input: {
 		});
 	const app = createRuntimePodApp({
 		runtimeProcess,
+		...(input.builderOptions?.readContainerMemory === undefined ? {} : {
+			readContainerMemory: input.builderOptions.readContainerMemory,
+		}),
 		quiesce: async (options) => {
 			phaseDeadline = options.settlementDeadline;
 			const bridgePhase = {
@@ -630,6 +639,13 @@ function runtimeToolPolicyFromPatchPayloadsWithFamily(
 		if (deriveInstalledBuiltinFamily && patchIndex === 0) {
 			family = unambiguousColdInstalledBuiltinFamily(runtimeConfig);
 		}
+		const installedTools = recordField(runtimeConfig, "installedTools") ??
+			recordField(runtimeConfig, "installed_tools");
+		if (installedTools !== undefined) {
+			const installedFamily = unambiguousColdInstalledBuiltinFamily(runtimeConfig);
+			if (family !== installedFamily) throw new Error("runtime installed builtin family changed");
+			configs = installedBuiltinToolConfigs(installedTools, installedFamily);
+		}
 		const systemPatch = runtimeAgentSystemPatch(parsed, runtimeConfig);
 		if (systemPatch.present) {
 			system = systemPatch.value;
@@ -669,9 +685,11 @@ function runtimeToolPolicyFromPatchPayloadsWithFamily(
 			recordArrayField(parsed.tool_policy, "configs") ??
 			recordArrayField(recordField(parsed.toolPolicy, "tools"), "configs") ??
 			recordArrayField(recordField(parsed.tool_policy, "tools"), "configs");
-		if (nextApprovalMode !== undefined || configValues !== undefined) {
-			approvalMode = nextApprovalMode ?? approvalMode;
-			configs = parseToolConfigs(configValues ?? []);
+		approvalMode = nextApprovalMode ?? approvalMode;
+		// Installed snapshots own declaration defaults and overrides. Ordered
+		// config-only patches retain their existing explicit replacement semantics.
+		if (installedTools === undefined && configValues !== undefined) {
+			configs = parseToolConfigs(configValues);
 		}
 		const nextMcpToolsets = parseMcpToolsets(
 			recordArrayField(parsed.tool_policy, "mcpToolsets") ??
@@ -749,6 +767,53 @@ function requiredColdInstalledBuiltinFamily(
 		throw new Error("runtime installed builtin family is malformed");
 	}
 	return family;
+}
+
+/** Projects the installed declaration into the same catalog used by provider and gate. */
+function installedBuiltinToolConfigs(
+	installedTools: unknown,
+	family: InstalledBuiltinFamily,
+): readonly ToolConfig[] {
+	if (!Array.isArray(installedTools)) throw new Error("runtime installed builtin policy is malformed");
+	const declaration = installedTools.find((tool: unknown) => isRecord(tool) && tool.type === "tetral_agent_toolset");
+	if (!isRecord(declaration)) throw new Error("runtime installed builtin policy is malformed");
+	const defaults = declaration.default_config ?? declaration.defaultConfig;
+	if (defaults !== undefined && defaults !== null && !isRecord(defaults)) {
+		throw new Error("runtime installed builtin policy is malformed");
+	}
+	const enabled = installedToolEnabled(defaults, true);
+	const permissionPolicy = installedToolPermission(defaults);
+	const overrides = declaration.configs ?? [];
+	if (!Array.isArray(overrides)) throw new Error("runtime installed builtin policy is malformed");
+	const byName = new Map<string, ToolConfig>();
+	for (const override of overrides) {
+		if (!isRecord(override) || typeof override.name !== "string") {
+			throw new Error("runtime installed builtin policy is malformed");
+		}
+		const name = canonicalBuiltinToolName(family, override.name);
+		if (name === undefined || byName.has(name)) throw new Error("runtime installed builtin policy is malformed");
+		const policy = installedToolPermission(override) ?? permissionPolicy;
+		byName.set(name, { name, enabled: installedToolEnabled(override, enabled),
+			...(policy === undefined ? {} : { permissionPolicy: policy }) });
+	}
+	return createToolCatalog({ family, includeSubAgentTools: true }).entries.map((entry) =>
+		byName.get(entry.name) ?? { name: entry.name, enabled,
+			...(permissionPolicy === undefined ? {} : { permissionPolicy }) });
+}
+
+function installedToolEnabled(value: unknown, fallback: boolean): boolean {
+	const enabled = recordField(value, "enabled");
+	if (enabled === undefined || enabled === null) return fallback;
+	if (typeof enabled !== "boolean") throw new Error("runtime installed builtin policy is malformed");
+	return enabled;
+}
+
+function installedToolPermission(value: unknown): ToolPermissionPolicy | undefined {
+	const raw = recordField(value, "permission_policy") ?? recordField(value, "permissionPolicy");
+	if (raw === undefined || raw === null) return undefined;
+	const policy = parsePermissionPolicy(raw);
+	if (policy === undefined) throw new Error("runtime installed builtin policy is malformed");
+	return policy;
 }
 
 function unambiguousColdInstalledBuiltinFamily(

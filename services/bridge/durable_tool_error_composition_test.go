@@ -54,6 +54,7 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 
 	runtimeRepair := runRuntimeInvalidToolRepairComposition(t, listener.Addr().String(), map[string]any{
 		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
+		"threadRole": "main", "threadVisibility": "public",
 		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"runtimeBindingToken": "fixture-binding-token",
 	})
@@ -341,11 +342,18 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode cold context: %v", err)
 	}
-	if payload.OpenRequestDraft != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 3 {
-		t.Fatalf("cold durable Tool context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
+	// End seals the selected Assistant; settling its Tool does not finish the
+	// durable turn. Until FinishIdle, the reference still names that same row.
+	wantMessageSequence := toolUse.GetCommitted().GetAssignedMessageSequence()
+	if payload.CurrentRequestMessage == nil ||
+		payload.CurrentRequestMessage.ModelRequestID != "mreq_durable_error" ||
+		payload.CurrentRequestMessage.AssistantMessageSequence != wantMessageSequence ||
+		len(payload.Messages) != 1 || payload.Messages[0].ContextKind != "assistant" ||
+		payload.Messages[0].MessageSequence != wantMessageSequence || len(payload.Messages[0].Parts) != 3 {
+		t.Fatalf("cold durable Tool context = entries=%#v currentRequestMessage=%#v; want sealed mreq_durable_error Assistant sequence %d", payload.Messages, payload.CurrentRequestMessage, wantMessageSequence)
 	}
-	if string(payload.ContextEntries[0].Parts[2]) != string(parts[2]) {
-		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.ContextEntries[0].Parts[2], parts[2])
+	if string(payload.Messages[0].Parts[2]) != string(parts[2]) {
+		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.Messages[0].Parts[2], parts[2])
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -500,8 +508,8 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode cold truncated Tool context: %v", err)
 	}
-	if len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.ContextEntries, parts[1])
+	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.Messages, parts[1])
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -600,8 +608,8 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 		t.Fatalf("LoadContext cancelled Tool: %v", err)
 	}
 	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.ContextEntries) != 1 || len(payload.ContextEntries[0].Parts) != 2 || string(payload.ContextEntries[0].Parts[1]) != string(parts[1]) {
-		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.ContextEntries, err)
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
+		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.Messages, err)
 	}
 	assertRuntimeHotColdToolComposition(
 		t,
@@ -776,7 +784,17 @@ type runtimeProviderComposition struct {
 }
 
 type runtimeColdContextComposition struct {
-	NextStep struct {
+	ColdProductionEntries               json.RawMessage `json:"coldProductionEntries"`
+	ColdProductionCurrentRequestMessage json.RawMessage `json:"coldProductionCurrentRequestMessage"`
+	ColdProductionActiveToolReferences  json.RawMessage `json:"coldProductionActiveToolReferences"`
+	ToolRouteView                       struct {
+		Routes []struct {
+			ToolUseEventID string `json:"toolUseEventId"`
+			Disposition    string `json:"disposition"`
+		} `json:"routes"`
+	} `json:"toolRouteView"`
+	ColdProductionPreloaded bool `json:"coldProductionPreloaded"`
+	NextStep                struct {
 		Action          string   `json:"action"`
 		ToolUseEventIDs []string `json:"toolUseEventIds"`
 	} `json:"nextStep"`
@@ -807,6 +825,9 @@ func runRuntimeColdContextComposition(t *testing.T, contextJSON string, composeP
 	var composed runtimeColdContextComposition
 	if err := json.Unmarshal(output, &composed); err != nil {
 		t.Fatalf("decode Runtime cold context composition: %v: %s", err, output)
+	}
+	if !composed.ColdProductionPreloaded {
+		t.Fatal("actual Runtime cold preload was not observed")
 	}
 	return composed
 }
@@ -1145,12 +1166,12 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 			t.Fatalf("LoadContext multi-Tool state: %v", err)
 		}
 		var payload bridgeLoadContextPayload
-		if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.ContextEntries) != 1 {
-			t.Fatalf("decode multi-Tool context: entries=%#v err=%v", payload.ContextEntries, err)
+		if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.Messages) != 1 {
+			t.Fatalf("decode multi-Tool context: entries=%#v err=%v", payload.Messages, err)
 		}
 		calls := make([]string, 0, 2)
 		results := make([]string, 0, 2)
-		for _, raw := range payload.ContextEntries[0].Parts {
+		for _, raw := range payload.Messages[0].Parts {
 			var part struct {
 				Type            string `json:"type"`
 				ModelToolCallID string `json:"modelToolCallId"`

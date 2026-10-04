@@ -136,22 +136,22 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	if err := json.Unmarshal([]byte(loadResponse.GetContextJson()), &loaded); err != nil {
 		t.Fatalf("decode committed input context: %v", err)
 	}
-	if len(loaded.ContextEntries) != 1 {
-		t.Fatalf("loaded context entries = %d; want one committed input", len(loaded.ContextEntries))
+	if len(loaded.Messages) != 1 {
+		t.Fatalf("loaded context entries = %d; want one committed input", len(loaded.Messages))
 	}
 	var loadedPart struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if len(loaded.ContextEntries[0].Parts) != 1 {
-		t.Fatalf("loaded context parts = %d; want one text part", len(loaded.ContextEntries[0].Parts))
+	if len(loaded.Messages[0].Parts) != 1 {
+		t.Fatalf("loaded context parts = %d; want one text part", len(loaded.Messages[0].Parts))
 	}
-	if err := json.Unmarshal(loaded.ContextEntries[0].Parts[0], &loadedPart); err != nil {
+	if err := json.Unmarshal(loaded.Messages[0].Parts[0], &loadedPart); err != nil {
 		t.Fatalf("decode loaded committed input: %v", err)
 	}
-	if loaded.ContextEntries[0].MessageSequence != assignedSequence ||
-		loaded.ContextEntries[0].ContextKind != "user" || loadedPart.Type != "text" || loadedPart.Text != "hello" {
-		t.Fatalf("loaded committed input = %#v/%#v; want equivalent durable user content", loaded.ContextEntries[0], loadedPart)
+	if loaded.Messages[0].MessageSequence != assignedSequence ||
+		loaded.Messages[0].ContextKind != "user" || loadedPart.Type != "text" || loadedPart.Text != "hello" {
+		t.Fatalf("loaded committed input = %#v/%#v; want equivalent durable user content", loaded.Messages[0], loadedPart)
 	}
 	replay, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
@@ -353,9 +353,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsKeepsTextAndAttachmentFromOneInput(
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode mixed media context: %v", err)
 	}
-	if len(payload.ContextEntries) != 1 || len(payload.PendingAttachments) != 1 ||
+	if len(payload.Messages) != 1 || len(payload.PendingAttachments) != 1 ||
 		payload.PendingAttachments[0].Origin.FileBacked == nil || payload.PendingAttachments[0].Origin.FileBacked.FileID != fileID {
-		t.Fatalf("mixed input cold context = entries %#v attachments %#v", payload.ContextEntries, payload.PendingAttachments)
+		t.Fatalf("mixed input cold context = entries %#v attachments %#v", payload.Messages, payload.PendingAttachments)
 	}
 }
 
@@ -813,10 +813,10 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		if err := json.Unmarshal([]byte(loadResponse.GetContextJson()), &loaded); err != nil {
 			t.Fatalf("decode reviewer input context: %v", err)
 		}
-		if len(loaded.ContextEntries) != 1 || loaded.ContextEntries[0].ContextKind != "user" {
-			t.Fatalf("loaded reviewer context entries = %#v; want one user entry", loaded.ContextEntries)
+		if len(loaded.Messages) != 1 || loaded.Messages[0].ContextKind != "user" {
+			t.Fatalf("loaded reviewer context entries = %#v; want one user entry", loaded.Messages)
 		}
-		loadedEntry, err := json.Marshal(loaded.ContextEntries[0])
+		loadedEntry, err := json.Marshal(loaded.Messages[0])
 		if err != nil {
 			t.Fatalf("encode loaded reviewer context: %v", err)
 		}

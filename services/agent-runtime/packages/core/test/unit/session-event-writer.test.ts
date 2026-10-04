@@ -16,6 +16,7 @@ function envelope(writeId = "write_1"): SessionEventEnvelope {
 		targetPodUid: "pod_1",
 		runtimeProcessId: "process-test",
 		writeId,
+		preallocatedEventId: "evt_00000000000000000000000000000001",
 		modelRequestId: "model_request_1",
 		event: {
 			type: "agent.message",

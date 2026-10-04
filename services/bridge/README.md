@@ -20,8 +20,8 @@ uses a connector-side leased reservation before its refs-only result commit.
 The Runtime Pod
 holds hot state only and mutates it after the Bridge ACK; nothing the pod
 holds is ever the source of truth, so a lost pod loses no durable fact.
-Tenant isolation is structural: every row carries `workspace_id` in its
-primary key and every caller presents a signed principal binding that Bridge
+Tenant isolation is structural: durable rows carry `workspace_id`, reads and
+mutations enforce workspace scope, and every caller presents a signed principal binding that Bridge
 verifies before any read or mutation. Bridge runs as an independent Deployment and ServiceAccount, with one
 `bridge-api` process (`cmd/bridge-api`). It serves Runtime and executor-facing
 RPCs and owns its database pool, execution-result listener and attachment GC.
@@ -212,7 +212,7 @@ separate 32 MiB transport fuse and existing per-attachment semantic limits.
 | --- | --- | --- |
 | Context | `LoadContext` | Cold-start one thread from current durable facts: ordered Messages, Request/Tool Events, direct internal-repair Message/Event references, unresolved pending tool waits, per-server MCP manifests, and pending media. Runtime reconstructs its checkpoint from these direct identities; Bridge does not project Message mutation history. |
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction. Tool confirmation settles the named pending-tool state. Interrupt intent makes Bridge census every unfinished durable Tool Use, write and consume one honest terminal conversation result per target, and return only minimal hot-state projections; background-task settlement remains independently Sandbox-owned and never creates a second public Tool Result. |
-| Events | `WriteEvent`, `CommitInternalToolRepair` | One non-result semantic event plus its projection in one transaction; a public Tool Use may carry the anchored prefix of completed reasoning parts. The event-less invalid-tool repair row is atomic and rehydratable. |
+| Events | `WriteEvent`, `CommitInternalToolRepair` | One non-result semantic event plus its projection in one transaction; a public Tool Use may carry the anchored prefix of completed reasoning parts. An invalid-tool repair atomically appends its private reasoning prefix and Tool Call/Result pair, with one rehydratable result Event. An absent or empty prefix preserves the ordinary repair declaration identity. |
 | Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation, cancels remaining Session input custody, closes the live residency row to `idle` without arming ordinary TTL cleanup, and terminates the Session while retaining the binding identity only for closeout replay, without mailing the terminal Main Thread. |
 | Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and exact snapshot of Runtime-selected parent Message references; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups whose operation kind, task, and executor input are selected from the durable Tool declaration; durable memory writes with content-match conflict checks |
@@ -277,12 +277,38 @@ does not validate a Runtime message state machine or accept database message,
 part, status, origin, or timestamp fields. PostgreSQL assigns durable ordering
 and audit metadata outside the stored provider-visible context.
 
+JSON content bounds count the UTF-8 bytes of JavaScript `JSON.stringify`.
+The shared Go encoder correction preserves actual Unicode line and paragraph
+separators while keeping literal backslash-u text escaped. Declaration identity,
+stored context validation, and stable reasoning metadata accounting use this
+same correction; a literal `\\u2028` is not a Unicode separator.
+
 `CommitInputs`, `WriteEvent`, `SettleToolResult`, `WriteRequestEnd`, repair,
 compaction, idle, and termination retain separate request and result types.
 There is no generic declaration result. Each successful hot-path application
 uses the immutable request plus only newly assigned facts returned by that
-operation. Cold recovery reconstructs sealed context, the open request draft,
-and active lifecycle facts directly from durable rows.
+operation. Cold recovery returns one ordered `messages` array of
+`{messageSequence, contextKind, parts}` and direct `turnFacts`. The separate
+`currentRequestMessage` is `{modelRequestId, assistantMessageSequence}` or null;
+it references the unique acknowledged Assistant for the current durable
+request, including sealed requests with unfinished retained tools. The
+selection is a checked projection of Runtime's current-request relation:
+ordinary closed runs and no-content requests have no reference. It does not
+fall back to a historical Assistant. When no durable turn is open, the bounded
+request read includes its actual latest idle or terminal closeout and the exact
+paired terminal failure; the Runtime selection rule remains unchanged.
+A successful reasoning-only End can assign
+the first Assistant sequence; cold loading follows its exact ordinary End
+receipt under the same workspace, Session, Thread, Request and End Event. It
+does not invent a caller retention selection. Immutable inherited context remains in
+`threadContextPrefix.entries`. Messages carry no lifecycle flags or checkpoint,
+and loading alone starts no tool work.
+
+Request End retention references must belong to that request. Completed and
+compacted outcomes name every declared Tool; failed, interrupted and rescheduled
+outcomes may omit a Tool only after its durable result exists. Every unfinished
+Tool remains required, preserving custody through final settlement. Selection
+changes provider-context eligibility while retaining the original audit events.
 
 ### Event-writer and Tool-settlement boundaries
 
@@ -307,7 +333,19 @@ and active lifecycle facts directly from durable rows.
   `sessions.usage` exactly once. Neither digest nor settlement payload is
   returned to Runtime.
 - **Lifecycle.** `WriteEvent` is idempotency-keyed by `runtime_write_id`; the attached
-  reasoning set folds into the request hash. `SettleToolResult` hashes its
+  reasoning set folds into the request hash. `agent.message` and `agent.thinking`
+  additionally require the Gateway-supplied `preallocated_event_id` (`evt_`
+  followed by 32 lowercase hexadecimal characters) and model-request identity.
+  That ID participates in the declaration digest and is returned unchanged on
+  commit or exact receipt replay; it is forbidden on all other declarations.
+  Missing or malformed identity fails before receipt lookup. New text and
+  thinking require one durable request Start and no End; an exact pre-End
+  receipt may still replay after End under the existing binding fence.
+  Event IDs are globally unique. A collision returns a bounded conflict and
+  rolls back the event, stream change, context append and receipt together,
+  without returning the existing event or choosing a replacement ID. Bridge
+  assigns event IDs for other event types and all database sequences.
+  `SettleToolResult` hashes its
   bounded outcome, including optional web usage, under the Tool Use identity. Runtime updates
   hot state from the immutable declaration and operation-specific result. An unknown transport
   result retries the same frozen declaration and receives the duplicate

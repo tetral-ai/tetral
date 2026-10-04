@@ -7,7 +7,6 @@ import { status as GrpcStatus, Metadata } from "@grpc/grpc-js";
 import type {
 	RuntimeContextEntry,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
 	RuntimeInternalToolRepairStore,
@@ -109,10 +108,10 @@ function assistantRunningToolMessage(
 	toolName: string,
 	_toolUseEventId: string,
 	input: RuntimeJsonValue,
-	modelRequestId = "mreq_resume_checkpoint",
-): RuntimeOpenRequestDraft {
+	_modelRequestId = "mreq_resume_checkpoint",
+): RuntimeContextEntry {
 	return {
-		modelRequestId,
+		contextKind: "assistant",
 		messageSequence,
 		parts: [
 			{ type: "tool_call", modelToolCallId, toolName, canonicalInput: input },
@@ -3488,7 +3487,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "execution run open",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3507,7 +3506,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "open request",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3531,8 +3530,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "pending tool route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					turnFacts: pendingFacts,
 					pendingToolUses: [
@@ -3551,8 +3550,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "unfinished sandbox route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					turnFacts: pendingFacts,
 					pendingToolUses: [],
@@ -3571,7 +3570,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "unresolved interrupt",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3590,8 +3589,8 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "interrupted incomplete Tool Use without a route",
 				context: {
-					contextEntries: pendingContextEntries,
-					openRequestDraft: pendingOpenRequestDraft,
+					messages:((draft)=>draft==null?pendingContextEntries:[...pendingContextEntries,{messageSequence:draft.messageSequence,contextKind:"assistant" as const,parts:draft.parts}])(pendingOpenRequestDraft),currentRequestMessage:((draft)=>draft==null?null:{modelRequestId:"mreq_resume_checkpoint",assistantMessageSequence:draft.messageSequence})(pendingOpenRequestDraft),
+
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3611,7 +3610,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "terminal closeout",
 				context: {
-					contextEntries: [],
+					currentRequestMessage:null,messages: [],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3639,7 +3638,7 @@ describe("RuntimePodToolRunner", () => {
 			{
 				name: "reducer has pending input",
 				context: {
-					contextEntries: [pendingInput],
+					currentRequestMessage:null,messages: [pendingInput],
 					thread: closedThread,
 					pendingToolUses: [],
 					pendingSandboxExecutions: [],
@@ -3649,7 +3648,7 @@ describe("RuntimePodToolRunner", () => {
 		];
 		for (const testCase of cases) {
 			const checkpoint = extractThreadTurnCheckpoint({
-				contextEntries: testCase.context.contextEntries,
+				messages: testCase.context.messages,
 				facts: testCase.context.turnFacts,
 			});
 			const routeView = extractColdThreadToolRouteView({
@@ -3706,7 +3705,7 @@ describe("RuntimePodToolRunner", () => {
 		// pending sets as independent arguments from the context loader — and they
 		// are what isolates routes, pendingToolUses and pendingSandboxExecutions.
 		const quiescentCheckpoint = extractThreadTurnCheckpoint({
-			contextEntries: [],
+			messages: [],
 			facts: emptyResumeTurnFacts,
 		});
 		expect(() =>
@@ -3772,7 +3771,7 @@ describe("RuntimePodToolRunner", () => {
 		}
 
 		const pendingAttachmentHosts = await buildResumeTestHosts(async () => ({
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
 			thread: closedThread,
 			pendingToolUses: [],
 			pendingSandboxExecutions: [],
@@ -3814,7 +3813,7 @@ describe("RuntimePodToolRunner", () => {
 		}
 
 		const hosts = await buildResumeTestHosts(async () => ({
-			contextEntries: [],
+			currentRequestMessage:null,messages: [],
 			thread: closedThread,
 			turnFacts: emptyResumeTurnFacts,
 			runtimeBindingToken: "runtime-binding-token-quiescent-resume",

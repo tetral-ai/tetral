@@ -58,7 +58,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	tracer := &bridgeExecutionQueryTracer{}
 	client := dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer))
 	scope := bridgeAPIScope(sessionID, threadID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_cleanup_narrow_idle", 4, "session.status_idle", `{"type":"session.status_idle"}`)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_cleanup_narrow_idle", 4, "session.status_idle", `{"type":"session.status_idle","stop_reason":{"type":"end_turn"}}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,status_event_id,binding_id,binding_generation,idle_since,cleanup_job_id,cleanup_enqueued_at,created_at,updated_at
 	) VALUES ('default',$1,'idle','evt_cleanup_narrow_idle','bind_cleanup_narrow_tool',1,'2026-01-01T00:00:00Z','cleanup_narrow_tool','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
@@ -916,7 +916,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatalf("sandbox executions after ordinary approval cleanup = %#v; want none", payload.PendingSandboxExecutions)
 	}
 	foundCleanupPart := false
-	for _, entry := range payload.ContextEntries {
+	for _, entry := range payload.Messages {
 		for _, rawPart := range entry.Parts {
 			var part struct {
 				Type            string         `json:"type"`

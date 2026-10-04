@@ -143,6 +143,7 @@ describe("ThreadLoop", () => {
 	test("provider-call assembler builds the complete non-persistent LLM request shape", () => {
 		const input: Parameters<typeof assembleProviderCallRequest>[0] = {
 			identity: {
+				threadRole:"main",threadVisibility:"public",
 				workspaceId: "workspace_1",
 				sessionId: "sesn_1",
 				sessionThreadId: "thread_1",
@@ -206,6 +207,7 @@ describe("ThreadLoop", () => {
 			timeoutMs: 456,
 			runtimeAttachments: [],
 			request: {
+				outputContractVersion:2, modelRequestStartEventId:"", threadRole:1, threadVisibility:1,
 				requestId: "provider_request_1",
 				modelRequestId: "model_request_1",
 				requestKind:
@@ -538,7 +540,7 @@ describe("ThreadLoop", () => {
 			),
 		);
 		expect(result).toMatchObject({ type: "completed" });
-		expect(session.state.contextManager.entries()).toContainEqual(
+		expect(session.state.contextManager.historyMessages()).toContainEqual(
 			expect.objectContaining({
 				contextKind: "assistant",
 				parts: [
@@ -551,7 +553,7 @@ describe("ThreadLoop", () => {
 		);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.filter((message) =>
 					message.parts.some(
 						(part) =>
@@ -613,7 +615,7 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toEqual({ type: "interrupted", discardHotState: true });
 		expect(providerCalls).toBe(0);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	test("runtime layer emits running, span, progress, span end, and idle around a normal provider call", async () => {
 		const session = new ThreadRuntime("sesn_1");
@@ -647,9 +649,9 @@ describe("ThreadLoop", () => {
 							timeline.push("provider:stream");
 						},
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "hello" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_651b7b6b0c300fff2432e92be31d9678",text:("hello")},
 							{
 								type: "finish",
 								finishReason: "stop",
@@ -736,9 +738,9 @@ describe("ThreadLoop", () => {
 						writer: malformedWriter,
 						onStream: (request) => providerRequests.push(request),
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "hello" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_39bfbdc865d4cf5a542ba1d78d1f26fb",text:("hello")},
 							{ type: "finish", finishReason: "stop" },
 						],
 					}),
@@ -801,13 +803,9 @@ describe("ThreadLoop", () => {
 		const queuedLlm = queuedLLMService(
 			[
 				[
-					{ type: "text-start", id: "summary-text" },
-					{
-						type: "text-delta",
-						id: "summary-text",
-						text_delta: oversizedSummary,
-					},
-					{ type: "text-end", id: "summary-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"summary-text",eventId:"evt_aefc27cc549ed50088107c15482511cf",text:(oversizedSummary)},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -821,13 +819,9 @@ describe("ThreadLoop", () => {
 					},
 				],
 				[
-					{ type: "text-start", id: "answer-text" },
-					{
-						type: "text-delta",
-						id: "answer-text",
-						text_delta: "answer after compaction",
-					},
-					{ type: "text-end", id: "answer-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"answer-text",eventId:"evt_5c9f7dbbd493a36c792b7c3f32375578",text:("answer after compaction")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -987,7 +981,7 @@ describe("ThreadLoop", () => {
 			"normal-provider-stream-start",
 		]);
 		const hotCheckpoint = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.find((message) => message.contextKind === "compaction");
 		expect(hotCheckpoint).toBeDefined();
 		expect(hotCheckpoint?.parts[0]).toMatchObject({ type: "text" });
@@ -1046,19 +1040,11 @@ describe("ThreadLoop", () => {
 		const llm = queuedLLMService(
 			[
 				[
-					{ type: "reasoning-start", id: "retry-discarded-reasoning" },
-					{
-						type: "reasoning-delta",
-						id: "retry-discarded-reasoning",
-						text_delta: failedReasoning,
-					},
-					{ type: "reasoning-end", id: "retry-discarded-reasoning" },
-					{ type: "text-start", id: "retry-discarded-text" },
-					{
-						type: "text-delta",
-						id: "retry-discarded-text",
-						text_delta: failedDraft,
-					},
+					{type:"thinking-started" as const,providerPartId:"retry-discarded-reasoning",eventId:"evt_b8be485ddc86457e9222e090503bafdc"},
+
+					{type:"reasoning-complete" as const,providerPartId:"retry-discarded-reasoning",thinkingEventId:"evt_b8be485ddc86457e9222e090503bafdc",text:(failedReasoning)},
+
+
 					{
 						type: "provider-error",
 						error: runtimeFailureFromProviderError(
@@ -1072,23 +1058,15 @@ describe("ThreadLoop", () => {
 					},
 				],
 				[
-					{ type: "reasoning-start", id: "retry-success-reasoning-1" },
-					{
-						type: "reasoning-delta",
-						id: "retry-success-reasoning-1",
-						text_delta: successfulReasoningFirst,
-					},
-					{ type: "reasoning-end", id: "retry-success-reasoning-1" },
-					{ type: "reasoning-start", id: "retry-success-reasoning-2" },
-					{
-						type: "reasoning-delta",
-						id: "retry-success-reasoning-2",
-						text_delta: successfulReasoningSecond,
-					},
-					{ type: "reasoning-end", id: "retry-success-reasoning-2" },
-					{ type: "text-start", id: "answer-text" },
-					{ type: "text-delta", id: "answer-text", text_delta: "recovered" },
-					{ type: "text-end", id: "answer-text" },
+					{type:"thinking-started" as const,providerPartId:"retry-success-reasoning-1",eventId:"evt_2b8e755b3af49c663891cdc6579b6c0c"},
+
+					{type:"reasoning-complete" as const,providerPartId:"retry-success-reasoning-1",thinkingEventId:"evt_2b8e755b3af49c663891cdc6579b6c0c",text:(successfulReasoningFirst)},
+					{type:"thinking-started" as const,providerPartId:"retry-success-reasoning-2",eventId:"evt_01c3fe96a4ca7d5ad0fc72d7f79cee48"},
+
+					{type:"reasoning-complete" as const,providerPartId:"retry-success-reasoning-2",thinkingEventId:"evt_01c3fe96a4ca7d5ad0fc72d7f79cee48",text:(successfulReasoningSecond)},
+
+
+					{type:"text-complete" as const,providerPartId:"answer-text",eventId:"evt_3e8f68d32bcb9d8c0860993842bf9b58",text:("recovered")},
 					{ type: "finish", finishReason: "stop" },
 				],
 			],
@@ -1165,7 +1143,7 @@ describe("ThreadLoop", () => {
 			new Set(requestEnds.map((envelope) => envelope.modelRequestId)).size,
 		).toBe(2);
 		const durableEvents = JSON.stringify(appended);
-		const hotContext = JSON.stringify(session.state.contextManager.entries());
+		const hotContext = JSON.stringify(session.state.contextManager.historyMessages());
 		expect(durableEvents).not.toContain(failedReasoning);
 		expect(durableEvents).not.toContain(failedDraft);
 		expect(hotContext).not.toContain(failedReasoning);
@@ -1275,9 +1253,9 @@ describe("ThreadLoop", () => {
 			},
 		};
 		const success = llmService([
-			{ type: "text-start", id: "text_after_retry" },
-			{ type: "text-delta", id: "text_after_retry", text_delta: "done" },
-			{ type: "text-end", id: "text_after_retry" },
+
+
+			{type:"text-complete" as const,providerPartId:"text_after_retry",eventId:"evt_f26b4d31c2ecca505794caae3b964533",text:("done")},
 			{ type: "finish", finishReason: "stop" },
 		]);
 		let attempt = 0;
@@ -1363,13 +1341,9 @@ describe("ThreadLoop", () => {
 			},
 		};
 		const success = llmService([
-			{ type: "text-start", id: "text_after_provider_timeout" },
-			{
-				type: "text-delta",
-				id: "text_after_provider_timeout",
-				text_delta: "done",
-			},
-			{ type: "text-end", id: "text_after_provider_timeout" },
+
+
+			{type:"text-complete" as const,providerPartId:"text_after_provider_timeout",eventId:"evt_0c2888a55c19ca7b8e28b8d7970d24a5",text:("done")},
 			{ type: "finish", finishReason: "stop" },
 		]);
 		let attempt = 0;
@@ -1579,16 +1553,9 @@ describe("ThreadLoop", () => {
 											},
 										})
 									: Stream.fromIterable([
-											{
-												type: "text-start" as const,
-												id: "text_retry_override",
-											},
-											{
-												type: "text-delta" as const,
-												id: "text_retry_override",
-												text_delta: "done",
-											},
-											{ type: "text-end" as const, id: "text_retry_override" },
+
+
+											{type:"text-complete" as const,providerPartId:"text_retry_override",eventId:"evt_1ac02b487a3160ff8b3feb00dc6361da",text:("done")},
 											{
 												type: "finish" as const,
 												finishReason: "stop" as const,
@@ -1717,7 +1684,7 @@ describe("ThreadLoop", () => {
 		expect(providerCalled).toBe(false);
 		expect(appendedTypes).toEqual(["session.status_running"]);
 		expect(order).toEqual([]);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	test("provider-call assembly failure fails closed after running status but before assistant shell, span, and provider stream", async () => {
 		const order: string[] = [];
@@ -1786,7 +1753,7 @@ describe("ThreadLoop", () => {
 				stop_reason: { type: "retries_exhausted" },
 			},
 		]);
-		expect(session.state.contextManager.entries()).toEqual([
+		expect(session.state.contextManager.historyMessages()).toEqual([
 			{
 				messageSequence: 1,
 				contextKind: "user",
@@ -1836,7 +1803,7 @@ describe("ThreadLoop", () => {
 		expect(order).toEqual([]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.map((message) => message.contextKind),
 		).toEqual(["user"]);
 	});
@@ -1862,9 +1829,9 @@ describe("ThreadLoop", () => {
 							(event) => event.type === "span.model_request_end",
 						),
 						events: [
-							{ type: "text-start", id: "text-1" },
-							{ type: "text-delta", id: "text-1", text_delta: "ok" },
-							{ type: "text-end", id: "text-1" },
+
+
+							{type:"text-complete" as const,providerPartId:"text-1",eventId:"evt_5d60896d6f4d5e7d830704784ef2e9e0",text:("ok")},
 							{
 								type: "finish",
 								finishReason: "stop",
@@ -1893,15 +1860,15 @@ describe("ThreadLoop", () => {
 			"span.model_request_end",
 		]);
 		expect(order).toEqual([]);
-		expect(session.state.contextManager.entries()).toEqual([
+		expect(session.state.contextManager.historyMessages()).toEqual([
 			{
 				messageSequence: 1,
 				contextKind: "user",
 				parts: [{ type: "text", text: "hello" }],
 			},
 		]);
-		expect(session.state.contextManager.openRequestDraft()).toEqual({
-			modelRequestId: expect.stringMatching(/^model_request-/),
+		expect(session.state.contextManager.currentAssistantMessage()).toEqual({
+			contextKind: "assistant",
 			messageSequence: 2,
 			parts: [{ type: "text", text: "ok" }],
 		});
@@ -1916,6 +1883,7 @@ describe("ThreadLoop", () => {
 		const order: string[] = [];
 		const requestEnds: Parameters<SessionEventWriter["writeRequestEnd"]>[0][] =
 			[];
+		const sequence = { eventSequence: 0, messageSequence: 0 };
 		const writer = writerFrom(
 			(envelope) => {
 				order.push(`event:${envelope.event.type}`);
@@ -1929,8 +1897,10 @@ describe("ThreadLoop", () => {
 			async (envelope) => {
 				order.push("event:span.model_request_end");
 				requestEnds.push(envelope);
-				return requestEndResultForTest(envelope);
+				return requestEndResultForTest(envelope, undefined, sequence);
 			},
+			[],
+			sequence,
 		);
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
@@ -1941,32 +1911,16 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						writer,
 						events: [
-							{
-								type: "reasoning-start",
-								id: "reasoning-1",
-								providerMetadata: {
+							{type:"thinking-started" as const,providerPartId:"reasoning-1",eventId:"evt_1af50a96b5152331d00e01d98fade45d"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-1",thinkingEventId:"evt_1af50a96b5152331d00e01d98fade45d",text:("thinking"),providerMetadata:Object.assign({},{
 									anthropic: { signature: "sig_round_trip" },
-								},
-							},
-							{
-								type: "reasoning-delta",
-								id: "reasoning-1",
-								text_delta: "thinking",
-							},
-							{ type: "reasoning-end", id: "reasoning-1" },
-							{
-								type: "reasoning-start",
-								id: "reasoning-2",
-								providerMetadata: {
+								})},
+							{type:"thinking-started" as const,providerPartId:"reasoning-2",eventId:"evt_3872005c051f9b8281c42634add0b30e"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-2",thinkingEventId:"evt_3872005c051f9b8281c42634add0b30e",text:("again"),providerMetadata:Object.assign({},{
 									openai: { encrypted_content: "ciphertext" },
-								},
-							},
-							{
-								type: "reasoning-delta",
-								id: "reasoning-2",
-								text_delta: "again",
-							},
-							{ type: "reasoning-end", id: "reasoning-2" },
+								})},
 							{ type: "finish", finishReason: "stop" },
 						],
 					}),
@@ -2025,19 +1979,11 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						writer,
 						events: [
-							{
-								type: "reasoning-start",
-								id: "reasoning-1",
-								providerMetadata: {
+							{type:"thinking-started" as const,providerPartId:"reasoning-1",eventId:"evt_f217ee0e42d954f02a55712a998a5750"},
+
+							{type:"reasoning-complete" as const,providerPartId:"reasoning-1",thinkingEventId:"evt_f217ee0e42d954f02a55712a998a5750",text:("must not stabilize"),providerMetadata:Object.assign({},{
 									anthropic: { signature: "sig_uncommitted" },
-								},
-							},
-							{
-								type: "reasoning-delta",
-								id: "reasoning-1",
-								text_delta: "must not stabilize",
-							},
-							{ type: "reasoning-end", id: "reasoning-1" },
+								})},
 							{ type: "finish", finishReason: "stop" },
 						],
 					}),
@@ -2047,7 +1993,7 @@ describe("ThreadLoop", () => {
 		expect(result).toMatchObject({ type: "failed" });
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.flatMap((message) => message.parts)
 				.some((part) => part.type === "reasoning"),
 		).toBe(false);
@@ -2156,20 +2102,12 @@ describe("ThreadLoop", () => {
 							providerRequests.push(request);
 						},
 						events: [
-							{ type: "reasoning-start", id: "retry-reasoning-1" },
-							{
-								type: "reasoning-delta",
-								id: "retry-reasoning-1",
-								text_delta: "first",
-							},
-							{ type: "reasoning-end", id: "retry-reasoning-1" },
-							{ type: "reasoning-start", id: "retry-reasoning-2" },
-							{
-								type: "reasoning-delta",
-								id: "retry-reasoning-2",
-								text_delta: "second",
-							},
-							{ type: "reasoning-end", id: "retry-reasoning-2" },
+							{type:"thinking-started" as const,providerPartId:"retry-reasoning-1",eventId:"evt_189cba30e46d6a261a141aeb3e915d93"},
+
+							{type:"reasoning-complete" as const,providerPartId:"retry-reasoning-1",thinkingEventId:"evt_189cba30e46d6a261a141aeb3e915d93",text:("first")},
+							{type:"thinking-started" as const,providerPartId:"retry-reasoning-2",eventId:"evt_dccb8371277234c96c4388606cfea776"},
+
+							{type:"reasoning-complete" as const,providerPartId:"retry-reasoning-2",thinkingEventId:"evt_dccb8371277234c96c4388606cfea776",text:("second")},
 							{ type: "finish", finishReason: "stop" },
 						],
 					}),
@@ -2178,7 +2116,7 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toMatchObject({ type: "completed" });
 		const residentSequences = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.map((entry) => entry.messageSequence);
 		expect(new Set(residentSequences).size).toBe(residentSequences.length);
 		expect(attempts).toHaveLength(3);
@@ -2203,7 +2141,7 @@ describe("ThreadLoop", () => {
 		).toEqual(["first", "second"]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.flatMap((message) => message.parts)
 				.filter((part) => part.type === "reasoning"),
 		).toHaveLength(2);
@@ -2258,13 +2196,9 @@ describe("ThreadLoop", () => {
 					runtimeThreadLoopLayer(loader, {
 						writer,
 						events: [
-							{ type: "reasoning-start", id: "failed-reasoning" },
-							{
-								type: "reasoning-delta",
-								id: "failed-reasoning",
-								text_delta: "discard me",
-							},
-							{ type: "reasoning-end", id: "failed-reasoning" },
+							{type:"thinking-started" as const,providerPartId:"failed-reasoning",eventId:"evt_3dc98236a6c6ac618c7653fc22430cc5"},
+
+							{type:"reasoning-complete" as const,providerPartId:"failed-reasoning",thinkingEventId:"evt_3dc98236a6c6ac618c7653fc22430cc5",text:("discard me")},
 							{
 								type: "provider-error",
 								error: runtimeFailureFromProviderError(
@@ -2292,7 +2226,7 @@ describe("ThreadLoop", () => {
 		expect(requestEnds[0]?.consumedAttachmentRefs ?? []).toEqual([]);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.flatMap((message) => message.parts)
 				.some((part) => part.type === "reasoning"),
 		).toBe(false);
@@ -2347,13 +2281,9 @@ describe("ThreadLoop", () => {
 						writer,
 						llmService: llmService(
 							[
-								{ type: "text-start", id: "answer-text" },
-								{
-									type: "text-delta",
-									id: "answer-text",
-									text_delta: "acknowledged",
-								},
-								{ type: "text-end", id: "answer-text" },
+
+
+								{type:"text-complete" as const,providerPartId:"answer-text",eventId:"evt_fbc6841839d9ed0354fc7148d770e795",text:("acknowledged")},
 								{ type: "finish", finishReason: "stop" },
 							],
 							(request) => {
@@ -2376,13 +2306,13 @@ describe("ThreadLoop", () => {
 			JSON.stringify(requests[0]?.context).match(/task result for next turn/g),
 		).toHaveLength(1);
 		expect(
-			JSON.stringify(session.state.contextManager.entries()).match(
+			JSON.stringify(session.state.contextManager.historyMessages()).match(
 				/task result for next turn/g,
 			),
 		).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
 		const committedNotification = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.find((message) =>
 				JSON.stringify(message).includes("task result for next turn"),
 			);
@@ -2452,7 +2382,7 @@ describe("ThreadLoop", () => {
 		expect(
 			session.state.threadTurnTransition().checkpoint.pendingInputContextSequences,
 		).toEqual([]);
-		expect(session.state.contextManager.entries()).toHaveLength(1);
+		expect(session.state.contextManager.historyMessages()).toHaveLength(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
 	});
 
@@ -2501,9 +2431,9 @@ describe("ThreadLoop", () => {
 						writer,
 						llmService: llmService(
 							[
-								{ type: "text-start", id: "answer" },
-								{ type: "text-delta", id: "answer", text_delta: "done" },
-								{ type: "text-end", id: "answer" },
+
+
+								{type:"text-complete" as const,providerPartId:"answer",eventId:"evt_a4813318cdd2cd7c2360038901c347d9",text:("done")},
 								{ type: "finish", finishReason: "stop" },
 							],
 							(request) => requests.push(request),
@@ -2523,7 +2453,7 @@ describe("ThreadLoop", () => {
 	test("an unresolved Tool Call blocks the next provider request at the Runtime boundary", async () => {
 		const session = new ThreadRuntime("sesn_unresolved_tool_call");
 		const toolUseEventId = "event_tool_unresolved";
-		session.state.contextManager.replaceEntries([
+		session.state.contextManager.replaceMessages([
 			RuntimeContextEntrySchema.parse({
 				messageSequence: 1,
 				contextKind: "assistant",
@@ -2538,7 +2468,7 @@ describe("ThreadLoop", () => {
 			}),
 		]);
 		session.state.markPersistentContextLoaded();
-		session.state.installThreadTurn(
+		session.state.installThreadCheckpoint(
 			{
 				pendingInputContextSequences: [],
 				request: {
@@ -2561,10 +2491,11 @@ describe("ThreadLoop", () => {
 					],
 				},
 			},
-			{
-				routes: [{ toolUseEventId, disposition: "hot_execution" }],
-			},
 		);
+  session.state.installCurrentRequestMessage({modelRequestId:"request_unresolved_tool_call",assistantMessageSequence:1});
+  session.state.registerActiveTool({toolUseEventId,modelRequestId:"request_unresolved_tool_call",modelToolCallId:"call_unresolved",assistantMessageSequence:1,disposition:"hot_execution"});
+  session.state.installThreadTurn(session.state.threadTurnTransition().checkpoint,{routes:[{toolUseEventId,disposition:"hot_execution"}]});
+
 		let providerCalls = 0;
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
@@ -2699,7 +2630,7 @@ describe("ThreadLoop", () => {
 		expect(loader.commitCalls).toHaveLength(2);
 		expect(providerCalls).toBe(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
-		expect(JSON.stringify(session.state.contextManager.entries())).toContain(
+		expect(JSON.stringify(session.state.contextManager.historyMessages())).toContain(
 			"task result recovered from the replayed receipt",
 		);
 	});
@@ -2826,7 +2757,7 @@ describe("ThreadLoop", () => {
 		expect(loader.commitCalls).toHaveLength(2);
 		expect(providerCalls).toBe(1);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
-		expect(JSON.stringify(session.state.contextManager.entries())).toContain(
+		expect(JSON.stringify(session.state.contextManager.historyMessages())).toContain(
 			"continue after rejected notification",
 		);
 		expect(appended.filter((event) => event.type === "session.error")).toEqual(
@@ -2859,13 +2790,9 @@ describe("ThreadLoop", () => {
 				},
 			],
 			[
-				{ type: "text-start", id: "current-answer" },
-				{
-					type: "text-delta",
-					id: "current-answer",
-					text_delta: "current turn recovered",
-				},
-				{ type: "text-end", id: "current-answer" },
+
+
+				{type:"text-complete" as const,providerPartId:"current-answer",eventId:"evt_65a509b9c3fa4825449419512d0c1a10",text:("current turn recovered")},
 				{ type: "finish", finishReason: "stop" },
 			],
 		];
@@ -2970,7 +2897,7 @@ describe("ThreadLoop", () => {
 		expect(result).toEqual({ type: "interrupted", discardHotState: true });
 		expect(providerCalls).toBe(0);
 		expect(session.state.peekAcceptedInput()).toBeUndefined();
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 	for (const testCase of [
 		{
@@ -3050,7 +2977,7 @@ describe("ThreadLoop", () => {
 			});
 			expect(JSON.stringify(appended)).not.toContain('"type":"retrying"');
 			expect(JSON.stringify(appended)).not.toMatch(/credit|balance|billing|platform key|raw credential/i);
-			expect(session.state.contextManager.entries().some((entry) => entry.contextKind === "assistant")).toBe(false);
+			expect(session.state.contextManager.historyMessages().some((entry) => entry.contextKind === "assistant")).toBe(false);
 
 			expect(
 				session.state.enqueueAcceptedInput(
@@ -3157,7 +3084,7 @@ describe("ThreadLoop", () => {
 		expect(JSON.stringify(appended)).not.toContain('"type":"retrying"');
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.some((message) => message.contextKind === "assistant"),
 		).toBe(false);
 	});
@@ -3693,6 +3620,8 @@ function providerInput(
 ): ProviderCallAssemblyInput {
 	return {
 		identity: {
+			threadRole: requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER ? "approval_reviewer" : "main",
+			threadVisibility: requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER ? "internal" : "public",
 			workspaceId: "workspace_1",
 			sessionId: "sesn_1",
 			sessionThreadId: "thread_1",

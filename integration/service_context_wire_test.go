@@ -55,8 +55,8 @@ type bridgeLoadContextMCPTool struct {
 }
 
 type bridgeLoadContextPayload struct {
-	ContextEntries           []bridgeRuntimeContextEntry          `json:"contextEntries"`
-	OpenRequestDraft         *bridgeRuntimeOpenRequestDraft       `json:"openRequestDraft"`
+	Messages                 []bridgeRuntimeContextEntry          `json:"messages"`
+	CurrentRequestMessage    *bridgeRuntimeCurrentRequestMessage  `json:"currentRequestMessage"`
 	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
@@ -211,8 +211,7 @@ type bridgeRuntimeContextEntry struct {
 	Parts           []json.RawMessage `json:"parts"`
 }
 
-type bridgeRuntimeOpenRequestDraft struct {
-	ModelRequestID  string            `json:"modelRequestId"`
-	MessageSequence int64             `json:"messageSequence"`
-	Parts           []json.RawMessage `json:"parts"`
+type bridgeRuntimeCurrentRequestMessage struct {
+	ModelRequestID           string `json:"modelRequestId"`
+	AssistantMessageSequence int64  `json:"assistantMessageSequence"`
 }

@@ -106,17 +106,17 @@ export async function closeFailedThreadRun(
 	) {
 		return result;
 	}
-	const durableTurnId = custody.activeTurnId(session);
-	if (durableTurnId === undefined) {
-		return result;
-	}
+	let durableTurnId:string|undefined;let reviewerRequest:boolean;
+ try {durableTurnId=custody.activeTurnId(session);reviewerRequest=session.state.threadTurnTransition().checkpoint.request?.requestKind==="approval_reviewer";}catch {
+  session.state.invalidateResidentState();
+  return {...result,releaseSession:{reason:"event_write_failed"}};
+ }
+ if(durableTurnId===undefined)return result;
 	const failure =
 		"type" in result.error
 			? result.error
 			: runtimeFailureFromProviderError(result.error);
-	const reviewerRequest =
-		session.state.threadTurnTransition().checkpoint.request?.requestKind ===
-		"approval_reviewer";
+
 	if (reviewerRequest || !isRuntimeTerminationFailure(failure)) {
 		if (!reviewerRequest) {
 			// A failed provider Turn closes before any concurrently admitted input
@@ -865,7 +865,7 @@ export function finishIdleCompletionCreate(
 	}
 	const payload =
 		failure === undefined
-			? finalAssistantText(runtimeThread.state.contextManager.entries())
+			? finalAssistantText(runtimeThread.state.contextManager.historyMessages())
 			: completionMailErrorPayload(failure.message);
 	return completionMailText(
 		[

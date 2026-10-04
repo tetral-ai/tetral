@@ -282,7 +282,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	}
 	ordinaryMember, ordinaryMemberErr := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_late_message", ModelRequestId: "mreq_reviewer_composition_parent",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"late"}]}`,
+		PreallocatedEventId: proto.String("evt_00000000000000000000000000000009"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"late"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("late"),
 	})
 	if ordinaryMember != nil || status.Code(ordinaryMemberErr) != codes.FailedPrecondition {

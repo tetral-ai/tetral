@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import type { CallOptions, ServiceError } from "@grpc/grpc-js";
@@ -148,6 +149,8 @@ const runner = new RuntimePodToolRunner({
 	subAgentRunHost: () => childHost,
 });
 const session = new ThreadRuntime({
+	threadRole: "main",
+	threadVisibility: "public",
 	workspaceId: input.workspaceId,
 	sessionId: input.sessionId,
 	sessionThreadId: input.sessionThreadId,
@@ -168,7 +171,7 @@ const llmService = {
 		if (providerInvocations === 1) {
 			return Stream.fromIterable([
 				{
-					type: "tool-call" as const,
+					type: "tool-call-complete" as const,
 					id: "call_subagent_production",
 					toolName: "spawn_agent",
 					input: {
@@ -198,13 +201,9 @@ const llmService = {
 			});
 		}
 		return Stream.fromIterable([
-			{ type: "text-start" as const, id: "subagent-complete" },
-			{
-				type: "text-delta" as const,
-				id: "subagent-complete",
-				text_delta: "child started",
-			},
-			{ type: "text-end" as const, id: "subagent-complete" },
+
+
+			{type:"text-complete" as const,providerPartId:"subagent-complete",eventId:`evt_${createHash("sha256").update(JSON.stringify(["subagent-production-composition.ts", request.sessionId, request.modelRequestId, "subagent-complete"])).digest("hex").slice(0,32)}`,text:("child started")},
 			{ type: "finish" as const, finishReason: "stop" as const },
 		]);
 	},

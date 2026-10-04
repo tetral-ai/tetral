@@ -18,7 +18,7 @@ const logs:unknown[]=[];
 const app=createProviderGatewayApp({config,logger:{info:r=>logs.push(r),error:r=>logs.push(r)},tokenReviewClient:{createTokenReview:async()=>({authenticated:true,audiences:["tetral-internal-grpc"],username:"system:serviceaccount:tetral-agent-runtime:agent-runtime",podUid:podUID})},providerStreamer:{stream:input=>registry.stream({...input,credential:{source:"session",authType:"provider_api_key",providerId:"anthropic",supplyMode:"anthropic-api-key",vaultId:"fixture",credentialId:"fixture",accessMode:"api_key",apiKey:"fixture-provider-key"}})}});
 const started=await app.start();
 const client=new RuntimePodGatewayClient({address:`127.0.0.1:${started.grpcPort}`,tokenPath:"unused",metadataFactory:async()=>{const md=new Metadata();md.set("authorization","Bearer fixture-runtime");return md;}});
-const state=async()=>await(await fetch(`${backend}/state`)).json() as {starts:number;cancelled:number;completed:number;active:number;markers:string[]};
+const state=async()=>await(await fetch(`${backend}/state`)).json() as {starts:number;cancelled:number;completed:number;active:number;markers:string[]|null};
 async function until(check:()=>Promise<boolean>){const deadline=Date.now()+10000;while(!await check()){assert(Date.now()<deadline,"observable condition timed out");await new Promise(resolve=>setTimeout(resolve,10));}}
 async function control(action:string,marker:string){assert.equal((await fetch(`${backend}/${action}?marker=${marker}`)).status,200);}
 async function open(marker:string){
@@ -32,8 +32,8 @@ async function open(marker:string){
  const completion=consumed.then(async()=>{const result=await handle.completion;const providerError=events.find(event=>event.providerError)?.providerError?.error;record(providerError?.code??(result.outcome==="eof"?(events.some(event=>event.finish)?"success":"incomplete_stream"):result.outcome));return result;},error=>{record("transport_error");throw error;});void completion.catch(()=>{});
  return{handle,events,join:async()=>await completion,marker};
 }
-async function partial(stream:Awaited<ReturnType<typeof open>>){await until(async()=>stream.events.some(e=>e.text?.text===`${stream.marker} partial`));}
-function assertOwnFrames(stream:Awaited<ReturnType<typeof open>>){for(const e of stream.events)if(e.text?.text)assert.equal(e.text.text,`${stream.marker} partial`);}
+async function partial(stream:Awaited<ReturnType<typeof open>>){await until(async()=>{const snapshot=await state();return snapshot.markers!==null&&snapshot.markers.includes(stream.marker);});assert(!stream.events.some(event=>event.textComplete),"partial SDK text must remain private before completion");}
+function assertOwnFrames(stream:Awaited<ReturnType<typeof open>>){for(const e of stream.events)if(e.textComplete?.text)assert.equal(e.textComplete.text,`${stream.marker} partial`);}
 try{
  if(variant==="admission_cancel"){
   const a=await open("replica_capacity_a"),b=await open("replica_capacity_b");await partial(a);await partial(b);

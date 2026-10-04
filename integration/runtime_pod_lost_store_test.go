@@ -177,7 +177,7 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 		t.Fatalf("decode pod-loss terminal context: %v", err)
 	}
 	memberCounts := map[string]map[string]int{}
-	for _, entry := range cold.ContextEntries {
+	for _, entry := range cold.Messages {
 		for _, rawPart := range entry.Parts {
 			var part struct {
 				Type            string `json:"type"`
@@ -604,6 +604,13 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 				t, admin, "default", sessionID, threadID, modelRequestID,
 				toolUseEventID, "tool-call-pod-loss-approval-"+suffix, "Write",
 			)
+			// The cold content and durable approval route describe the same input.
+			// This fixture's generic Tool-message seed otherwise uses an empty object.
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
+				SET data_json=jsonb_set(data_json::jsonb,'{parts,0,canonicalInput}','{"file_path":"src/a.ts"}'::jsonb)::text
+				WHERE workspace_id='default' AND session_id=$1 AND source_event_id=$2`, sessionID, toolUseEventID); err != nil {
+				t.Fatalf("seed matching approval content: %v", err)
+			}
 			if _, err := admin.ExecContext(context.Background(),
 				`INSERT INTO session_pending_tool_uses (
 					workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,

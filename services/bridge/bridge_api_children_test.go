@@ -249,9 +249,22 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_spawn_prefix_"+name, "evt_spawn_prefix_user_"+name, 1)
+			if _, err := admin.Exec(`UPDATE session_messages SET data_json='{"parts":[{"type":"text","text":"prior-user"}]}' WHERE session_id=$1 AND sequence=1`, sessionID); err != nil {
+				t.Fatal(err)
+			}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+			store.RuntimeBindingTokenHMACKey = []byte("child-content-test-binding-key")
 			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_prefix_start_"+name, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 1)
+			writeText := func(requestID, writeID, eventID, text string) {
+				t.Helper()
+				payload, _ := json.Marshal(map[string]any{"type": "agent.message", "content": []any{map[string]any{"type": "text", "text": text}}})
+				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID, EventType: "agent.message", PayloadJson: string(payload), PreallocatedEventId: &eventID, AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: text}}}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeText(modelRequestID, "source-text", "evt_00000000000000000000000000000021", "source-assistant")
 			inputJSON := `{"task_name":"worker","agent_type":"worker","fork_turns":"all"}`
 			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_tool_" + name, ModelRequestId: modelRequestID,
@@ -290,6 +303,28 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			}
 			if len(entries) != 1 || entries[0].MessageSequence != 1 || strings.Contains(entriesJSON, "spawn_agent") || strings.Contains(entriesJSON, "call_spawn_prefix_") {
 				t.Fatalf("%s child prefix = %s; want prior user context without source Assistant", name, entriesJSON)
+			}
+			laterRequest := modelRequestID
+			if requestEnded {
+				laterRequest = modelRequestID + "_later"
+				seedBridgeAPIRequestStart(t, store, scope, "later-start", laterRequest, runtimecontrol.RequestKindAgentProviderRequest, toolUse.GetCommitted().GetAssignedMessageSequence())
+			}
+			writeText(laterRequest, "later-text", "evt_00000000000000000000000000000022", "late-parent-growth")
+			var after string
+			if err := admin.QueryRow(`SELECT entries_json FROM session_thread_context_prefixes WHERE workspace_id='default' AND session_id=$1 AND child_thread_id=$2`, sessionID, created.GetCommitted().GetChildThreadId()).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if after != entriesJSON || !strings.Contains(after, "prior-user") || strings.Contains(after, "source-assistant") || strings.Contains(after, "late-parent-growth") {
+				t.Fatalf("stored child prefix changed after parent append: %s", after)
+			}
+			childScope := proto.Clone(scope).(*bridgev1.RuntimeScope)
+			childScope.SessionThreadId = created.GetCommitted().GetChildThreadId()
+			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(loaded.GetContextJson(), "prior-user") || strings.Contains(loaded.GetContextJson(), "source-assistant") || strings.Contains(loaded.GetContextJson(), "late-parent-growth") {
+				t.Fatalf("cold child context changed after parent append: %s", loaded.GetContextJson())
 			}
 		})
 	}

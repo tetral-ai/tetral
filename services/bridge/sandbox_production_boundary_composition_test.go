@@ -276,10 +276,7 @@ func testPostgreSQLSandboxProductionBoundaryLostACKAndLeaseTakeover(
 		t.Fatalf("decode Sandbox composition context: %v", err)
 	}
 	providerInputFound := false
-	contextEntries := contextPayload.ContextEntries
-	if contextPayload.OpenRequestDraft != nil {
-		contextEntries = append(contextEntries, bridgeRuntimeContextEntry{Parts: contextPayload.OpenRequestDraft.Parts})
-	}
+	contextEntries := contextPayload.Messages
 	for _, entry := range contextEntries {
 		for _, rawPart := range entry.Parts {
 			var part map[string]any
@@ -323,6 +320,10 @@ type sandboxProductionBoundaryBridgeServer struct {
 	settlementACKDropped bool
 	toolDeclarations     []*bridgev1.WriteEventRequest
 	toolReceipts         []*bridgev1.WriteEventResponse
+}
+
+func (s *sandboxProductionBoundaryBridgeServer) LoadContext(ctx context.Context, request *bridgev1.LoadContextRequest) (*bridgev1.LoadContextResponse, error) {
+	return s.store.LoadContext(ctx, request)
 }
 
 func (s *sandboxProductionBoundaryBridgeServer) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {

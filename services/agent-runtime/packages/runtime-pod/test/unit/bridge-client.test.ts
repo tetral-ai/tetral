@@ -182,7 +182,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		expect(bridge.approvalCloseRequests).toHaveLength(1);
 	});
 
-	test("loads sealed context and the open Request draft as direct durable facts", async () => {
+	test("loads unified committed messages and current request identity as direct durable facts", async () => {
 		const bridge = new TypedBridge();
 		const loader = new BridgeAPIContextLoader(options(bridge));
 
@@ -196,7 +196,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				handoffId: "",
 			},
 		]);
-		expect(loaded.contextEntries).toEqual([
+		expect(loaded.messages).toEqual([
 			{
 				messageSequence: 1,
 				contextKind: "user",
@@ -222,11 +222,15 @@ describe("Bridge operation-specific Runtime adapters", () => {
 					},
 				],
 			},
+			{
+				messageSequence: 3,
+				contextKind: "assistant",
+				parts: [{ type: "text", text: "draft" }],
+			},
 		]);
-		expect(loaded.openRequestDraft).toEqual({
+		expect(loaded.currentRequestMessage).toEqual({
 			modelRequestId: "mrq_open",
-			messageSequence: 3,
-			parts: [{ type: "text", text: "draft" }],
+			assistantMessageSequence: 3,
 		});
 	});
 
@@ -234,13 +238,30 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		const bridge = new TypedBridge();
 		bridge.contextJson = JSON.stringify({
 			...durableContext(),
-			contextEntries: [{ id: "legacy_message" }],
+			messages: [{ id: "legacy_message" }],
 		});
 		const loader = new BridgeAPIContextLoader(options(bridge));
 
 		await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject(
 			{ code: "schema_mismatch" },
 		);
+	});
+
+	test("rejects retired split content fields and requires an explicit current reference", async () => {
+		for (const invalid of [
+			{ ...durableContext(), contextEntries: [] },
+			{ ...durableContext(), openRequestDraft: null },
+			{ ...durableContext(), currentRequestMessage: undefined },
+		]) {
+			const bridge = new TypedBridge();
+			bridge.contextJson = JSON.stringify(invalid);
+			const loader = new BridgeAPIContextLoader(options(bridge));
+			await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject({ code: "schema_mismatch" });
+		}
+		const bridge = new TypedBridge();
+		bridge.contextJson = JSON.stringify({ ...durableContext(), currentRequestMessage: null });
+		const loader = new BridgeAPIContextLoader(options(bridge));
+		expect((await loader.loadThreadContext(threadScope())).currentRequestMessage).toBeNull();
 	});
 
 	test("rejects unknown top-level cold fields with safe phase diagnostics", async () => {
@@ -304,14 +325,14 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				context: () =>
 					JSON.stringify({
 						...durableContext(),
-						contextEntries: [{ canary }],
+						messages: [{ canary }],
 					}),
 			},
 			{
-				phase: "open_request_draft_parse",
-				reason: "invalid_open_request_draft_shape",
+				phase: "current_request_message_parse",
+				reason: "invalid_current_request_message_shape",
 				context: () =>
-					JSON.stringify({ ...durableContext(), openRequestDraft: canary }),
+					JSON.stringify({ ...durableContext(), currentRequestMessage: canary }),
 			},
 			{
 				phase: "turn_facts_parse",
@@ -755,7 +776,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		const bridge = new TypedBridge();
 		bridge.writeEventResponse = {
 			committed: {
-				eventId: "evt_1",
+				eventId: "evt_00000000000000000000000000000001",
 				eventSequence: 8,
 				assignedMessageSequence: 4,
 				createdToolUseEventIds: ["tool_evt_1"],
@@ -765,6 +786,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		const envelope: SessionEventEnvelope = {
 			...eventScope("write_1"),
 			modelRequestId: "mrq_1",
+			preallocatedEventId: "evt_00000000000000000000000000000001",
 			event: {
 				type: "agent.message",
 				content: [{ type: "text", text: "hello" }],
@@ -798,8 +820,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		await expect(writer.append(envelope)).resolves.toEqual({
 			ok: true,
 			type: "committed",
-			eventId: "evt_1",
-			assistant: { messageSequence: 4, createdToolUseEventIds: ["evt_1"] },
+			eventId: "evt_00000000000000000000000000000001",
+			assistant: { messageSequence: 4, createdToolUseEventIds: ["evt_00000000000000000000000000000001"] },
 		});
 		expect(bridge.writeEventRequests[0]?.assistantContextDelta).toEqual({
 			parts: [
@@ -819,6 +841,35 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				},
 			],
 		});
+		expect(bridge.writeEventRequests[0]?.preallocatedEventId).toBe(envelope.preallocatedEventId);
+	});
+
+	test("accepts only matching preallocated text and thinking receipt identities", async () => {
+		const eventId = "evt_00000000000000000000000000000001";
+		for (const eventType of ["agent.message", "agent.thinking"] as const) {
+			for (const outcome of ["committed", "duplicate"] as const) {
+				const bridge = new TypedBridge();
+				const writer = new BridgeAPIEventWriter(options(bridge));
+				const envelope: SessionEventEnvelope = {
+					...eventScope(`identity_${eventType}_${outcome}`),
+					modelRequestId: "mrq_1", preallocatedEventId: eventId,
+					event: eventType === "agent.message"
+						? { type: eventType, content: [{ type: "text", text: "alpha" }] }
+						: { type: eventType },
+					...(eventType === "agent.message" ? {
+						assistantContextAppend: { parts: [{ type: "text" as const, text: "alpha", truncated: false }] },
+					} : {}),
+				};
+				const receipt = { eventId, eventSequence: 8, createdToolUseEventIds: [],
+					...(eventType === "agent.message" ? { assignedMessageSequence: 4 } : {}),
+				};
+				bridge.writeEventResponse = { [outcome]: receipt };
+				await expect(writer.append(envelope)).resolves.toMatchObject({ ok: true, type: outcome, eventId });
+				bridge.writeEventResponse = { [outcome]: { ...receipt, eventId: "evt_00000000000000000000000000000002" } };
+				await expect(writer.append(envelope)).resolves.toMatchObject({ ok: false, error: { code: "schema_mismatch" } });
+				expect(bridge.writeEventRequests.at(-1)?.preallocatedEventId).toBe(eventId);
+			}
+		}
 	});
 
 	test("declares provider and canonical execution Tool inputs separately", async () => {
@@ -1154,6 +1205,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				serverToolUse: undefined,
 			},
 			repairKey: "repair_key_1",
+			reasoningPrefixContextDelta: undefined,
 		});
 
 		bridge.repairResponse = {
@@ -1163,6 +1215,25 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		await expect(
 			committer.commitInternalToolRepair(internalRepair()),
 		).resolves.toMatchObject({ ok: false, error: { code: "unavailable" } });
+	});
+
+	test("internal repair preserves ordered signed reasoning before its terminal call and result", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIInternalToolRepairCommitter(options(bridge));
+		bridge.repairResponse = {
+			committed: { repairEventId: "repair_evt_1", assignedMessageSequence: 9 },
+		};
+		await expect(committer.commitInternalToolRepair({
+			...internalRepair(),
+			reasoningPrefixContextDelta: { parts: [
+				{ type: "reasoning", text: "first", truncated: false, providerMetadata: { anthropic: { signature: "signed-first" } } },
+				{ type: "reasoning", text: "second", truncated: false },
+			] },
+		})).resolves.toMatchObject({ ok: true, type: "committed", assignedMessageSequence: 9 });
+		expect(bridge.repairRequests[0]?.reasoningPrefixContextDelta).toEqual({ parts: [
+			{ reasoning: { text: "first", providerMetadataJson: '{"anthropic":{"signature":"signed-first"}}' } },
+			{ reasoning: { text: "second", providerMetadataJson: undefined } },
+		] });
 	});
 
 	test("runtime termination keeps its independent closed result union", async () => {
@@ -1443,7 +1514,7 @@ function eventScope(writeId: string) {
 
 function durableContext() {
 	return {
-		contextEntries: [
+		messages: [
 			{
 				messageSequence: 1,
 				contextKind: "user",
@@ -1469,11 +1540,15 @@ function durableContext() {
 					},
 				],
 			},
+			{
+				messageSequence: 3,
+				contextKind: "assistant",
+				parts: [{ type: "text", text: "draft" }],
+			},
 		],
-		openRequestDraft: {
+		currentRequestMessage: {
 			modelRequestId: "mrq_open",
-			messageSequence: 3,
-			parts: [{ type: "text", text: "draft" }],
+			assistantMessageSequence: 3,
 		},
 		turnFacts: { events: [], internalRepairs: [] },
 		thread: {

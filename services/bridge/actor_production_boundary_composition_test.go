@@ -524,8 +524,8 @@ func assertRuntimeDirectContextComposition(t *testing.T, contextJSON string) {
 	if err := json.Unmarshal([]byte(contextJSON), &direct); err != nil {
 		t.Fatalf("decode generated LoadContext direct facts: %v", err)
 	}
-	if _, ok := direct["contextEntries"]; !ok {
-		t.Fatalf("generated LoadContext omitted contextEntries: %s", contextJSON)
+	if _, ok := direct["messages"]; !ok {
+		t.Fatalf("generated LoadContext omitted messages: %s", contextJSON)
 	}
 	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
 	if err != nil {

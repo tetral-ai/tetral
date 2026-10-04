@@ -45,7 +45,7 @@ func validateStableReasoningBudget(parts []any) error {
 		if err != nil {
 			return status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
 		}
-		aggregateBytes += len(text) + len(metadata)
+		aggregateBytes += len(text) + len(runtimecontrol.RestoreJSONStringifySeparatorEscapes([]byte(metadata)))
 	}
 	if count > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
 		return status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
@@ -537,12 +537,19 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 	for _, eventID := range selection.GetRepairEventIds() {
 		declaredRepairs[eventID] = struct{}{}
 	}
-	rows, err := tx.Query(ctx, `SELECT event_id,
-		CASE WHEN type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END
-		FROM session_events
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND model_request_id=$4
-		  AND (type IN ('agent.tool_use','agent.mcp_tool_use') OR
-		       (type='agent.tool_result' AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'))`,
+	rows, err := tx.Query(ctx, `SELECT member.event_id,
+		CASE WHEN member.type IN ('agent.tool_use','agent.mcp_tool_use') THEN 'tool_use' ELSE 'repair' END,
+		EXISTS (SELECT 1 FROM session_events result
+		 WHERE result.workspace_id=member.workspace_id AND result.session_id=member.session_id
+		   AND result.session_thread_id=member.session_thread_id AND result.model_request_id=member.model_request_id
+		   AND result.type IN ('agent.tool_result','agent.mcp_tool_result')
+		   AND COALESCE(result.payload_json::jsonb ->> 'tool_use_event_id',
+		                result.payload_json::jsonb ->> 'tool_use_id',
+		                result.payload_json::jsonb ->> 'mcp_tool_use_id')=member.event_id)
+		FROM session_events member
+		WHERE member.workspace_id=$1 AND member.session_id=$2 AND member.session_thread_id=$3 AND member.model_request_id=$4
+		  AND (member.type IN ('agent.tool_use','agent.mcp_tool_use') OR
+		       (member.type='agent.tool_result' AND member.payload_json::jsonb ->> 'repair_kind'='invalid_tool'))`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetModelRequestId())
 	if err != nil {
@@ -553,11 +560,18 @@ func verifyProviderContextRetentionReferencesTx(ctx context.Context, tx *dbconne
 	matchedRepairs := 0
 	for rows.Next() {
 		var eventID, memberKind string
-		if err := rows.Scan(&eventID, &memberKind); err != nil {
+		var terminal bool
+		if err := rows.Scan(&eventID, &memberKind, &terminal); err != nil {
 			return err
 		}
 		if memberKind == "tool_use" {
 			if _, ok := declaredToolUses[eventID]; !ok {
+				// Abnormal retention may exclude completed siblings from provider
+				// history. It must still name every unsettled Tool, whose custody
+				// and eventual result cannot be discarded by context selection.
+				if terminal && (selection.GetDisposition() == "failed" || selection.GetDisposition() == "interrupted" || selection.GetDisposition() == "rescheduled") {
+					continue
+				}
 				return status.Error(codes.FailedPrecondition, "provider-context retention omits a request Tool Use")
 			}
 			matchedToolUses++

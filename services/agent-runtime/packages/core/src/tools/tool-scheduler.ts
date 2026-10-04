@@ -74,6 +74,11 @@ export class SessionToolCoordinator {
     this.#maxConcurrentTools = options.maxConcurrentTools ?? 8;
   }
 
+  /** Read-only session occupancy; identities and tool payloads stay with their owners. */
+  permitCounts(): { readonly running: number; readonly waiting: number } {
+    return { running: this.#running.size, waiting: this.#waiters.length };
+  }
+
   withPermit<A, E, R>(policy: ToolRunPolicy, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
     return Effect.flatMap(this.#acquire(policy), (release) =>
       effect.pipe(Effect.ensuring(Effect.sync(release))),

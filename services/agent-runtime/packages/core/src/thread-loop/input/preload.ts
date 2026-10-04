@@ -1,7 +1,7 @@
+import type { RuntimeCurrentRequestMessage } from "../../contracts/runtime.js";
 import type {
 	RuntimeContextEntry,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 } from "../../contracts/runtime.js";
 import type { ThreadContextPrefix } from "../../session/context-manager.js";
@@ -30,8 +30,8 @@ export interface RuntimeConfigPatchState extends RuntimeConfigurationPatch {
 /** Complete cold baseline installed before a resident thread serves commands. */
 export interface RuntimeThreadPreloadState extends RuntimeThreadAddressState {
 	readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly messages: readonly RuntimeContextEntry[];
+	readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 	readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
 	readonly turnToolRouteView?: ThreadToolRouteView | undefined;
 	readonly threadContextPrefix?: ThreadContextPrefix | undefined;

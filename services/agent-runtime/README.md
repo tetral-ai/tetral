@@ -42,12 +42,12 @@ invariants stated with them.
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
 | `ThreadRuntime` | `thread-loop/thread-runtime.ts` | one thread's binding identity, `ThreadState`, configuration and shared coordinators | recreated when the thread becomes resident; owns no durable truth |
 | `ThreadState` | `thread-loop/thread-state.ts` | canonical `ThreadTurnCheckpoint`, read-only route/input/media views, pending tool work and other reconstructible hot data | rebuilt from durable state on cold start; dispatch is never stored here |
-| `ContextManager` | `context-manager.ts` | provider-visible sealed entries, one optional open Assistant draft and an immutable child prefix | rebuilt from durable projection; mutates only after the owning operation's durable ACK |
+| `ContextManager` | `context-manager.ts` | one committed message store and an immutable child prefix; ThreadState supplies current-request association and historical eligibility | rebuilt from durable projection; mutates only after the owning operation's durable ACK |
 | `ThreadTurnCheckpoint` | `thread-loop/turn/checkpoint.ts` | canonical durable lifecycle projection for one thread | reconstructed from durable facts; contains no provider write identity or hot dispatch |
 | Turn views | `thread-loop/turn/types.ts`, `thread-loop/turn/checkpoint.ts`, and `ThreadState` | read-only accepted-input, attachment and Tool-route projections consulted with the checkpoint | derived from current hot/durable custody; not an independent lifecycle |
 | Reducer / transition | `thread-loop/turn/reducer.ts` | pure rules producing checkpoint, state, stable next step and an optional one-time dispatch | immutable result of one fact/view cut; owns no I/O or mutable data |
 | `ThreadLoop` | `thread-loop/thread-loop.ts` | sole fact-application and dispatch-execution authority for one thread | captures dispatch on the stack, performs external work, then applies the next durable fact |
-| `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
+| `RequestContentProcessor` | `accumulator.ts` | completed provider-event validation, reasoning prefix and ordered member submission | created per provider request; committed content belongs to ContextManager and execution registrations belong to ThreadState.activeTools |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; failure fallback requires an ACKed outcome, failed requests reach durable idle before trunk reuse, and uncertain outcomes evict only the addressed execution |
 
@@ -203,7 +203,7 @@ state are awaited Effects, never detached background work.
 | --- | --- |
 | `CommitInputs` | apply the caller-held accepted-input context drafts at the Bridge-assigned sequences after the committed result (including idempotent replay) |
 | `WriteEvent` | apply the closed event result and its optional Assistant context append; open or resolve pending waits |
-| `WriteRequestEnd` | validate current custody even when no Assistant draft exists; otherwise seal the open draft. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
+| `WriteRequestEnd` | validate current custody, append any trailing reasoning, and acknowledge the durable request outcome; committed Assistant content stays addressable for pending tools. An interrupt during an open provider request also applies the identity-matched input commit returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
 | `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
 
@@ -213,6 +213,16 @@ this fallback starts. The same joined-End application gates the idle and active
 paths; a stale result stops further writes, and a committed result that cannot
 be applied evicts the invalid resident projection for cold reconstruction.
 Already-closed requests do not receive a second End.
+
+Message and Thinking writes carry frozen preallocated event IDs and framed stable
+write keys. Committed and duplicate receipts must return that exact ID. A receipt
+that cannot be coherently applied invalidates residency and fences subsequent
+members. Reasoning prefixes are committed once with the next text/tool/invalid
+repair or the successful End transaction; empty text creates no Assistant member.
+Cold loads carry `messages` and an explicit nullable `currentRequestMessage`
+reference. Runtime validates it against the selected durable request, stages
+content and pending controls, and checks the full reducer/route projection before
+publishing residency. It never restores the retired split draft envelope.
 
 An interrupt delivery attempt reports a retryable Request-End failure through
 the current `ThreadRunSlot`; retryable attempt state is never promoted into the
@@ -300,24 +310,29 @@ Invariants a replacement must preserve:
 - Runtime applies a terminal cancellation to hot conversation context as exactly
   `{type:"cancelled"}`. Provider-facing context never carries its internal
   cancellation error or diagnostic.
-- Stream events echo the request identity and arrive well-formed: fragments in
-  order, one terminal event, each tool call at most once per id; any violation
-  closes the turn as a protocol error and discards uncommitted drafts.
+- Gateway output contract v2 carries RPC-scoped identity and consecutive frame
+  sequences. Runtime accepts ThinkingStarted, TextComplete, ReasoningComplete,
+  ToolCallComplete, and the existing terminal/attachment events. Retired fragment
+  enums are rejected. Completed text/thinking event IDs are globally unique;
+  provider part IDs are unique within their content kind.
 - A validated terminal is held until the Gateway gRPC stream reaches normal
   EOF. Runtime adapts grpc-js through a Web reader and owns one typed completion
   latch; EOF without a terminal, transport failure after a terminal, consumer
   cancellation, or expiry of the request timeout plus the fixed 10-second
   transport-completion allowance cannot be mistaken for success. Every
   non-EOF exit cancels the reader and generated call before the latch settles.
-- The stable `tool-call` is the execution boundary; `tool-input` fragments start
-  nothing.
+- Each ToolCallComplete reserves one provider-ordered semantic position. Its
+  durable Tool Use ACK installs a reference in activeTools. After permit/token
+  waits, every fresh or recovered execution revalidates that reference and reads
+  the canonical committed call before accepting or executing the tool.
 - The next request cannot start until the stream is terminal, the request end is
   ACKed, and every committed Tool Use has reached its existing settlement owner.
   A failed attempt's text remains durable audit history but is excluded from all
-  later provider requests. Runtime retains only exact terminal Tool Call/Result
-  pairs and their ordered reasoning; a nonterminal Tool Call stays in the private
-  open draft until that same Tool route settles, without executor replay or a
-  fabricated result.
+  later provider requests. Runtime normalizes abnormal requests to exact retained
+  Tool calls/results and associated reasoning, and withholds that whole message
+  from history while any retained tool is pending. Successful End makes the same
+  message eligible without relocating content. Tool settlement appends to its
+  exact registered message and applies the terminal fact before releasing work.
 - The pod is the only retry driver. The accepted Request End reschedule receipt
   carries the attempt and Bridge-effective deadline through hot or cold recovery;
   Runtime waits only the remaining deadline and re-issues exactly one request
@@ -645,9 +660,10 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/thread-loop/thread-turn-load.test.ts`, `thread-turn-transition.test.ts` | durable turn reconstruction and the closed transition table |
 | `core/test/unit/thread-loop/tool-execution.test.ts`, `closeout.test.ts` | post-ACK tool execution, continuation, interruption, and settlement |
 | `core/test/unit/thread-loop/compaction.test.ts` | proactive and reactive compaction lifecycle |
+| `integration/content_compaction_cycles_test.go` (repository root) | three actual SDK compaction/eviction cycles plus cold provider-context recovery; fixed external usage triggers the normal model threshold after bootstrap history exceeds the retained recent window, and fixed summaries verify exact committed checkpoints |
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
-| `core/test/unit/runtime-accumulator.test.ts` | per-turn `ProviderStreamAccumulator` framing that never leaks across turns |
+| `core/test/unit/request-content-processor.test.ts` | completed member ordering, exact ACK application, reasoning prefixes, pressure and ownership release |
 | `core/test/unit/session-event-writer.test.ts`, `runtime-context-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
 | `core/test/unit/turn-retry-budget.test.ts` | provider and compaction reschedule budgets |
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |
@@ -684,6 +700,32 @@ bounded operator classifications and identities. Stream backpressure and
 asynchronous stderr failures appear through the existing HTTP metrics endpoint.
 Startup and shutdown cleanup release logger timers/listeners without waiting
 for stderr, after the business resource owner completes its cleanup.
+
+Completed content records expose bridge acknowledgement and local application
+as separate stages. Their `output.size_bytes` is the UTF-8 size of the owning
+frozen canonical JSON (Assistant append, Thinking event, repair, settlement or
+End envelope), not protobuf or socket bytes. Size cohorts can be derived from
+these numeric samples; transport byte metrics remain separate. Continuation
+records expose the pre-End declaration/member barrier, permit admission, binding refresh,
+approval wait, execution acceptance, result settlement, cold reconstruction and
+cleanup join. Aggregate latency labels are closed operation, outcome and request
+classes; identities appear only in bounded Debug samples. Pending member count
+and bytes report submissions still owned through acknowledgement and application.
+Tool-fiber gauges cover fresh and recovered fiber lifetimes, including approval
+and permit waits, and release on fiber exit.
+A protected post-Finish member barrier finishes when its actual custody owners
+join; cancellation intent alone does not manufacture a cancelled wait sample.
+Cleanup observers read correlation without running the reducer, so damaged
+resident state cannot prevent the resource owner from closing its scope.
+
+Approval timing covers one hot residency span. The existing pending control owns
+a one-shot observation with source `user` or `auto_reviewer`; a decision completes
+it, and residency disposal records local observation cancellation. That
+cancellation does not cancel the durable approval. Started and outstanding
+metrics retain the denominator for incomplete observations. Cold reconstruction
+reports timing unavailable in a separate counter and a raw sample without a
+duration. It contributes neither zero nor a successful completion to latency
+summaries. These metrics do not measure total human wait across processes.
 
 The command attempts app shutdown before Runtime Core close even when startup,
 waiting or an earlier close rejects, and makes repeated shutdown calls share

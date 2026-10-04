@@ -4,6 +4,8 @@ import {
   ProviderAttachmentRejectionReason,
   ProviderFinishReason,
   ProviderRequestKind,
+  ProviderThreadRole,
+  ProviderThreadVisibility,
   ProviderStreamEventType,
   ProviderContextRole,
   SystemCacheHint,
@@ -20,6 +22,10 @@ import { createLLMService, streamLLMEvents } from "../../src/llm/llm-service.js"
 function request(): ProviderRequest {
   return {
     requestId: "provider-request-1",
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_00000000000000000000000000000003",
+    threadRole: ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN,
+    threadVisibility: ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC,
     modelRequestId: "model-request-1",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
     workspaceId: "workspace-1",
@@ -53,7 +59,7 @@ function gatewayClient(events: readonly ProviderStreamEvent[]): GatewayClient {
   return {
     async streamProviderRequest() {
       return {
-        events: Stream.fromIterable(events),
+        events: Stream.fromIterable(events.map((frame, index) => ({ ...frame, frameSequence: index + 1 }))),
         completion: Promise.resolve({ outcome: "eof" as const }),
         cancel: () => undefined,
       };
@@ -61,11 +67,39 @@ function gatewayClient(events: readonly ProviderStreamEvent[]): GatewayClient {
   };
 }
 
-function event(type: ProviderStreamEventType, payload: Omit<ProviderStreamEvent, "type"> = {}): ProviderStreamEvent {
+function event(type: ProviderStreamEventType, payload: Partial<Omit<ProviderStreamEvent, "type">> = {}): ProviderStreamEvent {
   return {
     type,
+    frameSequence: 1,
     ...payload,
   };
+}
+
+const textEventId = "evt_fa63d49e16196e6ec78bca9f3402d409";
+const thinkingEventId = "evt_1883d72b86beda7ed3672f8cab82ee9a";
+
+function completeText(providerPartId = "text-1", text = "hello", eventId = textEventId): ProviderStreamEvent {
+  return event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE, {
+    textComplete: { providerPartId, eventId, text },
+  });
+}
+
+function thinkingStarted(providerPartId = "reasoning-1", eventId = thinkingEventId): ProviderStreamEvent {
+  return event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED, {
+    thinkingStarted: { providerPartId, eventId },
+  });
+}
+
+function completeReasoning(providerPartId = "reasoning-1", eventId = thinkingEventId, providerMetadataJson = "{}"): ProviderStreamEvent {
+  return event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE, {
+    reasoningComplete: { providerPartId, thinkingEventId: eventId, text: "thinking", providerMetadataJson },
+  });
+}
+
+function completeTool(modelToolCallId = "call-1", name = "lookup", inputJson = '{"q":"hi"}'): ProviderStreamEvent {
+  return event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE, {
+    toolCallComplete: { modelToolCallId, name, inputJson, providerMetadataJson: "{}" },
+  });
 }
 
 function successfulFinish(reason: ProviderFinishReason): ProviderStreamEvent {
@@ -168,12 +202,9 @@ describe("LLMService Gateway boundary", () => {
 
   test("maps generated Gateway ProviderStreamEvent variants to Runtime LLMEvent variants", async () => {
     const service = createLLMService(gatewayClient([
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, { text: { id: "text-1", text: "hello", metadataJson: "{}" } }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, { reasoning: { id: "reasoning-1", text: "", metadataJson: "{}" } }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA, { reasoning: { id: "reasoning-1", text: "thinking", metadataJson: "{}" } }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, { reasoning: { id: "reasoning-1", text: "", metadataJson: "{\"anthropic\":{\"signature\":\"sig_1\"}}" } }),
+      completeText(),
+      thinkingStarted(),
+      completeReasoning("reasoning-1", thinkingEventId, '{"anthropic":{"signature":"sig_1"}}'),
       event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, {
         finish: {
           reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
@@ -196,12 +227,9 @@ describe("LLMService Gateway boundary", () => {
     ]));
 
     expect(await collect(service.stream(request()))).toEqual([
-      { type: "text-start", id: "text-1" },
-      { type: "text-delta", id: "text-1", text_delta: "hello" },
-      { type: "text-end", id: "text-1" },
-      { type: "reasoning-start", id: "reasoning-1" },
-      { type: "reasoning-delta", id: "reasoning-1", text_delta: "thinking" },
-      { type: "reasoning-end", id: "reasoning-1", providerMetadata: { anthropic: { signature: "sig_1" } } },
+      { type: "text-complete", providerPartId: "text-1", eventId: textEventId, text: "hello" },
+      { type: "thinking-started", providerPartId: "reasoning-1", eventId: thinkingEventId },
+      { type: "reasoning-complete", providerPartId: "reasoning-1", thinkingEventId, text: "thinking", providerMetadata: { anthropic: { signature: "sig_1" } } },
       {
         type: "finish",
         finishReason: "stop",
@@ -513,12 +541,10 @@ describe("LLMService Gateway boundary", () => {
       },
       {
         events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, {
-            text: { id: "text-1", text: "", metadataJson: "{}" },
-          }),
+          completeText(),
           rejection,
         ],
-        expectedPrefix: [{ type: "text-start", id: "text-1" }],
+        expectedPrefix: [{ type: "text-complete", providerPartId: "text-1", eventId: textEventId, text: "hello" }],
       },
       {
         events: [unknown],
@@ -535,211 +561,83 @@ describe("LLMService Gateway boundary", () => {
     }
   });
 
-  test("rejects out-of-order fragments and events after terminal as gateway_protocol_error", async () => {
+  test("rejects every retired fragment enum instead of reconstructing fragment lifecycles", async () => {
+    // v1 fragment enum values are reserved in v2. Fragment/name lifecycle checks
+    // now belong to Gateway's assembler; Runtime rejects the obsolete protocol.
+    for (let retiredType = 1; retiredType <= 10; retiredType++) {
+      const output = await collect(createLLMService(gatewayClient([
+        event(retiredType as ProviderStreamEventType),
+      ])).stream(request()));
+      expect(output).toEqual([{
+        type: "provider-error",
+        error: expect.objectContaining({ type: "runtime", code: "gateway_protocol_error", retryable: false, fatal: true }),
+      }]);
+    }
+  });
+
+  test("rejects unmatched reasoning and events after a valid terminal candidate", async () => {
     for (const events of [
-      [event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, { text: { id: "text-1", text: "orphan", metadataJson: "{}" } })],
-      [
-        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, { finish: { reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP, metadataJson: "{}" } }),
-        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "late", text: "", metadataJson: "{}" } }),
-      ],
-      [
-        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, { finish: { reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP, metadataJson: "{}" } }),
-        event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
-          providerError: {
-            metadataJson: "{}",
-            error: {
-              code: "provider_unavailable",
-              message: "Provider Gateway lowering is not implemented in this stage.",
-              retryable: true,
-              fatal: false,
-              statusCode: 503,
-              retryAfterMs: 0,
-            },
-          },
-        }),
-      ],
-    ] satisfies readonly (readonly ProviderStreamEvent[])[]) {
-      const service = createLLMService(gatewayClient(events));
-      expect(await collect(service.stream(request()))).toEqual([
-        {
-          type: "provider-error",
-          error: expect.objectContaining({
-            type: "runtime",
-            code: "gateway_protocol_error",
-            retryable: false,
-            fatal: true,
-          }),
-        },
-      ]);
+      [completeReasoning()],
+      [successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP), completeText()],
+      [successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP), event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
+        providerError: { metadataJson: "{}", error: { code: "provider_unavailable", message: "provider failed", retryable: true, fatal: false, statusCode: 503, retryAfterMs: 0 } },
+      })],
+    ]) {
+      expect(await collect(createLLMService(gatewayClient(events)).stream(request()))).toEqual([{
+        type: "provider-error",
+        error: expect.objectContaining({ type: "runtime", code: "gateway_protocol_error", retryable: false, fatal: true }),
+      }]);
     }
   });
 
-  test("rejects duplicate fragments, duplicate tool calls, and tool-input name mismatches", async () => {
+  test("rejects duplicate complete identities and mismatched reasoning while preserving the valid prefix", async () => {
     const cases = [
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-        ],
-        prefixTypes: ["text-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, { text: { id: "text-1", text: "after-end", metadataJson: "{}" } }),
-        ],
-        prefixTypes: ["text-start", "text-end"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-            toolCall: { id: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-            toolCall: { id: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
-          }),
-        ],
-        prefixTypes: ["tool-call"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, {
-            toolInput: { id: "call-1", name: "other", text: "{\"q\":\"hi\"}", metadataJson: "{}" },
-          }),
-        ],
-        prefixTypes: ["tool-input-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
-            toolInput: { id: "call-1", name: "other", text: "", metadataJson: "{}" },
-          }),
-        ],
-        prefixTypes: ["tool-input-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-            toolCall: { id: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
-          }),
-        ],
-        prefixTypes: ["tool-input-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-            toolCall: { id: "call-1", name: "other", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
-          }),
-        ],
-        prefixTypes: ["tool-input-start", "tool-input-end"],
-      },
-    ] satisfies ReadonlyArray<{ readonly events: readonly ProviderStreamEvent[]; readonly prefixTypes: readonly LLMEvent["type"][] }>;
-
+      { events: [completeText(), completeText()], prefixTypes: ["text-complete"] },
+      { events: [completeText(), completeText("other-part")], prefixTypes: ["text-complete"] },
+      { events: [completeText(), thinkingStarted("reasoning-1", textEventId)], prefixTypes: ["text-complete"] },
+      { events: [thinkingStarted(), thinkingStarted()], prefixTypes: ["thinking-started"] },
+      { events: [thinkingStarted(), completeReasoning("other-part")], prefixTypes: ["thinking-started"] },
+      { events: [thinkingStarted(), completeReasoning("reasoning-1", textEventId)], prefixTypes: ["thinking-started"] },
+      { events: [thinkingStarted(), completeReasoning(), completeReasoning()], prefixTypes: ["thinking-started", "reasoning-complete"] },
+      { events: [completeTool(), completeTool()], prefixTypes: ["tool-call-complete"] },
+      { events: [completeTool(), completeTool("call-1", "other")], prefixTypes: ["tool-call-complete"] },
+    ] satisfies ReadonlyArray<{ events: ProviderStreamEvent[]; prefixTypes: LLMEvent["type"][] }>;
     for (const { events, prefixTypes } of cases) {
-      const service = createLLMService(gatewayClient(events));
-      const output = await collect(service.stream(request()));
-      expect(output.map((item) => item.type)).toEqual([
-        ...prefixTypes,
-        "provider-error",
-      ]);
+      const output = await collect(createLLMService(gatewayClient(events)).stream(request()));
+      expect(output.map(item => item.type)).toEqual([...prefixTypes, "provider-error"]);
       expect(output.at(-1)).toEqual({
         type: "provider-error",
-        error: expect.objectContaining({
-          type: "runtime",
-          code: "gateway_protocol_error",
-          retryable: false,
-          fatal: true,
-        }),
+        error: expect.objectContaining({ type: "runtime", code: "gateway_protocol_error", retryable: false, fatal: true }),
       });
     }
   });
 
-  test("rejects successful finish while any stream fragment lifecycle is incomplete", async () => {
-    const terminalFinish = successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP);
-    const cases = [
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, { text: { id: "text-1", text: "", metadataJson: "{}" } }),
-          terminalFinish,
-        ],
-        prefixTypes: ["text-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, { reasoning: { id: "reasoning-1", text: "", metadataJson: "{}" } }),
-          terminalFinish,
-        ],
-        prefixTypes: ["reasoning-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          terminalFinish,
-        ],
-        prefixTypes: ["tool-input-start"],
-      },
-      {
-        events: [
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
-            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-          }),
-          terminalFinish,
-        ],
-        prefixTypes: ["tool-input-start", "tool-input-end"],
-      },
-    ] satisfies ReadonlyArray<{ readonly events: readonly ProviderStreamEvent[]; readonly prefixTypes: readonly LLMEvent["type"][] }>;
-
-    for (const { events, prefixTypes } of cases) {
-      const service = createLLMService(gatewayClient(events));
-      const output = await collect(service.stream(request()));
-      expect(output.map((item) => item.type)).toEqual([
-        ...prefixTypes,
-        "provider-error",
-      ]);
-      expect(output.at(-1)).toEqual({
-        type: "provider-error",
-        error: expect.objectContaining({
-          type: "runtime",
-          code: "gateway_protocol_error",
-          retryable: false,
-          fatal: true,
-        }),
-      });
-    }
+  test("rejects successful finish while a ThinkingStarted has no matching completion", async () => {
+    const output = await collect(createLLMService(gatewayClient([
+      thinkingStarted(), successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP),
+    ])).stream(request()));
+    expect(output.map(item => item.type)).toEqual(["thinking-started", "provider-error"]);
+    expect(output.at(-1)).toEqual({
+      type: "provider-error",
+      error: expect.objectContaining({ type: "runtime", code: "gateway_protocol_error", retryable: false, fatal: true }),
+    });
   });
 
-  test("preserves an explicit provider error while discarding open fragments", async () => {
+  test("allows kind-scoped Provider IDs and preserves completion observation order", async () => {
+    const output = await collect(createLLMService(gatewayClient([
+      thinkingStarted("shared"), completeText("shared"), completeTool(), completeReasoning("shared"),
+      successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS),
+    ])).stream(request()));
+    expect(output.map(item => item.type)).toEqual(["thinking-started", "text-complete", "tool-call-complete", "reasoning-complete", "finish"]);
+    expect(output[1]).toEqual({ type: "text-complete", providerPartId: "shared", eventId: textEventId, text: "hello" });
+    expect(output[3]).toEqual({ type: "reasoning-complete", providerPartId: "shared", thinkingEventId, text: "thinking" });
+  });
+
+  test("preserves explicit provider failure after complete content and unmatched ThinkingStarted", async () => {
     const service = createLLMService(gatewayClient([
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, {
-        text: { id: "text-open", text: "", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, {
-        reasoning: { id: "reasoning-open", text: "", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-        toolInput: { id: "tool-open", name: "lookup", text: "", metadataJson: "{}" },
-      }),
+      completeText(),
+      thinkingStarted(),
+      completeTool(),
       event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
         providerError: {
           metadataJson: "{}",
@@ -757,9 +655,9 @@ describe("LLMService Gateway boundary", () => {
 
     const output = await collect(service.stream(request()));
     expect(output.map((item) => item.type)).toEqual([
-      "text-start",
-      "reasoning-start",
-      "tool-input-start",
+      "text-complete",
+      "thinking-started",
+      "tool-call-complete",
       "provider-error",
     ]);
     expect(output.at(-1)).toEqual({
@@ -777,22 +675,17 @@ describe("LLMService Gateway boundary", () => {
 
   test("rejects malformed ProviderStreamEvent payloads as gateway_protocol_error", async () => {
     const malformedEvents = [
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, {
-        text: { id: "text-1", text: "start-cannot-carry-delta", metadataJson: "{}" },
+      completeText("text-1", ""),
+      completeText("text-1", "hello", "invalid-event-id"),
+      completeReasoning("reasoning-1", thinkingEventId, "not-json"),
+      completeTool("call-1", "lookup", "not-json"),
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE),
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE, {
+        thinkingStarted: { providerPartId: "reasoning-1", eventId: thinkingEventId },
       }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, {
-        reasoning: { id: "reasoning-1", text: "end-cannot-carry-delta", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, {
-        text: { id: "text-1", text: "hello", metadataJson: "not-json" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, {
-        reasoning: { id: "reasoning-1", text: "wrong-payload", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, {
-        text: { id: "text-1", text: "hello", metadataJson: "{}" },
-        reasoning: { id: "reasoning-1", text: "extra-payload", metadataJson: "{}" },
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE, {
+        textComplete: { providerPartId: "text-1", text: "hello", eventId: textEventId },
+        thinkingStarted: { providerPartId: "reasoning-1", eventId: thinkingEventId },
       }),
       event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
         providerError: { error: undefined, metadataJson: "{}" },
@@ -848,29 +741,15 @@ describe("LLMService Gateway boundary", () => {
     }]);
   });
 
-  test("starts tool execution only from a valid complete tool-call event", async () => {
+  test("emits one exact tool call from the complete Gateway frame", async () => {
     const service = createLLMService(gatewayClient([
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
-        toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, {
-        toolInput: { id: "call-1", name: "lookup", text: "{\"q\":\"hi\"}", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
-        toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
-      }),
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-        toolCall: { id: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
-      }),
+      completeTool(),
       successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS),
     ]));
 
     expect(await collect(service.stream(request()))).toEqual([
-      { type: "tool-input-start", id: "call-1", toolName: "lookup" },
-      { type: "tool-input-delta", id: "call-1", toolName: "lookup", text_delta: "{\"q\":\"hi\"}" },
-      { type: "tool-input-end", id: "call-1", toolName: "lookup" },
       {
-        type: "tool-call", id: "call-1", toolName: "lookup", input: { q: "hi" },
+        type: "tool-call-complete", id: "call-1", toolName: "lookup", input: { q: "hi" },
         inputPreview: {
           preview: "{\"q\":\"hi\"}", truncated: false,
         },
@@ -882,16 +761,14 @@ describe("LLMService Gateway boundary", () => {
   test("keeps exact tool input above the message preview bound", async () => {
     const input = { content: "x".repeat(9_000), file_path: "notes/large.txt" };
     const service = createLLMService(gatewayClient([
-      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
-        toolCall: { id: "call-large", name: "Write", inputJson: JSON.stringify(input), metadataJson: "{}" },
-      }),
+      completeTool("call-large", "Write", JSON.stringify(input)),
       successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS),
     ]));
 
     const events = await collect(service.stream(request()));
 
     expect(events[0]).toMatchObject({
-      type: "tool-call",
+      type: "tool-call-complete",
       id: "call-large",
       toolName: "Write",
       input,
@@ -899,7 +776,7 @@ describe("LLMService Gateway boundary", () => {
         truncated: true,
       },
     });
-    expect(events[0]?.type === "tool-call" ? new TextEncoder().encode(events[0].inputPreview.preview).byteLength : 0).toBeLessThanOrEqual(8_192);
+    expect(events[0]?.type === "tool-call-complete" ? new TextEncoder().encode(events[0].inputPreview.preview).byteLength : 0).toBeLessThanOrEqual(8_192);
     expect(events[1]).toMatchObject({ type: "finish", finishReason: "tool-calls" });
   });
 

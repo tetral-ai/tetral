@@ -125,6 +125,8 @@ test("producer attachment receipt crosses Runtime ingress and starts one provide
 		targetPodUid: command.targetPodUid,
 		runtimeProcessId: command.runtimeProcessId,
 		runtimeBindingToken: "binding-token",
+		threadRole: "main",
+		threadVisibility: "public",
 	});
 	session.state.enqueueAcceptedInput(command);
 	const requests: LLMRequest[] = [];

@@ -8,6 +8,7 @@
  * module calls the provider-copy accessors in tool-copy and otherwise performs no I/O or route
  * execution.
  */
+import type {RuntimeJsonValue} from "../contracts/runtime.js";
 import { builtinToolDescription, builtinToolParameterDescription } from "./tool-copy.js";
 import type { DocumentedBuiltinToolName } from "./tool-copy.js";
 import { ApplyPatchLarkGrammar } from "./apply-patch-grammar.js";
@@ -432,6 +433,11 @@ const ClaudeFamilyToolNames = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"] 
 const GPTFamilyToolNames = ["exec_command", "write_stdin", "view_image", "apply_patch"] as const;
 const FamilyToolNames = new Set<string>([...ClaudeFamilyToolNames, ...GPTFamilyToolNames]);
 
+/** Maps installed builtin identifiers to this family's provider-visible names only. */
+export function canonicalBuiltinToolName(family: InstalledBuiltinFamily, name: string): string | undefined {
+  return builtinEntriesForFamily(family).find((entry) => entry.name.toLowerCase() === name.toLowerCase())?.name;
+}
+
 function builtinEntriesForFamily(family: InstalledBuiltinFamily): readonly ToolEntry[] {
   const selectedNames = family === "claude" ? ClaudeFamilyToolNames : GPTFamilyToolNames;
   const byName = new Map(BuiltinEntries.map((entry) => [entry.name, entry]));
@@ -667,4 +673,10 @@ function readInputSchema(): unknown {
     },
     required: ["file_path"],
   };
+}
+
+/** Derives the execution snapshot from the committed provider input. */
+export function executionInputForToolCall(entry:ToolEntry,input:RuntimeJsonValue):RuntimeJsonValue|undefined {
+ if(entry.inputContract.kind==="freeform_string")return typeof input==="string"?{[entry.inputContract.executionField]:input}:undefined;
+ return typeof input==="object"&&input!==null&&!Array.isArray(input)?input:undefined;
 }

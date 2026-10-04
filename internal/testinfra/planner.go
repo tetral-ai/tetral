@@ -400,7 +400,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			selections[index].Packages = packages
 			selections[index].Reason = "changed Go owners and repository-local reverse dependencies"
 			if serviceContract {
-				selections[index].Reason = "shared service contract, both Go owners, cross-service compositions and reverse dependencies"
+				selections[index].Reason = "shared service contract, Go owners, Bun fixture consumers, cross-service compositions and reverse dependencies"
 			} else if integrationInput {
 				selections[index].Reason = "rendered deployment or driver input consumed by integration compositions"
 			}
@@ -432,6 +432,7 @@ func separatedServiceContractChange(paths []string) bool {
 		}
 		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
 			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||
+			strings.HasPrefix(path, "integration/content_") || strings.HasPrefix(path, "integration/testdata/content-") ||
 			strings.HasPrefix(path, "integration/transport") || path == "integration/runtime_direct_tls_test.go" ||
 			path == "integration/protected_store_test.go" ||
 			path == "integration/protected_object_store_test.go" ||

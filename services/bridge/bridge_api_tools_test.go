@@ -290,10 +290,7 @@ func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
 	}
 	assertRuntimeScalar := func(payload bridgeLoadContextPayload) {
 		t.Helper()
-		entries := payload.ContextEntries
-		if payload.OpenRequestDraft != nil {
-			entries = append(entries, bridgeRuntimeContextEntry{Parts: payload.OpenRequestDraft.Parts})
-		}
+		entries := payload.Messages
 		for _, entry := range entries {
 			for _, rawPart := range entry.Parts {
 				var part map[string]any
@@ -565,10 +562,10 @@ func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode context: %v", err)
 	}
-	if payload.OpenRequestDraft == nil || len(payload.OpenRequestDraft.Parts) != len(inputs) {
-		t.Fatalf("open draft = %#v; want %d Tool Calls", payload.OpenRequestDraft, len(inputs))
+	if payload.CurrentRequestMessage == nil || len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != len(inputs) {
+		t.Fatalf("current Assistant = %#v/%#v; want %d Tool Calls", payload.CurrentRequestMessage, payload.Messages, len(inputs))
 	}
-	for index, rawPart := range payload.OpenRequestDraft.Parts {
+	for index, rawPart := range payload.Messages[0].Parts {
 		var part map[string]any
 		if err := json.Unmarshal(rawPart, &part); err != nil {
 			t.Fatalf("decode part: %v", err)
@@ -906,7 +903,7 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 
 	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mixed_text", ModelRequestId: "mreq_mixed",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":"continuing"}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000001"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":"continuing"}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("continuing"),
 	})
 	if err != nil || written.GetCommitted() == nil {
@@ -957,9 +954,9 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode mixed Assistant draft: %v", err)
 	}
-	if payload.OpenRequestDraft == nil || payload.OpenRequestDraft.ModelRequestID != "mreq_mixed" ||
-		len(payload.OpenRequestDraft.Parts) != 3 || len(payload.TurnFacts.InternalRepairs) != 1 {
-		t.Fatalf("mixed Assistant recovery = draft=%#v repairs=%#v", payload.OpenRequestDraft, payload.TurnFacts.InternalRepairs)
+	if payload.CurrentRequestMessage == nil || payload.CurrentRequestMessage.ModelRequestID != "mreq_mixed" ||
+		len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 3 || len(payload.TurnFacts.InternalRepairs) != 1 {
+		t.Fatalf("mixed Assistant recovery = draft=%#v repairs=%#v", payload.CurrentRequestMessage, payload.TurnFacts.InternalRepairs)
 	}
 	if payload.TurnFacts.InternalRepairs[0].RepairKey != repairKey {
 		t.Fatalf("mixed Assistant repair fact = %#v", payload.TurnFacts.InternalRepairs[0])

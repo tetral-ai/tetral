@@ -55,7 +55,7 @@ if (input.mode === "success") {
     targetPodUid: input.targetPodUid,
     runtimeProcessId: input.runtimeProcessId,
     runtimeBindingToken: `rtbt_${input.sessionId}`,
-    contextEntries: [],
+    currentRequestMessage:null,messages: [],
     thread: { role: "main", visibility: "public", status: "idle" },
   }));
   if (!preloaded.ok || !preloaded.applied) {

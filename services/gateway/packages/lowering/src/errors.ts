@@ -9,12 +9,10 @@
  * credential, and pool code construct these errors; the module emits generated
  * Gateway protocol values and performs no provider calls or retries itself.
  */
-import {
-  ProviderStreamEventType,
-} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { NormalizedProviderEventType as ProviderStreamEventType } from "./normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent } from "./normalized-stream.js";
 import type {
   ProviderError,
-  ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
 

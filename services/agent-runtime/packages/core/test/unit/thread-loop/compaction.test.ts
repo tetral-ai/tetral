@@ -54,6 +54,42 @@ import {
 } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
+	for (const partial of [false, true]) {
+		test(`committed compaction application failure fences ${partial ? "partial" : "unapplied"} hot state`, async () => {
+			const session = new ThreadRuntime("sesn_compaction_application_failure");
+			recordCompactionHint(session, { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+			const replace = session.state.contextManager.replaceEntriesThroughSequence.bind(session.state.contextManager);
+			let applications = 0;
+			session.state.contextManager.replaceEntriesThroughSequence = (...args) => {
+				applications += 1;
+				if (partial) replace(...args);
+				throw new Error("local committed checkpoint application failed");
+			};
+			let invalidations = 0;
+			const invalidate = session.state.invalidateResidentState.bind(session.state);
+			session.state.invalidateResidentState = () => { invalidations += 1; invalidate(); };
+			const requests: LLMRequest[] = [];
+			const samples: Parameters<NonNullable<ThreadLoop.ThreadLoopRuntimeOptions["recordContentCommit"]>>[0][] = [];
+			const result = await Effect.runPromise(Effect.gen(function* () {
+				return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+			}).pipe(Effect.provide(runtimeThreadLoopLayer(
+				new RecordingContextLoader([userMessage("old", 1, compactionHistory("summarize old context"))],
+					{ type: "context", entries: [userMessage("new", 2, "continue")] }),
+				{ compaction: {}, recordContentCommit: sample => samples.push(sample),
+					llmService: queuedLLMService([[{ type: "text-complete", providerPartId: "summary",
+						eventId: "evt_00000000000000000000000000000051", text: "anchored summary" },
+						{ type: "finish", finishReason: "stop" }]], requests) },
+			))));
+			expect(result).toMatchObject({ type: "failed" });
+			expect(applications).toBe(1);
+			expect(invalidations).toBeGreaterThan(0);
+			expect(session.state.persistentContextLoaded()).toBe(false);
+			expect(requests.map(request => request.requestKind)).toEqual([ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY]);
+			expect(samples.filter(sample => sample.kind === "request_end").map(sample => ({ phase: sample.phase, outcome: sample.outcome })))
+				.toEqual([{ phase: "request_end_commit", outcome: "committed" }, { phase: "request_end_apply", outcome: "failed" }]);
+		});
+	}
+
 	test("a reviewer finish arms proactive compaction on the reviewer model before its next review", async () => {
 		const session = new ThreadRuntime({
 			workspaceId: "wksp_reviewer",
@@ -61,6 +97,7 @@ describe("ThreadLoop", () => {
 			sessionThreadId: "thrd_reviewer",
 			parentThreadId: "thrd_main",
 			threadRole: "approval_reviewer",
+ threadVisibility:"internal",
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
@@ -76,9 +113,9 @@ describe("ThreadLoop", () => {
 		const llm = queuedLLMService(
 			[
 				[
-					{ type: "text-start", id: "review-first" },
-					{ type: "text-delta", id: "review-first", text_delta: "allow" },
-					{ type: "text-end", id: "review-first" },
+
+
+					{type:"text-complete" as const,providerPartId:"review-first",eventId:"evt_0821342e5a9899031f799a1081c249e0",text:("allow")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -96,13 +133,9 @@ describe("ThreadLoop", () => {
 					},
 				],
 				[
-					{ type: "text-start", id: "review-summary" },
-					{
-						type: "text-delta",
-						id: "review-summary",
-						text_delta: "Reviewer context summary.",
-					},
-					{ type: "text-end", id: "review-summary" },
+
+
+					{type:"text-complete" as const,providerPartId:"review-summary",eventId:"evt_27c65af7f536cdaefead62f17e99b049",text:("Reviewer context summary.")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -116,9 +149,9 @@ describe("ThreadLoop", () => {
 					},
 				],
 				[
-					{ type: "text-start", id: "review-second" },
-					{ type: "text-delta", id: "review-second", text_delta: "deny" },
-					{ type: "text-end", id: "review-second" },
+
+
+					{type:"text-complete" as const,providerPartId:"review-second",eventId:"evt_26dcb64a933857674eb93545b225d638",text:("deny")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -275,23 +308,15 @@ Previous anchored summary.
 							llmService: queuedLLMService(
 								[
 									[
-										{ type: "text-start", id: "summary-update" },
-										{
-											type: "text-delta",
-											id: "summary-update",
-											text_delta: "\nUpdated anchored summary.\n",
-										},
-										{ type: "text-end", id: "summary-update" },
+
+
+										{type:"text-complete" as const,providerPartId:"summary-update",eventId:"evt_0f31bedc9ae6510903b2c5bd2fbc031d",text:("\nUpdated anchored summary.\n")},
 										{ type: "finish", finishReason: "stop" },
 									],
 									[
-										{ type: "text-start", id: "answer" },
-										{
-											type: "text-delta",
-											id: "answer",
-											text_delta: "continued",
-										},
-										{ type: "text-end", id: "answer" },
+
+
+										{type:"text-complete" as const,providerPartId:"answer",eventId:"evt_a51eb02c98e5a087b8f1f7b51226c940",text:("continued")},
 										{ type: "finish", finishReason: "stop" },
 									],
 								],
@@ -322,7 +347,7 @@ Previous anchored summary.
 		expect(prompt).toContain('{"legacy":"recent"}');
 		expect(prompt).not.toContain("<conversation-checkpoint>");
 		const checkpoint = session.state.contextManager
-			.entries()
+			.historyMessages()
 			.find((message) => message.contextKind === "compaction");
 		expect(checkpoint).toBeDefined();
 		const checkpointText =
@@ -387,13 +412,9 @@ Previous anchored summary.
 			[
 				[overflow],
 				[
-					{ type: "text-start", id: "summary-text" },
-					{
-						type: "text-delta",
-						id: "summary-text",
-						text_delta: "Reactive summary.",
-					},
-					{ type: "text-end", id: "summary-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"summary-text",eventId:"evt_fe935c5233004568afa63b24c780f969",text:("Reactive summary.")},
 					{ type: "finish", finishReason: "stop" },
 				],
 				[overflow],
@@ -551,7 +572,7 @@ Previous anchored summary.
 				expect.objectContaining({ type: "agent.thread_context_compacted" }),
 			);
 			expect(
-				JSON.stringify(active.session.state.contextManager.entries()),
+				JSON.stringify(active.session.state.contextManager.historyMessages()),
 			).not.toContain("<conversation-checkpoint>");
 			const requestEnd = active.requestEndEnvelopes[0];
 			if (requestEnd === undefined) {
@@ -615,12 +636,12 @@ Previous anchored summary.
 				runtimeInputId: "rin_task_interrupted_compaction",
 			});
 			expect(
-				JSON.stringify(active.session.state.contextManager.entries()),
+				JSON.stringify(active.session.state.contextManager.historyMessages()),
 			).not.toContain("<conversation-checkpoint>");
 			expect(active.session.state.userInterruptRequested()).toBe(false);
 			const requests: LLMRequest[] = [];
 			const replayLoader = new QueuedContextLoader(
-				active.session.state.contextManager.entries(),
+				active.session.state.contextManager.historyMessages(),
 				[],
 			);
 			const result = await Effect.runPromise(
@@ -665,6 +686,7 @@ Previous anchored summary.
 			sessionThreadId: "thrd_reviewer",
 			parentThreadId: "thrd_main",
 			threadRole: "approval_reviewer",
+ threadVisibility:"internal",
 			bindingId: "bind_reviewer",
 			bindingGeneration: 1,
 			targetPodUid: "pod_reviewer",
@@ -738,7 +760,7 @@ Previous anchored summary.
 				expect.objectContaining({ type: "agent.thread_context_compacted" }),
 			);
 			expect(
-				JSON.stringify(active.session.state.contextManager.entries()),
+				JSON.stringify(active.session.state.contextManager.historyMessages()),
 			).not.toContain("<conversation-checkpoint>");
 			const runExit = await Effect.runPromise(Fiber.await(active.runFiber));
 			expect(
@@ -897,13 +919,9 @@ Previous anchored summary.
 		const requests: LLMRequest[] = [];
 		const eventBatches: readonly (readonly LLMEvent[])[] = [
 			[
-				{ type: "text-start", id: "summary-text" },
-				{
-					type: "text-delta",
-					id: "summary-text",
-					text_delta: "Summary carried forward.",
-				},
-				{ type: "text-end", id: "summary-text" },
+
+
+				{type:"text-complete" as const,providerPartId:"summary-text",eventId:"evt_b9b294ea3f0e6a236cf8d9873c801f8c",text:("Summary carried forward.")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -917,13 +935,9 @@ Previous anchored summary.
 				},
 			],
 			[
-				{ type: "text-start", id: "answer-text" },
-				{
-					type: "text-delta",
-					id: "answer-text",
-					text_delta: "answer after compaction",
-				},
-				{ type: "text-end", id: "answer-text" },
+
+
+				{type:"text-complete" as const,providerPartId:"answer-text",eventId:"evt_691a1c30cd02bbaa36fa02dbbe15ffe1",text:("answer after compaction")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -938,13 +952,9 @@ Previous anchored summary.
 				},
 			],
 			[
-				{ type: "text-start", id: "later-answer-text" },
-				{
-					type: "text-delta",
-					id: "later-answer-text",
-					text_delta: "answer to later input",
-				},
-				{ type: "text-end", id: "later-answer-text" },
+
+
+				{type:"text-complete" as const,providerPartId:"later-answer-text",eventId:"evt_f05818034e2a216c65d76bf740138ad9",text:("answer to later input")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -1059,7 +1069,7 @@ Previous anchored summary.
 		);
 		expect(
 			session.state.contextManager
-				.entries()
+				.historyMessages()
 				.map((message) => message.messageSequence),
 		).toContain(3);
 		expect(session.state.lastRequestContextAnchorSequence()).toBe(5);
@@ -1107,13 +1117,9 @@ Previous anchored summary.
 				},
 			],
 			[
-				{ type: "text-start", id: "summary-text" },
-				{
-					type: "text-delta",
-					id: "summary-text",
-					text_delta: "Summary before the task notification.",
-				},
-				{ type: "text-end", id: "summary-text" },
+
+
+				{type:"text-complete" as const,providerPartId:"summary-text",eventId:"evt_37ada4300411e755ffe6f7d44048d420",text:("Summary before the task notification.")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -1127,9 +1133,9 @@ Previous anchored summary.
 				},
 			],
 			[
-				{ type: "text-start", id: "first-answer" },
-				{ type: "text-delta", id: "first-answer", text_delta: "first answer" },
-				{ type: "text-end", id: "first-answer" },
+
+
+				{type:"text-complete" as const,providerPartId:"first-answer",eventId:"evt_6dbb77a53c8d7d73087a2271659cbb0f",text:("first answer")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -1144,13 +1150,9 @@ Previous anchored summary.
 				},
 			],
 			[
-				{ type: "text-start", id: "follow-up-answer" },
-				{
-					type: "text-delta",
-					id: "follow-up-answer",
-					text_delta: "follow-up answer",
-				},
-				{ type: "text-end", id: "follow-up-answer" },
+
+
+				{type:"text-complete" as const,providerPartId:"follow-up-answer",eventId:"evt_201df2b79ac12c4ed9ab041cbbc73b0d",text:("follow-up answer")},
 				{
 					type: "finish",
 					finishReason: "stop",
@@ -1241,7 +1243,7 @@ Previous anchored summary.
 			order.indexOf("provider-3"),
 		);
 		expect(
-			JSON.stringify(session.state.contextManager.entries()).match(
+			JSON.stringify(session.state.contextManager.historyMessages()).match(
 				/task completed while compaction was open/g,
 			),
 		).toHaveLength(1);
@@ -1418,13 +1420,9 @@ Previous anchored summary.
 					},
 				],
 				[
-					{ type: "text-start", id: "summary-text" },
-					{
-						type: "text-delta",
-						id: "summary-text",
-						text_delta: "Recovered summary.",
-					},
-					{ type: "text-end", id: "summary-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"summary-text",eventId:"evt_0df9da5660573cdefbb8ebd923efce98",text:("Recovered summary.")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -1438,13 +1436,9 @@ Previous anchored summary.
 					},
 				],
 				[
-					{ type: "text-start", id: "answer-text" },
-					{
-						type: "text-delta",
-						id: "answer-text",
-						text_delta: "answer after retry",
-					},
-					{ type: "text-end", id: "answer-text" },
+
+
+					{type:"text-complete" as const,providerPartId:"answer-text",eventId:"evt_90e3e60ec48091194af1eae40224a3ce",text:("answer after retry")},
 					{
 						type: "finish",
 						finishReason: "stop",
@@ -1831,6 +1825,6 @@ Previous anchored summary.
 		);
 		expect(result).toEqual({ type: "interrupted", discardHotState: true });
 		expect(providerCalls).toBe(0);
-		expect(session.state.contextManager.entries()).toEqual([]);
+		expect(session.state.contextManager.historyMessages()).toEqual([]);
 	});
 });

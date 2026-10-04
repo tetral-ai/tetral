@@ -228,13 +228,11 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
 		t.Fatalf("decode model-visible in-flight MCP error: %v", err)
 	}
 	var parts []json.RawMessage
-	if len(payload.ContextEntries) == 1 {
-		parts = payload.ContextEntries[0].Parts
-	} else if payload.OpenRequestDraft != nil {
-		parts = payload.OpenRequestDraft.Parts
+	if len(payload.Messages) == 1 {
+		parts = payload.Messages[0].Parts
 	}
 	if len(parts) != 2 {
-		t.Fatalf("in-flight MCP error context = entries=%#v draft=%#v", payload.ContextEntries, payload.OpenRequestDraft)
+		t.Fatalf("in-flight MCP error context = entries=%#v draft=%#v", payload.Messages, payload.CurrentRequestMessage)
 	}
 	var resultPart struct {
 		Result struct {

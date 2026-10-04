@@ -123,7 +123,7 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 			{turnPlan, "CTE previous_close_before_request", []string{"idx_session_events_thread_close_sequence"}, false},
 			{turnPlan, "CTE selected_thread_running", []string{"idx_session_events_thread_running_sequence"}, false},
 			{turnPlan, "CTE selected_thread_request_end", []string{"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type"}, false},
-			{turnPlan, "CTE selected_thread_latest_idle", []string{"idx_session_events_thread_close_sequence"}, false},
+			{turnPlan, "CTE selected_thread_latest_closeout", []string{"idx_session_events_thread_close_sequence"}, false},
 			{turnPlan, "CTE current_reschedule", []string{"idx_session_events_thread_type_sequence", "idx_session_events_thread_request_type"}, false},
 		}
 		for _, required := range requiredSubplans {

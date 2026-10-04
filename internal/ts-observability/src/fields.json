@@ -1,6 +1,7 @@
 [
   "alert.family",
   "approval.failure_kind",
+  "approval.source",
   "attachment.deleted",
   "attachment.failed",
   "attachment.marked",
@@ -155,6 +156,7 @@
   "rejection.kind",
   "repaired.count",
   "request.id",
+  "request.kind",
   "request.outcome",
   "resolution",
   "retry.attempt",

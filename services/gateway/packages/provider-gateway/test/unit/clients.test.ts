@@ -1,9 +1,11 @@
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, jest, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   ProviderFinishReason,
   ProviderRequestKind,
-  ProviderStreamEventType,
+
   ProviderContextRole,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderKeyFailureError } from "../../src/providers/pool.js";
@@ -18,7 +20,7 @@ import {
 import { validProviderRequest } from "./fixtures.js";
 import type { TextStreamPart, ToolSet } from "ai";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
-import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import type {
   AnthropicProviderSettings,

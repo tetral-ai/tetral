@@ -344,6 +344,7 @@ describe("Runtime provider-context projection", () => {
 
 			const assembled = assembleProviderCallRequest({
 				identity: {
+					threadRole: "main", threadVisibility: "public",
 					workspaceId: "default",
 					sessionId: "session-a",
 					sessionThreadId: "thread-a",
@@ -368,7 +369,7 @@ describe("Runtime provider-context projection", () => {
 			expect(assembled.ok).toBe(true);
 			if (!assembled.ok) continue;
 
-			expect(validateProviderRequest(assembled.request)).toEqual({ ok: true });
+			expect(validateProviderRequest({...assembled.request,modelRequestStartEventId:"evt_0000000000000001"})).toEqual({ ok: true });
 			const lowered = lowerProviderRequest(
 				assembled.request,
 				OpenAIGPT55Rules,

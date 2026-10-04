@@ -511,8 +511,8 @@ function openAIGoldenRequest(): ProviderRequest {
   });
 }
 
-async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {
-  const output: ProviderStreamEvent[] = [];
+async function collectEvents<T>(events: AsyncIterable<T>): Promise<readonly T[]> {
+  const output: T[] = [];
   for await (const event of events) {
     output.push(event);
   }

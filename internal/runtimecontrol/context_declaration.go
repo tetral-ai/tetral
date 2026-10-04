@@ -16,6 +16,8 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
+// Provider-content constants project services/gateway/packages/protocol/src/content-limits.json.
+// Bridge contract tests check these actual declaration limits against that policy.
 const RuntimeProviderMetadataMaxBytes = 16 * 1024
 
 const RuntimeToolOutputJSONMaxBytes = 512 * 1024
@@ -370,7 +372,5 @@ func RuntimeJSONBytes(value any) int {
 		return math.MaxInt
 	}
 	encoded := bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})
-	encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
-	encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
-	return len(encoded)
+	return len(RestoreJSONStringifySeparatorEscapes(encoded))
 }

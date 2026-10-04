@@ -73,7 +73,7 @@ describe("Runtime Pod transport bounds", () => {
 			"grpc.keepalive_permit_without_calls": 0,
 		});
 		expect(MaxGatewayRequestGrpcMessageBytes).toBe(64 * 1024 * 1024);
-		expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(8 * 1024 * 1024);
+		expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(32 * 1024 * 1024);
 		expect(MaxWebRequestGrpcMessageBytes).toBe(1024 * 1024);
 		expect(MaxWebResponseGrpcMessageBytes).toBe(512 * 1024);
 	});

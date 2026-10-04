@@ -3,6 +3,8 @@ import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
 import { Readable } from "node:stream";
 import {
   ProviderRequestKind,
+  ProviderThreadRole,
+  ProviderThreadVisibility,
   ProviderGatewayServiceService,
   ProviderStreamEventType,
   ProviderContextRole,
@@ -198,15 +200,15 @@ describe("Runtime Pod Gateway client", () => {
   test("classifies local-send and Gateway-receive size failures precisely", async () => {
     const cases = [
       {
-        details: "Attempted to send message with a size larger than 4194304",
+        details: `Attempted to send message with a size larger than ${MaxGatewayRequestGrpcMessageBytes}`,
         message: "Gateway request exceeded the local transport fuse.",
       },
       {
-        details: "Received message larger than max (33554433 vs 33554432)",
+        details: `Received message larger than max (${MaxGatewayRequestGrpcMessageBytes + 1} vs ${MaxGatewayRequestGrpcMessageBytes})`,
         message: "Gateway rejected the request above its transport fuse.",
       },
       {
-        details: "Received message that decompresses to a size larger than 33554432",
+        details: `Received message that decompresses to a size larger than ${MaxGatewayRequestGrpcMessageBytes}`,
         message: "Gateway rejected the request above its transport fuse.",
       },
     ];
@@ -365,12 +367,14 @@ describe("Runtime Pod Gateway client", () => {
       streamProviderRequest(call) {
         for (let index = 0; index < 17; index += 1) {
           const accepted = call.write({
-            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-            text: { id: "text_1", text: String(index), metadataJson: "" },
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,
+            frameSequence: index + 1,
+            textComplete: { providerPartId: `text_${index}`, eventId: `evt_${index.toString(16).padStart(32, "0")}`, text: String(index) },
           });
           if (!accepted) crossedHighWaterMark = true;
         }
         call.write({
+          frameSequence: 18,
           type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
           finish: {
             reason: 1,
@@ -412,6 +416,7 @@ describe("Runtime Pod Gateway client", () => {
       expect(events.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
       expect(await handle.completion).toEqual({ outcome: "eof" });
     } finally {
+      await client.close();
       await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
     }
   });
@@ -423,8 +428,9 @@ describe("Runtime Pod Gateway client", () => {
       streamProviderRequest(call) {
         call.on("cancelled", () => { cancelledCalls += 1; });
         call.write({
-          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-          text: { id: "text_1", text: "", metadataJson: "" },
+          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,
+          frameSequence: 1,
+          textComplete: { providerPartId: "text_1", eventId: "evt_00000000000000000000000000000001", text: "progress" },
         });
       },
       runWeb(_call, callback) {
@@ -453,6 +459,7 @@ describe("Runtime Pod Gateway client", () => {
       }
       expect(cancelledCalls).toBe(1);
     } finally {
+      await client.close();
       server.forceShutdown();
     }
   });
@@ -463,6 +470,7 @@ describe("Runtime Pod Gateway client", () => {
     request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
     request.context[0]!.content = [{ text: { text: "raw provider payload marker" } }];
     const finish: ProviderStreamEvent = {
+      frameSequence: 1,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       finish: {
         reason: 1,
@@ -513,6 +521,7 @@ describe("Runtime Pod Gateway client", () => {
 
   test("records a validated terminal candidate once when transport cleanup fails", async () => {
     const finish: ProviderStreamEvent = {
+      frameSequence: 1,
       type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       finish: {
         reason: 1,
@@ -599,8 +608,9 @@ function eventThenFailingGatewayClient(code: number, details: string): ProviderG
     streamProviderRequest(request: ProviderRequest) {
       return readableCall((async function* () {
           yield {
-            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-            text: { id: "text_1", text: "", metadataJson: "" },
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,
+            frameSequence: 1,
+            textComplete: { providerPartId: "text_1", eventId: "evt_00000000000000000000000000000001", text: "progress" },
           };
           throw Object.assign(new Error(details), { code, details });
       })());
@@ -628,6 +638,10 @@ function providerRequest(): ProviderRequest {
     requestId: "req_gateway_client",
     modelRequestId: "mreq_gateway_client",
     requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
+    outputContractVersion: 2,
+    modelRequestStartEventId: "evt_00000000000000000000000000000002",
+    threadRole: ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN,
+    threadVisibility: ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC,
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
     sessionThreadId: "thr_1",

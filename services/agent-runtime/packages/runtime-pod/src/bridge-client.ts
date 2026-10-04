@@ -1,3 +1,5 @@
+import { RuntimeCurrentRequestMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeCurrentRequestMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { bridgeUnaryCall, ownBridgeClient } from "./bridge-calls.js";
 import type { RuntimeBridgeDrainPhase } from "./lifecycle-policy.js";
 import type { FinishIdleOperationControls } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
@@ -31,7 +33,6 @@ import type {
 	RuntimeInternalToolRepairCommit,
 	RuntimeInternalToolRepairCommitResult,
 	RuntimeInterruptToolResult,
-	RuntimeOpenRequestDraft,
 	RuntimeProviderAttachment,
 	RuntimeToolSettlementDeclaration,
 	SessionEventEnvelope,
@@ -53,7 +54,6 @@ import {
 	normalizeSessionEventWriterError,
 	RuntimeContextEntrySchema,
 	RuntimeJsonValueSchema,
-	RuntimeOpenRequestDraftSchema,
 	RuntimeToolErrorSchema,
 	runtimeToolErrorFromFailure,
 	SessionEventWriterRetryPolicy,
@@ -896,8 +896,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		command: RuntimeThreadAddressState,
 		options?: RuntimeContextLoadOptions,
 	): Promise<{
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+		readonly messages: readonly RuntimeContextEntry[];
+		readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 		readonly turnFacts: ThreadTurnLoadFacts;
 		readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 		readonly durableTurnId?: string | undefined;
@@ -1095,8 +1095,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
 		input: RuntimeThreadAddressState,
 		options?: RuntimeContextLoadOptions,
 	): Promise<{
-		readonly contextEntries: readonly RuntimeContextEntry[];
-		readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+		readonly messages: readonly RuntimeContextEntry[];
+		readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 		readonly turnFacts: ThreadTurnLoadFacts;
 		readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 		readonly durableTurnId?: string | undefined;
@@ -1224,6 +1224,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			const request: WriteEventRequest = {
 				scope: bridgeScope(envelope),
 				runtimeWriteId: envelope.writeId,
+    preallocatedEventId:envelope.preallocatedEventId,
 				modelRequestId: envelope.modelRequestId ?? modelRequestIdForEvent(event),
 				eventType: toolEvent ? "" : event.type,
 				payloadJson: toolEvent ? "" : JSON.stringify(event),
@@ -1309,6 +1310,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 			if (
 				result === undefined ||
 				result.eventId.length === 0 ||
+    (envelope.preallocatedEventId!==undefined&&result.eventId!==envelope.preallocatedEventId)||
 				(envelope.assistantContextAppend === undefined &&
 					result.assignedMessageSequence !== undefined) ||
 				(envelope.assistantContextAppend !== undefined &&
@@ -1751,6 +1753,7 @@ export class BridgeAPIInternalToolRepairCommitter {
 				serverToolUse: undefined,
 			},
 			repairKey: repair.repairKey,
+			reasoningPrefixContextDelta: repair.reasoningPrefixContextDelta === undefined ? undefined : runtimeContextDeltaForBridge(repair.reasoningPrefixContextDelta),
 		};
 		let response: CommitInternalToolRepairResponse;
 		try {
@@ -2214,8 +2217,8 @@ function parseContextPayload(
 	input: RuntimeThreadAddressState,
 	logger?: RuntimePodLogger | undefined,
 ): {
-	readonly contextEntries: readonly RuntimeContextEntry[];
-	readonly openRequestDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly messages: readonly RuntimeContextEntry[];
+	readonly currentRequestMessage: RuntimeCurrentRequestMessage | null;
 	readonly turnFacts: ThreadTurnLoadFacts;
 	readonly threadContextPrefix?: ThreadContextPrefix | undefined;
 	readonly thread: RuntimeAcceptedThreadMetadataState;
@@ -2256,30 +2259,29 @@ function parseContextPayload(
 				return value;
 			},
 		);
-		const contextEntries = parseContextLoadPhase(
+		const messages = parseContextLoadPhase(
 			logger,
 			input,
 			"durable_context_parse",
 			"invalid_durable_context_shape",
 			() => {
-				if (!Array.isArray(parsed.contextEntries)) {
+				if (!Array.isArray(parsed.messages)) {
 					throw new Error("load context entries are malformed");
 				}
-				return parsed.contextEntries.map((entry) =>
+				return parsed.messages.map((entry) =>
 					RuntimeContextEntrySchema.parse(entry),
 				);
 			},
 		);
-		const openRequestDraft = parseContextLoadPhase(
+		const currentRequestMessage = parseContextLoadPhase(
 			logger,
 			input,
-			"open_request_draft_parse",
-			"invalid_open_request_draft_shape",
+			"current_request_message_parse",
+			"invalid_current_request_message_shape",
 			() =>
-				parsed.openRequestDraft === undefined ||
-				parsed.openRequestDraft === null
-					? undefined
-					: RuntimeOpenRequestDraftSchema.parse(parsed.openRequestDraft),
+				parsed.currentRequestMessage === null
+					? null
+					: RuntimeCurrentRequestMessageSchema.parse(parsed.currentRequestMessage),
 		);
 		const turnFacts = parseContextLoadPhase(
 			logger,
@@ -2345,8 +2347,8 @@ function parseContextPayload(
 			() => parsePendingAgentMail(parsed.pendingAgentMail),
 		);
 		return {
-			contextEntries,
-			...(openRequestDraft !== undefined ? { openRequestDraft } : {}),
+			messages,
+			currentRequestMessage,
 			turnFacts,
 			...(threadContextPrefix !== undefined ? { threadContextPrefix } : {}),
 			thread,
@@ -2370,8 +2372,8 @@ function parseContextPayload(
 }
 
 const LoadContextPayloadKeys = new Set([
-	"contextEntries",
-	"openRequestDraft",
+	"messages",
+	"currentRequestMessage",
 	"turnFacts",
 	"threadContextPrefix",
 	"thread",

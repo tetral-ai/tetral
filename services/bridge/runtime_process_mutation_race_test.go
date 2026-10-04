@@ -60,7 +60,7 @@ func TestPostgreSQLRuntimeProcessServingMutationRaces(t *testing.T) {
 				seed := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 				scope, tool := seedAwaitExecutionNotificationFixture(t, seed, admin, "serving_fence")
 				modelRequest := "mreq_exec_notify_serving_fence"
-				request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"original"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("original")}
+				request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, PreallocatedEventId: bridgeString("evt_00000000000000000000000000000002"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"original"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("original")}
 				if operation == "tool declaration" {
 					request = &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, ToolDeclaration: bridgeToolDeclarationWithRouteForTest("call-race", "Read", `{"file_path":"/workspace/once"}`, "allow")}
 				}
@@ -341,7 +341,7 @@ func TestPostgreSQLRuntimeUnseenRegistrationCrossesPromotion(t *testing.T) {
 				t.Fatal("unconfirmed delayed boot became current")
 			}
 			bindingBefore := receiptTenantSnapshot(t, admin)["session_runtime_bindings"]
-			if response, err := winner.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "surviving-original-binding", EventType: "agent.message", ModelRequestId: "mreq_exec_notify_unseen_register", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"survivor"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("survivor")}); err != nil || response.GetCommitted() == nil {
+			if response, err := winner.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "surviving-original-binding", PreallocatedEventId: bridgeString("evt_00000000000000000000000000000003"), EventType: "agent.message", ModelRequestId: "mreq_exec_notify_unseen_register", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"survivor"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("survivor")}); err != nil || response.GetCommitted() == nil {
 				t.Fatalf("P2 original binding did not keep writing:%v/%v", response, err)
 			}
 			afterWrite := receiptTenantSnapshot(t, admin)

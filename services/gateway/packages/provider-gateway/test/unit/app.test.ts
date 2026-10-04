@@ -1,3 +1,5 @@
+import { NormalizedProviderEventType as FragmentType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent, NormalizedTextEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { credentials, Metadata, status } from "@grpc/grpc-js";
@@ -28,11 +30,11 @@ describe("ProviderGatewayApp lifecycle", () => {
       tokenReviewClient: new AllowingTokenReviewClient(),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           await new Promise<void>((resolve) => {
             releaseStream = resolve;
           });
-          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           yield finishEvent();
         },
       },
@@ -73,8 +75,8 @@ describe("ProviderGatewayApp lifecycle", () => {
       await shutdownPromise;
 
       expect(events.map((event) => event.type)).toEqual([
-        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,
+        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE,
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       ]);
       expect(logs).toContainEqual(expect.objectContaining({
@@ -184,9 +186,9 @@ function metadata(): Metadata {
 }
 
 function textEvent(
-  type: ProviderStreamEventType,
+  type: NormalizedTextEventType,
   text: string,
-): ProviderStreamEvent {
+): NormalizedProviderEvent {
   return {
     type,
     text: {
@@ -197,9 +199,9 @@ function textEvent(
   };
 }
 
-function finishEvent(): ProviderStreamEvent {
+function finishEvent(): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
       usage: {

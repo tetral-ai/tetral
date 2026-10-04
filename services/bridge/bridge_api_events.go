@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
@@ -46,6 +49,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
 	if request.GetRuntimeWriteId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid write event request")
+	}
+	if err := validatePreallocatedEventIdentity(request); err != nil {
+		return nil, err
 	}
 	var toolProjection runtimecontrol.ToolProjection
 	var preparedTool *preparedRuntimeToolDeclaration
@@ -164,6 +170,9 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			if err := json.Unmarshal([]byte(existing.ReceiptJSON), &facts); err != nil || !validWriteEventDurableFacts(facts) {
 				return status.Error(codes.FailedPrecondition, "stored write event result is invalid")
 			}
+			if request.PreallocatedEventId != nil && facts.EventID != request.GetPreallocatedEventId() {
+				return status.Error(codes.FailedPrecondition, "stored write event identity is invalid")
+			}
 			duplicate = true
 			return nil
 		}
@@ -183,7 +192,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if threadScope.Status == "closed_for_runtime" || threadScope.Status == "failed" || threadScope.Status == "terminated" {
 			return status.Error(codes.FailedPrecondition, "thread does not accept new Runtime events")
 		}
-		if assistantContextDelta != nil {
+		if assistantContextDelta != nil || eventType == "agent.thinking" {
 			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 				return err
 			}
@@ -214,7 +223,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			}
 		}
 		visibility, sessionVisible := threadScope.PublicProjection(durableEventType)
-		eventID := id.New("evt_")
+		eventID := request.GetPreallocatedEventId()
+		if request.PreallocatedEventId == nil {
+			eventID = id.New("evt_")
+		}
 		sequence, err := runtimecontrol.NextSessionEventSequenceTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
@@ -249,6 +261,13 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			projectionJSON,
 			now,
 		); err != nil {
+			// Event IDs are globally unique, while receipts are scoped. Only an
+			// exact operation replay can return a duplicate; an ID collision
+			// rolls back the whole declaration without revealing its owner.
+			var pgError *pgconn.PgError
+			if errors.As(err, &pgError) && pgError.Code == "23505" && pgError.ConstraintName == "session_events_pkey" {
+				return status.Error(codes.AlreadyExists, "event identity conflict")
+			}
 			return err
 		}
 		if requestStart != nil && len(consumedFileAttachments.Pairs) > 0 {
@@ -375,6 +394,28 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 
 func validWriteEventDurableFacts(facts writeEventDurableFacts) bool {
 	return facts.EventID != ""
+}
+
+// Validate before receipt lookup: missing Gateway identity cannot replay a
+// declaration from a retired protocol, and an ID never grants mutation custody.
+func validatePreallocatedEventIdentity(request *bridgev1.WriteEventRequest) error {
+	modelContent := request.GetToolDeclaration() == nil && (request.GetEventType() == "agent.message" || request.GetEventType() == "agent.thinking")
+	if !modelContent {
+		if request.PreallocatedEventId != nil {
+			return status.Error(codes.InvalidArgument, "event type does not accept a preallocated identity")
+		}
+		return nil
+	}
+	value := request.GetPreallocatedEventId()
+	if request.GetModelRequestId() == "" || len(value) != 36 || !strings.HasPrefix(value, "evt_") {
+		return status.Error(codes.InvalidArgument, "model content requires a valid preallocated event identity")
+	}
+	for _, digit := range value[4:] {
+		if (digit < '0' || digit > '9') && (digit < 'a' || digit > 'f') {
+			return status.Error(codes.InvalidArgument, "model content requires a valid preallocated event identity")
+		}
+	}
+	return nil
 }
 
 func verifyRequestStartUniqueTx(

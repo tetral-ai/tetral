@@ -28,44 +28,7 @@ func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return runtimeJSONStringifyBytes(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})), nil
-}
-
-// JavaScript JSON.stringify leaves the Unicode line and paragraph separators
-// intact. encoding/json escapes them even when HTML escaping is disabled, so
-// declaration digests restore only encoder-authored separator escapes. Escaped
-// backslash text such as "\\u2028" remains byte-for-byte unchanged.
-func runtimeJSONStringifyBytes(encoded []byte) []byte {
-	result := make([]byte, 0, len(encoded))
-	for offset := 0; offset < len(encoded); {
-		next := bytes.IndexByte(encoded[offset:], '\\')
-		if next < 0 {
-			result = append(result, encoded[offset:]...)
-			break
-		}
-		result = append(result, encoded[offset:offset+next]...)
-		offset += next
-		separator := offset+6 <= len(encoded) &&
-			(string(encoded[offset:offset+6]) == `\u2028` || string(encoded[offset:offset+6]) == `\u2029`)
-		if separator {
-			precedingSlashes := 0
-			for index := offset - 1; index >= 0 && encoded[index] == '\\'; index-- {
-				precedingSlashes++
-			}
-			if precedingSlashes%2 == 0 {
-				if encoded[offset+5] == '8' {
-					result = append(result, "\u2028"...)
-				} else {
-					result = append(result, "\u2029"...)
-				}
-				offset += 6
-				continue
-			}
-		}
-		result = append(result, encoded[offset])
-		offset++
-	}
-	return result
+	return runtimecontrol.RestoreJSONStringifySeparatorEscapes(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})), nil
 }
 
 func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName string, rawJSON string) ([]byte, error) {
@@ -126,6 +89,9 @@ func writeEventDeclarationDigest(
 		"operation_kind":          bridgeOpWriteEvent,
 		"runtime_write_id":        request.GetRuntimeWriteId(),
 		"session_thread_id":       request.GetScope().GetSessionThreadId(),
+	}
+	if request.GetEventType() == "agent.message" || request.GetEventType() == "agent.thinking" {
+		declaration["preallocated_event_id"] = request.GetPreallocatedEventId()
 	}
 	if request.GetEventType() == "span.model_request_start" {
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
@@ -344,7 +310,7 @@ func internalToolRepairDeclarationDigest(
 	if err != nil {
 		return "", status.Error(codes.InvalidArgument, "internal Tool repair error is invalid")
 	}
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	declaration := map[string]any{
 		"canonical_input":    json.RawMessage(input),
 		"error":              errorValue,
 		"model_request_id":   request.GetModelRequestId(),
@@ -353,7 +319,15 @@ func internalToolRepairDeclarationDigest(
 		"repair_key":         repairKey,
 		"session_thread_id":  request.GetScope().GetSessionThreadId(),
 		"tool_name":          request.GetToolName(),
-	})
+	}
+	prefix, err := canonicalInternalToolRepairPrefix(request.GetReasoningPrefixContextDelta())
+	if err != nil {
+		return "", err
+	}
+	if prefix != nil {
+		declaration["reasoning_prefix_context_delta"] = prefix
+	}
+	raw, err := marshalRuntimeDeclarationObject(declaration)
 	if err != nil {
 		return "", err
 	}
@@ -893,8 +867,14 @@ func appendPreparedRuntimeAssistantContextTx(
 			return durableContextWrite{}, status.Error(codes.InvalidArgument, "request-end append may contain only reasoning context")
 		}
 	case "internal_tool_repair":
-		if toolCount != 1 || len(declaredParts) != 2 || declaredParts[1]["type"] != "tool_result" {
-			return durableContextWrite{}, status.Error(codes.InvalidArgument, "internal Tool repair must contain one Tool Call and one Tool result")
+		pairStart := len(declaredParts) - 2
+		if toolCount != 1 || pairStart < 0 || declaredParts[pairStart]["type"] != "tool_call" || declaredParts[pairStart+1]["type"] != "tool_result" {
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "internal Tool repair must end with one Tool Call and one Tool result")
+		}
+		for _, part := range declaredParts[:pairStart] {
+			if part["type"] != "reasoning" {
+				return durableContextWrite{}, status.Error(codes.InvalidArgument, "internal Tool repair prefix must contain only reasoning")
+			}
 		}
 	}
 	if err := validateStableReasoningBudget(existingParts); err != nil {
@@ -999,6 +979,7 @@ func commitInternalToolRepairContextTx(
 	toolName string,
 	canonicalInputJSON string,
 	toolError *bridgev1.RuntimeToolError,
+	reasoningPrefix *bridgev1.RuntimeContextDelta,
 	now time.Time,
 ) (internalToolRepairDurableFacts, error) {
 	if toolError == nil {
@@ -1015,6 +996,9 @@ func commitInternalToolRepairContextTx(
 			}},
 		}}},
 	}}
+	parts := make([]*bridgev1.RuntimeContextPart, 0, len(reasoningPrefix.GetParts())+len(delta.Parts))
+	parts = append(parts, reasoningPrefix.GetParts()...)
+	delta.Parts = append(parts, delta.Parts...)
 	write, err := appendRuntimeAssistantContextTx(
 		ctx, tx, scope, "internal_tool_repair", eventID, modelRequestID, delta, now,
 	)

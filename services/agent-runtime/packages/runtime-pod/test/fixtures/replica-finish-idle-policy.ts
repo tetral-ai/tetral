@@ -32,6 +32,8 @@ const writer = new BridgeAPIEventWriter({
 const scope = request.scope;
 const binding = scope.binding!;
 const session = new ThreadRuntime({
+    threadRole: "main",
+    threadVisibility: "public",
     workspaceId: scope.workspaceId,
     sessionId: scope.sessionId,
     sessionThreadId: scope.sessionThreadId,

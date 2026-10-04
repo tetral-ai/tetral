@@ -1,0 +1,14 @@
+[
+  {
+    "name": "default-allow-read-ask",
+    "installedTools": [{"type":"tetral_agent_toolset","family":"claude","default_config":{"enabled":true,"permission_policy":{"type":"always_allow"}},"configs":[{"name":"read","enabled":true,"permission_policy":{"type":"always_ask"}}]}],
+    "expectedDefault": "always_allow",
+    "expectedOverrides": {"Read":"always_ask"}
+  },
+  {
+    "name": "default-ask-write-allow",
+    "installedTools": [{"type":"tetral_agent_toolset","family":"claude","default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"write","enabled":true,"permission_policy":{"type":"always_allow"}}]}],
+    "expectedDefault": "always_ask",
+    "expectedOverrides": {"Write":"always_allow"}
+  }
+]

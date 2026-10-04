@@ -15,7 +15,7 @@
  *
  * INVARIANTS (hot state, binding):
  *   1. Request-turn accumulation state is scoped to exactly one provider turn and
- *      never leaks across turns (the ProviderStreamAccumulator accumulator is per-turn).
+ *      never leaks across turns (the RequestContentProcessor accumulator is per-turn).
  *   2. Thread-scoped hot state is fully released with its thread-entry cleanup — no
  *      orphaned fibers, timers, or maps survive the thread.
  *   3. A thread does not serve inbound commands until its cold load (durable context,
@@ -39,18 +39,20 @@ import {
 	Semaphore,
 } from "effect";
 import type { RuntimeContextLoadOptions } from "../context/context-loader.js";
-import type { RuntimeContextEntry } from "../contracts/runtime.js";
+import type { RuntimeCurrentRequestMessage, RuntimeContextEntry } from "../contracts/runtime.js";
 import {
 	ContextLoaderErrorSchema,
 	normalizeRuntimeFailure,
 } from "../contracts/runtime.js";
 import type {
+	RuntimeContinuationOperation,
 	RuntimeHotStateMetrics,
 	RuntimeMetricsSink,
 } from "../runtime/metrics.js";
-import { NoopRuntimeMetricsSink } from "../runtime/metrics.js";
+import { recordUnavailableApprovalWait, safeRuntimeMetricsSink } from "../runtime/metrics.js";
 import * as ThreadLoop from "../thread-loop/thread-loop.js";
 import * as ThreadRuntime from "../thread-loop/thread-runtime.js";
+import type { RuntimeActiveTool } from "../thread-loop/thread-state.js";
 import type {
 	RuntimeAcceptedInputState,
 	RuntimeAcceptedThreadMetadataState,
@@ -249,6 +251,12 @@ export type ThreadSnapshotResult =
 			readonly status?: RuntimeThreadStatusState | undefined;
 			readonly hasPendingApprovalToolJobs?: boolean | undefined;
 			readonly hasUnsettledToolOwner?: boolean | undefined;
+			readonly currentRequestMessage?: RuntimeCurrentRequestMessage | undefined;
+			readonly modelRequestId?: string | undefined;
+			readonly requestEndEventId?: string | undefined;
+			readonly activeToolReferences?: readonly Pick<RuntimeActiveTool,
+				"toolUseEventId" | "modelRequestId" | "modelToolCallId" | "assistantMessageSequence" | "disposition">[] | undefined;
+			readonly sessionToolPermits?: { readonly running: number; readonly waiting: number } | undefined;
 			readonly entries: readonly RuntimeContextEntry[];
 	  }
 	| {
@@ -432,6 +440,7 @@ export interface LayerOptions {
 		command: RuntimeThreadAddressState,
 		loadOptions?: RuntimeContextLoadOptions,
 	) => Promise<RuntimeThreadPreloadState>;
+	readonly recordOperation?: (observation:import("../runtime/metrics.js").RuntimeOperationObservation)=>void;
 	readonly closeoutMonotonicMs?: (() => number) | undefined;
 	readonly closeoutSleep?:
 		| ((durationMs: number, signal: AbortSignal) => Promise<boolean>)
@@ -620,9 +629,29 @@ export function layer(
 		Effect.gen(function* () {
 			const threadLoop = yield* ThreadLoop.Service;
 			const sessions = new Map<string, SessionEntry>();
-			const metrics = options.metrics ?? NoopRuntimeMetricsSink;
+			const metrics = safeRuntimeMetricsSink(options.metrics);
 			const closeoutMonotonicMs =
 				options.closeoutMonotonicMs ?? (() => Date.now());
+			const observeManagerEffect = <A, E, R>(
+				scope: { readonly workspaceId: string; readonly sessionId: string; readonly sessionThreadId: string },
+				operation: RuntimeContinuationOperation,
+				effect: Effect.Effect<A, E, R>,
+			): Effect.Effect<A, E, R> => Effect.suspend(() => {
+				const clock = options.closeoutMonotonicMs ?? (() => performance.now());
+				const startedAt = clock();
+				const entry = sessions.get(`${scope.workspaceId}\u0000${scope.sessionId}`)?.threads.get(scope.sessionThreadId);
+				// Correlation cannot validate damaged state or prevent the owning cleanup.
+				const request = entry?.runtimeThread.state.requestObservationScope();
+				const requestKind = request?.requestKind ?? (entry?.role === "approval_reviewer" ? "approval_reviewer" : "agent_provider_request");
+				return effect.pipe(Effect.onExit(exit => Effect.sync(() => {
+					const outcome = Exit.isFailure(exit)
+						? Cause.hasInterrupts(exit.cause) ? "cancelled" : "error"
+						: typeof exit.value === "object" && exit.value !== null && "ok" in exit.value && exit.value.ok === false ? "rejected" : "success";
+					const durationMs = Math.max(0, clock() - startedAt);
+					metrics.observeContinuationLatency?.(operation, durationMs, outcome, requestKind);
+					try { options.recordOperation?.({ ...scope, operation, durationMs, outcome, requestKind, modelRequestId: request?.modelRequestId }); } catch {}
+				})));
+			});
 			const closeoutSleep = options.closeoutSleep ?? defaultCloseoutSleep;
 			const installationScope = yield* Scope.make();
 			let admissionClosed = false;
@@ -891,6 +920,7 @@ export function layer(
 						threadRole:
 							identity.threadRole ??
 							existingThread.runtimeThread.identity.threadRole,
+      threadVisibility:identity.threadVisibility??existingThread.runtimeThread.identity.threadVisibility,
 						runtimeBindingToken:
 							existingThread.runtimeThread.identity.runtimeBindingToken,
 					});
@@ -978,6 +1008,7 @@ export function layer(
 					Effect.ensuring(
 						Effect.sync(() => {
 							threadEntry.bridgeScope = undefined;
+							threadEntry.runtimeThread.state.cancelApprovalObservations();
 							if (removal === "durable_custody_handoff") {
 								threadEntry.runtimeThread.state.clearAfterCustodyHandoff();
 							}
@@ -1198,10 +1229,11 @@ export function layer(
 				Deferred.await(runSlot.doneDeferred).pipe(Effect.exit);
 
 			const closeRunScope = (
+				threadEntry: ThreadEntry,
 				runSlot: ThreadRunSlot,
 				exit: Exit.Exit<ThreadLoop.ThreadLoopRunResult, unknown>,
 			): Effect.Effect<void> =>
-				Scope.close(runSlot.scope, exit).pipe(Effect.exit, Effect.asVoid);
+				observeManagerEffect(threadEntry.runtimeThread.identity, "cleanup_join", Scope.close(runSlot.scope, exit)).pipe(Effect.exit, Effect.asVoid);
 
 			const settleFailedRunCloseout = (
 				sessionEntry: SessionEntry,
@@ -1308,11 +1340,11 @@ export function layer(
 				Effect.gen(function* () {
 					threadEntry.runtimeThread.state.finishThreadRunProjection();
 					if (threadEntry.runSlot !== runSlot) {
-						yield* closeRunScope(runSlot, exit);
+						yield* closeRunScope(threadEntry, runSlot, exit);
 						yield* completeRunSlot(runSlot, exit);
 						return;
 					}
-					yield* closeRunScope(runSlot, exit);
+					yield* closeRunScope(threadEntry, runSlot, exit);
 					if (runSlot.interruptCloseoutReloadRequired) {
 						// A joined interrupt End could not be projected. Cold reload owns
 						// repair; invalid hot state must not issue another failure write.
@@ -2307,7 +2339,8 @@ export function layer(
 							for (const threadEntry of sessionEntry.threads.values()) {
 								threadEntry.runtimeThread.updateIdentity({
 									...threadEntry.runtimeThread.identity,
-									bindingId: command.bindingId,
+
+						bindingId: command.bindingId,
 									bindingGeneration: command.bindingGeneration,
 									targetPodUid: command.targetPodUid,
 									runtimeProcessId: command.runtimeProcessId,
@@ -2375,7 +2408,7 @@ export function layer(
 				startPendingWork = true,
 				canPublish: () => boolean = () => true,
 			): Effect.Effect<ThreadLifecycleResult> =>
-				Effect.gen(function* () {
+				observeManagerEffect(command, "context_reconstruct", Effect.gen(function* () {
 					if (admissionClosed || !canPublish()) {
 						return {
 							ok: false,
@@ -2401,6 +2434,7 @@ export function layer(
 						...(metadata.role !== undefined
 							? { threadRole: metadata.role }
 							: {}),
+						...(metadata.visibility!==undefined?{threadVisibility:metadata.visibility}:{}),
 						bindingId: command.bindingId,
 						bindingGeneration: command.bindingGeneration,
 						targetPodUid: command.targetPodUid,
@@ -2428,6 +2462,15 @@ export function layer(
 							reason: "thread_busy",
 						};
 					}
+					// An installation owner must publish failure before closing the
+					// channel whose joined commands may be awaiting that result.
+					// Direct preloads have no such owner and release their staging here.
+					const rejectStaging = () => Effect.gen(function* () {
+						threadResult.threadEntry.runtimeThread.state.invalidateResidentState();
+						if (threadResult.threadEntry.installation === undefined) {
+							yield* releaseThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+						}
+					});
 					const shouldInitializeSharedState =
 						initializeSharedState ??
 						(threadResult.sessionEntry.sharedStateStatus === "initializing" &&
@@ -2438,18 +2481,11 @@ export function layer(
 					threadResult.threadEntry.runtimeThread.state.contextManager.installThreadContextPrefix(
 						command.threadContextPrefix,
 					);
-					threadResult.threadEntry.runtimeThread.state.contextManager.replaceEntries(
-						command.contextEntries,
+					threadResult.threadEntry.runtimeThread.state.contextManager.replaceMessages(
+						command.messages,
 					);
-					if (command.openRequestDraft !== undefined) {
-						threadResult.threadEntry.runtimeThread.state.contextManager.installOpenRequestDraft(
-							command.openRequestDraft,
-						);
-					}
-					threadResult.threadEntry.runtimeThread.state.installThreadTurn(
-						command.turnCheckpoint,
-						command.turnToolRouteView,
-					);
+     threadResult.threadEntry.runtimeThread.state.installThreadCheckpoint(command.turnCheckpoint);
+     threadResult.threadEntry.runtimeThread.state.installCurrentRequestMessage(command.currentRequestMessage??undefined);
 					threadResult.threadEntry.runtimeThread.state.markPersistentContextLoaded();
 					const observedSharedPatches = [
 						...(command.runtimeConfigPatch === undefined
@@ -2539,10 +2575,7 @@ export function layer(
 							pendingToolUseIds.has(pending.toolUseEventId),
 						)
 					) {
-						yield* releaseThreadEntry(
-							threadResult.sessionEntry,
-							threadResult.threadEntry,
-						);
+						yield* rejectStaging();
 						return {
 							ok: false,
 							sessionId: command.sessionId,
@@ -2554,14 +2587,10 @@ export function layer(
 						yield* threadLoop.installLoadedPendingToolUses(
 							threadResult.threadEntry.runtimeThread,
 							command.pendingToolUses,
-							command.contextEntries,
-							command.openRequestDraft,
+							command.messages,
 						);
 					if (!pendingToolUseInstall.ok) {
-						yield* releaseThreadEntry(
-							threadResult.sessionEntry,
-							threadResult.threadEntry,
-						);
+						yield* rejectStaging();
 						return {
 							ok: false,
 							sessionId: command.sessionId,
@@ -2573,14 +2602,10 @@ export function layer(
 						yield* threadLoop.installLoadedSandboxExecutions(
 							threadResult.threadEntry.runtimeThread,
 							command.pendingSandboxExecutions,
-							command.contextEntries,
-							command.openRequestDraft,
+							command.messages,
 						);
 					if (!sandboxExecutionInstall.ok) {
-						yield* releaseThreadEntry(
-							threadResult.sessionEntry,
-							threadResult.threadEntry,
-						);
+						yield* rejectStaging();
 						return {
 							ok: false,
 							sessionId: command.sessionId,
@@ -2588,6 +2613,7 @@ export function layer(
 							reason: "context_load_failed",
 						};
 					}
+					threadResult.threadEntry.runtimeThread.state.installThreadTurn(command.turnCheckpoint,command.turnToolRouteView);
 					threadResult.threadEntry.status = metadata.status ?? "idle";
 					for (const mail of command.pendingAgentMail ?? []) {
 						const accepted =
@@ -2595,10 +2621,7 @@ export function layer(
 								mail,
 							);
 						if (accepted === "conflict") {
-							yield* releaseThreadEntry(
-								threadResult.sessionEntry,
-								threadResult.threadEntry,
-							);
+							yield* rejectStaging();
 							return {
 								ok: false,
 								sessionId: command.sessionId,
@@ -2631,6 +2654,17 @@ export function layer(
 							reason: "context_load_failed",
 						};
 					}
+					// Only a fully installed cold owner can report an outstanding approval.
+					// Its durable control has no start timestamp for this residency.
+					for (const pending of threadResult.threadEntry.runtimeThread.state.pendingApprovalToolJobs()) {
+						recordUnavailableApprovalWait({
+							workspaceId: command.workspaceId, sessionId: command.sessionId,
+							sessionThreadId: command.sessionThreadId, modelRequestId: pending.modelRequestId,
+							requestKind: threadResult.threadEntry.runtimeThread.state.threadTurnTransition().checkpoint.request?.requestKind ?? "agent_provider_request",
+							source: pending.job.approvalSource === "auto_reviewer" ? "auto_reviewer" : "user", metrics,
+							recordOperation: options.recordOperation,
+						});
+					}
 					if (
 						startPendingWork &&
 						threadLoop.threadNeedsRun(threadResult.threadEntry.runtimeThread)
@@ -2646,7 +2680,7 @@ export function layer(
 						sessionThreadId: command.sessionThreadId,
 						applied: true,
 					};
-				});
+				}));
 
 			const prepareThreadInstallation = (
 				command: RuntimeThreadAddressState,
@@ -2817,6 +2851,7 @@ export function layer(
 											: false,
 									};
 							if (!result.ok) {
+                threadResult.threadEntry.runtimeThread.state.invalidateResidentState();
 								if (
 									!installation.superseded &&
 									initializeSharedState &&
@@ -2858,6 +2893,8 @@ export function layer(
 									),
 									Effect.forkIn(installationScope),
 								);
+							} else if (!result.ok) {
+								yield* Deferred.succeed(cleanupDeferred, undefined);
 							}
 						}),
 					).pipe(
@@ -3322,11 +3359,24 @@ export function layer(
 							timedOut: true,
 						};
 					}
+					const state = threadEntry.runtimeThread.state;
+					const request = state.threadTurnTransition().checkpoint.request;
 					return {
 						ok: true,
 						sessionId: command.sessionId,
 						sessionThreadId: command.sessionThreadId,
 						observed: true,
+						currentRequestMessage: state.currentRequestMessage(),
+						modelRequestId: request?.modelRequestId,
+						requestEndEventId: request?.requestEnd?.eventId,
+						activeToolReferences: state.activeTools().map((tool) => ({
+							toolUseEventId: tool.toolUseEventId,
+							modelRequestId: tool.modelRequestId,
+							modelToolCallId: tool.modelToolCallId,
+							assistantMessageSequence: tool.assistantMessageSequence,
+							disposition: tool.disposition,
+						})),
+						sessionToolPermits: threadEntry.runtimeThread.toolCoordinator.permitCounts(),
 						status: threadEntry.status,
 						timedOut: false,
 					};
@@ -3429,11 +3479,24 @@ export function layer(
 							entries: [],
 						};
 					}
+					const state = threadEntry.runtimeThread.state;
+					const request = state.threadTurnTransition().checkpoint.request;
 					return {
 						ok: true,
 						sessionId: command.sessionId,
 						sessionThreadId: command.sessionThreadId,
 						observed: true,
+						currentRequestMessage: state.currentRequestMessage(),
+						modelRequestId: request?.modelRequestId,
+						requestEndEventId: request?.requestEnd?.eventId,
+						activeToolReferences: state.activeTools().map((tool) => ({
+							toolUseEventId: tool.toolUseEventId,
+							modelRequestId: tool.modelRequestId,
+							modelToolCallId: tool.modelToolCallId,
+							assistantMessageSequence: tool.assistantMessageSequence,
+							disposition: tool.disposition,
+						})),
+						sessionToolPermits: threadEntry.runtimeThread.toolCoordinator.permitCounts(),
 						status: threadEntry.status,
 						hasPendingApprovalToolJobs:
 							threadEntry.runtimeThread.state.hasPendingApprovalToolJobs(),
@@ -3443,7 +3506,7 @@ export function layer(
 									member.memberKind === "public_tool_use" &&
 									member.terminalResult === undefined,
 							) ?? false,
-						entries: threadEntry.runtimeThread.state.contextManager.entries(),
+						entries: threadEntry.runtimeThread.state.contextManager.historyMessages(),
 					};
 				});
 
@@ -3494,13 +3557,26 @@ export function layer(
 							"reviewer_execution_mismatch",
 						);
 					}
+					const state = threadEntry.runtimeThread.state;
+					const request = state.threadTurnTransition().checkpoint.request;
 					return {
 						ok: true,
 						sessionId: command.sessionId,
 						sessionThreadId: command.sessionThreadId,
 						observed: true,
+						currentRequestMessage: state.currentRequestMessage(),
+						modelRequestId: request?.modelRequestId,
+						requestEndEventId: request?.requestEnd?.eventId,
+						activeToolReferences: state.activeTools().map((tool) => ({
+							toolUseEventId: tool.toolUseEventId,
+							modelRequestId: tool.modelRequestId,
+							modelToolCallId: tool.modelToolCallId,
+							assistantMessageSequence: tool.assistantMessageSequence,
+							disposition: tool.disposition,
+						})),
+						sessionToolPermits: threadEntry.runtimeThread.toolCoordinator.permitCounts(),
 						status: threadEntry.status,
-						entries: threadEntry.runtimeThread.state.contextManager.entries(),
+						entries: threadEntry.runtimeThread.state.contextManager.historyMessages(),
 					};
 				});
 
@@ -3853,6 +3929,7 @@ function acceptedInputIdentityFromMetadata(
 			? { parentThreadId: metadata.parentThreadId }
 			: {}),
 		...(metadata.role !== undefined ? { threadRole: metadata.role } : {}),
+  ...(metadata.visibility!==undefined?{threadVisibility:metadata.visibility}:{}),
 		bindingId: command.bindingId,
 		bindingGeneration: command.bindingGeneration,
 		targetPodUid: command.targetPodUid,

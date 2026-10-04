@@ -137,7 +137,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 
 	message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_message", ModelRequestId: "mreq_facts",
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"hello"}]}`,
+		PreallocatedEventId: bridgeString("evt_00000000000000000000000000000004"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"hello"}]}`,
 		AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: "hello"}}}}},
 	})
 	if err != nil {

@@ -1,8 +1,9 @@
+import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import { AgentRuntimeBridgeServiceClient } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { ProviderGatewayServiceClient, ProviderStreamEventType, ProviderFinishReason } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { ProviderGatewayServiceClient, ProviderFinishReason } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { BridgeAPIAttachmentResolver, bridgeAttachmentGrpcChannelOptions } from "../../src/attachments.js";
 import { createProviderGatewayApp } from "../../src/app.js";
 import { validProviderRequest } from "../unit/fixtures.js";

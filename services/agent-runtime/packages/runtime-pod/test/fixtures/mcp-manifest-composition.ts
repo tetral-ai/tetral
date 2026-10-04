@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { Metadata } from "@grpc/grpc-js";
@@ -145,6 +146,8 @@ async function proveNextProviderToolVisibility(
 		],
 	});
 	const thread = new ThreadRuntime({
+		threadRole: "main",
+		threadVisibility: "public",
 		workspaceId: input.workspaceId,
 		sessionId: input.sessionId,
 		sessionThreadId: `thrd_${input.sessionId}`,
@@ -163,7 +166,7 @@ async function proveNextProviderToolVisibility(
 				runtimeThreadLoopLayer(loader, {
 					events: [
 						{
-							type: "tool-call",
+							type: "tool-call-complete",
 							id: "stale-manifest-tool-call",
 							toolName: input.toolName,
 							input: { query: "tetral" },
@@ -282,7 +285,7 @@ async function loadReplacement(
 			controlState(input, "rin_manifest_cold_load"),
 		);
 		const turnCheckpoint = extractThreadTurnCheckpoint({
-			contextEntries: loaded.contextEntries,
+			messages: loaded.messages,
 			facts: loaded.turnFacts,
 		});
 		const turnToolRouteView = extractColdThreadToolRouteView({
@@ -294,10 +297,7 @@ async function loadReplacement(
 			manager.preloadThread({
 				...controlState(input, "rin_manifest_cold_load"),
 				runtimeBindingToken: loaded.runtimeBindingToken,
-				contextEntries: loaded.contextEntries,
-				...(loaded.openRequestDraft === undefined
-					? {}
-					: { openRequestDraft: loaded.openRequestDraft }),
+				currentRequestMessage:loaded.currentRequestMessage,messages: loaded.messages,
 				turnCheckpoint,
 				turnToolRouteView,
 				thread: loaded.thread,
@@ -422,7 +422,7 @@ function preloadState(
 	return {
 		...controlState(input, "rin_preload"),
 		runtimeBindingToken: "runtime-binding-token",
-		contextEntries: [],
+		currentRequestMessage:null,messages: [],
 		runtimeConfigPatch: {
 			...addressState(input),
 			configIdentity: "session:1",
@@ -511,7 +511,7 @@ async function serveDurableRuntime(input: CompositionInput): Promise<void> {
             providerRequests.push({ toolNames: request.tools.map(tool => tool.name), modelRequestId: request.modelRequestId, generation: currentThread?.configuration.manifestGeneration(mode.serverName) ?? 0 });
             const blocked = holdProvider ? new Promise<void>(resolve => { releaseProvider = resolve; }) : Promise.resolve();
             activeProviders++;
-            return Stream.fromEffect(Effect.promise(() => blocked)).pipe(Stream.flatMap(() => { activeProviders--; runtimeRecords.push({ phase: "provider-stream-released" }); return Stream.fromIterable([{ type: "text-start" as const, id: "manifest-text" }, { type: "text-delta" as const, id: "manifest-text", text_delta: "manifest applied" }, { type: "text-end" as const, id: "manifest-text" }, { type: "finish" as const, finishReason: "stop" as const }]); }));
+            return Stream.fromEffect(Effect.promise(() => blocked)).pipe(Stream.flatMap(() => { activeProviders--; runtimeRecords.push({ phase: "provider-stream-released" }); return Stream.fromIterable([  {type:"text-complete" as const,providerPartId:"manifest-text",eventId:`evt_${createHash("sha256").update(JSON.stringify(["mcp-manifest-composition.ts", request.sessionId, request.modelRequestId, "manifest-text"])).digest("hex").slice(0,32)}`,text:("manifest applied")}, { type: "finish" as const, finishReason: "stop" as const }]); }));
         } };
     let currentThread: ThreadRuntime | undefined;
     // Legacy helper-only context APIs must never substitute a durable read.
@@ -521,9 +521,9 @@ async function serveDurableRuntime(input: CompositionInput): Promise<void> {
     const { manager, scope, events, catalogs } = await buildManager(capturingLayer);
     async function coldLoad() {
         const loaded = await loader.loadThreadContext(controlState(input, "rin_actual_cold_load"));
-        const turnCheckpoint = extractThreadTurnCheckpoint({ contextEntries: loaded.contextEntries, facts: loaded.turnFacts });
+        const turnCheckpoint = extractThreadTurnCheckpoint({ messages: loaded.messages, facts: loaded.turnFacts });
         const turnToolRouteView = extractColdThreadToolRouteView({ checkpoint: turnCheckpoint, pendingToolUses: loaded.pendingToolUses ?? [], pendingSandboxExecutions: loaded.pendingSandboxExecutions ?? [] });
-        const response = await Effect.runPromise(manager.preloadThread({ ...controlState(input, "rin_actual_cold_load"), runtimeBindingToken: loaded.runtimeBindingToken, contextEntries: loaded.contextEntries, turnCheckpoint, turnToolRouteView, thread: loaded.thread, ...(loaded.openRequestDraft === undefined ? {} : { openRequestDraft: loaded.openRequestDraft }), ...(loaded.runtimeConfigPatch === undefined ? {} : { runtimeConfigPatch: loaded.runtimeConfigPatch }), ...(loaded.mcpManifests === undefined ? {} : { mcpManifests: loaded.mcpManifests }) }));
+        const response = await Effect.runPromise(manager.preloadThread({ ...controlState(input, "rin_actual_cold_load"), runtimeBindingToken: loaded.runtimeBindingToken, currentRequestMessage:loaded.currentRequestMessage,messages: loaded.messages, turnCheckpoint, turnToolRouteView, thread: loaded.thread, ...(loaded.runtimeConfigPatch === undefined ? {} : { runtimeConfigPatch: loaded.runtimeConfigPatch }), ...(loaded.mcpManifests === undefined ? {} : { mcpManifests: loaded.mcpManifests }) }));
         if (!response.ok || !response.applied)
             throw new Error("actual Bridge cold preload failed");
         return { response, manifestGenerations: loaded.mcpManifests?.map(patch => ({ server: patch.mcpServerName, generation: patch.generation })) };

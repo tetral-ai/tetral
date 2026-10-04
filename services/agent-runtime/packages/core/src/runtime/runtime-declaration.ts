@@ -11,14 +11,12 @@ import type {
 	RuntimeContextPart,
 	RuntimeInterruptToolResult,
 	RuntimeJsonValue,
-	RuntimeOpenRequestDraft,
 	RuntimeToolSettlementDeclaration,
 } from "../contracts/runtime.js";
 import {
 	finalizeRuntimeToolOutput,
 	RuntimeAssistantContextAppendSchema,
 	RuntimeContextEntrySchema,
-	RuntimeOpenRequestDraftSchema,
 	runtimeToolErrorFromFailure,
 } from "../contracts/runtime.js";
 import type {
@@ -153,10 +151,10 @@ export function assistantAppendFromDraftParts(
 export function applyAssistantAppendResult(input: {
 	readonly modelRequestId: string;
 	readonly append: RuntimeAssistantContextAppend;
-	readonly existingDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly existingDraft?: RuntimeContextEntry | undefined;
 	readonly result: AssistantAppendResult;
 }): {
-	readonly draft: RuntimeOpenRequestDraft;
+	readonly draft: RuntimeContextEntry;
 	readonly activeToolParts: readonly Extract<
 		RuntimeAssistantDraftPart,
 		{ readonly type: "tool" }
@@ -164,10 +162,9 @@ export function applyAssistantAppendResult(input: {
 } {
 	if (
 		input.existingDraft !== undefined &&
-		(input.existingDraft.modelRequestId !== input.modelRequestId ||
-			input.existingDraft.messageSequence !== input.result.messageSequence)
+		(input.existingDraft.messageSequence !== input.result.messageSequence)
 	) {
-		throw new Error("Assistant append changed the open Request draft identity");
+		throw new Error("Assistant append changed the committed message identity");
 	}
 	const callParts = input.append.parts.filter(
 		(
@@ -212,24 +209,14 @@ export function applyAssistantAppendResult(input: {
 			canonicalInput: part.state.input.value,
 		};
 	});
-	const draft = RuntimeOpenRequestDraftSchema.parse({
-		modelRequestId: input.modelRequestId,
+	const draft = RuntimeContextEntrySchema.parse({
+		contextKind: "assistant",
 		messageSequence: input.result.messageSequence,
 		parts: [...(input.existingDraft?.parts ?? []), ...contextParts],
 	});
 	return { draft, activeToolParts };
 }
 
-export function sealAssistantDraft(
-	draft: RuntimeOpenRequestDraft,
-	trailingParts: readonly RuntimeContextPart[] = [],
-): RuntimeContextEntry {
-	return RuntimeContextEntrySchema.parse({
-		messageSequence: draft.messageSequence,
-		contextKind: "assistant",
-		parts: [...draft.parts, ...trailingParts],
-	});
-}
 
 export function applyToolSettlementToContext(input: {
 	readonly entries: readonly RuntimeContextEntry[];
@@ -271,30 +258,6 @@ export function applyToolSettlementToContext(input: {
 	return entries;
 }
 
-export function appendToolResultToOpenRequestDraft(
-	draft: RuntimeOpenRequestDraft,
-	resultPart: Extract<RuntimeContextPart, { readonly type: "tool_result" }>,
-): RuntimeOpenRequestDraft {
-	const callCount = draft.parts.filter(
-		(part) =>
-			part.type === "tool_call" &&
-			part.modelToolCallId === resultPart.modelToolCallId,
-	).length;
-	const resultCount = draft.parts.filter(
-		(part) =>
-			part.type === "tool_result" &&
-			part.modelToolCallId === resultPart.modelToolCallId,
-	).length;
-	if (callCount !== 1 || resultCount !== 0) {
-		throw new Error(
-			"Tool result target is missing or already terminal in the open Request draft",
-		);
-	}
-	return RuntimeOpenRequestDraftSchema.parse({
-		...draft,
-		parts: [...draft.parts, resultPart],
-	});
-}
 
 export function applyInterruptToolResults(input: {
 	readonly entries: readonly RuntimeContextEntry[];
@@ -391,26 +354,29 @@ export function internalToolRepairContext(input: {
 
 export function applyInternalToolRepairResult(input: {
 	readonly modelRequestId: string;
-	readonly existingDraft?: RuntimeOpenRequestDraft | undefined;
+	readonly existingDraft?: RuntimeContextEntry | undefined;
 	readonly assignedMessageSequence: number;
 	readonly context: RuntimeContextDraft;
-}): RuntimeOpenRequestDraft {
+	readonly reasoningPrefixContextDelta?: RuntimeAssistantContextAppend | undefined;
+}): RuntimeContextEntry {
 	if (input.context.contextKind !== "assistant") {
 		throw new Error("internal Tool repair context must be Assistant context");
 	}
 	if (
 		input.existingDraft !== undefined &&
-		(input.existingDraft.modelRequestId !== input.modelRequestId ||
-			input.existingDraft.messageSequence !== input.assignedMessageSequence)
+		(input.existingDraft.messageSequence !== input.assignedMessageSequence)
 	) {
 		throw new Error(
-			"internal Tool repair changed the open Request draft identity",
+			"internal Tool repair changed the committed message identity",
 		);
 	}
-	return RuntimeOpenRequestDraftSchema.parse({
-		modelRequestId: input.modelRequestId,
+	return RuntimeContextEntrySchema.parse({
+		contextKind: "assistant",
 		messageSequence: input.assignedMessageSequence,
-		parts: [...(input.existingDraft?.parts ?? []), ...input.context.parts],
+		parts: [...(input.existingDraft?.parts ?? []), ...(input.reasoningPrefixContextDelta?.parts.map((part): RuntimeContextPart => {
+      if (part.type !== "reasoning") throw new Error("internal repair prefix must contain reasoning only");
+      return {type:"reasoning",text:part.text,...(part.providerMetadata === undefined ? {} : {providerMetadata:part.providerMetadata})};
+    }) ?? []), ...input.context.parts],
 	});
 }
 

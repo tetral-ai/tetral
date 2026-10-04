@@ -1,7 +1,7 @@
 /**
  * @packageDocumentation
  *
- * Raises provider SDK stream parts into generated `ProviderStreamEvent` values.
+ * Raises SDK stream parts into Gateway-private normalized fragments.
  * It guards stable synthesized IDs for id-less
  * fragments, streamed tool names, metadata redaction, finish-reason mapping,
  * finish-only usage, and a single successful terminal event. Provider client
@@ -12,14 +12,14 @@
  */
 import {
   ProviderFinishReason,
-  ProviderStreamEventType,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { boundedRedactedJson } from "./redaction.js";
+import { NormalizedProviderEventType as ProviderStreamEventType } from "./normalized-stream.js";
+import type { NormalizedProviderEvent as ProviderStreamEvent, NormalizedTextEventType, NormalizedReasoningEventType, NormalizedToolInputEventType } from "./normalized-stream.js";
+import { redactedProviderMetadataJson } from "./redaction.js";
 import { normalizeProviderUsage } from "./usage.js";
 import type { ProviderUsageInput, ProviderUsageWireFamily } from "./usage.js";
 
-const ProviderMetadataJsonMaxBytes = 16 * 1024;
+import { MaxMetadataBytes } from "@tetral/gateway-protocol/src/bounds.js";
 
 /**
  * Closed set of adapted SDK parts consumed by `ProviderStreamRaiser`.
@@ -78,7 +78,7 @@ export interface ProviderStreamRaiserOptions {
 //     parts is rejected.
 //   - a missing tool name is rejected.
 // These are producer-side safeguards, not complete stream-wire validation.
-// Runtime owns fragment start/delta/end lifecycle, duplicate and completeness
+// Gateway block assembly owns full fragment lifecycle, duplicate and completeness
 // checks, attachment-rejection placement, and terminal validation.
 /**
  * Stateful producer that maps one provider stream to ordered Gateway events.
@@ -160,7 +160,7 @@ export class ProviderStreamRaiser {
     }
   }
 
-  private textEvent(type: ProviderStreamEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
+  private textEvent(type: NormalizedTextEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
     return {
       type,
       text: {
@@ -171,7 +171,7 @@ export class ProviderStreamRaiser {
     };
   }
 
-  private reasoningEvent(type: ProviderStreamEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
+  private reasoningEvent(type: NormalizedReasoningEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
     return {
       type,
       reasoning: {
@@ -182,7 +182,7 @@ export class ProviderStreamRaiser {
     };
   }
 
-  private toolInputEvent(type: ProviderStreamEventType, id: string, name: string, text: string, metadata: unknown): ProviderStreamEvent {
+  private toolInputEvent(type: NormalizedToolInputEventType, id: string, name: string, text: string, metadata: unknown): ProviderStreamEvent {
     return {
       type,
       toolInput: {
@@ -283,5 +283,5 @@ function finishReason(reason: string | undefined): ProviderFinishReason {
 }
 
 function metadataJson(value: unknown): string {
-  return boundedRedactedJson(value, ProviderMetadataJsonMaxBytes);
+  return redactedProviderMetadataJson(value, MaxMetadataBytes);
 }

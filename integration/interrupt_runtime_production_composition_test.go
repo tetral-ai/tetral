@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -976,7 +978,7 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 	seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	partial, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_partial", ModelRequestId: modelRequestID,
-		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"failed partial text"}]}`,
+		PreallocatedEventId: proto.String("evt_0000000000000000000000000000000a"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"failed partial text"}]}`,
 		AssistantContextDelta: bridgeTextContextDeltaForTest("failed partial text"),
 	})
 	if err != nil || partial.GetCommitted() == nil {

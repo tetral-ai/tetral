@@ -6,7 +6,7 @@
  */
 
 import { z } from "zod/v4";
-import type { RuntimeContextEntry } from "../../contracts/runtime.js";
+import type { RuntimeCurrentRequestMessage,RuntimeContextEntry } from "../../contracts/runtime.js";
 import { RuntimeContextEntrySchema } from "../../contracts/runtime.js";
 import type {
 	ThreadToolRouteView,
@@ -273,8 +273,48 @@ interface ColdPendingSandboxExecution {
 	readonly toolName: string;
 }
 
+/** Narrow durable association projection shared by cold transport and checkpoint reconstruction. */
+export function selectCurrentRequestStart(facts:ThreadTurnLoadFacts):ThreadTurnLoadFacts["events"][number]|undefined {
+ const starts=new Map(facts.events.filter(event=>event.type==="span.model_request_start").map(event=>[event.modelRequestId!,event]));
+	const latestRunning = facts.events
+		.filter(
+			(event) =>
+				event.type === "session.status_running" ||
+				event.type === "session.thread_status_running",
+		)
+		.at(-1);
+	const closeout = extractRunCloseout(facts.events);
+	const latestIdleBeforeRunning =
+		latestRunning === undefined
+			? undefined
+			: facts.events
+					.filter(
+						(event) =>
+							(event.type === "session.status_idle" ||
+								event.type === "session.thread_status_idle") &&
+							event.eventSequence < latestRunning.eventSequence,
+					)
+					.at(-1);
+	const preservePriorRequest =
+		latestIdleBeforeRunning?.idle?.stopReason === "requires_action";
+	const candidateStart = [...starts.values()]
+		.filter(
+			(event) =>
+				latestRunning === undefined ||
+				preservePriorRequest ||
+				event.eventSequence >= latestRunning.eventSequence,
+		)
+		.at(-1);
+	const runIsClosed =
+		closeout.terminalCloseout !== undefined ||
+		(closeout.idleCloseout !== undefined &&
+			closeout.idleCloseout.stopReason !== "requires_action");
+	const newestStart = runIsClosed ? undefined : candidateStart;
+ return newestStart;
+}
+
 export function extractThreadTurnCheckpoint(input: {
-	readonly contextEntries: readonly RuntimeContextEntry[];
+	readonly messages: readonly RuntimeContextEntry[];
 	readonly facts: ThreadTurnLoadFacts;
 }): ThreadTurnCheckpoint {
 	// PostgreSQL order is authoritative within Events and context separately.
@@ -309,41 +349,9 @@ export function extractThreadTurnCheckpoint(input: {
 
 	validateRequestOrdering(facts.events, starts, ends);
 	validateRequestMembers(facts.events, starts, ends, facts.internalRepairs);
-	const latestRunning = facts.events
-		.filter(
-			(event) =>
-				event.type === "session.status_running" ||
-				event.type === "session.thread_status_running",
-		)
-		.at(-1);
-	const closeout = extractRunCloseout(facts.events);
-	const latestIdleBeforeRunning =
-		latestRunning === undefined
-			? undefined
-			: facts.events
-					.filter(
-						(event) =>
-							(event.type === "session.status_idle" ||
-								event.type === "session.thread_status_idle") &&
-							event.eventSequence < latestRunning.eventSequence,
-					)
-					.at(-1);
-	const preservePriorRequest =
-		latestIdleBeforeRunning?.idle?.stopReason === "requires_action";
-	const latestStart = [...starts.values()].at(-1);
-	const candidateStart = [...starts.values()]
-		.filter(
-			(event) =>
-				latestRunning === undefined ||
-				preservePriorRequest ||
-				event.eventSequence >= latestRunning.eventSequence,
-		)
-		.at(-1);
-	const runIsClosed =
-		closeout.terminalCloseout !== undefined ||
-		(closeout.idleCloseout !== undefined &&
-			closeout.idleCloseout.stopReason !== "requires_action");
-	const newestStart = runIsClosed ? undefined : candidateStart;
+ const latestStart=[...starts.values()].at(-1);
+ const closeout=extractRunCloseout(facts.events);
+ const newestStart=selectCurrentRequestStart(facts);
 	const request =
 		newestStart === undefined
 			? undefined
@@ -364,7 +372,7 @@ export function extractThreadTurnCheckpoint(input: {
 			: closeout.idleCloseout;
 	const boundary =
 		latestStart?.requestStart?.contextThroughMessageSequence ?? 0;
-	const contextEntries = input.contextEntries.map((entry) =>
+	const contextEntries = input.messages.map((entry) =>
 		RuntimeContextEntrySchema.parse(entry),
 	);
 	if (
@@ -411,11 +419,10 @@ export function extractThreadTurnCheckpoint(input: {
 }
 
 /**
- * Converts the durable Assistant projection of one failed Request into the
- * Runtime-owned provider view. Text from the failed attempt is never replayed;
- * exact terminal Tool Call/Result pairs and their signed reasoning remain
- * provider-visible, while a nonterminal Tool Call stays in the private open
- * draft until its existing settlement route completes.
+ * Derives settlement routes for the selected durable Request. Committed
+ * Assistant content remains in ContextManager; each pending route names its
+ * exact Tool reference and existing settlement custody. The checkpoint governs
+ * which completed pairs may enter the provider view.
  */
 export function extractColdThreadToolRouteView(input: {
 	readonly checkpoint: ThreadTurnCheckpoint;
@@ -886,4 +893,15 @@ function extractRunCloseout(
 				}
 			: {}),
 	};
+}
+
+/** Checks the Bridge-selected narrow association against the actual durable checkpoint. */
+export function validateCurrentRequestMessage(reference:RuntimeCurrentRequestMessage|null,messages:readonly RuntimeContextEntry[],checkpoint:ThreadTurnCheckpoint):void {
+ if(reference!==null){
+  if(reference.modelRequestId!==checkpoint.request?.modelRequestId)throw new Error("current request association differs from checkpoint");
+  const matches=messages.filter(message=>message.messageSequence===reference.assistantMessageSequence);
+  if(matches.length!==1||matches[0]?.contextKind!=="assistant")throw new Error("current request association has no unique committed Assistant");
+  const retention=checkpoint.request.requestEnd?.providerContextRetention.assistantMessageSequence;
+  if(retention!==undefined&&retention!==reference.assistantMessageSequence)throw new Error("current request sequence differs from retention");
+ }else if(checkpoint.request?.requestEnd?.providerContextRetention.assistantMessageSequence!==undefined||checkpoint.request?.toolMembers.length)throw new Error("current durable Assistant association is missing");
 }

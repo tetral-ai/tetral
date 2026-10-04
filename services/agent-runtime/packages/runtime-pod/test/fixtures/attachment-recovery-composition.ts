@@ -228,7 +228,7 @@ if (input.mode === "cold") {
 	try {
 		const loaded = await bridgeLoader.loadThreadContext(address);
 		const checkpoint = extractThreadTurnCheckpoint({
-			contextEntries: loaded.contextEntries,
+			messages: loaded.messages,
 			facts: loaded.turnFacts,
 		});
 		const preloadResult = await hosts.subAgentRunHost.preloadThread(address);
@@ -237,7 +237,7 @@ if (input.mode === "cold") {
 				pendingAttachments: loaded.pendingAttachments?.length ?? 0,
 				attachmentInMessageOrCheckpoint:
 					input.fileId !== undefined &&
-					JSON.stringify({ contextEntries: loaded.contextEntries, checkpoint }).includes(input.fileId),
+					JSON.stringify({ currentRequestMessage:null,messages: loaded.messages, checkpoint }).includes(input.fileId),
 				providerInvocations,
 				preloadResult,
 			}),

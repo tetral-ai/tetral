@@ -41,9 +41,10 @@ import type {
 } from "@tetral/agent-runtime-core/src/thread-loop/turn/checkpoint.js";
 import {
 	extractColdThreadToolRouteView,
-	extractThreadTurnCheckpoint,
+	validateCurrentRequestMessage,
+ extractThreadTurnCheckpoint,
 } from "@tetral/agent-runtime-core/src/thread-loop/turn/load.js";
-import { projectFailedRequestsProviderContext } from "@tetral/agent-runtime-core/src/thread-loop/turn/provider-context.js";
+import { normalizeLoadedMessages } from "@tetral/agent-runtime-core/src/thread-loop/turn/provider-context.js";
 import { deriveThreadTurnSnapshot } from "@tetral/agent-runtime-core/src/thread-loop/turn/reducer.js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
@@ -78,8 +79,8 @@ export interface RuntimeSubAgentRunHost {
 	readonly preloadThread: (
 		input: Omit<
 			RuntimeThreadPreloadState,
-			| "contextEntries"
-			| "openRequestDraft"
+			| "messages"
+			| "currentRequestMessage"
 			| "turnCheckpoint"
 			| "turnToolRouteView"
 			| "runtimeBindingToken"
@@ -251,20 +252,16 @@ export async function buildRuntimeCoreHosts(
 						let turnCheckpoint: ThreadTurnCheckpoint;
 						let turnToolRouteView: ThreadToolRouteView;
 						let residentContext: ReturnType<
-							typeof projectFailedRequestsProviderContext
+							typeof normalizeLoadedMessages
 						>;
 						try {
 							turnCheckpoint = extractThreadTurnCheckpoint({
-								contextEntries: context.contextEntries,
+								messages: context.messages,
 								facts: context.turnFacts,
 							});
-							residentContext = projectFailedRequestsProviderContext({
-								contextEntries: context.contextEntries,
-								...(context.openRequestDraft === undefined
-									? {}
-									: { openRequestDraft: context.openRequestDraft }),
-								facts: context.turnFacts,
-							});
+       residentContext=normalizeLoadedMessages({messages:context.messages,facts:context.turnFacts});
+
+ validateCurrentRequestMessage(context.currentRequestMessage,context.messages,turnCheckpoint);
 							turnToolRouteView = extractColdThreadToolRouteView({
 								checkpoint: turnCheckpoint,
 								pendingToolUses: context.pendingToolUses ?? [],
@@ -289,10 +286,8 @@ export async function buildRuntimeCoreHosts(
 							...(context.thread !== undefined
 								? { thread: context.thread }
 								: {}),
-							contextEntries: residentContext.contextEntries,
-							...(residentContext.openRequestDraft !== undefined
-								? { openRequestDraft: residentContext.openRequestDraft }
-								: {}),
+       messages:residentContext,
+       currentRequestMessage:context.currentRequestMessage!==null&&residentContext.some(message=>message.messageSequence===context.currentRequestMessage!.assistantMessageSequence)?context.currentRequestMessage:null,
 							turnCheckpoint,
 							turnToolRouteView,
 							...(context.threadContextPrefix !== undefined
@@ -330,6 +325,7 @@ export async function buildRuntimeCoreHosts(
 			: {}),
 		...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
 		closeoutMonotonicMs: options.threadLoop.runtime.monotonicMs,
+		...(options.threadLoop.recordOperation === undefined ? {} : { recordOperation: options.threadLoop.recordOperation }),
 		closeoutSleep: options.threadLoop.runtime.sleep,
 		...(options.recordCloseoutEvent !== undefined
 			? { recordCloseoutEvent: options.recordCloseoutEvent }

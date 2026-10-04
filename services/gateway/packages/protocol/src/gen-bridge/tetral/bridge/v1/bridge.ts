@@ -774,6 +774,11 @@ export interface CommitInternalToolRepairRequest {
   canonicalInputJson: string;
   error: RuntimeToolError | undefined;
   repairKey: string;
+  /**
+   * Private stable reasoning immediately preceding this semantic repair member.
+   * Absent or empty means no prefix; nonempty parts must all be reasoning.
+   */
+  reasoningPrefixContextDelta?: RuntimeContextDelta | undefined;
 }
 
 export interface CommitInternalToolRepairResponse {
@@ -905,7 +910,14 @@ export interface WriteEventRequest {
   contextThroughMessageSequence?: number | undefined;
   requestKind: string;
   consumedFileAttachments: FileAttachmentPair[];
-  toolDeclaration: RuntimeToolDeclaration | undefined;
+  toolDeclaration:
+    | RuntimeToolDeclaration
+    | undefined;
+  /**
+   * Gateway identity for agent.message and agent.thinking only. Required for
+   * those events and preserved through durable declaration replay.
+   */
+  preallocatedEventId?: string | undefined;
 }
 
 export interface RuntimeToolDeclaration {
@@ -6445,6 +6457,7 @@ function createBaseCommitInternalToolRepairRequest(): CommitInternalToolRepairRe
     canonicalInputJson: "",
     error: undefined,
     repairKey: "",
+    reasoningPrefixContextDelta: undefined,
   };
 }
 
@@ -6470,6 +6483,9 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     }
     if (message.repairKey !== "") {
       writer.uint32(58).string(message.repairKey);
+    }
+    if (message.reasoningPrefixContextDelta !== undefined) {
+      RuntimeContextDelta.encode(message.reasoningPrefixContextDelta, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -6537,6 +6553,14 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
           message.repairKey = reader.string();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.reasoningPrefixContextDelta = RuntimeContextDelta.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6575,6 +6599,11 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
         : isSet(object.repair_key)
         ? globalThis.String(object.repair_key)
         : "",
+      reasoningPrefixContextDelta: isSet(object.reasoningPrefixContextDelta)
+        ? RuntimeContextDelta.fromJSON(object.reasoningPrefixContextDelta)
+        : isSet(object.reasoning_prefix_context_delta)
+        ? RuntimeContextDelta.fromJSON(object.reasoning_prefix_context_delta)
+        : undefined,
     };
   },
 
@@ -6601,6 +6630,9 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     if (message.repairKey !== "") {
       obj.repairKey = message.repairKey;
     }
+    if (message.reasoningPrefixContextDelta !== undefined) {
+      obj.reasoningPrefixContextDelta = RuntimeContextDelta.toJSON(message.reasoningPrefixContextDelta);
+    }
     return obj;
   },
 
@@ -6622,6 +6654,10 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
       ? RuntimeToolError.fromPartial(object.error)
       : undefined;
     message.repairKey = object.repairKey ?? "";
+    message.reasoningPrefixContextDelta =
+      (object.reasoningPrefixContextDelta !== undefined && object.reasoningPrefixContextDelta !== null)
+        ? RuntimeContextDelta.fromPartial(object.reasoningPrefixContextDelta)
+        : undefined;
     return message;
   },
 };
@@ -8617,6 +8653,7 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     requestKind: "",
     consumedFileAttachments: [],
     toolDeclaration: undefined,
+    preallocatedEventId: undefined,
   };
 }
 
@@ -8651,6 +8688,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.toolDeclaration !== undefined) {
       RuntimeToolDeclaration.encode(message.toolDeclaration, writer.uint32(146).fork()).join();
+    }
+    if (message.preallocatedEventId !== undefined) {
+      writer.uint32(154).string(message.preallocatedEventId);
     }
     return writer;
   },
@@ -8742,6 +8782,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.toolDeclaration = RuntimeToolDeclaration.decode(reader, reader.uint32());
           continue;
         }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.preallocatedEventId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8799,6 +8847,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.tool_declaration)
         ? RuntimeToolDeclaration.fromJSON(object.tool_declaration)
         : undefined,
+      preallocatedEventId: isSet(object.preallocatedEventId)
+        ? globalThis.String(object.preallocatedEventId)
+        : isSet(object.preallocated_event_id)
+        ? globalThis.String(object.preallocated_event_id)
+        : undefined,
     };
   },
 
@@ -8834,6 +8887,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.toolDeclaration !== undefined) {
       obj.toolDeclaration = RuntimeToolDeclaration.toJSON(message.toolDeclaration);
     }
+    if (message.preallocatedEventId !== undefined) {
+      obj.preallocatedEventId = message.preallocatedEventId;
+    }
     return obj;
   },
 
@@ -8860,6 +8916,7 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.toolDeclaration = (object.toolDeclaration !== undefined && object.toolDeclaration !== null)
       ? RuntimeToolDeclaration.fromPartial(object.toolDeclaration)
       : undefined;
+    message.preallocatedEventId = object.preallocatedEventId ?? undefined;
     return message;
   },
 };

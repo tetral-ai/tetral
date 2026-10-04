@@ -388,7 +388,7 @@ eof_line: "*** End of File" LF
     const patch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
 
     expect(registerRuntimeToolCall("mreq_patch", state, {
-      type: "tool-call",
+      type: "tool-call-complete",
       id: "call_patch",
       toolName: "apply_patch",
       input: patch,
@@ -397,7 +397,7 @@ eof_line: "*** End of File" LF
     expect(toolScheduler.jobs()[0]?.input).toEqual({ patch });
 
     expect(registerRuntimeToolCall("mreq_patch", state, {
-      type: "tool-call",
+      type: "tool-call-complete",
       id: "call_patch_object",
       toolName: "apply_patch",
       input: { patch },

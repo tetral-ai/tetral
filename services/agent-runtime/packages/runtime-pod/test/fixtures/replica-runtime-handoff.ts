@@ -1,3 +1,5 @@
+import {NormalizedProviderEventType} from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
+import type {NormalizedProviderEvent} from "../../../../../gateway/packages/lowering/src/normalized-stream.js";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { writeJsonSnapshot } from "./json-snapshot.js";
 import { appendFileSync } from "node:fs";
@@ -106,7 +108,7 @@ const gatewayService = new ProviderGatewayServiceShell({
         hmacKey: "replica-handoff-shared-token-signing-key",
     }),
     providerStreamer: {
-        stream: async function* (request) {
+        stream: async function* (request): AsyncGenerator<NormalizedProviderEvent> {
             const session = request.request.sessionId;
             const reviewer = request.request.requestKind ===
                 ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER;
@@ -124,13 +126,13 @@ const gatewayService = new ProviderGatewayServiceShell({
             });
             await writeJsonSnapshot(`${input.directory}/ledger.json`, ledger);
             yield {
-                type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
                 text: {
                     id: "frame", text: "", metadataJson: "{}"
                 },
             };
             yield {
-                type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
                 text: {
                     id: "frame",
                     text: reviewer
@@ -146,7 +148,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                     metadataJson: "{}",
                 },
             };
-            // The consumer has received the text frame before this barrier is visible.
+            // The provider source emitted a partial text block; v2 withholds it until completion.
             await writeFile(`${input.directory}/${session}-${ordinal}.frame`, "delivered");
             if ((!reviewer &&
                 (input.replacement ||
@@ -156,7 +158,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                 (reviewer && input.reviewerScenario === "hold"))
                 await wait(`${input.directory}/${session}-${ordinal}.release`, request.abortSignal);
             yield {
-                type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
                 text: {
                     id: "frame", text: "", metadataJson: "{}"
                 },
@@ -171,7 +173,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                         session.endsWith("b")));
             if (tool)
                 yield {
-                    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+                    type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
                     toolCall: {
                         id: "tool-current",
                         name: reviewRead || session.endsWith("b")
@@ -188,7 +190,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                     },
                 };
             yield {
-                type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
                 finish: {
                     reason: tool
                         ? ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS

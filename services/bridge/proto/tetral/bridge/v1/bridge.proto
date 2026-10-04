@@ -400,6 +400,9 @@ message CommitInternalToolRepairRequest {
   string canonical_input_json = 5;
   RuntimeToolError error = 6;
   string repair_key = 7;
+  // Private stable reasoning immediately preceding this semantic repair member.
+  // Absent or empty means no prefix; nonempty parts must all be reasoning.
+  optional RuntimeContextDelta reasoning_prefix_context_delta = 8;
 }
 
 message CommitInternalToolRepairResponse {
@@ -558,6 +561,9 @@ message WriteEventRequest {
   reserved 17;
   reserved "canonical_execution_input_json";
   RuntimeToolDeclaration tool_declaration = 18;
+  // Gateway identity for agent.message and agent.thinking only. Required for
+  // those events and preserved through durable declaration replay.
+  optional string preallocated_event_id = 19;
 }
 
 enum RuntimeToolEventKind {

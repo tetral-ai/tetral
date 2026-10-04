@@ -1,31 +1,31 @@
 {
   "eventTypeRuns": [
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "type": "reasoning-start",
       "count": 1
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "type": "reasoning-delta",
       "count": 21
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "type": "reasoning-end",
       "count": 1
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "type": "text-start",
       "count": 1
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "type": "text-delta",
       "count": 1
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "type": "text-end",
       "count": 1
     },
     {
-      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "type": "finish",
       "count": 1
     }
   ],

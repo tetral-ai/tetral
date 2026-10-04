@@ -180,8 +180,8 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 }
 
 type bridgeLoadContextPayload struct {
-	ContextEntries           []bridgeRuntimeContextEntry          `json:"contextEntries"`
-	OpenRequestDraft         *bridgeRuntimeOpenRequestDraft       `json:"openRequestDraft"`
+	Messages                 []bridgeRuntimeContextEntry          `json:"messages"`
+	CurrentRequestMessage    *bridgeRuntimeCurrentRequestMessage  `json:"currentRequestMessage"`
 	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
@@ -194,9 +194,10 @@ type bridgeLoadContextPayload struct {
 }
 
 type bridgeLoadContextMessageDescriptor struct {
-	Kind           string
-	SourceEventID  *string
-	ModelRequestID *string
+	MessageSequence int64
+	Kind            string
+	SourceEventID   *string
+	ModelRequestID  *string
 }
 
 type bridgeRuntimeContextEntry struct {
@@ -205,10 +206,9 @@ type bridgeRuntimeContextEntry struct {
 	Parts           []json.RawMessage `json:"parts"`
 }
 
-type bridgeRuntimeOpenRequestDraft struct {
-	ModelRequestID  string            `json:"modelRequestId"`
-	MessageSequence int64             `json:"messageSequence"`
-	Parts           []json.RawMessage `json:"parts"`
+type bridgeRuntimeCurrentRequestMessage struct {
+	ModelRequestID           string `json:"modelRequestId"`
+	AssistantMessageSequence int64  `json:"assistantMessageSequence"`
 }
 
 type bridgeLoadContextThreadPrefix struct {
@@ -389,19 +389,7 @@ func loadThreadContextJSONTx(
 			       m.sequence,
 			       m.data_json,
 			       m.source_event_id,
-			       m.model_request_id,
-			       CASE
-			         WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
-			         WHEN NOT EXISTS (
-			           SELECT 1 FROM session_events ended
-			            WHERE ended.workspace_id = m.workspace_id
-			              AND ended.session_id = m.session_id
-			              AND ended.session_thread_id = m.session_thread_id
-			              AND ended.model_request_id = m.model_request_id
-			              AND ended.type = 'span.model_request_end'
-			         ) THEN 'open'
-			         ELSE 'sealed'
-			       END AS context_state
+			       m.model_request_id
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
 		 WHERE m.workspace_id = $1
@@ -436,6 +424,24 @@ func loadThreadContextJSONTx(
 		              AND ended.payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}' = m.sequence::text
 		         )
 		         OR EXISTS (
+		           SELECT 1 FROM session_events ended
+		           JOIN session_bridge_operations receipt
+		             ON receipt.workspace_id = ended.workspace_id
+		            AND receipt.session_id = ended.session_id
+		            AND receipt.session_thread_id = ended.session_thread_id
+		            AND receipt.operation = 'write_request_end'
+		            AND receipt.source_kind = 'model_request'
+		            AND receipt.idempotency_key = ended.model_request_id
+		            AND receipt.receipt_json::jsonb ->> 'requestEndEventId' = ended.event_id
+		            WHERE ended.workspace_id = m.workspace_id
+		              AND ended.session_id = m.session_id
+		              AND ended.session_thread_id = m.session_thread_id
+		              AND ended.model_request_id = m.model_request_id
+		              AND ended.type = 'span.model_request_end'
+		              AND ended.payload_json::jsonb #>> '{provider_context_retention,disposition}' = 'completed'
+		              AND receipt.receipt_json::jsonb #>> '{ordinary,sealedMessageSequence}' = m.sequence::text
+		         )
+		         OR EXISTS (
 		           SELECT 1 FROM pending_requests pending
 		            WHERE pending.model_request_id = m.model_request_id
 		         )
@@ -452,8 +458,7 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	defer func() { _ = rows.Close() }()
-	contextEntries := make([]bridgeRuntimeContextEntry, 0)
-	var openRequestDraft *bridgeRuntimeOpenRequestDraft
+	messages := make([]bridgeRuntimeContextEntry, 0)
 	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
@@ -461,14 +466,12 @@ func loadThreadContextJSONTx(
 		var raw string
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
-		var contextState string
 		if err := rows.Scan(
 			&kind,
 			&sequence,
 			&raw,
 			&sourceEventID,
 			&modelRequestID,
-			&contextState,
 		); err != nil {
 			return "", err
 		}
@@ -479,26 +482,8 @@ func loadThreadContextJSONTx(
 		if err != nil {
 			return "", err
 		}
-		switch contextState {
-		case "sealed":
-			contextEntries = append(contextEntries, bridgeRuntimeContextEntry{
-				MessageSequence: sequence,
-				ContextKind:     kind,
-				Parts:           parts,
-			})
-		case "open":
-			if kind != "assistant" || !modelRequestID.Valid || openRequestDraft != nil {
-				return "", status.Error(codes.FailedPrecondition, "open request draft is ambiguous")
-			}
-			openRequestDraft = &bridgeRuntimeOpenRequestDraft{
-				ModelRequestID:  modelRequestID.String,
-				MessageSequence: sequence,
-				Parts:           parts,
-			}
-		default:
-			return "", status.Error(codes.FailedPrecondition, "durable context state is invalid")
-		}
-		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind}
+		messages = append(messages, bridgeRuntimeContextEntry{MessageSequence: sequence, ContextKind: kind, Parts: parts})
+		descriptor := bridgeLoadContextMessageDescriptor{Kind: kind, MessageSequence: sequence}
 		if sourceEventID.Valid {
 			descriptor.SourceEventID = &sourceEventID.String
 		}
@@ -535,9 +520,13 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
+	currentRequestMessage, err := selectCurrentRequestMessage(turnFacts, messageDescriptors)
+	if err != nil {
+		return "", err
+	}
 	return runtimecontrol.MarshalJSON(bridgeLoadContextPayload{
-		ContextEntries:           contextEntries,
-		OpenRequestDraft:         openRequestDraft,
+		Messages:                 messages,
+		CurrentRequestMessage:    currentRequestMessage,
 		TurnFacts:                turnFacts,
 		ThreadContextPrefix:      threadContextPrefix,
 		Thread:                   thread,

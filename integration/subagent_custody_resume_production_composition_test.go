@@ -58,7 +58,7 @@ type closedThreadResumeCompositionResult struct {
 			Action string `json:"action"`
 		} `json:"nextStep"`
 	} `json:"decision"`
-	ContextEntries   []bridgeRuntimeContextEntry `json:"contextEntries"`
+	Messages         []bridgeRuntimeContextEntry `json:"messages"`
 	TurnFacts        bridgeLoadContextTurnFacts  `json:"turnFacts"`
 	ProviderRequests int                         `json:"providerRequests"`
 	RuntimeEvents    int                         `json:"runtimeEvents"`
@@ -212,13 +212,113 @@ func (p *closedThreadResumeRuntimeProcess) providerStart(t *testing.T, admin *sq
 	}{}
 }
 
-func (p *closedThreadResumeRuntimeProcess) close(t *testing.T) {
+func closeResumedThreadAfterOutputCapture(t *testing.T, fixture subagentMailFixture, resumedRuntime *closedThreadResumeRuntimeProcess) {
 	t.Helper()
-	if err := os.WriteFile(p.closePath, []byte("close"), 0o600); err != nil {
+	// The later turn owns a new output capture. Its End does not complete
+	// FinishIdle; run that durable owner before asking Runtime to join.
+	var laterCaptureID string
+	var laterCaptureGeneration int
+	captureDeadline := time.Now().Add(10 * time.Second)
+	for {
+		err := fixture.admin.QueryRow(`SELECT finish_idle_write_id,capture_generation
+			FROM sandbox_output_capture_operations WHERE workspace_id='default'
+			AND session_id=$1 AND session_thread_id=$2 AND state='pending'`,
+			fixture.sessionID, fixture.childID).Scan(&laterCaptureID, &laterCaptureGeneration)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) || time.Now().After(captureDeadline) {
+			var facts string
+			factsErr := fixture.admin.QueryRow(`SELECT jsonb_build_object(
+				'captures',(SELECT COALESCE(jsonb_agg(jsonb_build_object('write',finish_idle_write_id,'generation',capture_generation,'state',state)),'[]'::jsonb) FROM sandbox_output_capture_operations WHERE session_id=$1 AND session_thread_id=$2),
+				'events',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',event_id,'type',type,'request',model_request_id,'error',payload_json::jsonb->'error','is_error',payload_json::jsonb->'is_error') ORDER BY sequence),'[]'::jsonb) FROM session_events WHERE session_id=$1 AND session_thread_id=$2),
+				'thread',(SELECT status FROM session_threads WHERE session_id=$1 AND id=$2))::text`,
+				fixture.sessionID, fixture.childID).Scan(&facts)
+			t.Fatalf("later resumed turn did not enqueue its output capture: %v; durable facts=%s/%v", err, facts, factsErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var pendingCaptureJobs int
+	if err := fixture.admin.QueryRow(`SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND status='pending'
+		AND payload_json::jsonb->>'session_id'=$2
+		AND payload_json::jsonb->>'finish_idle_write_id'=$3
+		AND (payload_json::jsonb->>'capture_generation')::int=$4`,
+		queue.KindSandboxOutputCapture, fixture.sessionID, laterCaptureID, laterCaptureGeneration).Scan(&pendingCaptureJobs); err != nil || pendingCaptureJobs != 1 {
+		t.Fatalf("later output-capture queue ownership=%d: %v", pendingCaptureJobs, err)
+	}
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		"daytona": &bridgeMemoryProjectionProvider{},
+	})
+	if err != nil {
+		t.Fatalf("build resumed output-capture provider registry: %v", err)
+	}
+	runner := &tetralsandbox.SandboxOutputCaptureJobRunner{
+		Queue:     tetralqueue.NewServer(queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(fixture.runtimeDB)), nil),
+		Store:     tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(dbconnect.NewClientForTesting(fixture.runtimeDB)),
+		Providers: registry,
+		BlobStore: blob.NewFakeBlobStore(),
+		Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+			WorkspaceID: "default", LeaseOwner: "subagent-resumed-output-capture", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	if err := os.WriteFile(resumedRuntime.closePath, []byte("close"), 0o600); err != nil {
 		t.Fatalf("release serving closed Thread resume composition: %v", err)
 	}
-	if err := p.command.Wait(); err != nil {
-		t.Fatalf("wait for serving closed Thread resume composition: %v: %s", err, p.output.String())
+	ctx, cancel := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	// Prior adopted captures can still have queued jobs, and closing sibling
+	// Threads can create captures. Keep the real owner serving until Core joins.
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := runner.RunOnceWithActivity(ctx); err != nil {
+				if ctx.Err() != nil {
+					workerDone <- nil
+					return
+				}
+				workerDone <- err
+				return
+			}
+			select {
+			case <-ctx.Done():
+				workerDone <- nil
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	runtimeDone := make(chan error, 1)
+	go func() { runtimeDone <- resumedRuntime.command.Wait() }()
+	joinDeadline := time.NewTimer(20 * time.Second)
+	defer joinDeadline.Stop()
+	var joinErr, workerErr error
+	select {
+	case joinErr = <-runtimeDone:
+		cancel()
+		workerErr = <-workerDone
+	case workerErr = <-workerDone:
+		cancel()
+		_ = resumedRuntime.command.Process.Kill()
+		joinErr = <-runtimeDone
+	case <-joinDeadline.C:
+		cancel()
+		_ = resumedRuntime.command.Process.Kill()
+		joinErr = <-runtimeDone
+		workerErr = <-workerDone
+		t.Fatalf("resumed Runtime did not join with its output-capture owner: runtime=%v worker=%v: %s", joinErr, workerErr, resumedRuntime.output.String())
+	}
+	if joinErr != nil || (workerErr != nil && !errors.Is(workerErr, context.Canceled)) {
+		t.Fatalf("join resumed Runtime and output-capture owner: runtime=%v worker=%v: %s", joinErr, workerErr, resumedRuntime.output.String())
+	}
+	var adoptedCaptures int
+	if err := fixture.admin.QueryRow(`SELECT count(*) FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		AND finish_idle_write_id=$3 AND capture_generation=$4 AND state='adopted'`,
+		fixture.sessionID, fixture.childID, laterCaptureID, laterCaptureGeneration).Scan(&adoptedCaptures); err != nil || adoptedCaptures != 1 {
+		t.Fatalf("later output capture was not adopted before join: %d/%v", adoptedCaptures, err)
 	}
 }
 
@@ -1118,7 +1218,7 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
 	laterExecution := resumedRuntime.providerStart(t, fixture.admin, fixture.sessionID, fixture.childID)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
-	resumedRuntime.close(t)
+	closeResumedThreadAfterOutputCapture(t, fixture, resumedRuntime)
 	var laterSequence int64
 	var laterMessageID, laterSourceEventID, finalSiblingStatus string
 	var finalStarts int
@@ -1256,10 +1356,10 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 		}
 	}
 	if !seenCompactionRunning || !seenCompactionStart || !seenCompactionEnd || !seenCompactionIdle ||
-		len(resumed.ContextEntries) != 1 || resumed.ContextEntries[0].ContextKind != "compaction" {
+		len(resumed.Messages) != 1 || resumed.Messages[0].ContextKind != "compaction" {
 		t.Fatalf("post-compaction cold facts = running:%t start:%t end:%t idle:%t context:%#v facts:%#v",
 			seenCompactionRunning, seenCompactionStart, seenCompactionEnd, seenCompactionIdle,
-			resumed.ContextEntries, resumed.TurnFacts.Events)
+			resumed.Messages, resumed.TurnFacts.Events)
 	}
 }
 
@@ -1390,7 +1490,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 	runtimeInputID := "agent_mail:" + laterDeliveryID
 	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, runtimeInputID, resumedRuntime.acceptResultPath)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 2)
-	resumedRuntime.close(t)
+	closeResumedThreadAfterOutputCapture(t, fixture, resumedRuntime)
 
 	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
 		parentScope, fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
@@ -1423,7 +1523,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": finalResumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, finalResume)
-	retainedJSON, err := json.Marshal(finalResume.ContextEntries)
+	retainedJSON, err := json.Marshal(finalResume.Messages)
 	if err != nil {
 		t.Fatalf("encode retained terminal Tool context: %v", err)
 	}
@@ -1571,8 +1671,8 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 		"bindingGeneration": 1, "targetPodUid": fixture.podUID, "runtimeProcessId": "process_" + fixture.podUID, "sourceToolUseEventId": resumeSourceID,
 	})
 	assertQuiescentClosedThreadResume(t, resumed)
-	if len(resumed.ContextEntries) != 0 || len(resumed.TurnFacts.Events) != 0 {
-		t.Fatalf("CLOSE-won cold context = entries:%#v facts:%#v; want cancelled first_mail omitted without fabricated Turn", resumed.ContextEntries, resumed.TurnFacts)
+	if len(resumed.Messages) != 0 || len(resumed.TurnFacts.Events) != 0 {
+		t.Fatalf("CLOSE-won cold context = entries:%#v facts:%#v; want cancelled first_mail omitted without fabricated Turn", resumed.Messages, resumed.TurnFacts)
 	}
 
 	laterSourceID := "evt_later_after_close_before_start"
@@ -1589,7 +1689,7 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	runQueueUntilInputSettled(t, fixture.runtimeDB, fixture.admin, resumedRuntime.port, fixture.sessionID, fixture.podUID, laterRuntimeInputID, resumedRuntime.acceptResultPath)
 	laterStart := resumedRuntime.providerStart(t, fixture.admin, fixture.sessionID, fixture.childID)
 	waitForThreadRequestEnds(t, fixture.admin, fixture.sessionID, fixture.childID, 1)
-	resumedRuntime.close(t)
+	closeResumedThreadAfterOutputCapture(t, fixture, resumedRuntime)
 	var laterSequence int64
 	var finalStarts, siblingStarts int
 	var finalSiblingInbox, finalSiblingQueue string
