@@ -18,6 +18,11 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPublicStreamingBrokerFailure",
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingOrdering",
       "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
     },
@@ -28,7 +33,17 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPublicStreamingSubscribers",
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingVisibility",
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPublicStreamingBackpressure",
       "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
     },
     {
@@ -38,8 +53,18 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPublicStreamingRecovery",
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingListCursors",
       "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPreviewTLSLifecycle",
+      "dependencies": ["postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk"]
     },
     {
       "package": "github.com/tetral-ai/tetral/services/bridge",
