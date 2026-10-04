@@ -27,8 +27,9 @@ import { createJsonLogger } from "../../src/logger.js";
 import type { GatewayLogger } from "../../src/logger.js";
 import type { GatewayAuthenticator, ProviderAttachmentResolver, ProviderRequestStreamer } from "../../src/service.js";
 import type { RuntimeBindingRequestIdentity, RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
-import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { GatewayCredentialStore, PlatformCredentialPool } from "../../src/providers/credentials.js";
+import type { PreviewRequestProducer } from "../../src/providers/preview-publisher.js";
 import type { EncryptedPlatformProviderKeyRow, PlatformHostedProviderId, PlatformKeySelectionOptions, ProviderFailureClassification } from "../../src/providers/pool.js";
 
 const RuntimePodUid = "pod_uid_gateway_service";
@@ -40,6 +41,31 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("ProviderGatewayServiceShell", () => {
+  test("preview factory follows validation and binding admission and never gates complete frames", async () => {
+    let opens = 0, closes = 0, offers = 0, providerCalls = 0;
+    const factory = () => { opens++; return { offer: () => { offers++; throw new Error("preview sink failed"); }, close: () => { closes++; } }; };
+    const request = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    for (const [malformed, binding] of [[{ ...request, outputContractVersion: 0 }, true], [request, false]] as const) {
+      const denied = createService(new RecordingAuthenticator(), true, { verify: () => binding }, { previewProducerFactory: factory });
+      await expectGrpcCode(collectEvents(denied.streamProviderRequest(malformed, metadata())), binding ? status.INVALID_ARGUMENT : status.PERMISSION_DENIED);
+    }
+    expect(opens).toBe(0);
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      previewProducerFactory: factory,
+      credentialResolver: sessionCredentialResolver(),
+      providerStreamer: { stream: async function* () {
+        providerCalls++; expect(opens).toBe(1);
+        yield textEvent(FragmentType.TextStart, "");
+        yield textEvent(FragmentType.TextDelta, "exact reply");
+        yield textEvent(FragmentType.TextEnd, "");
+        yield finishEvent();
+      } },
+    });
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+    expect(events.map(event => event.type)).toEqual([ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH]);
+    expect(events[0]?.textComplete?.text).toBe("exact reply");
+    expect(providerCalls).toBe(1); expect(offers).toBe(1); expect(closes).toBe(1);
+  });
   test("shutdown rejects an unjoined authentication worker and keeps its completion owned", async () => {
     let release!: () => void;
     const held = new Promise<void>(resolve=>{release=resolve;});
@@ -2026,6 +2052,7 @@ function createService(
       readonly semanticProgressTimeoutMs?: number | undefined;
     } | undefined;
     readonly logger?: GatewayLogger | undefined;
+    readonly previewProducerFactory?: (request: ProviderRequest) => PreviewRequestProducer;
   } = {},
 ): ProviderGatewayServiceShell {
   const { logger, ...shellOverrides } = overrides;

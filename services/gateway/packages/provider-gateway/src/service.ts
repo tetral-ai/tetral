@@ -49,6 +49,7 @@ import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
 import type { ProviderStageSample, ProviderStageOutcome, ProviderContentKind } from "./metrics.js";
 import { ProviderStreamEvent as ProviderStreamFrame } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { PreviewRequestProducer } from "./providers/preview-publisher.js";
 
 /**
  * Authenticates the internal gRPC caller and returns the workload identity
@@ -81,6 +82,7 @@ export interface ProviderGatewayServiceOptions {
   readonly providerStreamTimeouts?: ProviderStreamTimeoutOptions | undefined;
   readonly metrics?: ProviderGatewayMetricsRegistry | undefined;
   readonly assemblyBounds?: ProviderAssemblyBounds;
+  readonly previewProducerFactory?: (request: ProviderRequest) => PreviewRequestProducer;
   readonly observeAssemblyResources?: (resources:ProviderAssemblyResources,requestId:string)=>void;
   readonly observationClock?: ()=>number;
 }
@@ -156,6 +158,7 @@ export class ProviderGatewayServiceShell {
     metadata: Metadata,
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ProviderStreamEvent> {
+    let previewProducer: PreviewRequestProducer | undefined;
     let assemblyMetrics:ReturnType<ProviderGatewayMetricsRegistry["startContentAssembly"]> | undefined;
     try { assemblyMetrics=this.metrics.startContentAssembly(); } catch { /* Fail-open metrics. */ }
     const assembler = new ProviderBlockAssembler({
@@ -164,6 +167,9 @@ export class ProviderGatewayServiceShell {
       observeResources: resources=>{
         try { assemblyMetrics?.observe(resources); } catch { /* Fail-open metrics. */ }
         try { this.options.observeAssemblyResources?.(resources,request.requestId); } catch { /* Fail-open metrics. */ }
+      },
+      offerPreview: preview => {
+        try { previewProducer?.offer(preview); } catch { /* Previews never change complete delivery. */ }
       },
     });
     const processController = new AbortController();
@@ -231,6 +237,8 @@ export class ProviderGatewayServiceShell {
         return;
       }
       const finishMetrics = this.metrics.startProviderStream();
+      // Scope and durable Start are validated before any best-effort publication.
+      try { previewProducer = this.options.previewProducerFactory?.(request); } catch { /* Publication cannot reject an admitted model request. */ }
       let failed = false;
       const providerAbortController = new AbortController();
       const providerStartedAt = started;
@@ -305,6 +313,7 @@ export class ProviderGatewayServiceShell {
       }
       throw error;
     } finally {
+      try { previewProducer?.close(); } catch { /* Previews have no durable custody. */ }
       done();
       assembler.release();
       try { assemblyMetrics?.close(); } catch { /* Fail-open metrics. */ }

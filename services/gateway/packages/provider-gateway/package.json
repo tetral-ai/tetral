@@ -22,6 +22,7 @@
     "ai": "6.0.168",
     "zod": "4.4.3",
     "@tetral/ts-dbconnect": "file:../../../../internal/ts-dbconnect",
-    "undici": "7.30.0"
+    "undici": "7.30.0",
+    "@nats-io/transport-node": "3.4.0"
   }
 }

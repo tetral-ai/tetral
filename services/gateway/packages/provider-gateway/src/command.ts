@@ -28,6 +28,7 @@ import {
   SQLGatewayCredentialStore,
 } from "./providers/credentials.js";
 import { createProviderTransport } from "./providers/transport.js";
+import { createNatsPreviewPublisher } from "./providers/preview-nats.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
 import { MaxIdBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
@@ -306,6 +307,13 @@ export async function buildProviderGatewayCommandDependencies(input: {
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.bridgeTokenPath,
   });
+  let previewPublisher;
+  try {
+    previewPublisher = input.config.previewNats === undefined ? undefined : await createNatsPreviewPublisher(input.config.previewNats, input.logger);
+  } catch {
+    await Promise.allSettled([attachmentResolver.close(), providerTransport.close(), sql.close({ deadline: new Date(Date.now() + 5000) })]);
+    throw new Error("gateway preview credential startup failed");
+  }
   const app = createProviderGatewayApp({
     config: input.config,
     logger: input.logger,
@@ -313,6 +321,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
     credentialResolver,
     attachmentResolver,
     providerStreamer,
+    ...(previewPublisher === undefined ? {} : { previewPublisher }),
     bootstrap: async () => {
       await validateKubernetesTokenReviewReviewerMaterial({
         reviewerTokenPath: input.config.tokenReviewReviewerTokenPath,

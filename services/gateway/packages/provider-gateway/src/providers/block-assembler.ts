@@ -26,7 +26,7 @@ export interface ProviderAssemblyResources {
   readonly openBlocks: number;
   readonly identities: number;
 }
-/** PR4 offers progress through an injected nonblocking seam; transport belongs to its owner. */
+/** Request-local progress is offered without awaiting the process-owned preview publisher. */
 export type ProviderPreviewOffer = (preview:
   | { readonly kind: "thinking_started"; readonly eventId: string; readonly providerPartId: string }
   | { readonly kind: "text_delta"; readonly eventId: string; readonly providerPartId: string; readonly delta: string }

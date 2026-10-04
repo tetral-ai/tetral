@@ -76,8 +76,93 @@ frame. Thinking IDs are allocated at reasoning start; `ThinkingStarted` contains
 only the provider part ID and event ID. Signed empty reasoning remains complete
 content. The injected best-effort preview offer admits only main/public ordinary
 requests, never includes reasoning bodies or signatures, and cannot change formal
-delivery when disabled or throwing. Public preview publication belongs to the
-public event-stream owner.
+delivery when disabled or throwing. The admitted request's producer publishes
+best-effort public progress through the process-owned Core NATS client.
+
+### Public previews
+
+Gateway admits previews only for an ordinary model request whose loaded thread
+role is `main` and visibility is `public`. Runtime supplies those facts and the
+durably acknowledged model-request Start identity; viewer presence never changes
+model admission. Child, reviewer, compaction and unknown identities use the same
+complete-content path and produce no previews. Text/thinking IDs allocated by the
+assembler remain the IDs of their eventual committed events.
+
+`providers/preview-publisher.ts` owns one client, a fresh-connection supervisor
+and a nonblocking request producer. `request_open` precedes provider output;
+text starts at sequence zero and subsequent deltas are consecutive. Thinking is
+start-only: reasoning bodies/signatures and Tool arguments never enter the broker.
+The strict versioned JSON and encoded workspace/Session subject belong to
+`providers/preview-protocol.ts`. Shared contract ceilings (256 KiB/frame and 4096
+event identities/request) are defined by the protocol's `preview-limits.json`.
+Split UTF-16 scalars are held per event until complete; invalid/oversized preview
+content stops that event while authoritative complete content keeps its own limits.
+
+The queue is initially 4 MiB/1024 frames. Admission computes exact JSON UTF-8 size
+without a serialized allocation and reserves each encoded payload
+plus a bounded client copy and its PUB framing, so queued and in-flight/client
+buffers share the byte budget. A direct encoder fills one reserved buffer;
+rejected count/byte admission never invokes it. A worker hands at most 256 KiB/64 frames to the
+official client and holds their charge through one flush with a one-second
+deadline. Flush confirms processing by the connected server, not subscriber
+delivery. Encoding or queue overflow removes that event's unsent frames and stops
+its later deltas. Disconnect or uncertain flush discards the queue and disables
+active producers. Retired in-flight batches and client reservations stay charged
+until their worker and old-client cleanup settle; replacement requests share the
+remaining original budget and the single worker. The client has `reconnect:false`; a supervisor uses a one-second
+connect budget and a jittered retry delay capped at five seconds, and a fresh
+connection admits only new requests. Gateway's default native heartbeat
+interval is 1000 ms with one outstanding ping allowed. Its stale-connection signal explicitly
+closes the native client; that status worker joins connection cleanup, so an idle
+publisher does not depend only on a socket close callback. Old previews are never replayed. Broker
+availability does not change Gateway's core readiness, provider invocation,
+complete frames, or durable Tool/context custody.
+
+`providers/preview-transport.ts` owns one complete connection-attempt deadline
+across seeds and sockets, including pre-INFO and pre-TLS failures. It uses the
+pinned official transport's extension boundary for socket custody and delegates
+TLS verification and NATS parsing to that client. Host resolution occurs in the
+owned socket (`resolve:false`); cancellation destroys and joins those sockets
+without claiming to cancel an underlying operating-system resolver thread. A
+stable transport factory obtains the current attempt from async-local context,
+so concurrent credential replacement and recovery retain separate ownership.
+Shutdown cancels pending attempts as well as the active publisher client.
+
+Preview wiring is optional. With all preview settings unset no client is created.
+Configure `TETRAL_NATS_SERVERS` as comma-separated `nats://` addresses for the
+standard profile or verified-DNS `tls://` addresses for native TLS; URLs must not
+contain credentials. `TETRAL_NATS_USER_PATH` and `TETRAL_NATS_PASSWORD_PATH` name
+the mounted publish-role credential files. Native TLS additionally requires the
+complete `TETRAL_NATS_TLS_CA_PATH`, `TETRAL_NATS_TLS_CERT_PATH`, and
+`TETRAL_NATS_TLS_KEY_PATH` set. The official Node transport performs TLS before
+INFO, verifies each broker/advertised DNS name, and presents the client role
+certificate; there is no plaintext fallback. Malformed/partial startup settings
+or absent/invalid initial material fail startup. Configured but unavailable
+brokers stop previews while complete model delivery remains available.
+
+The validated file loader observes mounted generations on a 250-ms timer. It
+verifies a complete current CA/leaf/key pair before constructing a replacement
+connection and confirming its flush, then retires the old client and active
+previews. Malformed updates retain only still-valid last-known-good material and
+emit a bounded failure; expired material retires the client. A valid new
+generation that cannot connect or flush also retires the old client, so trust
+removal cannot keep a connection established under the removed trust. Shutdown
+starts observer/supervisor/publication cleanup alongside provider drain and
+joins both inside the existing workload budget before SQL closure.
+
+Operational settings are restart-only, parsed once in `preview-config.ts`:
+`TETRAL_GATEWAY_PREVIEW_{QUEUE_BYTES,QUEUE_FRAMES,BATCH_BYTES,BATCH_FRAMES,
+FLUSH_TIMEOUT_MS}` and `TETRAL_NATS_{CONNECT_TIMEOUT_MS,RETRY_MAX_MS,
+CREDENTIAL_POLL_MS,PING_INTERVAL_MS,MAX_PING_OUT}`. Heartbeat interval uses
+milliseconds (1–60000); maximum outstanding pings is a count (1–16), independently
+selected from connect/retry timing. Positive integer/range checks preserve frame, batch and
+combined queue compatibility. Metrics distinguish attempted, locally accepted,
+flushed, deliberately dropped and disabled previews, plus pending/client bytes
+and frames. They establish local accounting only. First disconnect, classified
+stop and recovery use bounded diagnostics with request scope and safe reasons;
+healthy fragments produce no default log. IDs, content and credentials never
+become metric labels. Event Stream owns authorized Session opt-in, contiguous
+prefix delivery and full text publication before the durable request End.
 
 Finish and ProviderError are mutually exclusive terminal frames. Usage rides
 Finish only. Attachment rejections are nonterminal and appear at most once before
@@ -483,6 +568,7 @@ it preserves the stated invariants and passes the named suites.
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
 | `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |
+| `preview-protocol.test.ts`, `preview-publisher.test.ts`, `preview-metrics.test.ts` | Strict cross-language preview fixture, UTF-8/scalar boundaries, charged bounded batches/queues, uncertain flush/reconnect/shutdown, request eligibility and safe local instruments |
 
 Run from `services/gateway`. The whole workspace suite (both workload packages
 plus the shared packages) is `bun run test` — the `test` script in

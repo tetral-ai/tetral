@@ -22,12 +22,21 @@ describe("ProviderGatewayApp lifecycle", () => {
   test("graceful shutdown flips readiness before draining in-flight gRPC streams", async () => {
     let releaseStream = (): void => undefined;
     let shutdownPromise: Promise<void> | undefined;
+    let previewCloseStarted = false;
+    let releasePreviewClose = (): void => undefined;
+    const previewCloseGate = new Promise<void>(resolve => { releasePreviewClose = resolve; });
     const logs: unknown[] = [];
     const request = validAnthropicProviderRequest();
     const app = createProviderGatewayApp({
       config: validConfig(),
       logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       tokenReviewClient: new AllowingTokenReviewClient(),
+      previewPublisher: {
+        start: () => undefined,
+        createProducer: () => ({ offer: () => undefined, close: () => undefined }),
+        metrics: { render: () => "" },
+        close: async () => { previewCloseStarted = true; await previewCloseGate; },
+      },
       providerStreamer: {
         stream: async function* () {
           yield {type:FragmentType.ReasoningStart,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
@@ -63,6 +72,10 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       shutdownPromise = app.shutdown();
       await waitUntil(() => !app.ready().ready);
+      // Both drains begin while the actual provider stream is positively held.
+      await waitUntil(() => previewCloseStarted);
+      let shutdownJoined = false;
+      void shutdownPromise.then(() => { shutdownJoined = true; });
       const rejectedRequest = {
         ...request,
         requestId: "req_not_ready",
@@ -72,6 +85,8 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       releaseStream();
       const events = await eventsPromise;
+      expect(shutdownJoined).toBe(false);
+      releasePreviewClose();
       await shutdownPromise;
 
       expect(events.map((event) => event.type)).toEqual([
@@ -111,6 +126,7 @@ describe("ProviderGatewayApp lifecycle", () => {
       }));
     } finally {
       releaseStream();
+      releasePreviewClose();
       await shutdownPromise?.catch(() => undefined);
       client.close();
       await app.shutdown();

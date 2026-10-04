@@ -20,6 +20,8 @@ import { diagnosticEnvKeys, parseDiagnosticConfig, parseWorkloadResourceConfig, 
 import type { DiagnosticConfig } from "@tetral/ts-observability";
 import { parseDatabasePoolConfig } from "@tetral/ts-dbconnect";
 import type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
+import { PreviewNatsEnvKeys, parsePreviewNatsConfig } from "./providers/preview-config.js";
+import type { PreviewNatsConfig } from "./providers/preview-config.js";
 export type { DatabasePoolConfig } from "@tetral/ts-dbconnect";
 
 /** Contains the complete validated configuration needed to compose one provider-gateway process. */
@@ -49,6 +51,7 @@ export interface ProviderGatewayConfig {
   readonly bridgeApiGrpcAddress: string;
   readonly bridgeTokenPath: string;
   readonly maxConcurrentTurns: number;
+  readonly previewNats?: PreviewNatsConfig;
 }
 
 /** Describes a bounded configuration or startup failure suitable for structured startup logging. */
@@ -70,6 +73,7 @@ const ServiceAccountSchema = z
   .max(511)
   .refine((value) => parseSingleServiceAccount(value) !== undefined);
 const ConfigSchema = z.strictObject({
+  ...Object.fromEntries(PreviewNatsEnvKeys.map(key => [key, z.string().optional()])),
   TETRAL_LOG_LEVEL: z.string().optional(),
   TETRAL_LOG_MAX_RECORD_BYTES: z.string().optional(),
   TETRAL_LOG_SUMMARY_INTERVAL_MS: z.string().optional(),
@@ -100,6 +104,7 @@ const ConfigSchema = z.strictObject({
   TETRAL_GATEWAY_MAX_CONCURRENT_TURNS: z.string().optional(),
 });
 const ProviderGatewayEnvKeys = [
+  ...PreviewNatsEnvKeys,
   ...diagnosticEnvKeys,
   "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
   "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
@@ -134,6 +139,9 @@ const ProviderGatewayEnvKeys = [
  * eight; a supplied value must be a positive safe integer.
  */
 export function loadProviderGatewayConfig(env: Record<string, string | undefined>): ProviderGatewayConfigResult {
+  let previewNats: PreviewNatsConfig | undefined;
+  try { previewNats = parsePreviewNatsConfig(env); }
+  catch { return { ok: false, error: { kind: "config_error", message: "invalid gateway preview config" } }; }
   const resource = parseWorkloadResourceConfig(env, 253);
   const diagnostics = parseDiagnosticConfig(env);
   const parsed = ConfigSchema.safeParse(env);
@@ -201,6 +209,7 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
       bridgeApiGrpcAddress: parsed.data.TETRAL_BRIDGE_API_GRPC_ADDR,
       bridgeTokenPath: parsed.data.TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH,
       maxConcurrentTurns,
+      ...(previewNats === undefined ? {} : { previewNats }),
     },
   };
 }
