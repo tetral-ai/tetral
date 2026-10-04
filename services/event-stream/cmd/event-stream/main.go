@@ -39,6 +39,8 @@ type commandConfig struct {
 	DeploymentEnvironment string
 	ServiceVersion        string
 	PrincipalVerifier     *auth.InternalPrincipalVerifier
+	StreamConfig          eventstream.StreamConfig
+	NATSConfig            eventstream.NATSConfig
 }
 
 func main() {
@@ -64,12 +66,22 @@ func configFromEnv(env envReader) (commandConfig, error) {
 	if err != nil {
 		return commandConfig{}, err
 	}
+	streamConfig, err := eventstream.StreamConfigFromEnv(env.Getenv)
+	if err != nil {
+		return commandConfig{}, workload.NewConfigError(err.Error())
+	}
+	natsConfig, err := eventstream.NATSConfigFromEnv(env.Getenv)
+	if err != nil {
+		return commandConfig{}, err
+	}
 	return commandConfig{
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
 		DeploymentEnvironment: resource.DeploymentEnvironment,
 		ServiceVersion:        resource.ServiceVersion,
 		PrincipalVerifier:     principalVerifier,
+		StreamConfig:          streamConfig,
+		NATSConfig:            natsConfig,
 	}, nil
 }
 
@@ -121,9 +133,24 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics()
 	reader := internaleventstream.NewPostgreSQLReader(database.runtimeClient)
-	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics)))
+	previewMetrics := eventstream.NewPreviewMetrics()
+	var previewHub *eventstream.PreviewHub
+	if cfg.NATSConfig.Enabled() {
+		transport, err := eventstream.NewNATSPreviewTransport(ctx, cfg.NATSConfig, cfg.StreamConfig, previewMetrics, logger)
+		if err != nil {
+			return logStartupFailure(logger, err)
+		}
+		defer workload.ProcessCleanup(ctx, transport.Close)
+		previewHub, err = eventstream.NewPreviewHub(transport, cfg.StreamConfig, previewMetrics)
+		if err != nil {
+			return logStartupFailure(logger, err)
+		}
+		defer workload.ProcessCleanup(ctx, previewHub.Close)
+	}
+	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics), eventstream.WithStreamConfig(cfg.StreamConfig), eventstream.WithStreamShutdownContext(ctx), eventstream.WithPreviewHub(previewHub), eventstream.WithPreviewMetrics(previewMetrics)))
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
+		workload.WithMetricsCollector("previews", previewMetrics.Collector()),
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.runtimeClient)),

@@ -8,7 +8,7 @@
 //	  ListSessionEvents / ListThreadEvents                 paged list APIs over session_events
 //	  ListSessionEventChanges / ListThreadEventChanges     SSE change feed
 //	  CurrentStreamPosition / CurrentThreadStreamPosition  SSE cursor head
-//	Bounds: defaultStreamBatchSize (100) caps rows per change-feed fetch;
+//	Bounds: MaxStreamBatchSize (100) caps rows per change-feed fetch;
 //	  defaultListLimit (20) and maxListLimit (100) bound the list page size.
 //	Signed session_events page token (resource "session_events", version 3), in pagination.go.
 //	Reads, never writes, four tables:
@@ -74,7 +74,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const defaultStreamBatchSize = 100
+const MaxStreamBatchSize = 100
 
 type PostgreSQLReader struct {
 	client          *dbconnect.Client
@@ -388,73 +388,70 @@ func (r *PostgreSQLReader) CurrentThreadStreamPosition(ctx context.Context, ws w
 }
 
 func (r *PostgreSQLReader) ListSessionEventChanges(ctx context.Context, ws workspace.ID, sessionID string, after int64, limit int) ([]StreamChange, error) {
-	if err := validateReaderScope(ws, sessionID); err != nil {
+	return r.listEventChanges(ctx, ReadScope{WorkspaceID: ws, SessionID: sessionID}, after, limit)
+}
+
+func (r *PostgreSQLReader) ListThreadEventChanges(ctx context.Context, ws workspace.ID, sessionID, threadID string, after int64, limit int) ([]StreamChange, error) {
+	if err := validateThreadReaderScope(ws, sessionID, threadID); err != nil {
+		return nil, err
+	}
+	return r.listEventChanges(ctx, ReadScope{WorkspaceID: ws, SessionID: sessionID, ThreadID: threadID}, after, limit)
+}
+
+func (r *PostgreSQLReader) listEventChanges(ctx context.Context, scope ReadScope, after int64, limit int) ([]StreamChange, error) {
+	if err := validateReaderScope(scope.WorkspaceID, scope.SessionID); err != nil {
 		return nil, err
 	}
 	if r == nil || r.client == nil {
 		return nil, &httpapi.ValidationError{Message: "event stream reader is required"}
 	}
-	if limit <= 0 || limit > defaultStreamBatchSize {
-		limit = defaultStreamBatchSize
+	if limit <= 0 || limit > MaxStreamBatchSize {
+		limit = MaxStreamBatchSize
 	}
 	var changes []StreamChange
-	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "eventstream.list_session_event_changes", func(tx *dbconnect.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT c.stream_position,
-			        e.event_id,
-			        COALESCE(e.session_thread_id, ''),
-			        e.sequence,
-			        e.type,
-			        e.payload_json,
-			        e.processed_at
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			   LEFT JOIN session_threads t
-			     ON t.workspace_id = c.workspace_id
-			    AND t.session_id = c.session_id
-			    AND t.id = c.session_thread_id
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.visibility = 'public'
-			    AND c.session_visible = TRUE
-			    AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))
-			    AND c.stream_position > $3
-			  ORDER BY c.stream_position ASC
-			  LIMIT $4`,
-			string(ws),
-			sessionID,
-			after,
-			limit,
-		)
+	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(scope.WorkspaceID), "eventstream.list_event_changes", func(tx *dbconnect.Tx) error {
+		// Session deletion remains observable on the session feed. Once its deletion
+		// row is behind the cursor (or absent), the lifecycle gate closes the reader.
+		if scope.ThreadID != "" {
+			if err := ensureReadableThreadTx(ctx, tx, scope.WorkspaceID, scope.SessionID, scope.ThreadID); err != nil {
+				return err
+			}
+		} else {
+			if err := ensureReadableSessionFeedTx(ctx, tx, scope.WorkspaceID, scope.SessionID, after); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.Query(ctx, `SELECT c.stream_position, e.event_id, COALESCE(e.session_thread_id,''), e.sequence,e.type,
+    CASE WHEN e.type = 'agent.message' AND e.model_request_id IS NOT NULL THEN NULL ELSE e.payload_json END,
+    e.processed_at, COALESCE(e.model_request_id,''),
+    COALESCE(started.event_id,''),COALESCE(started.insert_stream_position,0),COALESCE(started.projection_json::jsonb ->> 'request_kind',''),COALESCE(t.role,''),
+    e.type = 'agent.message' AND e.model_request_id IS NOT NULL
+   FROM session_event_stream_changes c
+   JOIN session_events e ON e.workspace_id = c.workspace_id AND e.session_id = c.session_id
+    AND e.session_thread_id IS NOT DISTINCT FROM c.session_thread_id AND e.event_id = c.event_id AND e.visibility = 'public'
+   LEFT JOIN session_threads t ON t.workspace_id = c.workspace_id AND t.session_id = c.session_id AND t.id = c.session_thread_id
+   LEFT JOIN session_events started ON started.workspace_id = e.workspace_id AND started.session_id = e.session_id
+    AND started.session_thread_id = e.session_thread_id AND started.model_request_id = e.model_request_id AND started.type = 'span.model_request_start'
+   WHERE c.workspace_id = $1 AND c.session_id = $2 AND c.visibility = 'public'
+    AND (c.session_thread_id IS NULL OR (t.visibility = 'public' AND t.role <> 'approval_reviewer'))
+    AND (($3 = '' AND c.session_visible = TRUE) OR c.session_thread_id = NULLIF($3,''))
+    AND c.stream_position > $4 ORDER BY c.stream_position ASC LIMIT $5`, string(scope.WorkspaceID), scope.SessionID, scope.ThreadID, after, limit)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = rows.Close() }()
-
 		changes = []StreamChange{}
 		for rows.Next() {
 			var change StreamChange
-			var sequence int64
-			var payload string
+			var payload sql.NullString
 			var processedAt sql.NullTime
-			if err := rows.Scan(
-				&change.StreamPosition,
-				&change.Event.ID,
-				&change.Event.ThreadID,
-				&sequence,
-				&change.Event.Type,
-				&payload,
-				&processedAt,
-			); err != nil {
+			if err := rows.Scan(&change.StreamPosition, &change.Event.ID, &change.Event.ThreadID, &change.Sequence, &change.Event.Type, &payload, &processedAt, &change.ModelRequestID, &change.RequestStartEventID, &change.RequestStartStreamPosition, &change.RequestKind, &change.ThreadRole, &change.DeferredMessage); err != nil {
 				return err
 			}
-			change.Event.SessionID = sessionID
-			change.Event.Payload = []byte(payload)
+			change.Event.SessionID = scope.SessionID
+			if payload.Valid {
+				change.Event.Payload = []byte(payload.String)
+			}
 			if processedAt.Valid {
 				formatted := processedAt.Time.UTC().Format(time.RFC3339Nano)
 				change.Event.ProcessedAt = &formatted
@@ -469,85 +466,16 @@ func (r *PostgreSQLReader) ListSessionEventChanges(ctx context.Context, ws works
 	return changes, nil
 }
 
-func (r *PostgreSQLReader) ListThreadEventChanges(ctx context.Context, ws workspace.ID, sessionID string, threadID string, after int64, limit int) ([]StreamChange, error) {
-	if err := validateThreadReaderScope(ws, sessionID, threadID); err != nil {
-		return nil, err
+func ensureReadableSessionFeedTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, after int64) error {
+	var readable bool
+	err := tx.QueryRow(ctx, `SELECT lifecycle_state <> 'deleted' OR EXISTS (
+  SELECT 1 FROM session_event_stream_changes c JOIN session_events e ON e.workspace_id=c.workspace_id AND e.session_id=c.session_id AND e.event_id=c.event_id
+   WHERE c.workspace_id=s.workspace_id AND c.session_id=s.id AND c.stream_position > $3 AND c.visibility='public' AND c.session_visible=TRUE AND e.type='session.deleted'
+  ) FROM sessions s WHERE workspace_id=$1 AND id=$2`, string(ws), sessionID, after).Scan(&readable)
+	if dbconnect.IsNoRows(err) || (err == nil && !readable) {
+		return &httpapi.NotFoundError{Message: "session not found"}
 	}
-	if r == nil || r.client == nil {
-		return nil, &httpapi.ValidationError{Message: "event stream reader is required"}
-	}
-	if limit <= 0 || limit > defaultStreamBatchSize {
-		limit = defaultStreamBatchSize
-	}
-	var changes []StreamChange
-	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "eventstream.list_thread_event_changes", func(tx *dbconnect.Tx) error {
-		if err := ensureReadableThreadTx(ctx, tx, ws, sessionID, threadID); err != nil {
-			return err
-		}
-		rows, err := tx.Query(ctx,
-			`SELECT c.stream_position,
-			        e.event_id,
-			        COALESCE(e.session_thread_id, ''),
-			        e.sequence,
-			        e.type,
-			        e.payload_json,
-			        e.processed_at
-			   FROM session_event_stream_changes c
-			   JOIN session_events e
-			     ON e.workspace_id = c.workspace_id
-			    AND e.session_id = c.session_id
-			    AND e.session_thread_id = c.session_thread_id
-			    AND e.event_id = c.event_id
-			    AND e.visibility = 'public'
-			  WHERE c.workspace_id = $1
-			    AND c.session_id = $2
-			    AND c.session_thread_id = $3
-			    AND c.visibility = 'public'
-			    AND c.stream_position > $4
-			  ORDER BY c.stream_position ASC
-			  LIMIT $5`,
-			string(ws),
-			sessionID,
-			threadID,
-			after,
-			limit,
-		)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = rows.Close() }()
-
-		changes = []StreamChange{}
-		for rows.Next() {
-			var change StreamChange
-			var sequence int64
-			var payload string
-			var processedAt sql.NullTime
-			if err := rows.Scan(
-				&change.StreamPosition,
-				&change.Event.ID,
-				&change.Event.ThreadID,
-				&sequence,
-				&change.Event.Type,
-				&payload,
-				&processedAt,
-			); err != nil {
-				return err
-			}
-			change.Event.SessionID = sessionID
-			change.Event.Payload = []byte(payload)
-			if processedAt.Valid {
-				formatted := processedAt.Time.UTC().Format(time.RFC3339Nano)
-				change.Event.ProcessedAt = &formatted
-			}
-			changes = append(changes, change)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return nil, err
-	}
-	return changes, nil
+	return err
 }
 
 func ensureReadableSessionTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string) error {

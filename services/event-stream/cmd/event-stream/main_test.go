@@ -437,3 +437,10 @@ func captureStderr(t *testing.T) (*bytes.Buffer, func()) {
 	})
 	return &buffer, finish
 }
+
+func (*commandEventReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {
+	return eventstream.PreviewRequest{}, nil
+}
+func (*commandEventReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
+	return nil, nil
+}

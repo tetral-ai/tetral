@@ -56,8 +56,36 @@ type ListResult struct {
 }
 
 type StreamChange struct {
-	StreamPosition int64
-	Event          Event
+	StreamPosition             int64
+	Event                      Event
+	Sequence                   int64
+	ModelRequestID             string
+	RequestStartStreamPosition int64
+	RequestStartEventID        string
+	RequestKind                string
+	ThreadRole                 string
+	DeferredMessage            bool
+}
+
+// ReadScope selects either the session-visible feed or one public thread.
+type ReadScope struct {
+	WorkspaceID workspace.ID
+	SessionID   string
+	ThreadID    string
+}
+
+type PreviewRequest struct {
+	StartStreamPosition int64
+	RequestKind         string
+	ThreadRole          string
+	ThreadVisibility    string
+	IsPrimaryThread     bool
+	Ended               bool
+}
+
+type RequestFinalMessage struct {
+	Sequence int64
+	Event    Event
 }
 
 type ListReader interface {

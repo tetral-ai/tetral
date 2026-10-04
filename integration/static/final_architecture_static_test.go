@@ -10,26 +10,28 @@ import (
 func TestFinalArchitectureEventStreamIsImplementedReadOnlyService(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	eventstreamSource := readFinalArchitectureSource(t, engineRoot, "services/event-stream/eventstream.go")
+	streamWriterSource := readFinalArchitectureSource(t, engineRoot, "services/event-stream/preview_writer.go")
 	readerSource := readFinalArchitectureSource(t, engineRoot, "internal/eventstream/postgresql_reader.go")
 	commandSource := readFinalArchitectureSource(t, engineRoot, "services/event-stream/cmd/event-stream/main.go")
 	tetralAPISource := readFinalArchitectureSource(t, engineRoot, "services/api/tetralapi.go")
 	for _, want := range []string{
 		"text/event-stream",
-		"event: %s",
-		"data: %s",
+		"event: ",
+		"data: ",
 	} {
-		if !strings.Contains(eventstreamSource, want) {
-			t.Fatalf("services/event-stream/eventstream.go missing Event Stream implementation token %q", want)
+		if !strings.Contains(streamWriterSource, want) {
+			t.Fatalf("services/event-stream/preview_writer.go missing Event Stream implementation token %q", want)
 		}
 	}
 	if !strings.Contains(eventstreamSource, "github.com/tetral-ai/tetral/internal/eventstream") {
 		t.Fatal("event-stream must compose the shared internal/eventstream reader")
 	}
-	for _, forbidden := range []string{"NewListRouter", "NewListHandler", "ListSessionEvents", "ListThreadEvents"} {
-		if strings.Contains(eventstreamSource, forbidden) {
-			t.Fatalf("event-stream SSE service retains list ownership token %q", forbidden)
-		}
-	}
+	// Stream framing belongs to the single response writer; endpoint handlers
+	// retain routing and read authorization. Keep list ownership out of every
+	// production file in this service, including the separate writer.
+	scanProductionSourceTokens(t, engineRoot, "services/event-stream", []string{
+		"NewListRouter", "NewListHandler", "ListSessionEvents", "ListThreadEvents",
+	})
 	if !strings.Contains(tetralAPISource, "github.com/tetral-ai/tetral/internal/eventstream") {
 		t.Fatal("api must compose the shared internal/eventstream list handler")
 	}

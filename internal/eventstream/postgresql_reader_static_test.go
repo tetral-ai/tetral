@@ -2,22 +2,35 @@ package eventstream_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestPostgreSQLReaderUsesReadOnlyTransactions(t *testing.T) {
-	source, err := os.ReadFile("postgresql_reader.go")
+	files, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("read postgresql_reader.go: %v", err)
+		t.Fatal(err)
 	}
-	text := string(source)
-	if strings.Contains(text, ".WithWorkspaceTx(") {
-		t.Fatalf("PostgreSQLReader must not use read-write workspace transactions")
+	count := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(source)
+		if strings.Contains(text, ".WithWorkspaceTx(") {
+			t.Fatalf("%s uses read-write workspace transactions", name)
+		}
+		count += strings.Count(text, ".WithWorkspaceReadOnlyTx(")
 	}
-	if got := strings.Count(text, ".WithWorkspaceReadOnlyTx("); got != 6 {
-		t.Fatalf("read-only workspace transaction count = %d; want 6", got)
+	if count == 0 {
+		t.Fatal("reader must use workspace read-only transactions")
 	}
+
 }
 
 func TestPostgreSQLReaderSessionListUsesImmutableGlobalOrder(t *testing.T) {

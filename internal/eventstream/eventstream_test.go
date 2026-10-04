@@ -1073,3 +1073,10 @@ func eventIDs(events []eventstream.Event) []string {
 func equalStrings(left []string, right []string) bool {
 	return slices.Equal(left, right)
 }
+
+func (r *recordingReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {
+	return eventstream.PreviewRequest{}, nil
+}
+func (r *recordingReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
+	return nil, nil
+}

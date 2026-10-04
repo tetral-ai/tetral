@@ -23,8 +23,8 @@ as the request scope. Every query is keyed on that `workspace_id`, and
 workspace never reads another's rows.
 
 This service owns no durable tables. It reads four tables, writes nothing, and
-never calls Runtime Pod, Bridge, Gateway, or Sandbox Service. Its only
-dependency is PostgreSQL. It does not admit events, consume queue jobs, execute
+never calls Runtime Pod, Bridge, Gateway, or Sandbox Service. PostgreSQL is its authoritative dependency. Optional Core NATS subscriptions
+carry best-effort Session previews; no NATS payload is persisted. It does not admit events, consume queue jobs, execute
 tools, or drive Runtime — event admission (`POST /events`) and the runtime
 writers that stamp `processed_at` and append change rows all live outside this
 folder.
@@ -95,6 +95,15 @@ cannot be missed by a subscriber that already advanced past the original event.
 
 ### SSE stream loop
 
+Session viewers may request `event_deltas[]=agent.message`,
+`event_deltas[]=agent.thinking`, or both. Repeated valid types are deduplicated;
+unsupported values return `400` before SSE headers. Omission means formal-only
+SSE and creates no preview subscription. Every Thread SSE endpoint remains
+formal-only and rejects preview options, including a Thread endpoint naming the
+main thread. Thinking previews are content-free starts; text previews use the
+SDK's `event_start` and `event_delta` wrappers. They carry no durable envelope,
+internal scope, or private sequence fields.
+
 For a session stream the handler first resolves the current high-water cursor
 (`MAX(stream_position)` over the visible change set), then flushes the SSE
 response headers. Change rows that already existed before that opening mark are
@@ -105,8 +114,10 @@ never replayed. The thread stream is the same loop scoped to one
 | --- | --- | --- |
 | Open | valid principal and `beta=true` | resolve high-water cursor, flush headers (`200`) |
 | Poll | each iteration | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
-| Emit | rows present | per row: `event: <event.type>` + `data: <public Event JSON>`, advance cursor to that row's `stream_position` |
-| Heartbeat | no rows this poll | write a `: heartbeat` comment frame, flush, sleep (`defaultStreamPollEvery` = 1s), re-poll |
+| Emit | ordinary rows present | per row: `event: <event.type>` + `data: <public Event JSON>`, advance the durable cursor only after a successful write |
+| Defer generated text | `agent.message` correlated to a model request | consume its change position without emitting or closing its preview; the SQL change query returns identity metadata with no text payload |
+| Publish request text | visible durable `span.model_request_end` | release the ordinary batch and suffix; read one complete committed text per page in stored sequence order, emit each full original event, then End; query discarded suffix again after the End cursor |
+| Heartbeat | no rows this poll | write a `: heartbeat` comment frame, flush, wait for the independent poll/heartbeat timers (both initially 1s) or a preview wake, then re-poll |
 | Close (deleted) | an emitted event's type is `session.deleted` | return; the server closes and sends nothing further |
 | Close (disconnect) | client context done at the poll sleep | return |
 | Close (read/marshal/write error) | error mid-loop, after headers flushed | return silently — the client sees the connection close with no error frame and no further bytes |
@@ -121,6 +132,59 @@ ingress must carry the same long-read / no-proxy-buffering annotations the
 git-proxy ingress already carries: without no-proxy-buffering at the ingress an
 intermediary buffers SSE frames and the stream is broken regardless of the
 heartbeat.
+
+Generated text remains immediately readable in history lists after commit. Its
+SSE publication waits for the corresponding durable End on both preview and
+formal-only connections. Normal, error, interrupted, and recovery Ends expand
+only complete committed messages between their exact Start and End. A stream
+opened during a request receives its earlier committed messages when that
+future End arrives; a stream opened after End uses history recovery. Tool and
+permission events continue through ordinary delivery while text waits.
+
+The End group retains one current complete text body, its transient public JSON
+encoding, and the End descriptor. No later formal event overtakes the group.
+Read or write failure closes the connection; no new durable publication state or
+preview replay cache is introduced. Lists retain their existing keys and
+committed-state semantics.
+
+### Preview subscription and loss
+
+A process-owned hub shares one ordinary NATS subscription per authorized
+workspace/Session among local opted-in viewers. Separate Event Stream processes
+receive ordinary fan-out; there is no queue group. Last-local-viewer removal
+closes that subscription, concurrent joins cannot reuse it while closing, and
+shutdown joins the dispatcher before closing its transport and database.
+
+Subscription setup occurs after scope authorization and before the final
+opening high-water mark. A one-second setup budget cannot hold formal SSE open
+indefinitely: unavailable NATS degrades previews internally, while PostgreSQL
+remains active. The subscriber restores desired subscriptions after reconnect;
+only newly started requests can become eligible, with no old preview replay.
+
+Private `request_open` admission reads the exact scoped database Start and its
+thread row. Eligible requests require `role = main`, `visibility = public`,
+`request_kind = agent_provider_request`, a Start position after this viewer's
+opening mark, and no matching durable End. Child/reviewer/compaction and foreign
+scope frames are rejected. Identity is cached for the request, rather than read
+for every delta. The writer catches up formal changes through Start before
+sending previews.
+
+Each event sends a contiguous prefix after its observed start. Lost, duplicate,
+or reordered sequence stops the preview conservatively. Unknown-event deltas
+are dropped. Viewer overflow affects that viewer; subscription loss invalidates
+all affected viewers. Formal events close matching IDs even when a preview
+start is delayed; the exact primary request End releases its event state and
+prevents late reopening. Thinking bodies, signatures, tool inputs and raw
+provider metadata never enter preview frames. A missing final tail may be
+undetectable and is not counted as detected loss.
+
+One response writer owns formal data, previews and heartbeats. Every write and
+flush gets a ten-second deadline; request cancellation retires an active blocked
+write and joins that cancellation watcher. Formal polling and lifecycle closure
+run between bounded preview slices, so a preview flood cannot monopolize the
+writer. Session deletion remains observable on an existing Session feed;
+deleted sessions cannot open new feeds. Thread loss of readability closes its
+feed and all departing viewers release their references.
 
 ### Read scope by endpoint
 
@@ -166,6 +230,8 @@ CurrentStreamPosition(ctx, ws, sessionID) (int64, error)
 ListSessionEventChanges(ctx, ws, sessionID, after, limit) ([]StreamChange, error)
 CurrentThreadStreamPosition(ctx, ws, sessionID, threadID) (int64, error)
 ListThreadEventChanges(ctx, ws, sessionID, threadID, after, limit) ([]StreamChange, error)
+ReadPreviewRequest(ctx, ws, sessionID, threadID, modelRequestID, startEventID) (PreviewRequest, error)
+ListRequestFinalMessages(ctx, scope, endEventID, afterSequence, 1) ([]RequestFinalMessage, error)
 ```
 
 - **Lifecycle**: constructed once at startup (`NewPostgreSQLReader`), shared
@@ -178,7 +244,9 @@ ListThreadEventChanges(ctx, ws, sessionID, threadID, after, limit) ([]StreamChan
   thread-scoped filter (without `session_visible`) on the thread methods;
   return change rows past `after` ordered by ascending `stream_position`;
   compute the high-water head as `MAX(stream_position)` over the same visible
-  set.
+  set; generated model text changes carry no selected payload body; request
+  pages verify their exact database End/Start and preserve endpoint visibility.
+  A request-final page contains at most one complete event.
 - **Conformance**: `TestPostgreSQLReaderListsAndStreamsPublicSessionVisibleEvents`,
   `TestEventStreamSessionSSEProjectsAllPublicChildEventVariants`,
   `TestEventStreamThreadSSEProjectsAllPublicChildEventVariants`,
@@ -258,6 +326,16 @@ request bodies and path parameters never supply identity.
 | `TestEventStreamList*` / `TestEventStreamServiceRouterDoesNotServeListRoutes` | `internal/eventstream/eventstream_test.go` | list envelope, SDK filter decoding, unknown-parameter rejection, and that this binary serves streams only |
 | `TestEventStreamRoutesRequire*` | `internal/eventstream/eventstream_test.go` | signed-principal enforcement and the exact-`beta=true` gate |
 | `TestEventStreamBoundaryLogsServerErrorsOnly` | `internal/eventstream/eventstream_test.go` | logging redaction: client errors are not logged as server errors |
+| `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission` / `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` | `internal/eventstream/request_final_messages_test.go` | actual read-only serving role: exact scope/Start/End, metadata-only changes, one-message pages, committed list bodies, cancellation and deletion visibility |
+| `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer: three large complete messages, original-batch release, body/encoding residency, one-page hold/cancel, End/suffix ordering for Session and Thread |
+| `TestNATSNative*` / `TestNATSSubscriber*` | `services/event-stream/preview_native_queue_test.go` / `preview_nats_test.go` | pinned official client over controlled TCP: shared process queue/reservations, at/over byte and count bounds, unaffected/future healthy controls, oversized frame/broker ceiling rejection, current callback and connection-attempt joins; real broker/TLS/SDK coverage is separate integration evidence |
+| `TestPreviewHubExact*` / `TestPreviewViewerExact*` / `TestPreviewHubIngressCount*` / `TestPreviewViewerCount*` | `services/event-stream/preview_bounds_test.go` | independently padded limit−1/exact/+1 encoded byte boundaries for ingress, fanout, viewer queue/current write/encoding and aggregate encoding; independent current-ingress/current-write count limits, unaffected viewers and joined cleanup |
+| `TestNATSNativeExactProcessByteReservationBoundary` / `TestNATSNativeHeartbeatOptionsConsumeTypedEnvironment` / `TestNATSHeartbeatConfigRangesAndFailFast` | `services/event-stream/preview_native_queue_test.go` / `config_test.go` | native byte reservation threshold−1/exact/+1 with frame counts nonbinding; environment defaults/overrides reach real pinned-client ping options; invalid local settings fail before startup |
+| `TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads` | `services/event-stream/preview_shutdown_test.go` | live TCP Session/Thread/opt-in SSE: opened-header/read barriers, process-context reader cancellation, writer/callback joins and zero ownership gauges |
+| `TestSSEWriter*` | `services/event-stream/preview_sse_writer_test.go` | held response body Write borrows the exact reserved slice; one deadline/flush, exact SSE framing and partial/error sent-byte accounting |
+| `TestPreviewMetrics*` | `services/event-stream/preview_metrics_test.go` | balanced ownership gauges, fixed latency bucket observations and labels, End/cancel/reset sequencer cleanup |
+| `TestPreviewHub*` / `TestPreviewWriter*` / `TestStreamQuery*` | `services/event-stream/preview_*_test.go` | transport component: fan-out/refcounts, last-unsubscribe race, queued/in-flight accounting, sequence prefixes, exact closure, eligible identity and bounded state |
+| `TestPreviewProtocol*` / `TestPreviewDecoder*` / `TestPreviewEncodedFrameByteBound` | `internal/eventwire/preview_event_test.go` | shared private/public fixtures, scope/vocabulary rejection, Unicode safety and encoded-size boundary |
 | `TestMarshalPublicEvent*` | `internal/eventwire/public_event_test.go` | wire projection: flattened union, authoritative row metadata, internal-field redaction, child-variant lineage |
 | `TestEventStreamProductionCodeKeepsReadOnlyRuntimeBoundary` / `TestEventStreamProductionCodeDoesNotImportExecutionOwners` | `services/event-stream/static_test.go` | static guard: this service imports no execution/writer package and stays read-only |
 | `TestEventStreamCommand*` | `services/event-stream/cmd/event-stream/main_test.go` | startup: schema/runtime-role verification before serving, required internal-principal key, scoped routes, `/metrics` off the main port, redacted startup-failure logs |
@@ -266,9 +344,118 @@ If a PR changes the stream loop, the two cursor sources, the read-scope
 filtering, the public wire projection, or the page-token shape, it updates the
 matching section here.
 
+## Preview process configuration
+
+All settings are parsed and validated once before serving. With every
+`TETRAL_NATS_*` setting absent, preview transport is disabled and formal SSE
+continues normally. To enable it, supply comma-separated `TETRAL_NATS_SERVERS`,
+`TETRAL_NATS_USER_PATH`, and `TETRAL_NATS_PASSWORD_PATH`. `TETRAL_NATS_CONNECT_TIMEOUT_MS` and `TETRAL_NATS_RECONNECT_WAIT_MS` each
+default to 1000 and accept positive millisecond values up to 5000. Credentials are loaded
+from mounted files; server URLs cannot carry credentials, query strings or
+paths. Broker unavailability does not withdraw core-service readiness.
+
+The Go subscriber's native broker heartbeat uses `TETRAL_NATS_PING_INTERVAL_MS`
+(default 120000 milliseconds, range 1–3600000) and
+`TETRAL_NATS_MAX_PING_OUT` (default 2 outstanding pings, range 1–16).
+These preserve the pinned Go client's defaults; the Gateway publisher has its
+own defaults. The typed `NATSConfig.PingInterval` and
+`NATSConfig.MaxPingsOutstanding` reach the official client's ping options on
+every fresh connection. Invalid environment or typed settings fail before
+credentials or network startup. Broker pings are independent of the public SSE
+heartbeat and the supervisor's reconnect delay.
+
+The protected transport also requires all three mounted references:
+`TETRAL_NATS_TLS_CA_PATH`, `TETRAL_NATS_TLS_CERT_PATH`, and
+`TETRAL_NATS_TLS_KEY_PATH`. Partial TLS configuration fails startup. The official
+Go client performs TLS before INFO, validates the DNS name of each seed and
+advertised reconnect destination, and obtains a fresh validated trust/certificate
+snapshot for new connections. Trust retirement closes affected established
+connections; malformed reload retains only valid last-known-good credentials,
+and expiry cannot enable plaintext. Long-lived SSE work also receives the command's process shutdown context.
+Shutdown cancels its SQL readers and response writer before the shared HTTP
+drain, joins its cancellation callback, and releases its viewer/sequencer state.
+The process supervisor and native dispatcher join before their
+credential observer closes. The supervisor creates a fresh official-client
+connection after loss, verifies its advertised `max_payload` before restoring
+desired subscriptions, and retains up to 64 validated seed/discovered addresses
+(each at most 2048 bytes) so another advertised DNS destination remains usable
+when the original seed is down. It never replays old native subscription identities.
+
+| Setting | Initial value |
+| --- | --- |
+| `TETRAL_EVENT_STREAM_POLL_INTERVAL_MS` | 1000 |
+| `TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS` | 1000 |
+| `TETRAL_EVENT_STREAM_WRITE_TIMEOUT_MS` | 10000 |
+| `TETRAL_EVENT_STREAM_PREVIEW_SETUP_TIMEOUT_MS` | 1000 |
+| `TETRAL_EVENT_STREAM_HUB_MAX_BYTES` / `HUB_MAX_FRAMES` | 8388608 / 2048 |
+| `TETRAL_EVENT_STREAM_VIEWER_MAX_BYTES` / `VIEWER_MAX_FRAMES` | 262144 / 128 |
+| `TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES` / `SUBSCRIPTION_MAX_FRAMES` | 8388608 / 2048 |
+| `TETRAL_EVENT_STREAM_ACTIVE_REQUESTS` | 32 |
+
+Timer values are positive milliseconds; poll/heartbeat/write values accept up
+to 60000 and preview setup up to 10000. Byte/count values are positive bounded
+integers; viewer limits cannot exceed hub limits. Encoded queued, in-flight and
+preview encoding bytes stay charged until release. The hub budget is one
+process application budget shared by ingress, every viewer queue, in-flight
+frames and public encoding. The `SUBSCRIPTION_MAX_*` settings independently
+bound the **whole process native receive storage**, rather than each Session.
+
+The pinned official client uses one shared `ChanSubscribe` channel across all
+Session subscriptions. The broker ceiling is 1 MiB; a fresh connection
+advertising a larger or invalid maximum is rejected before `SUB`. Native storage
+reserves two broker-sized payloads for parser/admission copies and one for the
+current dispatcher message. Buffered slots are
+`min(floor(SUBSCRIPTION_MAX_BYTES / 1048576) - 3, SUBSCRIPTION_MAX_FRAMES - 3)`.
+Enabling NATS therefore requires at least 3145728 native bytes and three native
+frame credits; zero buffered slots is allowed at that minimum. Defaults reserve
+five buffered slots, one current message and two parser/admission payloads,
+for at most 8 MiB native storage. This fixed process bound does not limit the
+number of watched Sessions or grow with their subscriptions. Native overflow
+replaces only affected subscription identities and invalidates their previews;
+other subscriptions and future eligible opens remain live.
+
+The default aggregate encoded pending-payload bound is 16 MiB (8 MiB hub plus
+8 MiB native), with a configured combined count ceiling of 4096. Native
+worst-case message size derives a smaller actual default occupancy of eight
+ownership slots. Native reservations are conservative, separately reported
+from measured application bytes and the current native payload. Ordinary
+durable change-page payloads, the single complete final body and its encoding
+remain separately bounded by their owning content/read contracts. The strict
+single-pass decoder has one current encoded scratch buffer of at most
+`2 * 262144 + 512` bytes, separately from pending payload storage. Duplicate-key
+tracking retains only the twelve allowed field names. Public wrapper size is
+calculated without output allocation, reserved against both hub/viewer limits,
+then encoded directly into that one exact output slice, including UTF-8,
+control-character and Go HTML escaping. The single SSE writer sends the small
+complete event header, the original reserved encoded slice and the terminator
+separately under one deadline, then flushes once. It never formats/copies a
+complete encoded body into another SSE buffer. Sent-byte counters include each
+actual successful/partial Write, and a failed part stops the frame before flush.
+The fixed private frame limit is 256 KiB, and each active request retains at most 4096 preview event
+identities. Capacity failure stops previews while formal delivery continues.
+
+Preview metrics expose balanced active SSE/viewer/subscription/request and pending-byte gauges,
+separate native reservation/queued-current count/current-byte gauges,
+invalid-frame and stop counters, written formal/preview event counts, sent
+bytes, slow writers and broker lifecycle. No event/request identity is a metric
+label. Counters describe local observations, not guaranteed subscriber delivery. Fixed
+latency bucket counters, sums and counts use monotonic elapsed time: formal
+selection/read through successful response flush (End includes its final
+publication group), and local hub ingress through successful preview flush.
+The constant `le` bucket label is the only latency label; these observations
+do not measure provider, broker or client end-to-end latency.
+
 ## Process diagnostics
 
 The command follows the shared [Go process diagnostic contract](../../internal/workload/README.md#diagnostics)
 for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
 suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
+
+Preview diagnostics report the first unavailable/disconnect/recovery transition
+and classified sequence/capacity/write loss. Records identify the operation,
+scoped request where known, bounded reason and `formal_active` outcome; they
+contain no text, tool inputs, credentials, provider metadata or raw errors.
+Routine previews and polls do not produce per-fragment records. The process
+logger bounds repeated diagnostics and emits suppression summaries independently
+of business delivery.
