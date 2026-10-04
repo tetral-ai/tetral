@@ -13,6 +13,13 @@ const bootstrap = JSON.parse(await readFile(bootstrapPath, 'utf8'));
 const fixtureName = bootstrap.fixtureName;
 assert(fixtureName === 'oidc-sdk-human' || fixtureName === 'oidc-sdk-service');
 const { default: Tetral } = await import(pathToFileURL(join(sdkRoot, 'src/index.ts')).href);
+const { retrieveAttributedMemoryVersion, redactAttributedMemoryVersion } = await import(
+  pathToFileURL(join(sdkRoot, 'tests/integration/fixtures/oidc-memory-actors.ts')).href,
+);
+assert(typeof bootstrap.identityID === 'string' && bootstrap.identityID.length > 0);
+const expectedActor = fixtureName === 'oidc-sdk-service'
+  ? { type: 'service_actor', service_id: bootstrap.identityID }
+  : { type: 'user_actor', user_id: bootstrap.identityID };
 const client = new Tetral({
   apiKey: null,
   authToken: null,
@@ -53,9 +60,7 @@ async function execute(command: Record<string, string>): Promise<unknown> {
     }
     case 'create': {
       const memory = await stores.memories.create(command.storeID, { path: command.path, content: command.content });
-      const version = await stores.memoryVersions.retrieve(memory.memory_version_id, { memory_store_id: command.storeID });
-      // Runtime wire JSON is deliberately retained as unknown. The pinned SDK's
-      // generated actor union does not yet describe Engine service_actor.
+      const version = await retrieveAttributedMemoryVersion(client, memory.memory_version_id, { memory_store_id: command.storeID }, expectedActor);
       return { memoryID: memory.id, versionID: memory.memory_version_id, version };
     }
     case 'read': {
@@ -69,7 +74,7 @@ async function execute(command: Record<string, string>): Promise<unknown> {
     }
     case 'update': {
       const memory = await stores.memories.update(command.memoryID, { memory_store_id: command.storeID, content: command.content });
-      const version = await stores.memoryVersions.retrieve(memory.memory_version_id, { memory_store_id: command.storeID });
+      const version = await retrieveAttributedMemoryVersion(client, memory.memory_version_id, { memory_store_id: command.storeID }, expectedActor);
       return { memoryID: memory.id, versionID: memory.memory_version_id, version };
     }
     case 'delete': {
@@ -78,7 +83,7 @@ async function execute(command: Record<string, string>): Promise<unknown> {
       return deleted;
     }
     case 'redact':
-      return await stores.memoryVersions.redact(command.versionID, { memory_store_id: command.storeID });
+      return await redactAttributedMemoryVersion(client, command.versionID, { memory_store_id: command.storeID }, expectedActor, expectedActor);
     default:
       throw new Error('unknown Engine-owned SDK fixture command');
   }

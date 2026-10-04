@@ -39,8 +39,8 @@ func TestSDKCompatibilityRowsEqualRegistry(t *testing.T) {
 	sdkRoot := forkSDKRootForStaticTest(t, engineRoot)
 	registryPath := filepath.Join(sdkRoot, "tests", "compatibility", "compat-cases.json")
 	registryCases := readSDKCompatibilityRegistry(t, registryPath)
-	if len(registryCases) != 285 {
-		t.Fatalf("SDK compatibility registry cases = %d; want 285", len(registryCases))
+	if len(registryCases) != 287 {
+		t.Fatalf("SDK compatibility registry cases = %d; want 287", len(registryCases))
 	}
 
 	registryIDs := make(map[string]struct{}, len(registryCases))

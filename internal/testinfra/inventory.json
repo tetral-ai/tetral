@@ -2,6 +2,11 @@
   "version": 1,
   "go_tests": [
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLPlatformKeyCLINativeClose",
+      "dependencies": ["postgresql", "docker", "bun-workspaces"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/auth",
       "name": "TestPostgreSQLOIDCExchange",
       "dependencies": ["postgresql"]
@@ -124,13 +129,8 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestPostgreSQLPlatformKeyCLINativeClose",
-      "dependencies": ["postgresql", "docker", "bun-workspaces"]
-    },
-    {
-      "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestForkSDKPreviewCompatibilityProofs",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "name": "TestForkSDKIntegrationCompatibilityProofs",
+      "dependencies": ["keycloak", "postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk"]
     },
     {
       "package": "github.com/tetral-ai/tetral/internal/testinfra",

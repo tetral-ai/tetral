@@ -26,11 +26,11 @@ import (
 )
 
 // One native root composes a real HTTPS IdP, the actual Auth command, production
-// role-separated API services, and a persistent process importing the unchanged
+// role-separated API services, and a persistent process importing the pinned
 // SDK source. A successful final response alone cannot prove the refresh path:
 // ordered edge observations and durable SQL effects distinguish it below.
 func TestOIDCKeycloakSDK(t *testing.T) {
-	oidcIsolatedTLSCase(t, func(t *testing.T) {
+	oidcIsolatedSDKIdentityCases(t, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		t.Cleanup(cancel)
 		oidcVerifySDKPin(t)
@@ -131,7 +131,8 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 						t.Logf("OIDC sanitized boundary journal=%s", edge.safeJournal(mark))
 					}
 				})
-				child := startOIDCSDKChild(ctx, t, map[string]string{"baseURL": server.URL, "assertionPath": assertionPath, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
+				identityID := document.Identities[index].ID
+				child := startOIDCSDKChild(ctx, t, map[string]string{"identityID": identityID, "baseURL": server.URL, "assertionPath": assertionPath, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
 				session := oidcDecodeSDKResult(t, child.control(t, "session", nil))
 				var storedWorkspace string
 				if err := admin.QueryRowContext(ctx, `SELECT workspace_id FROM sessions WHERE id=$1`, session.SessionID).Scan(&storedWorkspace); err != nil {
@@ -142,7 +143,6 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 				}
 				store := oidcDecodeSDKResult(t, child.control(t, "store", nil))
 				created := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/before.md", "content": "before"}))
-				identityID := document.Identities[index].ID
 				oidcAssertMemoryActor(ctx, t, admin, created.VersionID, actor.kind, identityID, false)
 				oidcAssertWireActor(t, created.Version.CreatedBy, actor.kind, identityID)
 				oidcAssertCachedRequests(t, edge, mark)
@@ -212,7 +212,9 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 				}
 				oidcAssertWireActor(t, *redacted.RedactedBy, actor.kind, identityID)
 				oidcAssertMemoryActor(ctx, t, admin, updated.VersionID, actor.kind, identityID, true)
-				t.Logf("oidc_sdk_assertion=%s_session_memory_cached_token_one401_one_exchange_one_effect sdk_pin=%s", actor.name, oidcSDKPin)
+				oidcAssertWireActor(t, redacted.CreatedBy, actor.kind, identityID)
+				t.Logf("oidc_sdk_assertion=%s_typed_created_by_redacted_by_stable_identity passed=true sdk_pin=%s", actor.name, oidcSDKPin)
+				t.Logf("oidc_sdk_assertion=%s_session_memory_cached_token_one401_one_exchange_one_effect passed=true sdk_pin=%s", actor.name, oidcSDKPin)
 			})
 		}
 	})

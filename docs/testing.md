@@ -52,10 +52,11 @@ commit, install frozen dependencies with lifecycle scripts disabled, run
 These source proofs complement the local SDK integration suites; they do not
 establish runtime or database interoperability by themselves.
 
-The registered SDK Session preview proofs run through
-`TestForkSDKPreviewCompatibilityProofs` in the existing Go evidence owner. Its
-inventory declaration requires PostgreSQL, MinIO, NATS, Bun workspaces and the
-pinned SDK. Full and Affected execute it while those dependencies are alive;
+The registered SDK Session preview and typed OIDC Memory proofs run through
+`TestForkSDKIntegrationCompatibilityProofs` in the existing Go evidence owner. Its
+inventory declaration requires real HTTPS Keycloak, TLS PostgreSQL via Docker,
+MinIO, NATS, Bun workspaces and the pinned SDK. Full and Affected execute it
+while those dependencies are alive;
 the normal CI Go Race shards include it. Fast compiles it without execution.
 To reproduce with automatic setup, run from a clean Engine checkout:
 
@@ -66,12 +67,21 @@ go run ./internal/testinfra/cmd/tetral-test --profile full --groups go
 The test runs the SDK's `test:compatibility:integration` command with the exact
 Engine root and revision. Frozen SDK installation disables lifecycle scripts;
 this launcher resolves source aliases directly and requires no SDK build or
-`dist` directory. The SDK selects only the named public streaming Identity
-subtest, validates executed Go JSONL and all five preview observations, and
-settles its two registered handlers. The Engine wrapper requires matching
-source/pass markers and exactly two passing handlers, so exit zero with an
-empty registry cannot pass. Nested processes inherit the runner's process and
+`dist` directory. The SDK selects the named public streaming Identity subtest
+and the complete `TestOIDCKeycloakSDK` root. The latter awaits typed SDK Memory
+retrieve/redact responses for human and service actors, then independently checks
+wire and stored attribution against the applied Engine identity IDs. Existing
+Session, token caching, revoked-bearer retry and durable-effect assertions also
+run. Both SDK and Engine validate executed Go JSONL, all five preview observations
+and four OIDC observations under their owning subtests. The wrapper requires
+exact source/scenario/test/assertion markers and four passing handlers; names,
+counts or exit zero alone cannot pass. Nested processes inherit the runner's
+process and
 database cleanup custody. Their original output remains in the Go artifact.
+Each fixed SDK child has an 11-minute process budget and the wrapper has a
+24-minute context; its owning native Go selection uses a 30-minute timeout.
+Other native Go selections use the package watchdog policy: 25 minutes for
+the exact integration package and 20 minutes for other packages.
 The runner tears down dependencies before a profile returns; a later standalone
 SDK command cannot reuse them. Standalone execution requires independently
 prepared dependencies and clean, matching Engine and SDK sources.

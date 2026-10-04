@@ -18,7 +18,7 @@ func TestPublicStreamingChangesSelectActualProtocolConsumers(t *testing.T) {
 		"internal/eventwire/preview_event.go", "services/gateway/packages/provider-gateway/src/providers/preview-publisher.ts",
 		"services/gateway/packages/protocol/src/preview-limits.json", "services/agent-runtime/packages/runtime-pod/src/gateway-client.ts",
 		"integration/public_streaming_test_support_test.go", "integration/testdata/public-streaming.json",
-		"integration/preview_tls_test.go", "integration/static/public_preview_sdk_projection_test.go",
+		"integration/sdk_integration_compatibility_test.go", "integration/preview_tls_test.go", "integration/static/public_preview_sdk_projection_test.go",
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
@@ -43,7 +43,7 @@ func TestPublicStreamingChangesSelectActualProtocolConsumers(t *testing.T) {
 			}
 		})
 	}
-	names := []string{"TestForkSDKPreviewCompatibilityProofs"}
+	names := []string{"TestForkSDKIntegrationCompatibilityProofs"}
 	for _, suffix := range []string{"Identity", "BrokerFailure", "Ordering", "RequestClosure", "Subscribers", "Visibility", "Backpressure", "EndPublication", "Recovery", "ListCursors"} {
 		names = append(names, "TestPostgreSQLPublicStreaming"+suffix)
 	}

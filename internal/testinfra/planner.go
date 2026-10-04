@@ -459,6 +459,7 @@ func separatedServiceContractChange(paths []string) bool {
 		}
 		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
 			strings.HasPrefix(path, "integration/public_streaming") || strings.HasPrefix(path, "integration/testdata/public-streaming") ||
+			path == "integration/sdk_integration_compatibility_test.go" ||
 			path == "integration/preview_tls_test.go" || strings.HasPrefix(path, "integration/preview_tls_") ||
 			path == "integration/static/public_preview_sdk_projection_test.go" || path == "integration/static/public_event_sdk_projection_test.go" ||
 			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||

@@ -134,10 +134,15 @@ make test-full
 
 The runner provisions private PostgreSQL and HTTPS Keycloak dependencies and
 the exact pinned SDK source. `TestOIDCKeycloakSDK` composes real human and service
-assertions, the actual Auth command, API services and the unchanged SDK. It checks
-cached bearer reuse, the ordered 401/exchange/retry path, durable effects and raw
-Memory actor responses. The pinned SDK's generated actor types do not yet include
-`service_actor`; that response typing requires the separate SDK companion.
+assertions, the actual Auth command, API services and the SDK’s existing OIDC
+provider. It checks cached bearer reuse, the ordered 401/exchange/retry path,
+and durable effects.
+The pinned SDK includes the service actor union and its test-only helpers await
+actual typed Memory retrieve/redact responses. Human `user_id` and service
+`service_id` must match the applied stable Engine identity ID; independent wire
+and database assertions verify the same attribution. The registered SDK
+integration wrapper executes this complete root alongside the Session preview
+proof while the native dependencies remain alive.
 
 `TestOIDCReplicaAuthority` starts two actual Auth processes against the same
 database and replays frozen bearer bytes through committed authority changes.

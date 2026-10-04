@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,6 +161,33 @@ func executeSelection(ctx context.Context, plan Plan, selection Selection, optio
 	return results, nil
 }
 
+// The registered SDK wrapper runs two fixed child scenarios (11 minutes each)
+// inside a 24-minute context. Only its inventory-owned selection needs a larger
+// enclosing Go budget; ordinary commands use the package watchdog policy.
+func goTestSelectionTimeout(selection Selection) string {
+	if slices.Contains(selection.Tests, "TestForkSDKIntegrationCompatibilityProofs") {
+		return "-timeout=30m"
+	}
+	return goPackageTimeout(selection.Packages)
+}
+
+func goTestExecutionArguments(profile Profile, selection Selection) []string {
+	arguments := []string{"go", "test", "-json", "-count=1"}
+	if profile != ProfileFast {
+		arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+	}
+	if len(selection.Tests) > 0 {
+		tests := make([]string, len(selection.Tests))
+		for index, name := range selection.Tests {
+			tests[index] = regexp.QuoteMeta(name)
+		}
+		arguments = append(arguments, "-run", "^(?:"+strings.Join(tests, "|")+")$")
+	} else if profile == ProfileFast {
+		arguments = append(arguments, "-run", "a^")
+	}
+	return append(arguments, selection.Packages[0])
+}
+
 func executeGoSelections(ctx context.Context, profile Profile, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
 	type outcome struct {
 		index int
@@ -176,20 +204,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 			defer wait.Done()
 			for index := range jobs {
 				selection := selections[index]
-				arguments := []string{"go", "test", "-json", "-count=1"}
-				if profile != ProfileFast {
-					arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
-				}
-				if len(selection.Tests) > 0 {
-					tests := make([]string, len(selection.Tests))
-					for index, name := range selection.Tests {
-						tests[index] = regexp.QuoteMeta(name)
-					}
-					arguments = append(arguments, "-run", "^(?:"+strings.Join(tests, "|")+")$")
-				} else if profile == ProfileFast {
-					arguments = append(arguments, "-run", "a^")
-				}
-				arguments = append(arguments, selection.Packages[0])
+				arguments := goTestExecutionArguments(profile, selection)
 				command := commandSpec{
 					Arguments:         arguments,
 					Artifact:          "go-" + string(profile) + "-" + sanitizeArtifact(selection.Packages[0]) + ".jsonl",
@@ -259,7 +274,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", goPackageTimeout(packages))
+			arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil

@@ -417,9 +417,10 @@ service tokens use `service_actor` with `service_id`. Human/service IDs are stab
 Engine identity IDs. Runtime writes retain `session_actor` with `session_id`.
 Exactly one actor ID is valid for its discriminator in both the model and
 PostgreSQL constraints. Reads require a verified authorized identity and do
-not require an API-key ID. The service actor is an additive response variant;
-older SDK actor types need the separate type/schema support update before
-typed service-actor compatibility can be claimed.
+not require an API-key ID. The SDK version pinned by this repository types all
+four actor variants, including `service_actor`; see
+[authentication](../../docs/authentication.md#verification) for the typed SDK
+verification.
 
 The store's soft-archive axis and its create-time-only attachment (a
 `memory_store` resource is attached by ID at session create, never defaulted and

@@ -26,7 +26,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-const oidcSDKPin = "b9c64659ac3c0773415ad463abfe52d20c6d1e28"
+const oidcSDKPin = "406e6eee5e28a2cb3e2caa4531700abb682a96e5"
 
 // Like the accepted public process cases, the child selects TLS PostgreSQL
 // before the process-global storage registry initializes. Actual Auth also
@@ -67,6 +67,46 @@ func oidcIsolatedTLSCaseWithMarker(t *testing.T, marker string, body func(*testi
 	}
 	if !strings.Contains(string(output), "--- PASS: "+t.Name()) || !strings.Contains(string(output), marker) {
 		t.Fatal("OIDC composition lacks executed owning assertions")
+	}
+}
+
+// Give each reported identity subtest custody of its actual isolated flow. The
+// child still selects TLS PostgreSQL before global storage initialization; its
+// fixed selector runs the owning human/service body rather than a report stub.
+func oidcIsolatedSDKIdentityCases(t *testing.T, body func(*testing.T)) {
+	t.Helper()
+	if os.Getenv("TETRAL_OIDC_PROCESS_CASE") == t.Name() {
+		oidcIsolatedTLSCase(t, body)
+		return
+	}
+	postgres := transporttest.NewPostgreSQL(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.Name()
+	for _, actor := range []string{"human", "service"} {
+		t.Run(actor, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+			defer cancel()
+			//nolint:gosec // Current executable and fixed owning identity selectors.
+			command := exec.CommandContext(ctx, executable, "-test.run=^"+root+"$/^"+actor+"$", "-test.v")
+			command.Env = append(os.Environ(), "TETRAL_OIDC_PROCESS_CASE="+root, "TETRAL_OIDC_PROCESS_PG_CERTS="+postgres.Directory, "TETRAL_OIDC_PROCESS_PG_URL="+postgres.URL)
+			output, err := command.CombinedOutput()
+			t.Logf("isolated OIDC identity process assertions:\n%s", output)
+			if err != nil {
+				t.Fatalf("actual OIDC identity process composition failed: %v", err)
+			}
+			for _, required := range []string{
+				"--- PASS: " + root + "/" + actor + " (",
+				"oidc_sdk_assertion=" + actor + "_session_memory_cached_token_one401_one_exchange_one_effect passed=true sdk_pin=" + oidcSDKPin,
+				"oidc_sdk_assertion=" + actor + "_typed_created_by_redacted_by_stable_identity passed=true sdk_pin=" + oidcSDKPin,
+			} {
+				if !strings.Contains(string(output), required) {
+					t.Fatal("OIDC identity composition lacks executed owning assertions")
+				}
+			}
+		})
 	}
 }
 
