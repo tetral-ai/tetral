@@ -266,3 +266,29 @@ error tuple; healthy high-frequency polling uses Debug. Repeated degradation
 records emit bounded suppression summaries. Existing metrics report diagnostic
 drops and sink failures independently of stderr. Listener and business-resource
 cleanup completes before the bounded diagnostic close.
+
+## Registered issuer verification
+
+Auth's issuer verifier accepts registered HTTPS issuers and RS256 signing keys.
+A rule fixes the exact issuer, audience, endpoint, egress destinations and CA
+trust. Assertions cannot supply a JWKS URL. Redirects are rejected; DNS results
+are checked before connecting, private destinations require explicit CIDRs, and
+TLS verifies the configured hostname. Issuer calls have a five-second deadline
+and a one-MiB response limit. Invalid assertions remain distinct from temporary
+issuer dependency failures, which use a safe `503` error envelope.
+
+Keys are cached by rule and trust revision for at most ten minutes. The typed
+verifier setting permits one to 600 seconds, defaults to 600, and refreshes after
+90 percent of validity. Known keys can survive a failed refresh only until their
+recorded validity expires. Concurrent refreshes join one request, unknown-key
+refreshes have a 30-second cooldown, and failed cold or expired refreshes obey
+the same cooldown. Cache and concurrent-refresh counts are bounded. Shutdown
+cancels and joins issuer work; a caller's cancellation cannot cancel another
+caller's waiting context. Verification produces an immutable exact-revision
+proof for the authority transaction, rather than workspace permissions.
+
+Controlled HTTPS issuer tests exercise claims, algorithm rejection, malicious
+metadata, TLS trust, rotation, retirement, cancellation, cache pressure and
+revision isolation. The native Keycloak fixture independently exercises real
+HTTPS assertions and signing-key lifecycle. Strict JSON decoding rejects
+unknown, duplicate and case-equivalent security fields.

@@ -15,9 +15,9 @@ const (
 	OperationAgentsList                  Operation = "agents.list"
 	OperationAgentsRead                  Operation = "agents.read"
 	OperationAgentsUpdate                Operation = "agents.update"
-	OperationApiKeysCreate               Operation = "api_keys.create"
-	OperationApiKeysDelete               Operation = "api_keys.delete"
-	OperationApiKeysList                 Operation = "api_keys.list"
+	OperationAPIKeysCreate               Operation = "api_keys.create"
+	OperationAPIKeysDelete               Operation = "api_keys.delete"
+	OperationAPIKeysList                 Operation = "api_keys.list" //nolint:gosec // G101: registered operation name, not a credential.
 	OperationCredentialsArchive          Operation = "credentials.archive"
 	OperationCredentialsCreate           Operation = "credentials.create"
 	OperationCredentialsDelete           Operation = "credentials.delete"
@@ -95,9 +95,9 @@ var registeredOperations = []Operation{
 	OperationAgentsList,
 	OperationAgentsRead,
 	OperationAgentsUpdate,
-	OperationApiKeysCreate,
-	OperationApiKeysDelete,
-	OperationApiKeysList,
+	OperationAPIKeysCreate,
+	OperationAPIKeysDelete,
+	OperationAPIKeysList,
 	OperationCredentialsArchive,
 	OperationCredentialsCreate,
 	OperationCredentialsDelete,
@@ -177,7 +177,7 @@ type OperationRoute struct {
 }
 
 var operationRoutes = []OperationRoute{
-	{"DELETE", "/v1/api_keys/{api_key_id}", OperationApiKeysDelete},
+	{"DELETE", "/v1/api_keys/{api_key_id}", OperationAPIKeysDelete},
 	{"DELETE", "/v1/environments/{environment_id}", OperationEnvironmentsDelete},
 	{"DELETE", "/v1/files/{file_id}", OperationFilesDelete},
 	{"DELETE", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresDelete},
@@ -191,7 +191,7 @@ var operationRoutes = []OperationRoute{
 	{"GET", "/v1/agents", OperationAgentsList},
 	{"GET", "/v1/agents/{agent_id}", OperationAgentsRead},
 	{"GET", "/v1/agents/{agent_id}/versions", OperationAgentVersionsList},
-	{"GET", "/v1/api_keys", OperationApiKeysList},
+	{"GET", "/v1/api_keys", OperationAPIKeysList},
 	{"GET", "/v1/environments", OperationEnvironmentsList},
 	{"GET", "/v1/environments/{environment_id}", OperationEnvironmentsRead},
 	{"GET", "/v1/files", OperationFilesList},
@@ -227,7 +227,7 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/agents", OperationAgentsCreate},
 	{"POST", "/v1/agents/{agent_id}", OperationAgentsUpdate},
 	{"POST", "/v1/agents/{agent_id}/archive", OperationAgentsArchive},
-	{"POST", "/v1/api_keys", OperationApiKeysCreate},
+	{"POST", "/v1/api_keys", OperationAPIKeysCreate},
 	{"POST", "/v1/environments", OperationEnvironmentsCreate},
 	{"POST", "/v1/environments/{environment_id}", OperationEnvironmentsUpdate},
 	{"POST", "/v1/environments/{environment_id}/archive", OperationEnvironmentsArchive},

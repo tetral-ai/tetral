@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
+	"unicode"
 )
 
 // DecodeStrictJSON rejects duplicate fields, excessive nesting, unknown fields,
@@ -47,10 +49,11 @@ func scanJSONValue(decoder *json.Decoder, depth int) error {
 				return err
 			}
 			key, ok := name.(string)
-			if !ok || seen[key] {
+			folded := foldJSONField(key)
+			if !ok || seen[folded] {
 				return errors.New("duplicate JSON field")
 			}
-			seen[key] = true
+			seen[folded] = true
 			if err := scanJSONValue(decoder, depth+1); err != nil {
 				return err
 			}
@@ -66,4 +69,25 @@ func scanJSONValue(decoder *json.Decoder, depth int) error {
 	}
 	_, err = decoder.Token()
 	return err
+}
+
+// encoding/json accepts Unicode case-equivalent struct field names. Reject
+// aliases in the same object using the same simple-fold equivalence, including
+// escaped names, Kelvin K, long S, and Greek sigma variants.
+func foldJSONField(name string) string {
+	return strings.Map(func(value rune) rune {
+		if value < unicode.MaxASCII+1 {
+			if value >= 'a' && value <= 'z' {
+				return value - 'a' + 'A'
+			}
+			return value
+		}
+		for {
+			next := unicode.SimpleFold(value)
+			if next <= value {
+				return next
+			}
+			value = next
+		}
+	}, name)
 }
