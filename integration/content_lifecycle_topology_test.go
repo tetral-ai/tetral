@@ -143,7 +143,15 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	command.Dir = "../services/gateway"
 	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin), "ENGINE_VAULT_KEY="+sdkIntegrationVaultKey)
 	command.Stdin = strings.NewReader("content-fixture-provider-key")
+	keyStarted := time.Now()
 	if err := command.Run(); err != nil {
+		exitCode := -1
+		if command.ProcessState != nil {
+			exitCode = command.ProcessState.ExitCode()
+		}
+		// Closed process metadata preserves the failure boundary without exposing
+		// credentials that native SQL errors or child output could contain.
+		t.Logf("platform_key_cli_failure elapsed_ms=%d key_deadline=%t key_cancelled=%t parent_deadline=%t parent_cancelled=%t started=%t process_state=%t exit_code=%d", time.Since(keyStarted).Milliseconds(), keyContext.Err() == context.DeadlineExceeded, keyContext.Err() == context.Canceled, ctx.Err() == context.DeadlineExceeded, ctx.Err() == context.Canceled, command.Process != nil, command.ProcessState != nil, exitCode)
 		t.Fatal("actual platform key CLI failed")
 	}
 	pod := id.New("pod_")
