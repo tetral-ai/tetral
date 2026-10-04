@@ -20,7 +20,7 @@ is restated here.
 
 | Service | Role |
 |---------|------|
-| `services/auth` | API-key auth at the edge; signed internal principals; `/v1/api_keys`. |
+| `services/auth` | API-key and federated bearer authentication; current workspace authority; signed principals; token exchange and `/v1/api_keys`. |
 | `services/api` | Public REST control plane (sessions, agents, environments, vaults, memory, files, skills). |
 | `services/queue` | Durable job queue: lease, transition, wake. |
 | `services/sandbox` | Provider-backed Sandbox lifecycle, tool execution, and resource projection. |

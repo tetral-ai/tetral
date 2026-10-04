@@ -42,14 +42,12 @@ func (f AuthenticatorFunc) Authenticate(ctx context.Context, rawKey string) (Pri
 	return f(ctx, rawKey)
 }
 
-// StoreAuthenticator wraps an APIKeyStore so its AuthenticateRawKey
-// method satisfies the Authenticator interface.
+// StoreAuthenticator adapts the shared resolver to local key-only routers.
 type StoreAuthenticator struct {
 	Store *APIKeyStore
 }
 
-// Authenticate implements Authenticator using the API key store's
-// narrow auth-lookup transaction.
+// Authenticate preserves the typed authority returned by the current resolver.
 func (a *StoreAuthenticator) Authenticate(ctx context.Context, rawKey string) (Principal, error) {
 	if a == nil || a.Store == nil {
 		return Principal{}, &AuthenticationError{Message: "authentication unavailable"}
@@ -58,7 +56,7 @@ func (a *StoreAuthenticator) Authenticate(ctx context.Context, rawKey string) (P
 	if err != nil {
 		return Principal{}, err
 	}
-	return IndependentKeyPrincipal(result.Workspace, result.APIKeyID), nil
+	return result.Principal, nil
 }
 
 // requestIDFromContext is the reflective accessor used by the audit

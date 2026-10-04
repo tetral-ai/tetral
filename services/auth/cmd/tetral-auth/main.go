@@ -51,6 +51,7 @@ func run(ctx context.Context, env tetralauth.Env) error {
 		workload.WithHTTPMetrics(httpMetrics),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", app.Client)),
+		workload.WithMetricsCollector("auth_token_pruning", app.PruningMetrics),
 	)
 	readiness.MarkReady()
 	return runPublicAndMetricsHTTP(ctx, cfg, readiness, logger, handler, metricsHandler)

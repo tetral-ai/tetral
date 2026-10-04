@@ -149,6 +149,7 @@ func TestAssertionVerifierRegisteredTrustClaimsAndNoUntrustedURLs(t *testing.T) 
 		t.Fatal("verified immutable proof lost snapshot fields")
 	}
 	initial := issuer.count("/keys")
+	initialDiscovery := issuer.count("/discovery")
 	other := newControlledIssuer(t)
 	for _, claims := range []map[string]any{{"alg": "none"}, {"alg": "HS256"}, {"iss": "https://unregistered.invalid"}, {"aud": "wrong"}, {"exp": time.Now().Add(-time.Minute).Unix()}, {"nbf": time.Now().Add(time.Minute).Unix()}, {"sub": ""}} {
 		_, err := verifier.Verify(context.Background(), issuer.rule, signIssuerAssertion(t, issuer.key, "initial", issuer.rule, claims))
@@ -168,7 +169,7 @@ func TestAssertionVerifierRegisteredTrustClaimsAndNoUntrustedURLs(t *testing.T) 
 	denied.Revision++
 	_, err = verifier.Verify(context.Background(), denied, assertion)
 	assertInvalidAssertion(t, err)
-	if issuer.count("/keys") != initial {
+	if issuer.count("/keys") != initial || issuer.count("/discovery") != initialDiscovery {
 		t.Fatal("unconfigured loopback received request")
 	}
 	noCA := issuer.rule
@@ -201,6 +202,11 @@ func TestAssertionVerifierDiscoveryDenialsAndDependencyFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			issuer := newControlledIssuer(t)
 			test.configure(issuer)
+			var prohibited *controlledIssuer
+			if test.name == "cross origin URI" {
+				prohibited = newControlledIssuer(t)
+				issuer.jwksURL = prohibited.server.URL + "/keys"
+			}
 			verifier := NewAssertionVerifier(context.Background())
 			defer verifier.Close()
 			_, err := verifier.Verify(context.Background(), issuer.rule, signIssuerAssertion(t, issuer.key, "initial", issuer.rule, nil))
@@ -211,6 +217,17 @@ func TestAssertionVerifierDiscoveryDenialsAndDependencyFailures(t *testing.T) {
 				}
 			} else {
 				assertInvalidAssertion(t, err)
+			}
+			if prohibited != nil {
+				prohibited.mu.Lock()
+				total := 0
+				for _, count := range prohibited.requests {
+					total += count
+				}
+				prohibited.mu.Unlock()
+				if total != 0 || prohibited.count("/discovery") != 0 || prohibited.count("/keys") != 0 {
+					t.Fatal("discovery fetched actual unregistered HTTPS endpoint")
+				}
 			}
 			if (test.name == "wrong issuer" || test.name == "HTTP metadata URI" || test.name == "cross origin URI") && issuer.count("/keys") != 0 {
 				t.Fatal("prohibited discovery destination fetched")

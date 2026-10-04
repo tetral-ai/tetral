@@ -2,6 +2,91 @@
   "version": 1,
   "go_tests": [
     {
+      "package": "github.com/tetral-ai/tetral/services/auth",
+      "name": "TestPostgreSQLOIDCExchange",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/auth/cmd/tetral-auth-policy",
+      "name": "TestPostgreSQLAuthPolicyCommand",
+      "dependencies": ["postgresql", "docker"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverAdmissionAndRevocationLockOrder",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverIssuanceBeforePolicyCommitHoldsRoots",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverCredentialExpiryAfterLockWait",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverBootstrapRotationBindsSelectedDigest",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverPolicyMutationBeforeIssuanceRejectsStaleAuthority",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverDerivedKeysPreserveCeilingAndDurableLineage",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverRestrictedKeyAndImmutableProvenance",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthorityResolverExactProofRevisionAndIntegerExpiry",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthTokenPrunerRetentionAndBatch",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthTokenPrunerConcurrentReplicas",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthTokenPrunerRoleIsolation",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthTokenPrunerAdmissionAndShutdown",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthPolicyLookupCatalogMatchesContract",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthPolicyImportAtomicNoopAndTerminalGrants",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/auth",
+      "name": "TestAuthPolicyServingConnectionCannotAdminister",
+      "dependencies": ["postgresql"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/internal/httpapi",
       "name": "TestPostgreSQLPublicMemoryTypedActors",
       "dependencies": ["postgresql"]

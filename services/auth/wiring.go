@@ -31,12 +31,24 @@ type StartupReadinessClient interface {
 type StartupOpenFunc func(context.Context) (StartupDatabase, error)
 
 type Application struct {
-	Handler http.Handler
-	Client  *dbconnect.Client
+	Handler        http.Handler
+	Client         *dbconnect.Client
+	Verifier       *auth.AssertionVerifier
+	Pruner         *auth.TokenPruner
+	PruningMetrics workload.MetricsCollector
 }
 
 func (a *Application) Close() error {
-	if a == nil || a.Client == nil {
+	if a == nil {
+		return nil
+	}
+	if a.Pruner != nil {
+		a.Pruner.Close()
+	}
+	if a.Verifier != nil {
+		a.Verifier.Close()
+	}
+	if a.Client == nil {
 		return nil
 	}
 	return a.Client.Close()
@@ -64,24 +76,38 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 	if err != nil {
 		return nil, err
 	}
-	handler, err := BuildRouter(ctx, RouterBuildConfig{
-		RawDatabase:    database.OpenResult.RawDatabaseForExcludedStores,
-		Config:         cfg,
-		Logger:         opts.logger,
-		RequestMetrics: opts.requestMetrics,
-	})
+	cacheTTL := cfg.JWKSCacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = 10 * time.Minute
+	}
+	verifier, err := auth.NewConfiguredAssertionVerifier(ctx, auth.AssertionVerifierConfig{KeyCacheTTL: cacheTTL})
 	if err != nil {
 		_ = database.OpenResult.Client.Close()
 		return nil, err
 	}
-	return &Application{Handler: handler, Client: database.OpenResult.Client}, nil
+
+	handler, err := BuildRouter(ctx, RouterBuildConfig{
+		RawDatabase:       database.OpenResult.RawDatabaseForExcludedStores,
+		AssertionVerifier: verifier,
+		Config:            cfg,
+		Logger:            opts.logger,
+		RequestMetrics:    opts.requestMetrics,
+	})
+	if err != nil {
+		verifier.Close()
+		_ = database.OpenResult.Client.Close()
+		return nil, err
+	}
+	pruner := auth.StartTokenPruner(ctx, auth.NewAuthorityResolver(database.OpenResult.RawDatabaseForExcludedStores, cfg.BootstrapWorkspaceID), opts.logger)
+	return &Application{Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector()}, nil
 }
 
 type RouterBuildConfig struct {
-	RawDatabase    *sql.DB
-	Config         Config
-	Logger         *slog.Logger
-	RequestMetrics httpapi.RequestMetricsRecorder
+	AssertionVerifier *auth.AssertionVerifier
+	RawDatabase       *sql.DB
+	Config            Config
+	Logger            *slog.Logger
+	RequestMetrics    httpapi.RequestMetricsRecorder
 }
 
 type ApplicationOption func(*applicationOptions)
@@ -121,6 +147,9 @@ func BuildRouter(ctx context.Context, cfg RouterBuildConfig) (http.Handler, erro
 	}
 	return NewRouter(RouterConfig{
 		Store:               store,
+		Resolver:            auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID),
+		AssertionVerifier:   cfg.AssertionVerifier,
+		ExchangeLimits:      cfg.Config.ExchangeLimits,
 		Signer:              signer,
 		PrincipalTTLSeconds: int(cfg.Config.InternalPrincipalTTL.Seconds()),
 		Logger:              cfg.Logger,

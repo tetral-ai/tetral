@@ -941,6 +941,11 @@ func cloneSchemaGrantStatements(roleName string) []string {
 		"GRANT ALL ON ALL TABLES IN SCHEMA public TO " + roleName,
 		"GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO " + roleName,
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_lock_runtime_process(text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_key(bytea)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_key(bytea) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_token(bytea)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_token(bytea) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_grants(text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_grants(text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lock_authority(text,text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lock_authority(text,text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_prune_tokens(integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_prune_tokens(integer) TO "+roleName) + "; END IF; END $fixture_grant$",
 	}
 }
 

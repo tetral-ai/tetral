@@ -228,8 +228,8 @@ func secureTetralAPIDataDir(t *testing.T) string {
 func seedTetralAPIPrincipalAPIKey(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(),
-		`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-		 VALUES ($1, $2, 'api signed principal test key', 'tetral_test', decode(repeat('0', 64), 'hex'), 'standard', '2026-01-01T00:00:00Z')
+		`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, authority_kind, created_at)
+		 VALUES ($1, $2, 'api signed principal test key', 'tetral_test', decode(repeat('0', 64), 'hex'), 'standard', 'independent_key', '2026-01-01T00:00:00Z')
 		 ON CONFLICT (id) DO NOTHING`,
 		tetralAPITestAPIKeyID, string(workspace.DefaultID),
 	)

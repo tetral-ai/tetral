@@ -238,6 +238,14 @@ func newTestAuthRouter(t *testing.T) (http.Handler, *sql.DB, string) {
 	); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
+	rawFixtureKey, err := auth.GenerateAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(context.Background(), `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES('ak_test_principal','ws_auth_test','signed fixture','fixture',$1,'standard','independent_key',clock_timestamp())`, auth.DigestAPIKey(rawFixtureKey)); err != nil {
+		t.Fatal(err)
+	}
+
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)

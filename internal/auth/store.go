@@ -52,12 +52,10 @@ type CreateAPIKeyResult struct {
 	APIKey string `json:"api_key"`
 }
 
-// APIKeyStore manages workspace-scoped API key rows on top of the
-// PostgreSQL `api_keys` table. Workspace-scoped management calls run
-// under transaction-local `tetral.workspace_id` set by
-// storage.WithWorkspaceTx; the narrow authentication lookup uses a
-// transaction-local `tetral.auth_lookup = 'true'` setting that the
-// auth_lookup RLS policy permits FOR SELECT only.
+// APIKeyStore manages scoped credential metadata and issuance. Pre-workspace
+// authentication delegates to AuthorityResolver's fixed digest lookup, current
+// root locks, credential recheck and usage transaction. A caller-supplied lookup
+// flag alone does not confer global table access.
 type APIKeyStore struct {
 	db *sql.DB
 }
@@ -93,8 +91,8 @@ func (s *APIKeyStore) CreateForWorkspace(ctx context.Context, workspaceID worksp
 	var stored APIKeyMetadata
 	if err := storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
 		_, execErr := tx.ExecContext(ctx,
-			`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, authority_kind, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, 'independent_key', $7)`,
 			apiKeyID, string(workspaceID), trimmed, prefix, digest, KindStandard, now,
 		)
 		if execErr != nil {
@@ -244,86 +242,25 @@ func (s *APIKeyStore) RevokeForWorkspace(ctx context.Context, workspaceID worksp
 	})
 }
 
-// TouchLastUsedForWorkspace updates audit metadata for a successfully
-// authenticated key. auth calls this after the digest lookup
-// succeeds, through the workspace-scoped RLS path instead of the
-// cross-workspace auth lookup transaction.
-func (s *APIKeyStore) TouchLastUsedForWorkspace(ctx context.Context, workspaceID workspace.ID, apiKeyID string) error {
-	now := storage.Now().Format(time.RFC3339)
-	return storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		result, execErr := tx.ExecContext(ctx,
-			`UPDATE api_keys SET last_used_at = $1
-			 WHERE id = $2 AND workspace_id = $3 AND revoked_at IS NULL`,
-			now, apiKeyID, string(workspaceID),
-		)
-		if execErr != nil {
-			return mapPostgreSQLError(execErr)
-		}
-		affected, _ := result.RowsAffected()
-		if affected == 0 {
-			return &AuthenticationError{Message: "invalid api key"}
-		}
-		return nil
-	})
-}
-
-// AuthenticationResult is the result of a successful raw-key lookup:
-// the workspace.Workspace owning the matching api_key row.
+// AuthenticationResult retains the exact typed principal resolved for the key.
+// Workspace/APIKeyID fields preserve the existing local caller contract.
 type AuthenticationResult struct {
+	Principal Principal
 	APIKeyID  string
 	Workspace workspace.Workspace
 }
 
-// AuthenticateRawKey looks up the api_keys row whose digest matches
-// SHA-256(rawToken) and is not revoked. The lookup runs inside a
-// transaction with `tetral.auth_lookup = 'true'` set
-// transaction-locally so the narrow auth_lookup RLS policy permits
-// the cross-workspace SELECT; no other workspace_id GUC is set, so
-// any accidental write through this transaction would be blocked by
-// workspace_isolation. Workspace fields (id, type, name, created_at)
-// are joined in the same query so callers do not need a follow-up
-// workspaces.Get call.
+// AuthenticateRawKey checks current authority and credential usage atomically.
+// Derived keys keep their identity-grant revisions and immutable ceiling.
 func (s *APIKeyStore) AuthenticateRawKey(ctx context.Context, rawToken string) (*AuthenticationResult, error) {
 	if rawToken == "" {
 		return nil, &AuthenticationError{Message: "missing api key"}
 	}
-	digest := DigestAPIKey(rawToken)
-
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	principal, err := NewAuthorityResolver(s.db, "").AuthenticateKey(ctx, rawToken)
 	if err != nil {
 		return nil, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err := tx.ExecContext(ctx,
-		`SELECT set_config('tetral.auth_lookup', 'true', true)`); err != nil {
-		return nil, err
-	}
-
-	var apiKeyID string
-	var ws workspace.Workspace
-	err = tx.QueryRowContext(ctx,
-		`SELECT k.id, k.workspace_id, w.type, w.name, w.created_at
-		   FROM api_keys k JOIN workspaces w ON w.id = k.workspace_id
-		  WHERE k.key_digest = $1 AND k.revoked_at IS NULL`,
-		digest,
-	).Scan(&apiKeyID, &ws.ID, &ws.Type, &ws.Name, &ws.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, &AuthenticationError{Message: "invalid api key"}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	committed = true
-	return &AuthenticationResult{APIKeyID: apiKeyID, Workspace: ws}, nil
+	return &AuthenticationResult{APIKeyID: principal.APIKeyID, Workspace: principal.Workspace, Principal: principal}, nil
 }
 
 // UpsertBootstrap atomically refreshes the bootstrap api_keys row
@@ -351,8 +288,8 @@ func (s *APIKeyStore) UpsertBootstrap(ctx context.Context, workspaceID workspace
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('tetral.auth.bootstrap:' || $1::text, 0))`, string(workspaceID)); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,created_at)
-   VALUES($1,$2,'bootstrap',$3,$4,'bootstrap',$5)
+		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at)
+   VALUES($1,$2,'bootstrap',$3,$4,'bootstrap','independent_key',$5)
    ON CONFLICT(workspace_id) WHERE key_kind='bootstrap'
    DO UPDATE SET key_digest=EXCLUDED.key_digest,key_prefix=EXCLUDED.key_prefix,
      last_used_at=NULL,revoked_at=NULL,
@@ -393,4 +330,24 @@ func runeCount(s string) int {
 		n++
 	}
 	return n
+}
+
+// GetForWorkspace supplies trusted key ownership facts for the public gate.
+func (s *APIKeyStore) GetForWorkspace(ctx context.Context, ws workspace.ID, keyID string) (APIKeyMetadata, error) {
+	meta := APIKeyMetadata{Type: "api_key"}
+	err := storage.WithWorkspaceTx(ctx, s.db, string(ws), func(tx *sql.Tx) error {
+		var last, revoked sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT id,workspace_id,name,key_prefix,key_kind,created_at,last_used_at,revoked_at FROM api_keys WHERE id=$1 AND workspace_id=$2 AND revoked_at IS NULL`, keyID, string(ws)).Scan(&meta.ID, &meta.WorkspaceID, &meta.Name, &meta.KeyPrefix, &meta.KeyKind, &meta.CreatedAt, &last, &revoked)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "api key not found"}
+		}
+		if last.Valid {
+			meta.LastUsedAt = last.String
+		}
+		if revoked.Valid {
+			meta.RevokedAt = revoked.String
+		}
+		return err
+	})
+	return meta, err
 }

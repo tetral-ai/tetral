@@ -11,6 +11,11 @@ import (
 
 const (
 	DefaultInternalPrincipalTTL       = 60 * time.Second
+	EnvJWKSCacheTTLSeconds            = "TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS"
+	EnvExchangeBodyBytes              = "TETRAL_AUTH_EXCHANGE_BODY_BYTES"
+	EnvExchangeConcurrency            = "TETRAL_AUTH_EXCHANGE_CONCURRENCY"
+	EnvExchangeRequestsPerMinute      = "TETRAL_AUTH_EXCHANGE_REQUESTS_PER_MINUTE"
+	EnvExchangeBodyReadTimeoutMS      = "TETRAL_AUTH_EXCHANGE_BODY_READ_TIMEOUT_MS"
 	EnvHTTPAddress                    = "TETRAL_AUTH_HTTP_ADDR"
 	EnvMetricsAddress                 = "TETRAL_AUTH_METRICS_ADDR"
 	EnvBootstrapAPIKey                = "ENGINE_API_KEY" //nolint:gosec // Env-var name, not an API key value.
@@ -24,6 +29,8 @@ type Env interface {
 }
 
 type Config struct {
+	JWKSCacheTTL                   time.Duration
+	ExchangeLimits                 ExchangeLimits
 	HTTPAddress                    string
 	MetricsAddress                 string
 	DeploymentEnvironment          string
@@ -73,7 +80,33 @@ func ConfigFromEnv(env Env) (Config, error) {
 		}
 		ttl = time.Duration(seconds) * time.Second
 	}
+	cacheTTL := 600
+	limits := DefaultExchangeLimits()
+	readMS := int(limits.BodyReadTimeout / time.Millisecond)
+	for _, setting := range []struct {
+		name             string
+		target           *int
+		minimum, maximum int
+	}{
+		{EnvJWKSCacheTTLSeconds, &cacheTTL, 1, 600},
+		{EnvExchangeBodyBytes, &limits.BodyBytes, 1024, 65536},
+		{EnvExchangeConcurrency, &limits.ConcurrentRequests, 1, 32},
+		{EnvExchangeRequestsPerMinute, &limits.RequestsPerMinute, 1, 6000},
+		{EnvExchangeBodyReadTimeoutMS, &readMS, 100, 5000},
+	} {
+		if raw := env.Getenv(setting.name); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < setting.minimum || value > setting.maximum {
+				return Config{}, workload.NewConfigError(setting.name + " is outside its supported integer range")
+			}
+			*setting.target = value
+		}
+	}
+	limits.BodyReadTimeout = time.Duration(readMS) * time.Millisecond
+
 	return Config{
+		JWKSCacheTTL:                   time.Duration(cacheTTL) * time.Second,
+		ExchangeLimits:                 limits,
 		HTTPAddress:                    httpAddress,
 		MetricsAddress:                 metricsAddress,
 		DeploymentEnvironment:          resource.DeploymentEnvironment,

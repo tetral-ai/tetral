@@ -1685,6 +1685,25 @@ END $$`
 		key_prefix TEXT NOT NULL,
 		key_digest BYTEA NOT NULL UNIQUE,
 		key_kind TEXT NOT NULL CHECK (key_kind IN ('bootstrap','standard')),
+		authority_kind TEXT NOT NULL CHECK(authority_kind IN ('independent_key','identity_grant')),
+		federation_rule_id TEXT REFERENCES auth_federation_rules(id),
+		identity_id TEXT REFERENCES auth_identities(id),
+		grant_id TEXT,
+		rule_revision BIGINT,
+		identity_revision BIGINT,
+		grant_revision BIGINT,
+		role_version BIGINT,
+		issuance_operations JSONB,
+		parent_credential_id TEXT,
+		expires_at TIMESTAMPTZ,
+		FOREIGN KEY(workspace_id,grant_id) REFERENCES auth_workspace_grants(workspace_id,id),
+		CHECK(((authority_kind='independent_key' AND federation_rule_id IS NULL AND identity_id IS NULL
+		 AND grant_id IS NULL AND rule_revision IS NULL AND identity_revision IS NULL AND grant_revision IS NULL
+		 AND role_version IS NULL AND issuance_operations IS NULL AND parent_credential_id IS NULL)
+		 OR (authority_kind='identity_grant' AND federation_rule_id IS NOT NULL AND identity_id IS NOT NULL
+		 AND grant_id IS NOT NULL AND rule_revision>0 AND identity_revision>0 AND grant_revision>0 AND role_version>0
+		 AND jsonb_typeof(issuance_operations)='array' AND jsonb_array_length(issuance_operations)>0
+		 AND parent_credential_id IS NOT NULL)) IS TRUE),
 		created_at TIMESTAMPTZ NOT NULL,
 		last_used_at TIMESTAMPTZ,
 		revoked_at TIMESTAMPTZ,
@@ -1855,6 +1874,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		// before sessions, files/memory stores before Session resource details,
 		// and vaults before credentials.
 		{"create_workspaces", createPostgreSQLWorkspacesTable},
+	}
+	steps = append(steps, postgresqlAuthTableSteps()...)
+	steps = append(steps, []postgresqlSchemaStep{
 		{"create_environments", createPostgreSQLEnvironmentsTable},
 		{"create_environment_artifacts", createPostgreSQLEnvironmentArtifactsTable},
 		{"create_agents", createPostgreSQLAgentsTable},
@@ -1996,7 +2018,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_memory_versions_memory", createPostgreSQLMemoryVersionsMemoryIndex},
 		{"index_memory_versions_operation", createPostgreSQLMemoryVersionsOperationIndex},
 		{"index_memory_versions_api_key", createPostgreSQLMemoryVersionsAPIKeyIndex},
-	}
+	}...)
 
 	// RLS: enable + force on every workspace-owned table, then
 	// (re)create the workspace_isolation policy. Each ALTER TABLE is
@@ -2042,26 +2064,17 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
 	)
 
-	// Narrow auth-lookup policy on api_keys: when
-	// `tetral.auth_lookup` is set to 'true' for the current
-	// transaction, SELECTs see every workspace's api_keys row. Used
-	// solely by the pre-workspace authentication lookup that resolves
-	// x-api-key → workspace_id. Every other access path leaves the
-	// setting unset and falls through to workspace_isolation. The
-	// policy is FOR SELECT only, so an auth-lookup transaction cannot
-	// insert/update/delete api_keys rows even by accident.
-	steps = append(steps,
-		postgresqlSchemaStep{
-			name: "rls_policy_auth_lookup_drop",
-			ddl:  "DROP POLICY IF EXISTS auth_lookup ON api_keys",
-		},
-		postgresqlSchemaStep{
-			name: "rls_policy_auth_lookup",
-			ddl: `CREATE POLICY auth_lookup ON api_keys
-			FOR SELECT
-			USING (current_setting('tetral.auth_lookup', true) = 'true')`,
-		},
-	)
+	// Only a fixed SECURITY DEFINER function executing as the actual table
+	// owner can use this path. A serving caller setting the same GUC gains
+	// neither global reads nor writes after the function returns.
+	for _, table := range []string{"api_keys", "auth_workspace_grants", "auth_access_tokens"} {
+		predicate := fmt.Sprintf("current_setting('tetral.auth_lookup', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.%s'::regclass)", table)
+		steps = append(steps,
+			postgresqlSchemaStep{name: "rls_policy_auth_lookup_drop_" + table, ddl: "DROP POLICY IF EXISTS auth_lookup ON " + table},
+			postgresqlSchemaStep{name: "rls_policy_auth_lookup_" + table, ddl: fmt.Sprintf("CREATE POLICY auth_lookup ON %s FOR ALL USING (%s) WITH CHECK (%s)", table, predicate, predicate)},
+		)
+	}
+	steps = append(steps, postgresqlAuthFunctionSteps()...)
 
 	// Narrow git-ticket lookup policy on session_git_tickets: the git
 	// proxy validates a capability ticket before it knows the workspace.

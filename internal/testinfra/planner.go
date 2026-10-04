@@ -362,6 +362,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 	// Go import traversal cannot see RPC edges or the Bun children in their
 	// composition tests. Keep that evidence relation explicit after separation.
 	serviceContract := separatedServiceContractChange(revision.ChangedPaths)
+	authContract := authenticationContractChange(revision.ChangedPaths)
 	if serviceContract {
 		for _, id := range []string{"go", "runtime", "gateway"} {
 			group, ok := inventory.Group(id)
@@ -398,6 +399,11 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 				// The runner's broker and its ACL proof project the same values.
 				paths = append(paths, "internal/testinfra")
 			}
+			if authContract {
+				// Signed identity/authority and Memory actor persistence cross
+				// process/HTTP boundaries that Go imports do not fully describe.
+				paths = append(paths, "internal/auth", "services/auth", "internal/httpapi", "internal/memory", "internal/eventstream", "services/event-stream", "integration")
+			}
 			packages, err := affectedGoPackages(root, paths)
 			if err != nil || len(packages) == 0 {
 				revision.FullFallbackCause = "Go dependency closure unavailable"
@@ -410,9 +416,23 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			} else if integrationInput {
 				selections[index].Reason = "rendered or projected deployment input consumed by integration and broker fixture compositions"
 			}
+			if authContract && !serviceContract {
+				selections[index].Reason = "authentication contract, public actor/protocol consumers and repository-local reverse dependencies"
+			}
 		}
 	}
 	return selections, nil
+}
+
+func authenticationContractChange(paths []string) bool {
+	for _, path := range paths {
+		for _, owner := range []string{"internal/auth", "services/auth"} {
+			if path == owner || strings.HasPrefix(path, owner+"/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func separatedServiceContractChange(paths []string) bool {

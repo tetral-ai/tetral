@@ -21,8 +21,12 @@ import (
 func TestMigrationLogsObserveRollbackAndRetryWithoutDriverDetails(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	_, err := db.Exec(`CREATE SCHEMA schema_fault; CREATE FUNCTION schema_fault.reject_migration() RETURNS event_trigger LANGUAGE plpgsql AS $$
-BEGIN RAISE EXCEPTION 'private-migration-message' USING ERRCODE = '42501', DETAIL = 'private-migration-detail'; END $$;
-CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION schema_fault.reject_migration()`)
+BEGIN
+ IF EXISTS(SELECT 1 FROM pg_event_trigger_ddl_commands() WHERE object_identity='public.idx_runtime_processes_current') THEN
+  RAISE EXCEPTION 'private-migration-message' USING ERRCODE = '42501', DETAIL = 'private-migration-detail';
+ END IF;
+END $$;
+CREATE EVENT TRIGGER reject_migration ON ddl_command_end WHEN TAG IN ('CREATE INDEX') EXECUTE FUNCTION schema_fault.reject_migration()`)
 	if err != nil {
 		t.Fatal(err)
 	}

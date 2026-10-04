@@ -3,7 +3,7 @@
 package schemaidentity
 
 const (
-	PostgreSQLSchemaVersionOneChecksum = "153a945d598186f75b1cd098b5e67d22a5f29d086ebb656e50b88eac33c5b4a9"
+	PostgreSQLSchemaVersionOneChecksum = "4babbba451a682773b185609edfb91f9857c5273945a0a242326d61e63950b67"
 )
 
 // Identity binds a schema version to the checksum of its ordered migration DDL.

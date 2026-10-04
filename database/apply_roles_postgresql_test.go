@@ -116,6 +116,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 
 		seedRLSRows(t, admin)
 		assertAPIAndBridgeDurableOperations(t, databaseName, admin, declarations)
+		assertAuthLookupBoundary(t, databaseName, admin, declarations)
 		auth := openManagedRole(t, databaseName, declarations.Roles["auth"])
 		defer func() { _ = auth.Close(context.Background()) }()
 		tx, err := auth.Begin(context.Background())
@@ -552,7 +553,7 @@ func seedRLSRows(t *testing.T, admin *sql.DB) {
 		}
 	}
 	for index, workspaceID := range []string{"ws_contract_a", "ws_contract_b"} {
-		if _, err := admin.Exec(`INSERT INTO api_keys (workspace_id,id,name,key_prefix,key_digest,key_kind,created_at) VALUES ($1,$2,'contract','tk_test',$3,'standard',clock_timestamp())`, workspaceID, fmt.Sprintf("ak_contract_%c", 'a'+index), []byte{byte(index + 1)}); err != nil {
+		if _, err := admin.Exec(`INSERT INTO api_keys (workspace_id,id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES ($1,$2,'contract','tk_test',$3,'standard','independent_key',clock_timestamp())`, workspaceID, fmt.Sprintf("ak_contract_%c", 'a'+index), []byte{byte(index + 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -708,5 +709,66 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {
+	t.Helper()
+	ctx := context.Background()
+	authConnection := openManagedRole(t, databaseName, declarations.Roles["auth"])
+	defer func() { _ = authConnection.Close(ctx) }()
+	tx, err := authConnection.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('tetral.workspace_id','ws_contract_a',true),set_config('tetral.auth_lookup','true',true)`); err != nil {
+		t.Fatal(err)
+	}
+	var visible int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id IN ('ak_contract_a','ak_contract_b')`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("caller lookup flag broadened Auth visibility=%d", visible)
+	}
+	var resolved string
+	if err := tx.QueryRow(ctx, `SELECT workspace_id FROM public.tetral_auth_lookup_key(decode('02','hex'))`).Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != "ws_contract_b" {
+		t.Fatal("exact digest lookup did not resolve its workspace")
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id IN ('ak_contract_a','ak_contract_b')`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("definer lookup leaked global policy=%d", visible)
+	}
+	_ = tx.Rollback(ctx)
+	for _, statement := range []string{
+		`UPDATE auth_federation_rules SET enabled=false`,
+		`UPDATE auth_identities SET enabled=false`,
+		`UPDATE auth_workspace_grants SET enabled=false`,
+		`DELETE FROM auth_access_tokens`,
+	} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], statement)
+	}
+	for _, statement := range []string{
+		`SELECT * FROM public.tetral_auth_lookup_key(decode('02','hex'))`,
+		`SELECT * FROM public.tetral_auth_lookup_token(decode('02','hex'))`,
+		`SELECT * FROM public.tetral_auth_lookup_grants('identity_any',NULL)`,
+		`SELECT * FROM public.tetral_auth_lock_authority('rule','identity','grant','workspace')`,
+		`SELECT * FROM public.tetral_auth_prune_tokens(1000)`,
+		`SELECT * FROM api_keys`,
+	} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles["api"], statement)
+	}
+	var unsafe int
+	if err := admin.QueryRow(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('tetral_auth_lookup_key','tetral_auth_lookup_token','tetral_auth_lookup_grants','tetral_auth_lock_authority','tetral_auth_prune_tokens') AND (NOT p.prosecdef OR NOT ('search_path=pg_catalog'=ANY(p.proconfig)) OR EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))`).Scan(&unsafe); err != nil {
+		t.Fatal(err)
+	}
+	if unsafe != 0 {
+		t.Fatalf("unsafe Auth function catalog=%d", unsafe)
 	}
 }

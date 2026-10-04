@@ -30,7 +30,6 @@
         "environments": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "vaults": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "credentials": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-        "api_keys": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "skills": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "skill_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "file_objects": ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -48,8 +47,19 @@
       "tables": {
         "workspaces": ["SELECT"],
         "api_keys": ["SELECT", "INSERT", "UPDATE"],
-        "tetral_schema_migrations": ["SELECT"]
-      }
+        "tetral_schema_migrations": ["SELECT"],
+        "auth_federation_rules": ["SELECT"],
+        "auth_identities": ["SELECT"],
+        "auth_workspace_grants": ["SELECT"],
+        "auth_access_tokens": ["SELECT", "INSERT", "UPDATE"]
+      },
+      "functions": [
+        "tetral_auth_lookup_key(bytea)",
+        "tetral_auth_lookup_token(bytea)",
+        "tetral_auth_lookup_grants(text, text)",
+        "tetral_auth_lock_authority(text, text, text, text)",
+        "tetral_auth_prune_tokens(integer)"
+      ]
     },
     "queue": {
       "tables": {

@@ -63,7 +63,14 @@ func LoadRoleContract() (RoleContract, error) {
 			}
 		}
 		for _, function := range role.Functions {
-			if function != "tetral_lock_runtime_process(text, text, text)" || (workload != "bridge" && workload != "job_runner") {
+			allowed := (function == "tetral_lock_runtime_process(text, text, text)" && (workload == "bridge" || workload == "job_runner"))
+			if workload == "auth" {
+				switch function {
+				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)":
+					allowed = true
+				}
+			}
+			if !allowed {
 				return RoleContract{}, fmt.Errorf("invalid function grant for workload %q", workload)
 			}
 		}
