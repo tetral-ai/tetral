@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -69,8 +68,9 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 	const sandboxBytes = `{"status":"success","result":{"stdout":"original"}}`
 	commitAwaitExecutionSettlement(t, admin, scope, sandboxTool, sandboxBytes, false)
 	sandboxRequest := &bridgev1.AcceptSandboxExecutionRequest{Scope: scope, ToolUseEventId: sandboxTool}
-	// The accepted stdin identity commits before its wait; a short caller wait is
-	// lost, then independent Sandbox settlement publishes the result.
+	// Prove committed stdin custody before losing the real caller's response.
+	// Its existing 5s fixture guard exceeds the unchanged 3s admission phase
+	// and precedes the 30s result wait; deadline expiry alone is not admission.
 	const task = "task_retired_stdin"
 	const stdinTool = "evt_retired_stdin"
 	seedBridgeAPIEvent(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool, nextBridgeAPIEventSequenceForTest(t, admin, scope.GetSessionId(), scope.GetSessionThreadId()), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_retired_stdin","chars":"once"},"evaluated_permission":"allow"}`)
@@ -78,15 +78,23 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 	seedBridgeAPIAllowedToolRoute(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool)
 	seedBridgeAPIBackgroundTask(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), scope.GetBinding().GetBindingId(), task, "evt_retired_stdin_source")
 	stdinRequest := &bridgev1.SendCommandInputRequest{Scope: scope, TaskId: task, ToolUseEventId: stdinTool, OperationId: "op_retired_stdin"}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	_, err = client.SendCommandInput(ctx, stdinRequest)
-	cancel()
-	if status.Code(err) != codes.DeadlineExceeded {
-		t.Fatalf("accepted stdin response loss=%v", err)
-	}
+	tracer := &bridgeExecutionQueryTracer{}
+	traced := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer)))
+	stdinClient, stdinReturned := receiptJoinedRPC(t, traced, podUID)
+	admitPendingBackgroundReceipt(t, admin, tracer, stdinReturned, backgroundReceiptAdmission{
+		scope: scope, receiptID: stdinTool, taskID: task, requestID: stdinRequest.OperationId, kind: "stdin", totalJobs: 1,
+		call: func(ctx context.Context) error {
+			_, err := stdinClient.SendCommandInput(ctx, stdinRequest)
+			return err
+		},
+	})
 	const stdinBytes = `{"status":"accepted","original":true}`
-	if _, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json=$1,result_digest='fixture_terminal_digest' WHERE workspace_id='default' AND tool_use_event_id=$2`, stdinBytes, stdinTool); err != nil {
+	updated, err := admin.Exec(`UPDATE session_runtime_tool_results SET background_operation_state='terminal',result_json=$1,result_digest='fixture_terminal_digest' WHERE workspace_id='default' AND tool_use_event_id=$2`, stdinBytes, stdinTool)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if count, err := updated.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("terminal stdin receipt=%d/%v; want 1", count, err)
 	}
 
 	newMemory := durableMemoryRequestForTest(t, admin, scope, "evt_retired_memory_unseen", `{"action":"create","path":"notes/unseen.md","content":"forbidden"}`)
