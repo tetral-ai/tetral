@@ -86,6 +86,10 @@ Before the first install, follow the
 Secrets, install the database roles/schema contract, and seed the initial
 workspace.
 
+Configure client API keys or explicit OIDC federation with the
+[authentication guide](docs/authentication.md); Auth's operator contract covers
+registered issuers, Engine workspace grants and administrative provisioning.
+
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.
 

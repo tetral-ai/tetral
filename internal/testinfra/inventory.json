@@ -22,6 +22,11 @@
       "dependencies": ["postgresql"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestOIDCKeycloakAuthRotation",
+      "dependencies": ["keycloak", "postgresql", "docker"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/internal/auth",
       "name": "TestAuthorityResolverCredentialExpiryAfterLockWait",
       "dependencies": ["postgresql"]
@@ -35,6 +40,16 @@
       "package": "github.com/tetral-ai/tetral/internal/auth",
       "name": "TestAuthorityResolverPolicyMutationBeforeIssuanceRejectsStaleAuthority",
       "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestOIDCKeycloakSDK",
+      "dependencies": ["keycloak", "postgresql", "docker", "sdk"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestOIDCReplicaAuthority",
+      "dependencies": ["postgresql", "docker"]
     },
     {
       "package": "github.com/tetral-ai/tetral/internal/auth",

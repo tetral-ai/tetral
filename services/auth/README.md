@@ -23,6 +23,9 @@ plaintext fallback. New connections load the current validated trust generation.
 Administrative policy provisioning uses a separate protected administrative
 connection; serving Auth cannot administer policy.
 
+For the exact SDK configuration, Engine workspace selectors and actor wire
+format, see [authentication](../../docs/authentication.md).
+
 ## States & lifecycle
 
 ### Request surfaces
@@ -248,6 +251,10 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
   rotation, retirement, cancellation, cache pressure and revision isolation.
 - Pruner tests: strict retention, bounded batches, replica progress, role
   isolation, failure recovery, metrics and joined cancellation.
+- Actual OIDC integration roots: unchanged SDK/real HTTPS Keycloak exchange and
+  reactive 401 recovery, real Keycloak/Auth rotation, two actual Auth processes
+  sharing PostgreSQL with frozen Bearers and zero issuer calls, and exact test
+  edge forwarding. Native inventory owns their dependency lifecycle.
 
 ## Process diagnostics
 
