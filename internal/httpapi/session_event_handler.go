@@ -80,17 +80,17 @@ func (h *SessionEventHandler) appendClientEvents(w http.ResponseWriter, r *http.
 		writeError(w, r, err)
 		return
 	}
-	workspaceID, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	idempotencyKey, err := sessionEventIdempotencyKey(r.Header.Values("Idempotency-Key"))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	request, err := h.decodeStrictSessionEventBody(w, r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	workspaceID, err := requestWorkspace(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return

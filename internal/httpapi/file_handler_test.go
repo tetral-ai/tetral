@@ -520,12 +520,14 @@ type recordingFileService struct {
 	createCalls int
 	listCalls   int
 	getCalls    int
+	getIDs      []string
 	deleteCalls int
 	openCalls   int
 
 	createResult *files.FileMetadata
 	listResult   files.ListResult
 	getResult    *files.FileMetadata
+	getResults   map[string]*files.FileMetadata
 	deleteResult *files.DeleteResponse
 	openResult   *files.ContentStream
 	err          error
@@ -608,10 +610,14 @@ func (s *recordingFileService) ListFiles(_ context.Context, _ workspace.ID, opti
 	return s.listResult, s.err
 }
 
-func (s *recordingFileService) GetFile(_ context.Context, _ workspace.ID, _ string) (*files.FileMetadata, error) {
+func (s *recordingFileService) GetFile(_ context.Context, _ workspace.ID, fileID string) (*files.FileMetadata, error) {
 	s.getCalls++
+	s.getIDs = append(s.getIDs, fileID)
 	if s.err != nil {
 		return nil, s.err
+	}
+	if result := s.getResults[fileID]; result != nil {
+		return result, nil
 	}
 	if s.getResult != nil {
 		return s.getResult, nil
@@ -758,6 +764,7 @@ func TestFileHandlerRoutesListMetadataDeleteAndContent(t *testing.T) {
 		listResult: files.ListResult{Data: []*files.FileMetadata{{
 			ID: "file_listed", Type: "file", Filename: "listed.bin", MIMEType: "application/octet-stream", CreatedAt: time.Unix(0, 0).UTC(),
 		}}, HasMore: false},
+		getResults:   map[string]*files.FileMetadata{"file_delete": {ID: "file_delete", Type: "file"}},
 		getResult:    &files.FileMetadata{ID: "file_meta", Type: "file", Filename: "meta.bin", MIMEType: "application/octet-stream"},
 		deleteResult: &files.DeleteResponse{ID: "file_delete", Type: "file_deleted"},
 		openResult: &files.ContentStream{
@@ -779,6 +786,7 @@ func TestFileHandlerRoutesListMetadataDeleteAndContent(t *testing.T) {
 		{http.MethodGet, "/v1/files/file_download/content", http.StatusOK},
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			beforeGet := store.getCalls
 			req := httptest.NewRequest(route.method, route.path, nil)
 			setAuthHeader(req)
 			rec := httptest.NewRecorder()
@@ -786,10 +794,20 @@ func TestFileHandlerRoutesListMetadataDeleteAndContent(t *testing.T) {
 			if rec.Code != route.want {
 				t.Fatalf("status = %d; want %d body=%q", rec.Code, route.want, rec.Body.String())
 			}
+			wantReads := 0
+			if route.path == "/v1/files/file_meta" || route.method == http.MethodDelete {
+				wantReads = 1 // metadata read, or trusted deletion admission fact
+			}
+			if got := store.getCalls - beforeGet; got != wantReads {
+				t.Fatalf("metadata/admission reads = %d; want %d", got, wantReads)
+			}
 		})
 	}
-	if store.listCalls != 1 || store.getCalls != 1 || store.deleteCalls != 1 || store.openCalls != 1 {
-		t.Fatalf("route calls = list:%d get:%d delete:%d open:%d; want all 1", store.listCalls, store.getCalls, store.deleteCalls, store.openCalls)
+	if store.listCalls != 1 || store.getCalls != 2 || store.deleteCalls != 1 || store.openCalls != 1 {
+		t.Fatalf("route calls = list:%d get:%d delete:%d open:%d; want list:1 get:2 delete:1 open:1", store.listCalls, store.getCalls, store.deleteCalls, store.openCalls)
+	}
+	if len(store.getIDs) != 2 || store.getIDs[0] != "file_meta" || store.getIDs[1] != "file_delete" {
+		t.Fatalf("metadata/admission lookups = %v", store.getIDs)
 	}
 }
 

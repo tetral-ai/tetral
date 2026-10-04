@@ -13,6 +13,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -448,7 +449,7 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 			MaxEventsPerRequest: 1,
 		}),
 	)
-	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(handler))
+	router := httpapi.NewRouter(httpapi.NewSessionHandler(&sessionEventHTTPFacts{}), "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(handler))
 
 	tooLarge := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_http_configured/events?beta=true", strings.NewReader(`{"events":[{"type":"user.message","content":[{"type":"text","text":"`+strings.Repeat("x", 120)+`"}]}]}`))
 	tooLarge.Header.Set("x-api-key", testAPIKey)
@@ -634,7 +635,19 @@ func newSessionEventHTTPRouter(service *recordingSessionEventHTTPService) http.H
 		}
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default", CreatedAt: "2026-01-01T00:00:00Z"}, "ak_test"), nil
 	})
-	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)))
+	return httpapi.NewRouter(httpapi.NewSessionHandler(&sessionEventHTTPFacts{}), "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)))
+}
+
+// The ingress fixture supplies an explicit trusted Session owner, just as the
+// production API wires its Session handler alongside event admission.
+type sessionEventHTTPFacts struct {
+	fakeSessionService
+	getCalls int
+}
+
+func (s *sessionEventHTTPFacts) Get(_ context.Context, _ workspace.ID, sessionID string) (*session.Response, error) {
+	s.getCalls++
+	return &session.Response{ID: sessionID}, nil
 }
 
 type recordingSessionEventHTTPService struct {

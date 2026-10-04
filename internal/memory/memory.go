@@ -15,6 +15,7 @@ const (
 	ActorAPI     = "api_actor"
 	ActorSession = "session_actor"
 	ActorUser    = "user_actor"
+	ActorService = "service_actor"
 
 	OperationCreated  = "created"
 	OperationModified = "modified"
@@ -142,6 +143,7 @@ type Actor struct {
 	APIKeyID  string `json:"api_key_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	UserID    string `json:"user_id,omitempty"`
+	ServiceID string `json:"service_id,omitempty"`
 }
 
 type CreateMemoryRequest struct {

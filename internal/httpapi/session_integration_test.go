@@ -2,6 +2,8 @@ package httpapi_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -35,9 +37,10 @@ const (
 )
 
 type sessionIntegrationEnv struct {
-	router http.Handler
-	admin  *sql.DB
-	clock  time.Time
+	service *session.Service
+	router  http.Handler
+	admin   *sql.DB
+	clock   time.Time
 }
 
 func newSessionIntegrationEnv(t *testing.T) *sessionIntegrationEnv {
@@ -75,6 +78,7 @@ func newSessionIntegrationEnv(t *testing.T) *sessionIntegrationEnv {
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_integration"), nil //nolint:gosec // G101: synthetic test API key id
 	})
+	testEnv.service = service
 	testEnv.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
 	return testEnv
 }
@@ -942,4 +946,72 @@ type sessionIntegrationEncryptor struct{}
 
 func (sessionIntegrationEncryptor) Encrypt(value []byte) ([]byte, error) {
 	return append([]byte("encrypted:"), value...), nil
+}
+
+func TestPublicAuthorizationSessionDeletionPreservesLifecycle(t *testing.T) {
+	env := newSessionIntegrationEnv(t)
+	created := env.createSession(t, `{"agent":{"type":"agent","id":"agent_http_session","version":2},"environment_id":"env_http_session","vault_ids":[],"resources":[{"type":"file","file_id":"file_http_source_a","mount_path":"/workspace/pending.txt"}]}`)
+	resource := findSessionIntegrationResource(t, created.Resources, string(session.ResourceTypeFile))
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := auth.NewInternalPrincipalSigner(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := auth.NewInternalPrincipalVerifier(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := httpapi.NewRouter(httpapi.NewSessionHandler(env.service), "", httpapi.WithInternalPrincipalVerifier(verifier))
+	full := identityAdmissionFixture(auth.IdentityHuman)
+	restricted := identityAdmissionFixture(auth.IdentityHuman)
+	restricted.Authority.Operations = []auth.Operation{auth.OperationModelsList}
+	sessionPath := "/v1/sessions/" + created.ID + "?beta=true"
+	resourcePath := "/v1/sessions/" + created.ID + "/resources/" + resource.ID + "?beta=true"
+	eventsBefore := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_events WHERE workspace_id=$1`, workspace.DefaultID)
+	for _, path := range []string{sessionPath, resourcePath, "/v1/sessions/sesn_absent?beta=true", "/v1/sessions/sesn_absent/resources/sesrsc_absent?beta=true"} {
+		response := signedPublicCall(t, router, signer, restricted, http.MethodDelete, path, "")
+		assertHTTPStatus(t, response, http.StatusForbidden)
+	}
+	if eventsAfter := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_events WHERE workspace_id=$1`, workspace.DefaultID); eventsAfter != eventsBefore {
+		t.Fatal("denied deletion changed durable events")
+	}
+	var lifecycle string
+	if err := env.admin.QueryRowContext(t.Context(), `SELECT lifecycle_state FROM sessions WHERE id=$1`, created.ID).Scan(&lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle != "active" {
+		t.Fatalf("denied delete lifecycle=%s", lifecycle)
+	}
+	// A deletion in progress is hidden from ordinary reads but must still reach
+	// the original mutator's 409 contract, including a retained tombstoned file.
+	if _, err := env.admin.ExecContext(t.Context(), `UPDATE session_resources SET delete_requested_at=now() WHERE resource_id=$1`, resource.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.admin.ExecContext(t.Context(), `UPDATE files SET deleted_at=now() WHERE file_id=$1`, resource.FileID); err != nil {
+		t.Fatal(err)
+	}
+	assertHTTPStatus(t, signedPublicCall(t, router, signer, full, http.MethodGet, resourcePath, ""), http.StatusNotFound)
+	response := signedPublicCall(t, router, signer, full, http.MethodDelete, resourcePath, "")
+	assertHTTPStatus(t, response, http.StatusConflict)
+	assertErrorType(t, response, "invalid_request_error")
+	assertHTTPStatus(t, signedPublicCall(t, router, signer, full, http.MethodDelete, sessionPath, ""), http.StatusOK)
+	eventsAfterDelete := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_events WHERE workspace_id=$1`, workspace.DefaultID)
+	jobsAfterDelete := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id=$1`, workspace.DefaultID)
+	assertHTTPStatus(t, signedPublicCall(t, router, signer, full, http.MethodGet, sessionPath, ""), http.StatusNotFound)
+	assertHTTPStatus(t, signedPublicCall(t, router, signer, full, http.MethodDelete, sessionPath, ""), http.StatusOK)
+	if events := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_events WHERE workspace_id=$1`, workspace.DefaultID); events != eventsAfterDelete {
+		t.Fatal("repeated deletion created another durable event")
+	}
+	if jobs := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id=$1`, workspace.DefaultID); jobs != jobsAfterDelete {
+		t.Fatal("repeated deletion created another durable job")
+	}
+	// Full-workspace authority still cannot cross workspace boundaries.
+	if _, err := env.admin.ExecContext(t.Context(), `INSERT INTO workspaces(id,type,name,created_at) VALUES('workspace_other','workspace','other',now())`); err != nil {
+		t.Fatal(err)
+	}
+	foreign := auth.IndependentKeyPrincipal(workspace.Workspace{ID: "workspace_other"}, "ak_other_fixture")
+	assertHTTPStatus(t, signedPublicCall(t, router, signer, foreign, http.MethodDelete, sessionPath, ""), http.StatusNotFound)
 }

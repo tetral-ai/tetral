@@ -79,17 +79,17 @@ func (h *SkillHandler) createVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	ws, err := requestWorkspace(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
 	parsed, err := h.parseUploadMultipart(w, r, false)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	defer func() { _ = skill.CleanupStagedUploadParts(parsed.files) }()
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	created, err := h.service.CreateVersion(r.Context(), ws, chi.URLParam(r, "skill_id"), skill.CreateVersionInput{Files: parsed.files})
 	if err != nil {
 		writeError(w, r, err)
@@ -228,6 +228,9 @@ func (h *SkillHandler) getSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "skill", got.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, got)
 }
 
@@ -251,6 +254,9 @@ func (h *SkillHandler) getVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, ws, "skill_version", got.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, got)
 }
 
@@ -267,6 +273,14 @@ func (h *SkillHandler) getVersionContent(w http.ResponseWriter, r *http.Request)
 	version := chi.URLParam(r, "version")
 	if version == "" {
 		writeError(w, r, &skill.NotFoundError{Message: "skill version not found"})
+		return
+	}
+	resolved, err := h.service.GetVersion(r.Context(), ws, chi.URLParam(r, "skill_id"), version)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if !authorizeReadResource(w, r, ws, "skill_version", resolved.ID) {
 		return
 	}
 	content, err := h.service.OpenVersionContent(r.Context(), ws, chi.URLParam(r, "skill_id"), version)
@@ -313,6 +327,9 @@ func (h *SkillHandler) listVersions(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.ListVersions(r.Context(), ws, chi.URLParam(r, "skill_id"), options)
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	if !authorizeReadResource(w, r, ws, "skill", chi.URLParam(r, "skill_id")) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

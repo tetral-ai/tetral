@@ -330,12 +330,27 @@ replayed against a different query, workspace, or filter set.
 Both routers mount `auth.InternalPrincipalMiddleware`. A request without a
 valid signed principal is rejected before any query runs, and the principal's
 `workspace_id` (via `workspace.MustIDFromContext`) is the sole request scope —
-request bodies and path parameters never supply identity.
+request bodies and path parameters never supply identity. Every actual list
+and SSE registration declares its semantic action in the shared operation
+registry. The common Authorizer checks the principal's typed workspace and
+operation ceiling before any reader access, so a denied action returns
+`403 permission_error` independently of whether a selected resource exists.
+Allowed reads then verify session/thread visibility and the actual parent
+relation through the tenant-safe reader and authorize those trusted facts
+before returning data, joining a preview subscription or writing SSE headers.
+Full-workspace authority retains workspace-isolated `404` behavior.
+
+Authorization is an admission snapshot: Engine policy revocation applies to
+subsequent admission checks, and does not terminate an already admitted SSE
+connection. The only assignable role is `workspace_full_access`; this boundary
+does not implement future per-resource collection filtering.
 
 - **Invariants a replacement must preserve**: no route reachable without a
   verified principal; `workspace_id` derived only from the principal.
 - **Conformance**: `TestEventStreamRoutesRequireSignedInternalPrincipal`,
-  `TestEventStreamRoutesRequireExactlyOneBetaMarkerBeforeReaderAccess`.
+  `TestEventStreamRoutesRequireExactlyOneBetaMarkerBeforeReaderAccess`,
+  `TestPublicAuthorizationEventReadsDenyBeforeReaderAccess`, and actual-router
+  coverage in `internal/httpapi/public_authorization_test.go`.
 
 ## Testing guide
 

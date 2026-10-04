@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 )
@@ -51,14 +52,25 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		r = r.WithContext(ctx)
 	}
 
+	// This tenant-safe opening read proves session/thread visibility and the
+	// actual parent relation before policy, subscriptions, or SSE headers.
+	openingCursor, err := currentPosition(r.Context())
+	if err != nil {
+		httpapi.WriteError(w, r, err)
+		return
+	}
+	reference := auth.ResourceReference{WorkspaceID: scope.WorkspaceID, Type: "session", ID: scope.SessionID}
+	if scope.ThreadID != "" {
+		reference.Type = "thread"
+		reference.ID = scope.ThreadID
+	}
+	if err := httpapi.AuthorizePublicRequest(r.Context(), reference); err != nil {
+		httpapi.WriteError(w, r, err)
+		return
+	}
 	var viewer *PreviewViewer
 	if len(types) > 0 && scope.ThreadID == "" && h.options.previewHub != nil {
-		// Authorize before installing a broker subscription. The second high-water
-		// read below is the opening mark, after the bounded subscription flush.
-		if _, err := currentPosition(r.Context()); err != nil {
-			httpapi.WriteError(w, r, err)
-			return
-		}
+		// The next high-water read is the opening mark after subscription flush.
 		ctx, cancel := context.WithTimeout(r.Context(), h.options.streamConfig.PreviewSetupTimeout)
 		var err error
 		viewer, err = h.options.previewHub.Join(ctx, scope.WorkspaceID, scope.SessionID)
@@ -70,10 +82,13 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 			h.logPreviewStop(scope, "", "setup_unavailable")
 		}
 	}
-	cursor, err := currentPosition(r.Context())
-	if err != nil {
-		httpapi.WriteError(w, r, err)
-		return
+	cursor := openingCursor
+	if len(types) > 0 && scope.ThreadID == "" && h.options.previewHub != nil {
+		cursor, err = currentPosition(r.Context())
+		if err != nil {
+			httpapi.WriteError(w, r, err)
+			return
+		}
 	}
 	state := streamPreviewState{requests: map[string]*previewRequestState{}, watermark: cursor, types: types}
 	defer h.releasePreviewRequests(&state)

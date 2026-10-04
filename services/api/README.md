@@ -6,7 +6,7 @@ The request/response half of the platform's public API surface: every SDK
 route that answers immediately terminates here. The service validates the
 request, writes durable rows, and returns — it executes nothing. Every request
 arrives already authenticated: the edge called `auth`, stripped the raw
-API key, and injected a signed internal principal; this service verifies that
+API key or Bearer token, and injected a signed internal principal; this service verifies that
 principal and takes workspace authority from it alone. When admitted work needs
 anything to happen later — Sandbox lifecycle work, an environment build, cleanup — that
 fact leaves this service in exactly one vehicle: a queue job written in the same
@@ -123,6 +123,7 @@ unauthenticated.
 | Step | Rule | Failure |
 | --- | --- | --- |
 | Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
+| Operation | Every registered business route, including authenticated stubs, declares a semantic action from `internal/auth`. The common Authorizer checks the verified principal's explicit operation ceiling against its typed workspace before any resource lookup. | `403 permission_error` |
 | Selector binding | Client-supplied `workspace_id`, `session_id`, `vault_id`, etc. are selectors, never authority. Every query binds `Principal.workspace_id` plus the route selector. | — |
 | Cross-workspace / missing | Never falls back to another workspace, default resource, or default credential. | `404 not_found_error`, or `403 permission_error` where an authenticated-but-forbidden action exists |
 | Beta marker | Every `client.beta.*` route requires `beta=true`; omitted, repeated, or altered is rejected. `/v1/models` accepts the marker optionally. | `400 invalid_request_error` |
@@ -409,6 +410,17 @@ content), and `memory_versions` (immutable content, reached from
 | Optimistic concurrency | Update and delete may carry a content-hash precondition (`expected_content_sha256` / `MemoryPrecondition`); a mismatch is a `PreconditionFailedError` → `409 invalid_request_error`. |
 | Version redaction | `memory_versions` are redactable, but redacting the current live head is refused — an active memory always keeps non-NULL content. |
 
+Memory version actors describe the credential that performed each write and
+redaction. Independent and identity-derived API keys use `api_actor` with the
+actual `api_key_id`; direct human tokens use `user_actor` with `user_id`; direct
+service tokens use `service_actor` with `service_id`. Human/service IDs are stable
+Engine identity IDs. Runtime writes retain `session_actor` with `session_id`.
+Exactly one actor ID is valid for its discriminator in both the model and
+PostgreSQL constraints. Reads require a verified authorized identity and do
+not require an API-key ID. The service actor is an additive response variant;
+older SDK actor types need the separate type/schema support update before
+typed service-actor compatibility can be claimed.
+
 The store's soft-archive axis and its create-time-only attachment (a
 `memory_store` resource is attached by ID at session create, never defaulted and
 never added through `POST /resources`) are covered above.
@@ -420,8 +432,25 @@ never added through `POST /resources`) are covered above.
 - **Contract.** Requests reach this service only with a valid
   `X-Tetral-Internal-Principal` injected by the edge. This service verifies the
   signature, audience (`tetral-public-api`), expiry, method, and path, then
-  attaches `Principal { workspace_id, api_key_id }` to the request context.
-  Raw public API keys never reach this service.
+  attaches workspace, typed identity, credential and authority to the request
+  context. API-key credentials carry their actual key ID; direct human and
+  service tokens carry stable Engine identity IDs. Raw public API keys and
+  Bearer tokens never reach this service.
+- **Operation and resource ownership.** Actual router registrations declare
+  semantic actions and use the common Authorizer. A denied operation does not
+  query resources. Allowed collection/create actions use the verified typed
+  workspace. Individual reads authorize their canonical service result before
+  disclosure; nested lists authorize a parent proven by the successful
+  tenant-scoped list. Mutations load trusted identities before effects, then
+  recheck eligibility in their own transactions.
+  Session creation and resource attachment retain their service-owned checks
+  of all referenced agents, environments, vaults, files and memory stores.
+  Deletion lookups retain already-deleted Session rows and pending resource
+  deletion facts so authorization preserves the existing idempotent Session
+  delete and in-progress resource conflict behavior. Mutations recheck
+  eligibility in their own transactions.
+  `workspace_full_access` is the only assignable role. Future resource policy
+  filtering and pagination semantics are not implemented by this boundary.
 - **Invariant a replacement must preserve.** No public handler may read identity
   from the request body or from client-supplied `X-Tetral-*` headers. Workspace
   authority is the verified principal alone.

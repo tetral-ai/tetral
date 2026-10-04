@@ -140,8 +140,8 @@ func NewListRouter(reader ListReader, verifier *auth.InternalPrincipalVerifier, 
 	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(options.requestMetrics)))
 	router.Route("/v1", func(router chi.Router) {
 		router.Use(internalPrincipalMiddleware(verifier))
-		router.Get("/sessions/{session_id}/events", listHandler.ServeSessionEvents)
-		router.Get("/sessions/{session_id}/threads/{thread_id}/events", listHandler.ServeThreadEvents)
+		router.Method(http.MethodGet, "/sessions/{session_id}/events", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/events", listHandler.ServeSessionEvents))
+		router.Method(http.MethodGet, "/sessions/{session_id}/threads/{thread_id}/events", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/threads/{thread_id}/events", listHandler.ServeThreadEvents))
 	})
 	return router
 }
@@ -174,6 +174,10 @@ func (handler *ListHandler) ServeSessionEvents(writer http.ResponseWriter, reque
 		httpapi.WriteError(writer, request, err)
 		return
 	}
+	if err := httpapi.AuthorizePublicRequest(request.Context(), auth.ResourceReference{WorkspaceID: ws, Type: "session", ID: chi.URLParam(request, "session_id")}); err != nil {
+		httpapi.WriteError(writer, request, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, normalizeListResult(result))
 }
 
@@ -194,6 +198,10 @@ func (handler *ListHandler) ServeThreadEvents(writer http.ResponseWriter, reques
 	}
 	result, err := handler.reader.ListThreadEvents(request.Context(), ws, chi.URLParam(request, "session_id"), chi.URLParam(request, "thread_id"), options)
 	if err != nil {
+		httpapi.WriteError(writer, request, err)
+		return
+	}
+	if err := httpapi.AuthorizePublicRequest(request.Context(), auth.ResourceReference{WorkspaceID: ws, Type: "thread", ID: chi.URLParam(request, "thread_id")}); err != nil {
 		httpapi.WriteError(writer, request, err)
 		return
 	}

@@ -108,6 +108,9 @@ func (h *MemoryHandler) getStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, workspaceID, "memory_store", result.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -248,6 +251,9 @@ func (h *MemoryHandler) listMemories(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, workspaceID, "memory_store", chi.URLParam(r, "memory_store_id")) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -269,6 +275,9 @@ func (h *MemoryHandler) getMemory(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.GetMemory(r.Context(), workspaceID, chi.URLParam(r, "memory_store_id"), chi.URLParam(r, "memory_id"), view)
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	if !authorizeReadResource(w, r, workspaceID, "memory", result.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -362,6 +371,9 @@ func (h *MemoryHandler) listMemoryVersions(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, err)
 		return
 	}
+	if !authorizeReadResource(w, r, workspaceID, "memory_store", chi.URLParam(r, "memory_store_id")) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -383,6 +395,9 @@ func (h *MemoryHandler) getMemoryVersion(w http.ResponseWriter, r *http.Request)
 	result, err := h.service.GetMemoryVersion(r.Context(), workspaceID, chi.URLParam(r, "memory_store_id"), chi.URLParam(r, "memory_version_id"), view)
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	if !authorizeReadResource(w, r, workspaceID, "memory_version", result.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -445,18 +460,33 @@ func requireEmptyMemoryBody(w http.ResponseWriter, r *http.Request) error {
 
 func memoryWorkspaceID(r *http.Request) (workspace.ID, error) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
-	if !ok || principal.APIKeyID == "" {
+	if !ok {
 		return "", &auth.AuthenticationError{Message: "missing authenticated principal"}
 	}
-	return principal.Workspace.ID, nil
+	if err := principal.Validate(); err != nil {
+		return "", err
+	}
+	return authorizeWorkspace(r.Context())
 }
 
 func memoryPrincipal(r *http.Request) (workspace.ID, memory.Actor, error) {
 	principal, ok := auth.PrincipalFromContext(r.Context())
-	if !ok || principal.APIKeyID == "" {
+	if !ok {
 		return "", memory.Actor{}, &auth.AuthenticationError{Message: "missing authenticated principal"}
 	}
-	return principal.Workspace.ID, memory.Actor{Type: memory.ActorAPI, APIKeyID: principal.APIKeyID}, nil
+	if err := principal.Validate(); err != nil {
+		return "", memory.Actor{}, err
+	}
+	if _, err := authorizeWorkspace(r.Context()); err != nil {
+		return "", memory.Actor{}, err
+	}
+	if principal.Credential.Kind == auth.CredentialAPIKey {
+		return principal.Workspace.ID, memory.Actor{Type: memory.ActorAPI, APIKeyID: principal.APIKeyID}, nil
+	}
+	if principal.Identity.Kind == auth.IdentityHuman {
+		return principal.Workspace.ID, memory.Actor{Type: memory.ActorUser, UserID: principal.Identity.ID}, nil
+	}
+	return principal.Workspace.ID, memory.Actor{Type: memory.ActorService, ServiceID: principal.Identity.ID}, nil
 }
 
 func requireStrictQuery(r *http.Request, allowed []string) error {

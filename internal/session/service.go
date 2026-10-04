@@ -1198,3 +1198,16 @@ func (t filesTx) Query(ctx context.Context, query string, args ...any) (files.Ro
 func (t filesTx) QueryRow(ctx context.Context, query string, args ...any) files.Row {
 	return t.tx.QueryRowScanner(ctx, query, args...)
 }
+
+// LookupSessionDeletion resolves a tenant-owned target without applying public
+// read visibility: an already deleted session still supports idempotent delete.
+// Delete owns lifecycle eligibility and rechecks the row in its transaction.
+func (s *Service) LookupSessionDeletion(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	return s.store.LookupSessionDeletion(ctx, ws, sessionID)
+}
+
+// LookupResourceDeletion preserves delete-requested resource visibility for
+// repeated deletion while proving its actual session/workspace relationship.
+func (s *Service) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	return s.store.LookupResourceDeletion(ctx, ws, sessionID, resourceID)
+}

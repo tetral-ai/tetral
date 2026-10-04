@@ -4130,3 +4130,22 @@ func cloneProviderCredentialForAdmission(credential *ProviderCredentialForAdmiss
 	clone := *credential
 	return &clone
 }
+
+func (s *recordingSessionStore) LookupSessionDeletion(_ context.Context, ws workspace.ID, sessionID string) (string, error) {
+	value, ok := s.sessions[sessionID]
+	if !ok || value.WorkspaceID != ws {
+		return "", &NotFoundError{Message: "session not found"}
+	}
+	return value.ID, nil
+}
+func (s *recordingSessionStore) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	if _, err := s.LookupSessionDeletion(ctx, ws, sessionID); err != nil {
+		return "", err
+	}
+	for _, value := range s.sessions[sessionID].Resources {
+		if value.ID == resourceID && value.DetachedAt == nil {
+			return value.ID, nil
+		}
+	}
+	return "", &NotFoundError{Message: "session resource not found"}
+}

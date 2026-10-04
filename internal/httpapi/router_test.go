@@ -352,6 +352,7 @@ func TestFileRoutesWithFileHandlerOptionInstallsRealReceivers(t *testing.T) {
 		listResult: files.ListResult{Data: []*files.FileMetadata{{
 			ID: "file_list", Type: "file", Filename: "listed.bin", MIMEType: "application/octet-stream",
 		}}},
+		getResults:   map[string]*files.FileMetadata{"file_delete": {ID: "file_delete", Type: "file"}},
 		getResult:    &files.FileMetadata{ID: "file_get", Type: "file", Filename: "got.bin", MIMEType: "application/octet-stream"},
 		deleteResult: &files.DeleteResponse{ID: "file_delete", Type: "file_deleted"},
 		openResult: &files.ContentStream{
@@ -394,9 +395,12 @@ func TestFileRoutesWithFileHandlerOptionInstallsRealReceivers(t *testing.T) {
 			}
 		})
 	}
-	if store.createCalls != 1 || store.listCalls != 1 || store.getCalls != 1 || store.deleteCalls != 1 || store.openCalls != 1 {
-		t.Fatalf("route calls = create:%d list:%d get:%d delete:%d open:%d; want all 1",
+	if store.createCalls != 1 || store.listCalls != 1 || store.getCalls != 2 || store.deleteCalls != 1 || store.openCalls != 1 {
+		t.Fatalf("route calls = create:%d list:%d get:%d delete:%d open:%d; want create:1 list:1 get:2 delete:1 open:1",
 			store.createCalls, store.listCalls, store.getCalls, store.deleteCalls, store.openCalls)
+	}
+	if len(store.getIDs) != 2 || store.getIDs[0] != "file_get" || store.getIDs[1] != "file_delete" {
+		t.Fatalf("metadata/admission lookups = %v", store.getIDs)
 	}
 }
 
@@ -631,4 +635,11 @@ func TestLoggingMiddlewareRunsWithoutError(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200 through full middleware chain, got %d", recorder.Code)
 	}
+}
+
+func (fakeSessionService) LookupSessionDeletion(_ context.Context, _ workspace.ID, id string) (string, error) {
+	return id, nil
+}
+func (fakeSessionService) LookupResourceDeletion(_ context.Context, _ workspace.ID, _ string, id string) (string, error) {
+	return id, nil
 }

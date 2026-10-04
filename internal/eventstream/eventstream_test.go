@@ -1077,3 +1077,49 @@ func (r *recordingReader) ReadPreviewRequest(context.Context, workspace.ID, stri
 func (r *recordingReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
 	return nil, nil
 }
+
+func TestPublicAuthorizationEventReadsDenyBeforeReaderAccess(t *testing.T) {
+	signer, verifier := testInternalPrincipalPair(t)
+	// Bounded signed admission uses the production operation policy. Restricted
+	// product roles are not assignable; this fixture removes event permissions.
+	principal := auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_restricted_fixture")
+	principal.Authority.Operations = []auth.Operation{auth.OperationModelsList}
+	for _, path := range []string{
+		"/v1/sessions/sesn_events/events?beta=true",
+		"/v1/sessions/sesn_absent/events?beta=true",
+		"/v1/sessions/sesn_events/threads/thr_main/events?beta=true",
+		"/v1/sessions/sesn_absent/threads/thr_absent/events?beta=true",
+		"/v1/sessions/sesn_events/events/stream?beta=true",
+		"/v1/sessions/sesn_absent/events/stream?beta=true&event_deltas[]=agent.message",
+		"/v1/sessions/sesn_events/threads/thr_main/stream?beta=true",
+		"/v1/sessions/sesn_absent/threads/thr_absent/stream?beta=true",
+	} {
+		t.Run(path, func(t *testing.T) {
+			reader := &recordingReader{listResult: eventstream.ListResult{Data: []eventstream.Event{{ID: "evt_private", Type: "agent.message", Payload: json.RawMessage(`{"content":[{"type":"text","text":"secret stored content"}]}`)}}}}
+			var router http.Handler
+			if strings.Contains(path, "/stream") {
+				router = eventstreamservice.NewRouter(reader, verifier)
+			} else {
+				router = eventstream.NewListRouter(reader, verifier)
+			}
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			token, err := signer.Mint(principal, http.MethodGet, request.URL.Path, "req_restricted_fixture", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("X-Tetral-Internal-Principal", token)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status=%d want403 body=%s", recorder.Code, recorder.Body.String())
+			}
+			assertErrorEnvelope(t, recorder, "permission_error", true)
+			if reader.listCalls != 0 || reader.currentCalls != 0 || reader.changeCalls != 0 {
+				t.Fatalf("denied route reached reader: list=%d current=%d changes=%d", reader.listCalls, reader.currentCalls, reader.changeCalls)
+			}
+			if strings.Contains(recorder.Body.String(), "secret stored content") || recorder.Header().Get("Content-Type") == "text/event-stream" {
+				t.Fatal("denial started a stream or disclosed data")
+			}
+		})
+	}
+}

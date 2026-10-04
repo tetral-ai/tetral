@@ -23,10 +23,12 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -65,8 +67,15 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 			return time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)
 		}),
 	)
+	// Event admission uses the public gate's tenant-safe Session lookup before
+	// admitting work. Resolve the seeded Session through its real owning service.
+	sessionService := session.NewService(
+		agent.NewService(agent.NewPostgreSQLAgentStore(client), nil),
+		nil, nil, nil, nil,
+		session.NewPostgreSQLSessionStore(client), nil,
+	)
 	router := httpapi.NewRouter(
-		httpapi.NewSessionHandler(nil),
+		httpapi.NewSessionHandler(sessionService),
 		"",
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_transport_fixture"), nil

@@ -2,6 +2,22 @@
   "version": 1,
   "go_tests": [
     {
+      "package": "github.com/tetral-ai/tetral/internal/httpapi",
+      "name": "TestPostgreSQLPublicMemoryTypedActors",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/httpapi",
+      "name": "TestPublicAuthorizationMemoryDeniesBeforeDurableEffects",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/httpapi",
+      "name": "TestPublicAuthorizationSessionDeletionPreservesLifecycle",
+      "dependencies": ["postgresql"]
+    },
+
+    {
       "package": "github.com/tetral-ai/tetral/internal/testinfra",
       "name": "TestKeycloakHTTPSIdentityAndSigningKeyLifecycle",
       "dependencies": ["keycloak"]

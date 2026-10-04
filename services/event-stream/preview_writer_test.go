@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	readerpkg "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
@@ -167,29 +168,31 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				firstPoll := true
 				go func() {
 					defer close(done)
-					handler.streamEvents(response, request, scope, types, func(ctx context.Context) (int64, error) {
-						if scope.ThreadID == "" {
-							return real.CurrentStreamPosition(ctx, workspace.DefaultID, scope.SessionID)
-						}
-						return real.CurrentThreadStreamPosition(ctx, workspace.DefaultID, scope.SessionID, scope.ThreadID)
-					}, func(ctx context.Context, after int64) ([]StreamChange, error) {
-						if firstPoll {
-							firstPoll = false
-							select {
-							case <-changesRelease:
-							case <-ctx.Done():
-								return nil, ctx.Err()
+					serveDeclaredStream(response, request, scope, func(w http.ResponseWriter, r *http.Request) {
+						handler.streamEvents(w, r, scope, types, func(ctx context.Context) (int64, error) {
+							if scope.ThreadID == "" {
+								return real.CurrentStreamPosition(ctx, workspace.DefaultID, scope.SessionID)
 							}
-						}
-						var changes []StreamChange
-						var err error
-						if scope.ThreadID == "" {
-							changes, err = real.ListSessionEventChanges(ctx, workspace.DefaultID, scope.SessionID, after, 100)
-						} else {
-							changes, err = real.ListThreadEventChanges(ctx, workspace.DefaultID, scope.SessionID, scope.ThreadID, after, 100)
-						}
-						reader.retainChanges(changes)
-						return changes, err
+							return real.CurrentThreadStreamPosition(ctx, workspace.DefaultID, scope.SessionID, scope.ThreadID)
+						}, func(ctx context.Context, after int64) ([]StreamChange, error) {
+							if firstPoll {
+								firstPoll = false
+								select {
+								case <-changesRelease:
+								case <-ctx.Done():
+									return nil, ctx.Err()
+								}
+							}
+							var changes []StreamChange
+							var err error
+							if scope.ThreadID == "" {
+								changes, err = real.ListSessionEventChanges(ctx, workspace.DefaultID, scope.SessionID, after, 100)
+							} else {
+								changes, err = real.ListThreadEventChanges(ctx, workspace.DefaultID, scope.SessionID, scope.ThreadID, after, 100)
+							}
+							reader.retainChanges(changes)
+							return changes, err
+						})
 					})
 				}()
 				select {
@@ -354,7 +357,9 @@ func TestStreamLoopPreviewLossAfterSessionDeletionContinuesFormalDelivery(t *tes
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.streamEvents(response, request, scope, map[string]bool{"agent.message": true}, currentPosition, listChanges)
+		serveDeclaredStream(response, request, scope, func(w http.ResponseWriter, r *http.Request) {
+			h.streamEvents(w, r, scope, map[string]bool{"agent.message": true}, currentPosition, listChanges)
+		})
 	}()
 	select {
 	case <-response.opened:
@@ -478,7 +483,10 @@ func TestStreamLoopDrainsBacklogAndEndSuffixWithoutPollWait(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.streamEvents(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_backlog"}, nil, func(context.Context) (int64, error) { return 0, nil }, listChanges)
+		scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_backlog"}
+		serveDeclaredStream(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), scope, func(w http.ResponseWriter, r *http.Request) {
+			h.streamEvents(w, r, scope, nil, func(context.Context) (int64, error) { return 0, nil }, listChanges)
+		})
 	}()
 	select {
 	case <-idle:
@@ -534,7 +542,10 @@ func previewLoopFixture(t *testing.T, pollInterval time.Duration, formal func(af
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.streamEvents(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}, map[string]bool{"agent.message": true}, func(context.Context) (int64, error) { return 10, nil }, listChanges)
+		scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
+		serveDeclaredStream(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), scope, func(w http.ResponseWriter, r *http.Request) {
+			h.streamEvents(w, r, scope, map[string]bool{"agent.message": true}, func(context.Context) (int64, error) { return 10, nil }, listChanges)
+		})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -599,4 +610,16 @@ func TestStreamLoopDeliversFormalRowDuringPreviewFlood(t *testing.T) {
 		transport.publish(t, fixtureFrame("event_delta", "evt_message", sequence, "x"))
 		waitCondition(t, func() bool { return sink.count("event: event_delta\n") == int(sequence) })
 	}
+}
+
+// serveDeclaredStream runs a stream handler as the router does: as the declared
+// public stream operation for scope, on behalf of a principal of scope's
+// Workspace, because streamEvents authorizes against both before reading.
+func serveDeclaredStream(w http.ResponseWriter, r *http.Request, scope ReadScope, serve func(http.ResponseWriter, *http.Request)) {
+	pattern := "/v1/sessions/{session_id}/events/stream"
+	if scope.ThreadID != "" {
+		pattern = "/v1/sessions/{session_id}/threads/{thread_id}/stream"
+	}
+	r = r.WithContext(auth.WithPrincipal(r.Context(), auth.IndependentKeyPrincipal(workspace.Workspace{ID: scope.WorkspaceID}, "ak_stream_fixture")))
+	httpapi.DeclarePublicOperation(http.MethodGet, pattern, serve).ServeHTTP(w, r)
 }

@@ -35,7 +35,7 @@ func NewAgentHandler(service *agent.Service) *AgentHandler {
 // requestWorkspace extracts the authenticated workspace from ctx.
 // Real resource handlers fail closed when auth did not attach one.
 func requestWorkspace(ctx context.Context) (workspace.ID, error) {
-	return workspace.MustIDFromContext(ctx)
+	return authorizeWorkspace(ctx)
 }
 
 // readStrictAgentBody applies the 1 MiB MaxBytesReader cap, reads the
@@ -147,6 +147,9 @@ func (h *AgentHandler) getAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !authorizeReadResource(w, r, ws, "agent", result.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -271,6 +274,9 @@ func (h *AgentHandler) listAgentVersions(w http.ResponseWriter, r *http.Request)
 	result, err := h.service.ListVersions(r.Context(), ws, chi.URLParam(r, "agent_id"), options)
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	if !authorizeReadResource(w, r, ws, "agent", chi.URLParam(r, "agent_id")) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

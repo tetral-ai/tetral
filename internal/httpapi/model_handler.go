@@ -61,6 +61,10 @@ func listModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := requestWorkspace(r.Context()); err != nil {
+		writeError(w, r, err)
+		return
+	}
 	start, end, hasMore := modelCatalogPageBounds(catalog[:], query, limit)
 	data := make([]modelInfoResponse, 0, end-start)
 	for _, entry := range catalog[start:end] {
@@ -94,8 +98,16 @@ func retrieveModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, &ValidationError{Message: "invalid model id"})
 		return
 	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	for _, entry := range catalog {
 		if entry.ID == id {
+			if !authorizeReadResource(w, r, ws, "model", entry.ID) {
+				return
+			}
 			writeJSON(w, http.StatusOK, modelResponse(entry, beta))
 			return
 		}

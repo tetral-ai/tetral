@@ -2831,3 +2831,33 @@ func mapPostgreSQLSessionError(err error) error {
 	}
 	return err
 }
+
+func (s *PostgreSQLSessionStore) LookupSessionDeletion(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_deletion", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2`, string(ws), sessionID).Scan(&resolved)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "session not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+func (s *PostgreSQLSessionStore) LookupResourceDeletion(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_resource_deletion", func(tx *dbconnect.Tx) error {
+		// Match RequestResourceDelete's retained row relation, including a pending
+		// delete and its tombstoned file; detached resources remain unavailable.
+		err := tx.QueryRow(ctx, `SELECT sr.resource_id FROM session_resources sr
+   LEFT JOIN session_file_resources sfr ON sfr.workspace_id=sr.workspace_id AND sfr.session_id=sr.session_id AND sfr.resource_id=sr.resource_id
+   WHERE sr.workspace_id=$1 AND sr.session_id=$2 AND sr.resource_id=$3 AND sr.detached_at IS NULL
+   AND EXISTS (SELECT 1 FROM sessions s WHERE s.workspace_id=sr.workspace_id AND s.id=sr.session_id AND s.lifecycle_state<>'deleted')
+   AND (sr.type<>'file' OR EXISTS (SELECT 1 FROM files f WHERE f.workspace_id=sr.workspace_id AND f.file_id=sfr.file_id AND f.scope_type='session' AND f.scope_id=sr.session_id))`, string(ws), sessionID, resourceID).Scan(&resolved)
+		if err == sql.ErrNoRows {
+			return &NotFoundError{Message: "session resource not found"}
+		}
+		return err
+	})
+	return resolved, err
+}

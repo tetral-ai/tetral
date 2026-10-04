@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -34,7 +36,11 @@ func TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads(t *testing.T) {
 				types = map[string]bool{"agent.message": true}
 			}
 			entered, queryCanceled, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pattern := "/v1/sessions/{session_id}/events/stream"
+			if mode == "thread" {
+				pattern = "/v1/sessions/{session_id}/threads/{thread_id}/stream"
+			}
+			declared := httpapi.DeclarePublicOperation(http.MethodGet, pattern, func(w http.ResponseWriter, r *http.Request) {
 				defer close(done)
 				h.streamEvents(w, r, scope, types, func(context.Context) (int64, error) { return 0, nil }, func(ctx context.Context, _ int64) ([]StreamChange, error) {
 					close(entered)
@@ -42,6 +48,10 @@ func TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads(t *testing.T) {
 					close(queryCanceled)
 					return nil, ctx.Err()
 				})
+			})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r = r.WithContext(auth.WithPrincipal(r.Context(), auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_shutdown_fixture")))
+				declared.ServeHTTP(w, r)
 			}))
 			defer server.Close()
 			response, err := server.Client().Get(server.URL)

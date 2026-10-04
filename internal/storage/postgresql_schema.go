@@ -1604,11 +1604,13 @@ END $$`
 		created_api_key_id TEXT,
 		created_session_id TEXT,
 		created_user_id TEXT,
+		created_service_id TEXT,
 		redacted_at TIMESTAMPTZ,
 		redacted_actor_type TEXT,
 		redacted_api_key_id TEXT,
 		redacted_session_id TEXT,
 		redacted_user_id TEXT,
+		redacted_service_id TEXT,
 		PRIMARY KEY (memory_version_id),
 		UNIQUE (workspace_id, memory_store_id, memory_id, memory_version_id),
 		FOREIGN KEY (workspace_id, memory_store_id, memory_id) REFERENCES memories(workspace_id, memory_store_id, memory_id) ON DELETE CASCADE,
@@ -1616,16 +1618,18 @@ END $$`
 		FOREIGN KEY (workspace_id, redacted_api_key_id) REFERENCES api_keys(workspace_id, id),
 		CONSTRAINT memory_versions_operation_shape CHECK (operation IN ('created', 'modified', 'deleted')),
 		CONSTRAINT memory_versions_created_actor_shape CHECK (
-			(created_actor_type = 'api_actor' AND created_api_key_id IS NOT NULL AND created_session_id IS NULL AND created_user_id IS NULL)
-			OR (created_actor_type = 'session_actor' AND created_api_key_id IS NULL AND created_session_id IS NOT NULL AND created_user_id IS NULL)
-			OR (created_actor_type = 'user_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NOT NULL)
+			(created_actor_type = 'api_actor' AND created_api_key_id IS NOT NULL AND created_session_id IS NULL AND created_user_id IS NULL AND created_service_id IS NULL)
+			OR (created_actor_type = 'session_actor' AND created_api_key_id IS NULL AND created_session_id IS NOT NULL AND created_user_id IS NULL AND created_service_id IS NULL)
+			OR (created_actor_type = 'service_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NULL AND created_service_id IS NOT NULL)
+			OR (created_actor_type = 'user_actor' AND created_api_key_id IS NULL AND created_session_id IS NULL AND created_user_id IS NOT NULL AND created_service_id IS NULL)
 		),
-		CONSTRAINT memory_versions_redacted_actor_shape CHECK (
-			(redacted_at IS NULL AND redacted_actor_type IS NULL AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'api_actor' AND redacted_api_key_id IS NOT NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'session_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NOT NULL AND redacted_user_id IS NULL)
-			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'user_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NOT NULL)
-		),
+		CONSTRAINT memory_versions_redacted_actor_shape CHECK ((
+			(redacted_at IS NULL AND redacted_actor_type IS NULL AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'api_actor' AND redacted_api_key_id IS NOT NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'session_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NOT NULL AND redacted_user_id IS NULL AND redacted_service_id IS NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'service_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NULL AND redacted_service_id IS NOT NULL)
+			OR (redacted_at IS NOT NULL AND redacted_actor_type = 'user_actor' AND redacted_api_key_id IS NULL AND redacted_session_id IS NULL AND redacted_user_id IS NOT NULL AND redacted_service_id IS NULL)
+		) IS TRUE),
 		CONSTRAINT memory_versions_payload_shape CHECK (
 			(
 				redacted_at IS NOT NULL

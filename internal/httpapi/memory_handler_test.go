@@ -309,6 +309,14 @@ type updateMemoryCaptureService struct {
 	request *memory.UpdateMemoryRequest
 }
 
+// These capture fixtures explicitly supply the trusted pre-mutation owner fact.
+func (s *createMemoryCaptureService) GetStore(_ context.Context, _ workspace.ID, storeID string) (*memory.Store, error) {
+	return &memory.Store{ID: storeID}, nil
+}
+func (s *updateMemoryCaptureService) GetMemory(_ context.Context, _ workspace.ID, storeID, memoryID, _ string) (*memory.Memory, error) {
+	return &memory.Memory{ID: memoryID, MemoryStoreID: storeID}, nil
+}
+
 func (s *updateMemoryCaptureService) UpdateMemory(_ context.Context, _ workspace.ID, storeID string, memoryID string, request memory.UpdateMemoryRequest, _ memory.Actor) (*memory.Memory, error) {
 	s.request = &request
 	return &memory.Memory{ID: memoryID, Type: "memory", MemoryStoreID: storeID, Path: "/updated.md"}, nil
