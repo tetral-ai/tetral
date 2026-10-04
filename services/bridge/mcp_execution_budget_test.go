@@ -114,6 +114,9 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				h.awaitMCPHeld(adapter, "tools/call")
 				output := h.joinAction(pending)
 				h.awaitMCPStoredResult(event)
+				// Local completion and storage do not acknowledge the peer's HTTP abort.
+				// Observe that event while its accepted response remains held.
+				h.action(map[string]any{"kind": "wait-call-cancelled", "adapter": adapter})
 				observed := h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
 				var proof struct {
 					Counts  struct{ CancelledCalls int }

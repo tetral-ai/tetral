@@ -6,6 +6,7 @@ function peerFor(adapter: 'github'|'slack') { const peer=new McpHTTPProtocolFixt
 import { McpExecutionBudget, MCP_EXECUTION_TIMEOUT_MS, MCP_FIRST_COMMIT_RESERVE_MS } from '../../src/execution-budget.js';
 import { DiscoverySDKClient } from '../../src/discovery.js';
 import { McpSDKClient, streamableHTTPTransportOptions } from '../../src/client.js';
+import type { McpSDKClientOptions } from '../../src/client.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpHTTPProtocolFixture, until } from '../fixtures/mcp-http-protocol.js';
 import { registeredServer } from '../fixtures/registered-server.js';
@@ -40,4 +41,74 @@ test('real HTTP held tool response is cancelled when the execution budget expire
  const client=new McpSDKClient({executionTimeoutMs:1000,serverResolver:{async resolve(){return registeredServer('github','work-github');}},credentialResolver:{async resolve(){return {ok:true,mode:'bearer',token:'fixture',tokenHash:'fixture',vaultId:'v',credentialId:'c'};},async refresh(){throw new Error('Unexpected refresh');}},onToolsListChanged:async()=>undefined,createTransport:input=>new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input))});
  const operation=client.callTool(identity);void operation.catch(()=>undefined);
  try{await held.entered;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});await until(()=>peer.counts.cancelledCalls===1);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:1});expect(client.connectionCount()).toBe(0);}finally{held.release();await client.closeAll();await peer.close();}
+},10_000);
+
+function timeoutClient(peer: McpHTTPProtocolFixture, options: Partial<McpSDKClientOptions> = {}): McpSDKClient {
+ return new McpSDKClient({
+  serverResolver:{async resolve(){return registeredServer('github','work-github');}},
+  credentialResolver:{async resolve(){return {ok:true,mode:'bearer',token:'fixture',tokenHash:'fixture',vaultId:'v',credentialId:'c'};},async refresh(){throw new Error('Unexpected refresh');}},
+  onToolsListChanged:async()=>undefined,
+  createTransport:input=>new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input)),
+  ...options,
+ });
+}
+
+test('native SDK call timeout retires sole HTTP execution before the total deadline',async()=>{
+ const peer=peerFor('github');peer.notificationsEnabled=false;
+ const client=timeoutClient(peer,{executionTimeoutMs:1000,callTimeoutMs:50});
+ let held:ReturnType<McpHTTPProtocolFixture['hold']>|undefined;
+ try{
+  await client.listTools(identity);expect(peer.counts).toMatchObject({initialize:1,list:1,call:0,effects:0});peer.resetCounts();
+  held=peer.hold('tools/call');const started=performance.now();
+  const operation=client.callTool(identity);void operation.catch(()=>undefined);
+  await held.entered;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});
+  const rejectionElapsedMs=performance.now()-started;expect(rejectionElapsedMs).toBeLessThan(1000);
+  await until(()=>peer.counts.cancelledCalls===1);
+  expect(client.connectionCount()).toBe(0);expect(peer.counts).toMatchObject({initialize:0,list:0,call:1,effects:1,cancelledCalls:1});
+  console.info(JSON.stringify({kind:'mcp-native-timeout-observation',case:caseName,rejectionElapsedMs,totalBudgetMs:1000,callCeilingMs:50,counts:{...peer.counts},connections:client.connectionCount(),beforeRelease:true}));
+  held.release();
+  await expect(client.callTool({...identity,input:{nonce:'after-native-timeout'}})).resolves.toMatchObject({structuredContent:{nonce:'after-native-timeout'}});
+  expect(peer.counts).toMatchObject({initialize:1,list:1,call:2,effects:2});expect(client.connectionCount()).toBe(1);
+ }finally{held?.release();await client.closeAll();await peer.close();}
+},10_000);
+
+test('native SDK call timeout preserves an unrelated execution owning the same transport',async()=>{
+ const peer=peerFor('github');peer.notificationsEnabled=false;
+ class NativeTimeoutSDK extends DiscoverySDKClient {
+  override async callTool(params:Parameters<DiscoverySDKClient['callTool']>[0],schema?:Parameters<DiscoverySDKClient['callTool']>[1],options?:RequestOptions){
+   return super.callTool(params,schema,params.arguments?.nonce==='native-timeout'?{...options,timeout:50}:options);
+  }
+ }
+ const client=timeoutClient(peer,{createClient:()=>new NativeTimeoutSDK({name:'shared-native-timeout-sdk',version:'1'}, {})});
+ let held:ReturnType<McpHTTPProtocolFixture['hold']>|undefined;let survivor:Promise<unknown>|undefined;
+ try{
+  await client.listTools(identity);peer.resetCounts();held=peer.hold('tools/call');
+  survivor=client.callTool({...identity,input:{nonce:'survivor'}},{timeoutMs:5000});void survivor.catch(()=>undefined);
+  await held.entered;let survivorSettled=false;void survivor.finally(()=>{survivorSettled=true;}).catch(()=>undefined);
+  const operation=client.callTool({...identity,input:{nonce:'native-timeout'}},{timeoutMs:1000});void operation.catch(()=>undefined);
+  await until(()=>peer.counts.call===2);await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});
+  expect(survivorSettled).toBe(false);expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({call:2,effects:2,cancelledCalls:0});
+  held.release();await expect(survivor).resolves.toMatchObject({structuredContent:{nonce:'survivor'}});
+  expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:0,call:2,effects:2,cancelledCalls:0});
+ }finally{held?.release();await survivor?.catch(()=>undefined);await client.closeAll();await peer.close();}
+},10_000);
+
+test('native SDK warm discovery timeout preserves ready transport and concurrent execution',async()=>{
+ const peer=peerFor('github');peer.notificationsEnabled=false;let warm=false;
+ class NativeTimeoutSDK extends DiscoverySDKClient {
+  override async listTools(params?:Parameters<DiscoverySDKClient['listTools']>[0],options?:RequestOptions){
+   return super.listTools(params,warm?{...options,timeout:50}:options);
+  }
+ }
+ const client=timeoutClient(peer,{createClient:()=>new NativeTimeoutSDK({name:'discovery-native-timeout-sdk',version:'1'}, {})});
+ let heldCall:ReturnType<McpHTTPProtocolFixture['hold']>|undefined,heldList:ReturnType<McpHTTPProtocolFixture['hold']>|undefined,survivor:Promise<unknown>|undefined;
+ try{
+  await client.listTools(identity);peer.resetCounts();heldCall=peer.hold('tools/call');
+  survivor=client.callTool({...identity,input:{nonce:'discovery-survivor'}},{timeoutMs:5000});void survivor.catch(()=>undefined);await heldCall.entered;
+  warm=true;heldList=peer.hold('tools/list');const listing=client.listTools(identity,{timeoutMs:1000});void listing.catch(()=>undefined);
+  await heldList.entered;await expect(listing).rejects.toMatchObject({code:'mcp_timeout'});
+  expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:1,call:1,effects:1,cancelledCalls:0});
+  heldList.release();heldCall.release();await expect(survivor).resolves.toMatchObject({structuredContent:{nonce:'discovery-survivor'}});
+  expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:1,call:1,effects:1,cancelledCalls:0});
+ }finally{heldList?.release();heldCall?.release();await survivor?.catch(()=>undefined);await client.closeAll();await peer.close();}
 },10_000);

@@ -535,6 +535,9 @@ leaving preserves initialization for others, while all leaving aborts it. Failed
 initialization never publishes a ready client. Idle expiry closes and evicts.
 Only the SDK retains output schema metadata; full definitions remain local to
 initialization, explicit discovery or manifest reporting. Warm calls do not list.
+A native SDK request timeout retires the transport when that execution is its
+sole owner, even if the total execution timer has not fired. Warm discovery and
+other concurrent operations retain ownership of their shared ready client.
 
 | State | Trigger | Transition |
 | --- | --- | --- |

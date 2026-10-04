@@ -623,6 +623,14 @@ export class McpSDKClient implements McpClient {
         this.ownOperation(Promise.resolve().then(operation)),
         exhausted,
       ]);
+    } catch (error) {
+      // The SDK request timer can reject before the total timer aborts its
+      // signal. Retire abandoned execution work while this call still owns
+      // the entry; an earlier signal abort must not reconsider its ownership.
+      if (closeOnAbort && !signal?.aborted && isTimeoutError(error) && entry.inFlight.size === 1) {
+        await this.closeConnection(entry).catch(() => undefined);
+      }
+      throw error;
     } finally {
       call.settled = true;
       entry.inFlight.delete(call);
