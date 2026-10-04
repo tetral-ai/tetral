@@ -74,6 +74,38 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 					h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, output, map[string]any{"execution_budget_ms": 170000, "first_commit_reserve_ms": 10000, "actual_sql_stored_before_ack_drop": true, "first_bridge_commits": 1, "second_bridge_commits": 1, "recovery_after_first_commit_ms": secondTimes[0].Sub(firstTimes[0]).Milliseconds(), "frozen_commit_request_equal": true, "stored_results": 1, "original_public_result": 1, "original_settlement_receipt": 1, "external_calls": 1, "accepted_effects": 1})
 					return
 				}
+				originInitialize, originList := 1, 1
+				var readinessSetup json.RawMessage
+				if variant == "shorter-grpc-caller-deadline" {
+					// Complete SDK readiness before testing cancellation of an accepted
+					// external call. The separate execution-deadline case retains cold
+					// preparation inside its shared budget.
+					listed := h.action(map[string]any{"kind": "list", "adapter": adapter})
+					var setup struct {
+						Tools  []struct{ Name string }
+						Counts struct{ Initialize, List, Call, Effects int }
+					}
+					if err := json.Unmarshal(listed, &setup); err != nil {
+						t.Fatal(err)
+					}
+					if len(setup.Tools) != 1 || setup.Tools[0].Name != "read_echo" || setup.Counts.Initialize != 1 || setup.Counts.List != 1 || setup.Counts.Call != 0 || setup.Counts.Effects != 0 {
+						t.Fatalf("SDK readiness setup did not complete without execution: %s", listed)
+					}
+					readinessSetup = h.action(map[string]any{"kind": "observe", "adapter": adapter})
+					var ready struct {
+						Connections []int
+						IssuerCalls int
+					}
+					if err := json.Unmarshal(readinessSetup, &ready); err != nil {
+						t.Fatal(err)
+					}
+					if len(ready.Connections) != 2 || ready.Connections[0] != 1 || ready.Connections[1] != 0 || ready.IssuerCalls != 0 {
+						t.Fatal("SDK readiness setup did not retain exactly its prepared connection")
+					}
+					// Keep setup traffic separate from the timed call and its replay.
+					h.action(map[string]any{"kind": "reset"})
+					originInitialize, originList = 0, 0
+				}
 				h.action(map[string]any{"kind": "hold", "adapter": adapter, "holdPhase": "tools/call"})
 				if variant == "shorter-grpc-caller-deadline" {
 					action["callerDeadlineMs"], action["settle"] = 500, false
@@ -82,7 +114,7 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				h.awaitMCPHeld(adapter, "tools/call")
 				output := h.joinAction(pending)
 				h.awaitMCPStoredResult(event)
-				observed := h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
+				observed := h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
 				var proof struct {
 					Counts  struct{ CancelledCalls int }
 					Records []map[string]any
@@ -102,7 +134,7 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				replayAction := map[string]any{"kind": "execute", "replica": 1, "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce}
 				replay := h.action(replayAction)
 				h.assertMCPOriginalSettlement(event, replay, 2, 5, "MCP tool call timed out.")
-				h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
+				h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
 				remaining, elapsed, lastRemaining, lastElapsed := 0, 0, 1000.0, 0.0
 				for _, record := range proof.Records {
 					r, rok := record["timeout.remaining_ms"].(float64)
@@ -125,7 +157,7 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				if remaining < 3 || elapsed < 3 {
 					t.Fatal("actual shared execution phase budget observations are missing")
 				}
-				h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, replay, map[string]any{"original_caller_observation": json.RawMessage(output), "injected_execution_budget_ms": 1000, "grpc_caller_deadline_ms": func() int {
+				h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, replay, map[string]any{"original_caller_observation": json.RawMessage(output), "readiness_setup": readinessSetup, "origin_initialize": originInitialize, "origin_list": originList, "injected_execution_budget_ms": 1000, "grpc_caller_deadline_ms": func() int {
 					if variant == "shorter-grpc-caller-deadline" {
 						return 500
 					}
