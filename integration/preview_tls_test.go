@@ -140,7 +140,18 @@ func TestPostgreSQLPreviewTLSLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		previewTLSControl(t, cluster)
-		before := previewRoleConnections(t, cluster)
+		before := previewRequireRoleConnections(t, cluster)
+		if !previewBothRolesConnected(before) {
+			t.Fatalf("malformed-client baseline requires one owned connection per role: %v", before)
+		}
+		// Restore mounts even if the strict identity assertion aborts this
+		// subtest, so later trust tests inspect their own intended generations.
+		for _, role := range []struct {
+			config testinfra.NATSRole
+			leaf   transporttest.Leaf
+		}{{cluster.Fixture.Publisher, cluster.PublisherLeaf}, {cluster.Fixture.Subscriber, cluster.SubscriberLeaf}} {
+			t.Cleanup(func() { previewProjectRole(t, role.config, "cleanup-client", cluster.Root.PEM, role.leaf) })
+		}
 		malformedPublisher, malformedSubscriber := cluster.PublisherLeaf, cluster.SubscriberLeaf
 		malformedPublisher.Key, malformedSubscriber.Key = []byte("invalid mounted key"), []byte("invalid mounted key")
 		previewProjectRole(t, cluster.Fixture.Publisher, "malformed-client", cluster.Root.PEM, malformedPublisher)
@@ -148,7 +159,9 @@ func TestPostgreSQLPreviewTLSLifecycle(t *testing.T) {
 		previewAwaitReload(t, "client-malformed-rejection", func() bool {
 			return reloads.Load() > 0 && previewGatewayOutcome(t, h, "preview.credential_reload_failed", "invalid_generation")
 		})
-		if !reflect.DeepEqual(before, previewRoleConnections(t, cluster)) {
+		after := previewRequireRoleConnections(t, cluster)
+		t.Logf("malformed-client owned connection identities before=%v after=%v", before, after)
+		if !reflect.DeepEqual(before, after) {
 			t.Fatal("malformed client generation retired still-valid last-known-good connections")
 		}
 		h.releaseFragments(t, 1)
@@ -210,12 +223,12 @@ func previewTLSControl(t *testing.T, c *previewTLSCluster) {
 	if err != nil {
 		t.Fatal("allowed subscriber control failed")
 	}
-	defer consumer.Close()
+	defer previewCloseObservedControl(t, c.Brokers[1], consumer)()
 	producer, err := c.connect(c.Brokers[0], c.Fixture.Publisher, c.PublisherLeaf, c.Root.PEM, "localhost")
 	if err != nil {
 		t.Fatal("allowed publisher control failed")
 	}
-	defer producer.Close()
+	defer previewCloseObservedControl(t, c.Brokers[0], producer)()
 	subject := "preview.v1.tls.control." + previewRandom(t)
 	sub, err := consumer.SubscribeSync(subject)
 	if err != nil {
@@ -272,6 +285,34 @@ func previewTLSControl(t *testing.T, c *previewTLSCluster) {
 	message, err := sub.NextMsg(5 * time.Second)
 	if err != nil || string(message.Data) != "authorized-across-route" {
 		t.Fatal("actual route fan-out failed positive control")
+	}
+}
+
+// Local Close does not join the broker's read loop/removal. Observe removal
+// of this exact temporary control CID before later role-identity measurements.
+func previewCloseObservedControl(t *testing.T, broker *previewTLSBroker, connection *nats.Conn) func() {
+	t.Helper()
+	cid, err := connection.GetClientID()
+	if err != nil {
+		connection.Close()
+		t.Fatal("temporary control client identity unavailable")
+	}
+	serverID := connection.ConnectedServerId()
+	return func() {
+		connection.Close()
+		started := time.Now()
+		defer func() {
+			t.Logf("control client removal broker=%s server_id=%s cid=%d elapsed=%s bound=5s", broker.Name, serverID, cid, time.Since(started))
+		}()
+		previewAwait(t, 5*time.Second, func() bool {
+			var state struct {
+				ServerID    string `json:"server_id"`
+				Connections []struct {
+					CID uint64 `json:"cid"`
+				} `json:"connections"`
+			}
+			return previewMonitor(broker, fmt.Sprintf("/connz?cid=%d", cid), &state) == nil && state.ServerID == serverID && len(state.Connections) == 0
+		})
 	}
 }
 func previewServedSerial(b *previewTLSBroker, roots []byte, leaf transporttest.Leaf) string {
@@ -364,7 +405,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 	h.waitFragments(t)
 	h.releaseFragments(t, 1)
 	h.waitEvent(t, "trust-on", "event_delta", 1)
-	before := previewRoleConnections(t, c)
+	before := previewRequireRoleConnections(t, c)
 	if !previewBothRolesConnected(before) {
 		t.Fatal("expected one production publisher and one subscriber connection")
 	}
@@ -376,7 +417,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 	}
 	previewAssertStableBindings(t, c.Brokers[1])
 	previewAwaitRoleChange(t, c, "subscriber-seed-reconnect", before, false)
-	before = previewRoleConnections(t, c)
+	before = previewRequireRoleConnections(t, c)
 	oldRoot, oldPublisher := c.Root, c.PublisherLeaf
 	second := transporttest.Must(transporttest.NewAuthority("preview-root-r2"))
 	overlap := append(append([]byte(nil), oldRoot.PEM...), second.PEM...)
@@ -395,7 +436,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 			return previewServedSerial(broker, overlap, oldPublisher) == broker.ClientLeaf.Parsed.SerialNumber.String() && previewServedRouteSerial(broker, overlap, oldPublisher) == broker.RouteLeaf.Parsed.SerialNumber.String()
 		})
 	}
-	before = previewRoleConnections(t, c)
+	before = previewRequireRoleConnections(t, c)
 	c.PublisherLeaf = transporttest.Must(second.ValidLeaf("localhost", previewPublisherURI))
 	c.SubscriberLeaf = transporttest.Must(second.ValidLeaf("localhost", previewSubscriberURI))
 	previewProjectRole(t, c.Fixture.Publisher, "r2-leaf", overlap, c.PublisherLeaf)
@@ -425,7 +466,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 	// Both live role connections must exist before the trust-retirement oracle
 	// can establish that each old connection was actually retired.
 	previewAwaitBothRoles(t, c, h, "post-route-restarts")
-	before = previewRoleConnections(t, c)
+	before = previewRequireRoleConnections(t, c)
 	previewProjectRole(t, c.Fixture.Publisher, "r2-only", second.PEM, c.PublisherLeaf)
 	previewProjectRole(t, c.Fixture.Subscriber, "r2-only", second.PEM, c.SubscriberLeaf)
 	previewAwaitRoleChange(t, c, "r1-client-trust-retirement", before, true)
@@ -487,15 +528,31 @@ func previewProjectRole(t *testing.T, role testinfra.NATSRole, generation string
 }
 func previewRoleConnections(t *testing.T, c *previewTLSCluster) map[string]bool {
 	t.Helper()
+	state := previewRoleConnectionState(t, c)
+	if state == nil {
+		return nil
+	}
 	connections := map[string]bool{}
-	for id := range previewRoleConnectionState(t, c) {
+	for id := range state {
 		connections[id] = true
+	}
+	return connections
+}
+
+// Polls treat nil as an incomplete sweep; stable before/after snapshots must
+// fail rather than interpret monitor unavailability as a changed connection.
+func previewRequireRoleConnections(t *testing.T, c *previewTLSCluster) map[string]bool {
+	t.Helper()
+	connections := previewRoleConnections(t, c)
+	if connections == nil {
+		t.Fatal("required role connection snapshot unavailable")
 	}
 	return connections
 }
 
 // Monitoring credentials are matched in memory and replaced with fixed public
 // role labels. Only connection identities and subscription counts escape.
+// Nil means incomplete monitoring; an allocated empty map means no role peers.
 func previewRoleConnectionState(t *testing.T, c *previewTLSCluster) map[string]int {
 	t.Helper()
 	roles := map[string]string{}
@@ -516,8 +573,8 @@ func previewRoleConnectionState(t *testing.T, c *previewTLSCluster) map[string]i
 				Subscriptions int    `json:"subscriptions"`
 			} `json:"connections"`
 		}
-		if previewMonitor(broker, "/connz?auth=true", &state) != nil {
-			continue
+		if err := previewMonitor(broker, "/connz?auth=true", &state); err != nil {
+			return nil
 		}
 		for _, conn := range state.Connections {
 			if label := roles[conn.User]; label != "" {
@@ -567,7 +624,8 @@ func previewAwaitBothRoles(t *testing.T, c *previewTLSCluster, h *publicStreamin
 				publisherConnected = value
 			}
 		}
-		t.Logf("production role recovery phase=%s elapsed=%s bound=10s observed=%v live_native_subscription_counts=%v publisher_connected=%s subscriber_watched_sessions=%.0f subscriber_disconnects=%.0f subscriber_reconnects=%.0f", phase, time.Since(started), observed, previewRoleConnectionState(t, c), publisherConnected, h.metric(t, "event_stream_preview_subscriptions"), h.metric(t, "event_stream_nats_disconnects_total"), h.metric(t, "event_stream_nats_reconnects_total"))
+		state := previewRoleConnectionState(t, c)
+		t.Logf("production role recovery phase=%s elapsed=%s bound=10s observed=%v live_native_subscription_counts=%v publisher_connected=%s subscriber_watched_sessions=%.0f subscriber_disconnects=%.0f subscriber_reconnects=%.0f monitor_complete=%t", phase, time.Since(started), observed, state, publisherConnected, h.metric(t, "event_stream_preview_subscriptions"), h.metric(t, "event_stream_nats_disconnects_total"), h.metric(t, "event_stream_nats_reconnects_total"), state != nil)
 	}()
 	previewAwait(t, 10*time.Second, func() bool { observed = previewRoleConnections(t, c); return previewBothRolesConnected(observed) })
 }
@@ -592,7 +650,7 @@ func previewAwaitRoleChange(t *testing.T, c *previewTLSCluster, phase string, be
 		bound = 10 * time.Second
 	}
 	defer func() {
-		t.Logf("production TLS phase=%s elapsed=%s bound=%s before=%v observed=%v require_all_replaced=%t", phase, time.Since(started), bound, before, observed, all)
+		t.Logf("production TLS phase=%s elapsed=%s bound=%s before=%v observed=%v require_all_replaced=%t monitor_complete=%t", phase, time.Since(started), bound, before, observed, all, observed != nil)
 	}()
 	previewAwait(t, bound, func() bool {
 		observed = previewRoleConnections(t, c)
@@ -646,7 +704,8 @@ func previewTLSRejectedTrust(t *testing.T, c *previewTLSCluster) {
 	previewProjectRole(t, c.Fixture.Publisher, "valid-rejecting-trust", second.PEM, publisher)
 	previewProjectRole(t, c.Fixture.Subscriber, "valid-rejecting-trust", second.PEM, subscriber)
 	previewAwaitReload(t, "valid-client-trust-removal-retirement", func() bool {
-		return len(previewRoleConnections(t, c)) == 0 && previewGatewayOutcome(t, h, "preview.credential_reload_failed", "invalid_generation")
+		connections := previewRoleConnections(t, c)
+		return connections != nil && len(connections) == 0 && previewGatewayOutcome(t, h, "preview.credential_reload_failed", "invalid_generation")
 	})
 	h.releaseFragments(t, 3)
 	h.finish(t)
