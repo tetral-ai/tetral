@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -340,16 +344,151 @@ func TestPostgreSQLRuntimeProcessReportUsesConfiguredAttemptBudget(t *testing.T)
 	}
 }
 
+// A handler can return while database/sql's cancellation rollback or pgx's
+// native connection cleanup still runs. Trace BEGIN as well as the Pod query:
+// expiry between those statements must not be mistaken for pre-SQL expiry.
+type reportBackendCapture struct {
+	pid          uint32
+	backendStart string
+	begin, pod   bool
+	cleanup      <-chan struct{}
+}
+type reportBackendTracer struct {
+	ctx        context.Context
+	admin      *sql.DB
+	mu         sync.Mutex
+	armed      bool
+	identities map[uint32]string
+	backends   map[uint32]reportBackendCapture
+	err        error
+}
+
+func (tracer *reportBackendTracer) TraceConnectStart(ctx context.Context, _ pgx.TraceConnectStartData) context.Context {
+	return ctx
+}
+func (tracer *reportBackendTracer) TraceConnectEnd(_ context.Context, data pgx.TraceConnectEndData) {
+	if data.Err != nil {
+		return
+	}
+	pid := data.Conn.PgConn().PID()
+	var identity string
+	err := tracer.admin.QueryRowContext(tracer.ctx, `SELECT backend_start::text FROM pg_stat_activity WHERE datname=current_database() AND pid=$1`, pid).Scan(&identity)
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	if err != nil {
+		tracer.err = err
+		return
+	}
+	if tracer.identities == nil {
+		tracer.identities = make(map[uint32]string)
+	}
+	tracer.identities[pid] = identity
+}
+func (tracer *reportBackendTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	begin := strings.EqualFold(strings.TrimSpace(data.SQL), "begin")
+	pod := strings.HasPrefix(data.SQL, "SELECT last_promoted_order FROM runtime_process_pods")
+	if !begin && !pod {
+		return ctx
+	}
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	if !tracer.armed {
+		return ctx
+	}
+	pid := conn.PgConn().PID()
+	capture := tracer.backends[pid]
+	capture.pid = pid
+	capture.backendStart = tracer.identities[pid]
+	capture.begin = capture.begin || begin
+	capture.pod = capture.pod || pod
+	capture.cleanup = conn.PgConn().CleanupDone()
+	tracer.backends[pid] = capture
+	return ctx
+}
+func (*reportBackendTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (tracer *reportBackendTracer) arm() {
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	tracer.armed = true
+	tracer.backends = make(map[uint32]reportBackendCapture)
+}
+func (tracer *reportBackendTracer) snapshot() ([]reportBackendCapture, error) {
+	tracer.mu.Lock()
+	defer tracer.mu.Unlock()
+	captures := make([]reportBackendCapture, 0, len(tracer.backends))
+	for _, capture := range tracer.backends {
+		captures = append(captures, capture)
+	}
+	return captures, tracer.err
+}
+
+type reportBackendState struct {
+	backendStart string
+	xactStart    sql.NullString
+	state, wait  string
+	locks        int
+}
+
+func readReportBackendState(ctx context.Context, admin *sql.DB, pid uint32) (reportBackendState, bool, error) {
+	var state reportBackendState
+	err := admin.QueryRowContext(ctx, `SELECT backend_start::text,xact_start::text,state,COALESCE(wait_event_type,''),(SELECT count(*) FROM pg_locks WHERE pid=$1 AND (locktype IN ('transactionid','virtualxid') OR relation='runtime_process_pods'::regclass)) FROM pg_stat_activity WHERE datname=current_database() AND pid=$1`, pid).Scan(&state.backendStart, &state.xactStart, &state.state, &state.wait, &state.locks)
+	if err == sql.ErrNoRows {
+		return state, false, nil
+	}
+	return state, true, err
+}
+func awaitReportBackendTerminal(ctx context.Context, t *testing.T, admin *sql.DB, capture reportBackendCapture) {
+	t.Helper()
+	if capture.backendStart == "" {
+		t.Fatalf("report backend pid=%d has no independently bound identity", capture.pid)
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, exists, err := readReportBackendState(ctx, admin, capture.pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var terminal string
+		switch {
+		case !exists:
+			terminal = "backend_gone"
+		case state.backendStart != capture.backendStart:
+			terminal = "backend_replaced"
+		case state.state == "idle" && !state.xactStart.Valid && state.locks == 0:
+			terminal = "transaction_ended"
+		}
+		if terminal != "" {
+			// Healthy pooled connections remain open. Only a departed original
+			// backend requires native socket cleanup to join as well.
+			if terminal != "transaction_ended" {
+				select {
+				case <-capture.cleanup:
+				case <-ctx.Done():
+					t.Fatal("departed report backend native cleanup did not join")
+				}
+			}
+			t.Logf("report backend terminal=%s pid=%d backend=%s BEGIN=%t Pod=%t state=%s xact=%s locks=%d", terminal, capture.pid, capture.backendStart, capture.begin, capture.pod, state.state, state.xactStart.String, state.locks)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("report backend not terminal: pid=%d state=%s xact=%s wait=%s locks=%d: %v", capture.pid, state.state, state.xactStart.String, state.wait, state.locks, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
 func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 	for _, variant := range []string{"configured server deadline", "earlier caller deadline", "parent cancellation"} {
 		t.Run(variant, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			client := dbconnect.NewClientForTesting(runtime)
+			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			tracer := &reportBackendTracer{ctx: ctx, admin: admin}
+			client := dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer))
 			store := NewPostgreSQLBridgeAPIStore(client)
 			store.ProcessPolicy.ReportTimeout = 80 * time.Millisecond
 			rpc, returned := receiptJoinedRPC(t, store, "pod-report-deadline")
-			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stop()
 			registered, err := rpc.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: "report-deadline"})
 			if err != nil {
 				t.Fatal(err)
@@ -382,6 +521,7 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 			}
 			defer cancel()
 			done := make(chan error, 1)
+			tracer.arm()
 			start := time.Now()
 			report := &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: registered.RuntimeProcessId, RegistrationReceipt: registered.RegistrationReceipt, Phase: bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING}
 			go func() { _, err := rpc.ReportRuntimeProcess(caller, report); done <- err }()
@@ -389,9 +529,23 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 			// the real report is waiting at its Pod arbitration row.
 			if variant == "parent cancellation" {
 				for {
-					var waiting bool
-					if err := admin.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%last_promoted_order%')`).Scan(&waiting); err != nil {
+					captures, err := tracer.snapshot()
+					if err != nil {
 						t.Fatal(err)
+					}
+					waiting := false
+					for _, capture := range captures {
+						if !capture.pod {
+							continue
+						}
+						state, exists, err := readReportBackendState(ctx, admin, capture.pid)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if exists && state.backendStart == capture.backendStart && state.state == "active" && state.wait == "Lock" && state.xactStart.Valid {
+							waiting = true
+							t.Logf("exact report Pod wait pid=%d backend=%s xact=%s", capture.pid, capture.backendStart, state.xactStart.String)
+						}
 					}
 					if waiting {
 						break
@@ -432,6 +586,22 @@ func TestPostgreSQLRuntimeProcessReportDeadlineFencesPromotion(t *testing.T) {
 			}
 			if before != after {
 				t.Fatal("expired/cancelled report changed candidate row")
+			}
+			captures, err := tracer.snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(captures) == 0 {
+				if variant == "parent cancellation" {
+					t.Fatal("parent cancellation lacked exact report SQL capture")
+				}
+				t.Log("report expired before any traced report SQL; no report backend transaction was started")
+			}
+			// Keep our blocker until the exact remote transaction ends. Go
+			// handler return alone cannot join native asynchronous cleanup.
+			// This is a backend ownership fence, not a retry of NOWAIT.
+			for _, capture := range captures {
+				awaitReportBackendTerminal(ctx, t, admin, capture)
 			}
 			if err := blocker.Commit(); err != nil {
 				t.Fatal(err)
