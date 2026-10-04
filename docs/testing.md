@@ -49,8 +49,32 @@ not execute that profile. From a clean SDK checkout at the runner's pinned
 commit, install frozen dependencies with lifecycle scripts disabled, run
 `bash ./scripts/build`, then run
 `TETRAL_ENGINE_ROOT=/absolute/path/to/engine bun run test:compatibility:static`.
-These source proofs complement the local SDK integration suite; they do not
+These source proofs complement the local SDK integration suites; they do not
 establish runtime or database interoperability by themselves.
+
+The registered SDK Session preview proofs run through
+`TestForkSDKPreviewCompatibilityProofs` in the existing Go evidence owner. Its
+inventory declaration requires PostgreSQL, MinIO, NATS, Bun workspaces and the
+pinned SDK. Full and Affected execute it while those dependencies are alive;
+the normal CI Go Race shards include it. Fast compiles it without execution.
+To reproduce with automatic setup, run from a clean Engine checkout:
+
+```sh
+go run ./internal/testinfra/cmd/tetral-test --profile full --groups go
+```
+
+The test runs the SDK's `test:compatibility:integration` command with the exact
+Engine root and revision. Frozen SDK installation disables lifecycle scripts;
+this launcher resolves source aliases directly and requires no SDK build or
+`dist` directory. The SDK selects only the named public streaming Identity
+subtest, validates executed Go JSONL and all five preview observations, and
+settles its two registered handlers. The Engine wrapper requires matching
+source/pass markers and exactly two passing handlers, so exit zero with an
+empty registry cannot pass. Nested processes inherit the runner's process and
+database cleanup custody. Their original output remains in the Go artifact.
+The runner tears down dependencies before a profile returns; a later standalone
+SDK command cannot reuse them. Standalone execution requires independently
+prepared dependencies and clean, matching Engine and SDK sources.
 
 Bridge, Job Runner and their shared Runtime configuration, MCP manifest and
 durable-control packages form one verification boundary. Affected selection

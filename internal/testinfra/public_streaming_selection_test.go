@@ -43,8 +43,11 @@ func TestPublicStreamingChangesSelectActualProtocolConsumers(t *testing.T) {
 			}
 		})
 	}
+	names := []string{"TestForkSDKPreviewCompatibilityProofs"}
 	for _, suffix := range []string{"Identity", "BrokerFailure", "Ordering", "RequestClosure", "Subscribers", "Visibility", "Backpressure", "EndPublication", "Recovery", "ListCursors"} {
-		name := "TestPostgreSQLPublicStreaming" + suffix
+		names = append(names, "TestPostgreSQLPublicStreaming"+suffix)
+	}
+	for _, name := range names {
 		found := false
 		for _, declared := range inventory.GoTests {
 			if declared.Name != name {
