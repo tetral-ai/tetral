@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 113 {
-		t.Fatalf("canonical object count = %d; want 113", len(canonical))
+	if len(canonical) != 115 {
+		t.Fatalf("canonical object count = %d; want 115 including two preview-client egress policies", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)

@@ -139,7 +139,7 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 		capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
 		for _, capability := range capabilities {
 			switch capability {
-			case "postgresql", "minio", "docker", "bun-workspaces", "sdk", "envoy", "bun-image":
+			case "postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk", "envoy", "bun-image":
 				set[capability] = true
 			case "external-sdk-checkout", "cross-language-integration":
 				set["sdk"] = true

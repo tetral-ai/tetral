@@ -21,7 +21,7 @@ metadata:
     app.kubernetes.io/part-of: tetral
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas.eventStream }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -40,6 +40,9 @@ spec:
     spec:
       serviceAccountName: event-stream
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: event-stream
           image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
@@ -48,6 +51,8 @@ spec:
             - /usr/local/bin/event-stream
           env:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
+{{ include "tetral.previewEnv" . | trim | indent 12 }}
+{{ include "tetral.eventStreamPolicy" . | trim | indent 12 }}
             - name: TETRAL_EVENT_STREAM_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
@@ -76,6 +81,7 @@ spec:
               path: /ready
               port: http
           volumeMounts:
+{{ include "tetral.previewMounts" . | trim | indent 12 }}
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -89,6 +95,7 @@ spec:
               drop:
                 - ALL
       volumes:
+{{ include "tetral.previewVolumes" (dict "root" . "role" "subscriber") | trim | indent 8 }}
         - name: store-trust
           configMap:
             name: {{ .Values.transport.storeTrustConfigMap | quote }}

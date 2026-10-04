@@ -22,6 +22,7 @@ func TestFastPlanStartsNoDurableDependency(t *testing.T) {
 	starters := dependencyStarters{
 		postgresql: func(context.Context, *dependencyManager) error { calls["postgresql"]++; return nil },
 		minio:      func(context.Context, *dependencyManager) error { calls["minio"]++; return nil },
+		nats:       func(context.Context, *dependencyManager) error { calls["nats"]++; return nil },
 		docker:     func(context.Context) error { calls["docker"]++; return nil },
 	}
 	manager, err := startDependenciesWith(context.Background(), plan.Dependencies, nil, starters)

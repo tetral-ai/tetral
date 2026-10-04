@@ -69,7 +69,7 @@ func TestCoveragePrerequisitesIncludeProductionTransportImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dependency := range []string{"postgresql", "minio", "sdk", "bun-workspaces", "docker", "envoy", "bun-image"} {
+	for _, dependency := range []string{"postgresql", "minio", "nats", "sdk", "bun-workspaces", "docker", "envoy", "bun-image"} {
 		if !contains(plan.Dependencies, dependency) {
 			t.Errorf("coverage omitted %s", dependency)
 		}

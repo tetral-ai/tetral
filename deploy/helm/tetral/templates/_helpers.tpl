@@ -45,6 +45,9 @@ sidecar.istio.io/userVolumeMount: '[{"name":"runtime-direct-leaf","mountPath":"/
 {{- end }}
 {{- else if eq .role "job-runner" }}
 traffic.sidecar.istio.io/excludeOutboundPorts: {{ if eq $root.Values.transport.profile "hardened" }}"19443"{{ else }}"19090"{{ end }}
+{{- else if and (eq .role "provider-gateway") $root.Values.preview.enabled }}
+# Native NATS security and reconnect are owned by its official client.
+traffic.sidecar.istio.io/excludeOutboundPorts: "4222"
 {{- end }}
 {{- end -}}
 
@@ -86,8 +89,10 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 {{- $replicas := int (get $.Values.replicas $key) -}}
 {{- $goProcesses = add $goProcesses $replicas (int (include "tetral.surge" (dict "root" $ "replicas" $replicas))) -}}
 {{- end -}}
-{{/* Queue and Event Stream remain fixed at one replica each. */}}
-{{- range list "queue" "event-stream" -}}
+{{- $eventStream := int .Values.replicas.eventStream -}}
+{{- $goProcesses = add $goProcesses $eventStream (int (include "tetral.surge" (dict "root" . "replicas" $eventStream))) -}}
+{{/* Queue remains fixed at one replica. */}}
+{{- range list "queue" -}}
 {{- $goProcesses = add $goProcesses 1 (int (include "tetral.surge" (dict "root" $ "replicas" 1))) -}}
 {{- end -}}
 {{- $git := int (include "tetral.gitProxyMaxReplicas" .) -}}

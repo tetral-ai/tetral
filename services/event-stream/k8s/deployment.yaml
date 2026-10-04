@@ -28,6 +28,9 @@ spec:
     spec:
       serviceAccountName: event-stream
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: event-stream
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -41,6 +44,42 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_NATS_SERVERS
+              value: "nats://tetral-nats.tetral-system.svc.cluster.local:4222"
+            - name: TETRAL_NATS_USER_PATH
+              value: /var/run/tetral/nats-role/user
+            - name: TETRAL_NATS_PASSWORD_PATH
+              value: /var/run/tetral/nats-role/password
+            - name: TETRAL_EVENT_STREAM_ACTIVE_REQUESTS
+              value: "32"
+            - name: TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_POLL_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_PREVIEW_SETUP_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_BYTES
+              value: "262144"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_FRAMES
+              value: "128"
+            - name: TETRAL_EVENT_STREAM_WRITE_TIMEOUT_MS
+              value: "10000"
+            - name: TETRAL_NATS_CONNECT_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_NATS_RECONNECT_WAIT_MS
+              value: "1000"
+            - name: TETRAL_NATS_PING_INTERVAL_MS
+              value: "120000"
+            - name: TETRAL_NATS_MAX_PING_OUT
+              value: "2"
             - name: TETRAL_EVENT_STREAM_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
@@ -69,6 +108,9 @@ spec:
               path: /ready
               port: http
           volumeMounts:
+            - name: nats-role
+              mountPath: /var/run/tetral/nats-role
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -90,6 +132,15 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: nats-role
+          secret:
+            secretName: "tetral-nats-subscriber"
+            defaultMode: 0440
+            items:
+              - key: user
+                path: user
+              - key: password
+                path: password
         - name: store-trust
           configMap:
             name: "tetral-store-trust"

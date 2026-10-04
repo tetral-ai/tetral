@@ -82,3 +82,27 @@ that silently permits more than the default did.
 {{- if gt (add (int .Values.lifecycle.webDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Web drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}
 {{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Queue drain and cancellation join must fit 25s application allocation, reserving 5s signal/proxy margin in 30s Pod grace" }}{{ end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.replicas.eventStream)) }}{{ fail "replicas.eventStream must be a positive integer" }}{{ end }}
+{{- if .Values.preview.enabled }}
+{{- if not (regexMatch "^[A-Za-z0-9.-]+:4222$" .Values.preview.brokerAddress) }}{{ fail "preview.brokerAddress must be a broker DNS name on port 4222 without credentials" }}{{ end }}
+{{- range $key := list "publisherSecret" "subscriberSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required" $key) }}{{ end }}{{ end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "trustConfigMap" "publisherLeafSecret" "subscriberLeafSecret" }}{{- if not (get $.Values.preview $key) }}{{ fail (printf "preview.%s is required in the protected profile" $key) }}{{ end }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.preview.enabled) }}{{ fail "preview.enabled must be a boolean" }}{{ end }}
+{{- $groups := list (dict "path" "eventStream" "values" .Values.eventStream "maxima" (dict "pollIntervalMs" 60000 "heartbeatIntervalMs" 60000 "writeTimeoutMs" 60000 "previewSetupTimeoutMs" 10000 "hubMaxBytes" 67108864 "hubMaxFrames" 16384 "viewerMaxBytes" 8388608 "viewerMaxFrames" 4096 "subscriptionMaxBytes" 67108864 "subscriptionMaxFrames" 16384 "activeRequests" 4096)) }}
+{{- if .Values.preview.enabled }}
+{{- $groups = append $groups (dict "path" "preview.gateway" "values" .Values.preview.gateway "maxima" (dict "queueBytes" 9007199254740991 "queueFrames" 9007199254740991 "batchBytes" 262144 "batchFrames" 9007199254740991 "connectTimeoutMs" 60000 "flushTimeoutMs" 60000 "retryMaxMs" 60000 "credentialPollMs" 60000 "pingIntervalMs" 60000 "maxPingOut" 16)) }}
+{{- $groups = append $groups (dict "path" "preview.subscriber" "values" .Values.preview.subscriber "maxima" (dict "connectTimeoutMs" 5000 "reconnectWaitMs" 5000 "pingIntervalMs" 3600000 "maxPingOut" 16)) }}
+{{- end }}
+{{- range $group := $groups }}
+{{- range $key, $maximum := $group.maxima }}
+{{- $value := get $group.values $key }}
+{{- if or (not (has (kindOf $value) $numericKinds)) (le (float64 $value) 0.0) (ne (float64 $value) (floor (float64 $value))) (gt (float64 $value) (float64 $maximum)) }}{{ fail (printf "%s.%s must be a positive integer within its typed service bound" $group.path $key) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if or (gt (int .Values.eventStream.viewerMaxBytes) (int .Values.eventStream.hubMaxBytes)) (gt (int .Values.eventStream.viewerMaxFrames) (int .Values.eventStream.hubMaxFrames)) }}{{ fail "eventStream viewer bounds must fit hub bounds" }}{{ end }}
+{{- if .Values.preview.enabled }}
+{{- if or (lt (float64 .Values.preview.gateway.queueBytes) (mul 2 (int .Values.preview.gateway.batchBytes) | float64)) (gt (float64 .Values.preview.gateway.batchFrames) (float64 .Values.preview.gateway.queueFrames)) }}{{ fail "preview.gateway batches must fit the bounded publisher queue" }}{{ end }}
+{{- end }}

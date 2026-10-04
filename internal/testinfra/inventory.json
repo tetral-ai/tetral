@@ -7,6 +7,11 @@
       "dependencies": ["postgresql", "docker", "bun-workspaces"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/internal/testinfra",
+      "name": "TestNATSRolePermissionsThroughActualBroker",
+      "dependencies": ["nats"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/bridge",
       "name": "TestPostgreSQLAbnormalContentRetentionCold",
       "dependencies": ["postgresql", "bun-workspaces"]

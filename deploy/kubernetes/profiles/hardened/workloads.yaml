@@ -814,6 +814,46 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: provider-gateway-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports:
+        - protocol: TCP
+          port: 4222
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: event-stream-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: event-stream
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports:
+        - protocol: TCP
+          port: 4222
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: provider-gateway
   namespace: tetral-system
   labels:
@@ -2534,6 +2574,9 @@ spec:
     spec:
       serviceAccountName: event-stream
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: event-stream
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev
@@ -2547,6 +2590,48 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_NATS_SERVERS
+              value: "tls://tetral-nats.tetral-system.svc.cluster.local:4222"
+            - name: TETRAL_NATS_USER_PATH
+              value: /var/run/tetral/nats-role/user
+            - name: TETRAL_NATS_PASSWORD_PATH
+              value: /var/run/tetral/nats-role/password
+            - name: TETRAL_NATS_TLS_CA_PATH
+              value: /var/run/tetral/nats-trust/ca.crt
+            - name: TETRAL_NATS_TLS_CERT_PATH
+              value: /var/run/tetral/nats-leaf/tls.crt
+            - name: TETRAL_NATS_TLS_KEY_PATH
+              value: /var/run/tetral/nats-leaf/tls.key
+            - name: TETRAL_EVENT_STREAM_ACTIVE_REQUESTS
+              value: "32"
+            - name: TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_HUB_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_POLL_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_PREVIEW_SETUP_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES
+              value: "8388608"
+            - name: TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_FRAMES
+              value: "2048"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_BYTES
+              value: "262144"
+            - name: TETRAL_EVENT_STREAM_VIEWER_MAX_FRAMES
+              value: "128"
+            - name: TETRAL_EVENT_STREAM_WRITE_TIMEOUT_MS
+              value: "10000"
+            - name: TETRAL_NATS_CONNECT_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_NATS_RECONNECT_WAIT_MS
+              value: "1000"
+            - name: TETRAL_NATS_PING_INTERVAL_MS
+              value: "120000"
+            - name: TETRAL_NATS_MAX_PING_OUT
+              value: "2"
             - name: TETRAL_EVENT_STREAM_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
@@ -2575,6 +2660,15 @@ spec:
               path: /ready
               port: http
           volumeMounts:
+            - name: nats-role
+              mountPath: /var/run/tetral/nats-role
+              readOnly: true
+            - name: nats-trust
+              mountPath: /var/run/tetral/nats-trust
+              readOnly: true
+            - name: nats-leaf
+              mountPath: /var/run/tetral/nats-leaf
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -2596,6 +2690,27 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: nats-role
+          secret:
+            secretName: "tetral-nats-subscriber"
+            defaultMode: 0440
+            items:
+              - key: user
+                path: user
+              - key: password
+                path: password
+        - name: nats-trust
+          configMap:
+            name: "tetral-nats-client-trust"
+        - name: nats-leaf
+          secret:
+            secretName: "tetral-nats-subscriber-tls"
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
         - name: store-trust
           configMap:
             name: "tetral-store-trust"
@@ -3095,6 +3210,8 @@ spec:
         sidecar.istio.io/nativeSidecar: "true"
         sidecar.istio.io/proxyImage: "docker.io/istio/proxyv2:1.31.1@sha256:d86cba0dd1eb15c00b6901c69ce5ae3d2d5f8427a47751098cf8c3ab2a4a62e9"
         proxy.istio.io/config: '{"holdApplicationUntilProxyStarts":true,"terminationDrainDuration":"5s"}'
+        # Native NATS security and reconnect are owned by its official client.
+        traffic.sidecar.istio.io/excludeOutboundPorts: "4222"
       labels:
         app.kubernetes.io/name: provider-gateway
         app.kubernetes.io/part-of: tetral
@@ -3102,6 +3219,9 @@ spec:
     spec:
       serviceAccountName: provider-gateway
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 60
       containers:
         - name: provider-gateway
@@ -3117,6 +3237,38 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DATABASE_POOL_MAX
               value: "10"
+            - name: TETRAL_NATS_SERVERS
+              value: "tls://tetral-nats.tetral-system.svc.cluster.local:4222"
+            - name: TETRAL_NATS_USER_PATH
+              value: /var/run/tetral/nats-role/user
+            - name: TETRAL_NATS_PASSWORD_PATH
+              value: /var/run/tetral/nats-role/password
+            - name: TETRAL_NATS_TLS_CA_PATH
+              value: /var/run/tetral/nats-trust/ca.crt
+            - name: TETRAL_NATS_TLS_CERT_PATH
+              value: /var/run/tetral/nats-leaf/tls.crt
+            - name: TETRAL_NATS_TLS_KEY_PATH
+              value: /var/run/tetral/nats-leaf/tls.key
+            - name: TETRAL_GATEWAY_PREVIEW_BATCH_BYTES
+              value: "262144"
+            - name: TETRAL_GATEWAY_PREVIEW_BATCH_FRAMES
+              value: "64"
+            - name: TETRAL_GATEWAY_PREVIEW_FLUSH_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_GATEWAY_PREVIEW_QUEUE_BYTES
+              value: "4194304"
+            - name: TETRAL_GATEWAY_PREVIEW_QUEUE_FRAMES
+              value: "1024"
+            - name: TETRAL_NATS_CONNECT_TIMEOUT_MS
+              value: "1000"
+            - name: TETRAL_NATS_CREDENTIAL_POLL_MS
+              value: "250"
+            - name: TETRAL_NATS_MAX_PING_OUT
+              value: "1"
+            - name: TETRAL_NATS_PING_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_NATS_RETRY_MAX_MS
+              value: "5000"
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: "30000"
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
@@ -3191,6 +3343,15 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: nats-role
+              mountPath: /var/run/tetral/nats-role
+              readOnly: true
+            - name: nats-trust
+              mountPath: /var/run/tetral/nats-trust
+              readOnly: true
+            - name: nats-leaf
+              mountPath: /var/run/tetral/nats-leaf
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -3201,6 +3362,27 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
       volumes:
+        - name: nats-role
+          secret:
+            secretName: "tetral-nats-publisher"
+            defaultMode: 0440
+            items:
+              - key: user
+                path: user
+              - key: password
+                path: password
+        - name: nats-trust
+          configMap:
+            name: "tetral-nats-client-trust"
+        - name: nats-leaf
+          secret:
+            secretName: "tetral-nats-publisher-tls"
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
         - name: store-trust
           configMap:
             name: "tetral-store-trust"

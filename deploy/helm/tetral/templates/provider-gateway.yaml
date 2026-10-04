@@ -38,6 +38,9 @@ spec:
     spec:
       serviceAccountName: provider-gateway
       automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 60
       containers:
         - name: provider-gateway
@@ -48,6 +51,8 @@ spec:
             - /app/dist/provider-gateway/src-command.js
           env:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" true) | trim | indent 12 }}
+{{ include "tetral.previewEnv" . | trim | indent 12 }}
+{{ include "tetral.previewGatewayPolicy" . | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.providerDrainMs | quote }}
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
@@ -114,6 +119,7 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+{{ include "tetral.previewMounts" . | trim | indent 12 }}
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -124,6 +130,7 @@ spec:
               mountPath: /var/run/secrets/tetral-internal-grpc/bridge
               readOnly: true
       volumes:
+{{ include "tetral.previewVolumes" (dict "root" . "role" "publisher") | trim | indent 8 }}
         - name: store-trust
           configMap:
             name: {{ .Values.transport.storeTrustConfigMap | quote }}

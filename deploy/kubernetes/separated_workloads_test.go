@@ -135,7 +135,14 @@ func validateSeparatedDeployment(text, name string, c separatedContract) error {
 	if strings.Count(text, "app.kubernetes.io/name: "+name+"\n") != 3 {
 		return fmt.Errorf("%s selector or labels differ", name)
 	}
-	if strings.Contains(text, "envFrom:") || strings.Contains(text, "secret:\n") {
+	secretText := text
+	if name == "provider-gateway" {
+		// Only this role's two named NATS credential files are granted. A
+		// complete Secret mount or subscriber/cluster grant remains forbidden.
+		scoped := "        - name: nats-role\n          secret:\n            secretName: \"tetral-nats-publisher\"\n            defaultMode: 0440\n            items:\n              - key: user\n                path: user\n              - key: password\n                path: password\n"
+		secretText = strings.Replace(secretText, scoped, "", 1)
+	}
+	if strings.Contains(secretText, "envFrom:") || strings.Contains(secretText, "secret:\n") {
 		return fmt.Errorf("%s inherits unscoped Secret mounts", name)
 	}
 	ports := map[string]int{}

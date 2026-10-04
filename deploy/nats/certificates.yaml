@@ -1,0 +1,103 @@
+# Protected NATS role leaves. The operator binds tetral-native to a dedicated
+# intermediate; neither this file nor workload Pods contain signing keys.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tetral-nats-server-tls
+  namespace: tetral-system
+spec:
+  secretName: tetral-nats-server-tls
+  issuerRef:
+    name: tetral-native
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "tetral-nats.tetral-system.svc.cluster.local"
+    - "*.tetral-nats-headless.tetral-system.svc.cluster.local"
+  uris:
+    - spiffe://cluster.local/ns/tetral-system/sa/tetral-nats
+  usages:
+    - digital signature
+    - server auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tetral-nats-route-tls
+  namespace: tetral-system
+spec:
+  secretName: tetral-nats-route-tls
+  issuerRef:
+    name: tetral-native
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "*.tetral-nats-headless.tetral-system.svc.cluster.local"
+  uris:
+    - spiffe://cluster.local/ns/tetral-system/sa/tetral-nats
+  usages:
+    - digital signature
+    - server auth
+    - client auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tetral-nats-publisher-tls
+  namespace: tetral-system
+spec:
+  secretName: tetral-nats-publisher-tls
+  issuerRef:
+    name: tetral-native
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "provider-gateway.tetral-system.svc.cluster.local"
+  uris:
+    - spiffe://cluster.local/ns/tetral-system/sa/provider-gateway
+  usages:
+    - digital signature
+    - client auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tetral-nats-subscriber-tls
+  namespace: tetral-system
+spec:
+  secretName: tetral-nats-subscriber-tls
+  issuerRef:
+    name: tetral-native
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - "event-stream.tetral-system.svc.cluster.local"
+  uris:
+    - spiffe://cluster.local/ns/tetral-system/sa/event-stream
+  usages:
+    - digital signature
+    - client auth

@@ -1,12 +1,12 @@
 # Tetral Helm chart
 
 This chart installs the same Tetral platform objects as the canonical
-manifests under `deploy/kubernetes`. Default values render those 80 objects
+manifests under `deploy/kubernetes`. Default values render those 115 objects
 without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
 
-Complete prerequisites 1–8 before running the install command. Database
+Complete prerequisites 1–9 before running the install command. Database
 preparation and workspace seeding run independently before any service starts.
 
 1. **Create the two namespaces.** The default chart does not own namespaces:
@@ -134,6 +134,13 @@ preparation and workspace seeding run independently before any service starts.
    generation, the Secret inventory, the seed command, and the Daytona
    sandbox-snapshot registration that must happen before the first tool
    execution.
+
+9. **Prepare preview transport.** The default enables best-effort previews.
+   Install the separately pinned [Core NATS release](../../nats/README.md),
+   supplying publisher and subscriber role Secrets before app startup.
+   Hardened mode additionally requires the native issuer, public trust and
+   separate role leaves described there. Set `preview.enabled=false` for a
+   formal-only installation; PostgreSQL SSE and history remain active.
 
 ## Install
 
@@ -502,3 +509,38 @@ set in `deploy/kubernetes/profiles/hardened` replaces the default set; applying
 both sets together is unsupported. The local TLS fixtures use controlled
 certificates and Docker networks; issuing/policy/rollout behavior still needs
 verification in the deployment's actual environment.
+
+## Public previews and Event Stream bounds
+
+`replicas.eventStream` controls independent SSE processes and contributes each
+replica plus rollout surge to the PostgreSQL connection ledger. Every opted-in
+process uses an ordinary Core NATS subscription, so cross-process viewers each
+receive their own preview copy. Gateway receives only publisher credentials;
+Event Stream receives only subscriber credentials. The Runtime, Runner, API,
+Auth and MCP Connector receive no NATS credentials. `preview.brokerAddress`
+is a DNS name on 4222 without URL credentials. Standard routing uses
+`nats://`; hardened native transport uses `tls://` with complete verified
+trust/role certificate paths and excludes 4222 from Gateway's mesh capture.
+
+`preview.gateway` configures the bounded publication queue, batch byte/frame
+limits, connect/flush deadlines, retry cap, credential poll interval, and native
+NATS heartbeat settings. `preview.subscriber` configures connect/reconnect
+deadlines and its own native NATS heartbeat settings. `eventStream`
+configures formal polling/heartbeat/write deadlines, preview setup timeout,
+hub/viewer/subscription byte and frame limits, and active request limit.
+Defaults are projections of the typed service defaults. The chart rejects
+nonpositive/out-of-range values, a viewer larger than its hub, and a publisher
+batch that cannot fit the queue. Values use milliseconds where named `Ms`.
+The two roles share environment key names but retain distinct client defaults:
+
+| Helm role settings | `TETRAL_NATS_PING_INTERVAL_MS` | `TETRAL_NATS_MAX_PING_OUT` |
+|---|---|---|
+| `preview.gateway.pingIntervalMs` / `maxPingOut` | Default 1000; range 1–60000 ms | Default 1; range 1–16 |
+| `preview.subscriber.pingIntervalMs` / `maxPingOut` | Default 120000; range 1–3600000 ms | Default 2; range 1–16 |
+
+Gateway's defaults bound detection of an idle lost publisher. Event Stream keeps
+the pinned Go client's existing two-minute/two-outstanding-ping defaults; its
+reconnect supervisor and projected timeout settings remain independent.
+These operational limits do not change preview JSON or durable event identity.
+Set `preview.enabled=false` to omit all broker credentials, network grants and
+publisher policy variables; formal Event Stream bounds remain configured.

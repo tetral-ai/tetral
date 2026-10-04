@@ -37,5 +37,40 @@
         "linux_amd64_child_digest": "sha256:aeda10476eecca07f7d3a2776eda30d0452c133ea87b40335bc6031fb01de789"
       }
     ]
+  },
+  "nats": {
+    "version": "2.15.0",
+    "charts": [
+      {
+        "name": "nats",
+        "version": "2.15.0",
+        "url": "https://github.com/nats-io/k8s/releases/download/nats-2.15.0/nats-2.15.0.tgz",
+        "sha256": "cf21ffddb6718a57e34dd9856c09e77bd6a51e309fb597e05cafa1e3c2557b99"
+      }
+    ],
+    "clients": {
+      "go": "1.53.0",
+      "javascript_transport_node": "3.4.0"
+    },
+    "images": [
+      {
+        "component": "server",
+        "reference": "docker.io/nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4",
+        "top_level_digest": "sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4",
+        "linux_amd64_child_digest": "sha256:eda962d67930eda338222072d9a9f3818855d922ad224c399b0b01d251e9b91b"
+      },
+      {
+        "component": "reloader",
+        "reference": "docker.io/natsio/nats-server-config-reloader:0.23.0@sha256:64cb6c858e794906d3167378e02b7e0feb83c4e14c07b371eb8d921ef8c4a60b",
+        "top_level_digest": "sha256:64cb6c858e794906d3167378e02b7e0feb83c4e14c07b371eb8d921ef8c4a60b",
+        "linux_amd64_child_digest": "sha256:1418d42cea39ea729c1d34ca26ba33d967abdf040bad45ec1314c807bfacc56f"
+      },
+      {
+        "component": "exporter",
+        "reference": "docker.io/natsio/prometheus-nats-exporter:0.20.1@sha256:4fbf6dacb84780a45a1c3af9b1080c69451a288d20902deae671b80717bb8f61",
+        "top_level_digest": "sha256:4fbf6dacb84780a45a1c3af9b1080c69451a288d20902deae671b80717bb8f61",
+        "linux_amd64_child_digest": "sha256:2a4c7a0656c29dacc11dc9f3584ca08a9bc08219eaa14b332abd6234e031e5f4"
+      }
+    ]
   }
 }

@@ -256,6 +256,8 @@ resources:
 
 # Each Deployment starts independently; enabled provider autoscaling retains its floor of two.
 replicas:
+  # Event Stream distributes new SSE connections; active streams stay on their Pod.
+  eventStream: 1
   api: 1
   auth: 1
   bridge: 1
@@ -291,6 +293,47 @@ transport:
   goPoolMax: 20
   bunPoolMax: 10
   externalDatabaseConnections: null
+
+# Core NATS is an independently installed, pinned official-chart release.
+# Disable only previews; PostgreSQL formal SSE always remains active.
+preview:
+  enabled: true
+  brokerAddress: tetral-nats.tetral-system.svc.cluster.local:4222
+  publisherSecret: tetral-nats-publisher
+  subscriberSecret: tetral-nats-subscriber
+  trustConfigMap: tetral-nats-client-trust
+  publisherLeafSecret: tetral-nats-publisher-tls
+  subscriberLeafSecret: tetral-nats-subscriber-tls
+  gateway:
+    queueBytes: 4194304
+    queueFrames: 1024
+    batchBytes: 262144
+    batchFrames: 64
+    connectTimeoutMs: 1000
+    flushTimeoutMs: 1000
+    retryMaxMs: 5000
+    credentialPollMs: 250
+    pingIntervalMs: 1000
+    maxPingOut: 1
+  subscriber:
+    connectTimeoutMs: 1000
+    reconnectWaitMs: 1000
+    pingIntervalMs: 120000
+    maxPingOut: 2
+
+# Projections of Event Stream's typed defaults, including formal SSE timers.
+eventStream:
+  pollIntervalMs: 1000
+  heartbeatIntervalMs: 1000
+  writeTimeoutMs: 10000
+  previewSetupTimeoutMs: 1000
+  hubMaxBytes: 8388608
+  hubMaxFrames: 2048
+  viewerMaxBytes: 262144
+  viewerMaxFrames: 128
+  subscriptionMaxBytes: 8388608
+  subscriptionMaxFrames: 2048
+  activeRequests: 32
 
 # Resolved against each workload replica/HPA bound in the connection ledger.
 rollout:

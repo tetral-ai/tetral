@@ -1,0 +1,464 @@
+---
+# Source: nats/templates/pod-disruption-budget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats
+  namespace: tetral-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: nats
+      app.kubernetes.io/instance: tetral-nats
+      app.kubernetes.io/name: nats
+---
+# Source: nats/templates/service-account.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats
+  namespace: tetral-system
+---
+# Source: nats/templates/config-map.yaml
+apiVersion: v1
+data:
+  nats.conf: |
+    {
+      "authorization": {
+        "users": [
+          {
+            "password": $NATS_PUBLISHER_PASSWORD,
+            "permissions": {
+              "publish": [
+                "preview.v1.>"
+              ],
+              "subscribe": {
+                "deny": [
+                  ">"
+                ]
+              }
+            },
+            "user": $NATS_PUBLISHER_USER
+          },
+          {
+            "password": $NATS_SUBSCRIBER_PASSWORD,
+            "permissions": {
+              "publish": {
+                "deny": [
+                  ">"
+                ]
+              },
+              "subscribe": [
+                "preview.v1.>"
+              ]
+            },
+            "user": $NATS_SUBSCRIBER_USER
+          }
+        ]
+      },
+      "client_advertise": $NATS_CLIENT_ADVERTISE,
+      "cluster": {
+        "authorization": {
+          "password": $NATS_CLUSTER_PASSWORD,
+          "user": $NATS_CLUSTER_USER
+        },
+        "name": "tetral-nats",
+        "no_advertise": false,
+        "port": 6222,
+        "routes": [
+          $NATS_ROUTE_0,
+          $NATS_ROUTE_1,
+          $NATS_ROUTE_2
+        ],
+        "tls": {
+          "ca_file": "/etc/nats-ca-cert/ca.crt",
+          "cert_file": "/etc/nats-certs/cluster/tls.crt",
+          "key_file": "/etc/nats-certs/cluster/tls.key",
+          "min_version": "1.2",
+          "verify": true
+        }
+      },
+      "http_port": 8222,
+      "lame_duck_duration": "30s",
+      "lame_duck_grace_period": "10s",
+      "max_payload": 1048576,
+      "pid_file": "/var/run/nats/nats.pid",
+      "port": 4222,
+      "server_name": $SERVER_NAME,
+      "tls": {
+        "ca_file": "/etc/nats-ca-cert/ca.crt",
+        "cert_file": "/etc/nats-certs/nats/tls.crt",
+        "handshake_first": true,
+        "key_file": "/etc/nats-certs/nats/tls.key",
+        "min_version": "1.2",
+        "verify": true
+      }
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats-config
+  namespace: tetral-system
+---
+# Source: nats/templates/headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats-headless
+  namespace: tetral-system
+spec:
+  clusterIP: None
+  ports:
+  - appProtocol: tls
+    name: nats
+    port: 4222
+    targetPort: nats
+  - appProtocol: tls
+    name: cluster
+    port: 6222
+    targetPort: cluster
+  - appProtocol: http
+    name: monitor
+    port: 8222
+    targetPort: monitor
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/name: nats
+---
+# Source: nats/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats
+  namespace: tetral-system
+spec:
+  ports:
+  - appProtocol: tls
+    name: nats
+    port: 4222
+    targetPort: nats
+  selector:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/name: nats
+---
+# Source: nats/templates/stateful-set.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: tetral-nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/version: 2.15.0
+    helm.sh/chart: nats-2.15.0
+  name: tetral-nats
+  namespace: tetral-system
+spec:
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: nats
+      app.kubernetes.io/instance: tetral-nats
+      app.kubernetes.io/name: nats
+  serviceName: tetral-nats-headless
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
+      labels:
+        app.kubernetes.io/component: nats
+        app.kubernetes.io/instance: tetral-nats
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: nats
+        app.kubernetes.io/version: 2.15.0
+        helm.sh/chart: nats-2.15.0
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/instance: tetral-nats
+                app.kubernetes.io/name: nats
+            topologyKey: kubernetes.io/hostname
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - --config
+        - /etc/nats-config/nats.conf
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SERVER_NAME
+          value: $(POD_NAME)
+        - name: NATS_CLIENT_ADVERTISE
+          value: $(POD_NAME).tetral-nats-headless.tetral-system.svc.cluster.local:4222
+        - name: NATS_CLUSTER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: tetral-nats-cluster-credentials
+        - name: NATS_CLUSTER_USER
+          valueFrom:
+            secretKeyRef:
+              key: user
+              name: tetral-nats-cluster-credentials
+        - name: NATS_PUBLISHER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: publisher_password
+              name: tetral-nats-server-credentials
+        - name: NATS_PUBLISHER_USER
+          valueFrom:
+            secretKeyRef:
+              key: publisher_user
+              name: tetral-nats-server-credentials
+        - name: NATS_ROUTE_0
+          valueFrom:
+            secretKeyRef:
+              key: route_0
+              name: tetral-nats-cluster-credentials
+        - name: NATS_ROUTE_1
+          valueFrom:
+            secretKeyRef:
+              key: route_1
+              name: tetral-nats-cluster-credentials
+        - name: NATS_ROUTE_2
+          valueFrom:
+            secretKeyRef:
+              key: route_2
+              name: tetral-nats-cluster-credentials
+        - name: NATS_SUBSCRIBER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: subscriber_password
+              name: tetral-nats-server-credentials
+        - name: NATS_SUBSCRIBER_USER
+          valueFrom:
+            secretKeyRef:
+              key: subscriber_user
+              name: tetral-nats-server-credentials
+        image: docker.io/nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - nats-server
+              - -sl=ldm=/var/run/nats/nats.pid
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: nats
+        ports:
+        - containerPort: 4222
+          name: nats
+        - containerPort: 6222
+          name: cluster
+        - containerPort: 8222
+          name: monitor
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: "1"
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        startupProbe:
+          failureThreshold: 90
+          httpGet:
+            path: /healthz
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /etc/nats-config
+          name: config
+        - mountPath: /var/run/nats
+          name: pid
+        - mountPath: /etc/nats-ca-cert
+          name: tls-ca
+        - mountPath: /etc/nats-certs/nats
+          name: nats-tls
+        - mountPath: /etc/nats-certs/cluster
+          name: cluster-tls
+      - args:
+        - -pid
+        - /var/run/nats/nats.pid
+        - -config
+        - /etc/nats-config/nats.conf
+        - -config
+        - /etc/nats-ca-cert/ca.crt
+        - -config
+        - /etc/nats-certs/cluster/tls.crt
+        - -config
+        - /etc/nats-certs/cluster/tls.key
+        - -config
+        - /etc/nats-ca-cert/ca.crt
+        - -config
+        - /etc/nats-certs/nats/tls.crt
+        - -config
+        - /etc/nats-certs/nats/tls.key
+        image: docker.io/natsio/nats-server-config-reloader:0.23.0@sha256:64cb6c858e794906d3167378e02b7e0feb83c4e14c07b371eb8d921ef8c4a60b
+        name: reloader
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        volumeMounts:
+        - mountPath: /var/run/nats
+          name: pid
+        - mountPath: /etc/nats-config
+          name: config
+        - mountPath: /etc/nats-ca-cert
+          name: tls-ca
+        - mountPath: /etc/nats-certs/nats
+          name: nats-tls
+        - mountPath: /etc/nats-certs/cluster
+          name: cluster-tls
+      - args:
+        - -port=7777
+        - -connz
+        - -routez
+        - -subz
+        - -varz
+        - -prefix=nats
+        - -use_internal_server_id
+        - http://localhost:8222/
+        image: docker.io/natsio/prometheus-nats-exporter:0.20.1@sha256:4fbf6dacb84780a45a1c3af9b1080c69451a288d20902deae671b80717bb8f61
+        name: prom-exporter
+        ports:
+        - containerPort: 7777
+          name: prom-metrics
+      enableServiceLinks: false
+      serviceAccountName: tetral-nats
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/component: nats
+            app.kubernetes.io/instance: tetral-nats
+            app.kubernetes.io/name: nats
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+      volumes:
+      - configMap:
+          name: tetral-nats-config
+        name: config
+      - emptyDir: {}
+        name: pid
+      - configMap:
+          name: tetral-nats-broker-trust
+        name: tls-ca
+      - name: nats-tls
+        secret:
+          secretName: tetral-nats-server-tls
+      - name: cluster-tls
+        secret:
+          secretName: tetral-nats-route-tls
+  volumeClaimTemplates: null
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tetral-nats
+  namespace: tetral-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+      app.kubernetes.io/instance: tetral-nats
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: provider-gateway}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: event-stream}
+      ports: [{protocol: TCP, port: 4222}]
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports: [{protocol: TCP, port: 6222}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {tetral.ai/network-role: monitoring}
+      ports: [{protocol: TCP, port: 7777}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: tetral-nats
+      ports: [{protocol: TCP, port: 6222}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]

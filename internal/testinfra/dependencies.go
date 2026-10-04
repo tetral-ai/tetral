@@ -43,6 +43,7 @@ type dependencyManager struct {
 type dependencyStarters struct {
 	postgresql func(context.Context, *dependencyManager) error
 	minio      func(context.Context, *dependencyManager) error
+	nats       func(context.Context, *dependencyManager) error
 	docker     func(context.Context) error
 	sdk        func(context.Context, *dependencyManager) error
 	image      func(context.Context, *dependencyManager, string) error
@@ -51,6 +52,7 @@ type dependencyStarters struct {
 var productionDependencyStarters = dependencyStarters{
 	postgresql: func(ctx context.Context, manager *dependencyManager) error { return manager.startPostgreSQL(ctx) },
 	minio:      func(ctx context.Context, manager *dependencyManager) error { return manager.startMinIO(ctx) },
+	nats:       func(ctx context.Context, manager *dependencyManager) error { return manager.startNATS(ctx) },
 	docker:     dockerAvailable,
 	sdk:        func(ctx context.Context, manager *dependencyManager) error { return manager.startSDK(ctx) },
 	image: func(ctx context.Context, manager *dependencyManager, name string) error {
@@ -105,6 +107,15 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 		started := time.Now()
 		evidenceStart := len(manager.evidence)
 		switch dependency {
+		case "nats":
+			if starters.nats == nil {
+				_ = manager.stopBounded()
+				return nil, fmt.Errorf("NATS dependency starter is unavailable")
+			}
+			if err := starters.nats(ctx, manager); err != nil {
+				_ = manager.stopBounded()
+				return nil, err
+			}
 		case "postgresql":
 			if dsn := os.Getenv(storagetest.EnvTestDatabaseURL); dsn == "" {
 				if err := starters.postgresql(ctx, manager); err != nil {

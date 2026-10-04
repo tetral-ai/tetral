@@ -13,13 +13,13 @@ import (
 // production use of gopkg.in/yaml.v3 must remain inside the Skill
 // package/frontmatter parser or the single repository workflow parser. The
 // exact test/fixture exceptions perform object-level YAML parsing to validate
-// deployment equivalence, immutable Istiod rendering and the actual rendered
-// Runtime listener. Other Engine packages must continue to follow
+// deployment equivalence, immutable Istiod/Core NATS rendering and the actual
+// rendered Runtime listener. Other Engine packages must continue to follow
 // engine/CLAUDE.md's stdlib-first dependency rule.
 //
 // The test walks every Go source file under engine/ and asserts that
 // no file outside `internal/skill`, the exact workflow parser, or the exact
-// chart-equivalence test imports `gopkg.in/yaml.v3` directly.
+// deployment test/fixture imports `gopkg.in/yaml.v3` directly.
 func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	const yamlImport = `"gopkg.in/yaml.v3"`
 	const allowedDir = "internal/skill"
@@ -27,6 +27,7 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	allowedDeploymentParsers := map[string]bool{
 		"deploy/helm/chart_test.go":             true,
 		"deploy/istio/render_test.go":           true,
+		"deploy/nats/render_test.go":            true,
 		"integration/transporttest/runtime.go":  true,
 		"services/sandbox/k8s_manifest_test.go": true,
 	}

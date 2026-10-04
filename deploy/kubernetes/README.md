@@ -24,3 +24,11 @@ Runner Runtime visibility. TokenReview bindings cover receiving workloads only.
 The obsolete combined `gateway.yaml` and Bridge visibility role are removed.
 See the [workload replica and access contract](../helm/tetral/README.md#independent-workload-replicas-and-access)
 for default replicas, Provider autoscaling and credential audience separation.
+
+Gateway and Event Stream preview wiring requires the separately rendered
+[Core NATS release](../nats/README.md) and its role credential Secrets. The
+hardened app example additionally expects native trust and issued per-role
+leaves; it never falls back to plaintext. Regenerate application manifests with
+`python3 deploy/render-manifests.py` after changing chart values, and regenerate
+the independent broker manifests with `deploy/nats/render.py` for the selected
+replica count. Broker and application manifests have separate lifecycle owners.

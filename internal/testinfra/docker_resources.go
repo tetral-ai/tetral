@@ -35,7 +35,7 @@ type DockerMount struct {
 type ContainerSpec struct {
 	// NetworkContainer shares an already running fixture container's network
 	// namespace, as a sidecar does in a Pod. Publish ports on that container.
-	// It cannot be combined with Network, Aliases, or Ports.
+	// It cannot be combined with Network, Aliases, Ports, or HostPorts.
 	NetworkContainer *DockerContainer
 	Image            string
 	Network          string
@@ -43,9 +43,13 @@ type ContainerSpec struct {
 	Env              map[string]string
 	Mounts           []DockerMount
 	Ports            []int
-	Command          []string
-	Entrypoint       string
-	User             string
+	// HostPorts optionally fixes a published container port's loopback binding.
+	// Docker-chosen ephemeral bindings can change after stop/start. Fixtures
+	// whose clients retain endpoints must reserve explicit ports before Run.
+	HostPorts  map[int]int
+	Command    []string
+	Entrypoint string
+	User       string
 }
 
 // DockerContainer contains only public fixture identity, never environment or
@@ -113,7 +117,7 @@ func (r *DockerResources) Run(ctx context.Context, spec ContainerSpec) (*DockerC
 	args = append(args, "--name", name)
 	args = append(args, dependencyContainerLabels(r.kind, r.runID)...)
 	if peer := spec.NetworkContainer; peer != nil {
-		if spec.Network != "" || len(spec.Aliases) != 0 || len(spec.Ports) != 0 {
+		if spec.Network != "" || len(spec.Aliases) != 0 || len(spec.Ports) != 0 || len(spec.HostPorts) != 0 {
 			return nil, errors.New("shared Docker network namespace cannot declare a network, aliases, or ports")
 		}
 		if peer.owner != r || peer.Name != peer.ownedName || !contains(r.containers, peer.Name) {
@@ -130,11 +134,24 @@ func (r *DockerResources) Run(ctx context.Context, spec ContainerSpec) (*DockerC
 	for _, alias := range spec.Aliases {
 		args = append(args, "--network-alias", alias)
 	}
+	for containerPort, hostPort := range spec.HostPorts {
+		declared := false
+		for _, port := range spec.Ports {
+			declared = declared || port == containerPort
+		}
+		if !declared || hostPort < 1 || hostPort > 65535 {
+			return nil, errors.New("fixed Docker fixture binding requires a declared port and valid host port")
+		}
+	}
 	for _, port := range spec.Ports {
 		if port < 1 || port > 65535 {
 			return nil, errors.New("invalid Docker fixture port")
 		}
-		args = append(args, "--publish", "127.0.0.1::"+strconv.Itoa(port))
+		hostPort := ""
+		if fixed := spec.HostPorts[port]; fixed != 0 {
+			hostPort = strconv.Itoa(fixed)
+		}
+		args = append(args, "--publish", "127.0.0.1:"+hostPort+":"+strconv.Itoa(port))
 	}
 	for _, mount := range spec.Mounts {
 		if !filepath.IsAbs(mount.Source) || !filepath.IsAbs(mount.Target) || strings.ContainsAny(mount.Source+mount.Target, ",\n\r") {
