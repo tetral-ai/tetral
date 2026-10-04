@@ -113,14 +113,27 @@ invalidates or reactivates workspace-managed keys.
 ### Internal principal token
 
 Compact `header.payload.signature` (EdDSA, `typ = tetral-internal-principal`).
-Claims: `workspace_id`, `api_key_id`, `aud = tetral-public-api`, bound
-`method`/`path`, `iat`/`exp`, `jti` (`itok_` token id), `request_id`,
-`forwarded_for`. TTL defaults to 60 seconds
-(`TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS` overrides). Verification
-requires a valid signature, the fixed audience, an exact method-and-path
-match, a not-yet-expired `exp`, and non-empty workspace and key ids. The same
-key signs the `/v1/api_keys` list cursors (`typ = tetral-cursor`), which bind
-the workspace id, list position, and limit.
+Claims include `workspace_id`, typed `credential`, optional `identity`, and
+`authority`, in addition to `aud = tetral-public-api`, bound `method`/`path`,
+`iat`/`exp`, `jti`, `request_id`, and `forwarded_for`. The API-key credential's
+`api_key_id` is the actual durable key ID. Access-token identities carry no
+API-key ID. Authority distinguishes independent keys from identity grants and
+carries checked root revisions, policy version, a typed workspace scope, and
+an explicit operation ceiling. Missing provenance is rejected rather than
+interpreted as independent authority.
+
+TTL defaults to 60 seconds and is bounded to five minutes. Verification requires
+a valid signature, fixed audience, exact method and path, valid issuance and
+expiry times, bounded claim fields, and a complete credential/authority union.
+Duplicate fields and unknown claims are rejected. The same key signs API-key
+list cursors (`typ = tetral-cursor`), which bind workspace, list position, and limit.
+
+The shared `auth.Authorize` gate checks a registered semantic action, such as
+`sessions.read`, against the signed operation ceiling and trusted typed resource
+facts from the owning repository. `workspace_full_access` resolves to the explicit
+current registry; future operations never inherit permission from a wildcard.
+Route aliases are classified separately from action identity. Restricted scopes
+use this same gate but are not an assignable product role.
 
 ### Ports
 
@@ -172,8 +185,7 @@ the workspace id, list position, and limit.
   request, expired at `exp`.
 - **Invariants a replacement must preserve.** Asymmetric signing with
   verify-only distribution; per-request binding of audience, method, and path;
-  a positive TTL; non-empty workspace and key ids. A different scheme must keep
-  all four or downstream trust breaks.
+  a bounded positive TTL; a complete typed credential and authority union.
 - **Conformance tests.** `services/auth/routes_test.go` (mint side);
   consumer verification in `internal/eventstream/eventstream_test.go`
   (`TestEventStreamRoutesRequireSignedInternalPrincipal`) and the

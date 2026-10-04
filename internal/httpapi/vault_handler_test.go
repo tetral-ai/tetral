@@ -385,7 +385,7 @@ func newVaultHandlerRouterForListTests(t *testing.T, vaults *recordingVaultStore
 	t.Helper()
 	vaultHandler := httpapi.NewVaultHandler(vault.NewService(vaults, credentials))
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithVaultHandler(vaultHandler))
 }

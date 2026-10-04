@@ -73,7 +73,7 @@ func newSessionIntegrationEnv(t *testing.T) *sessionIntegrationEnv {
 		session.WithClock(func() time.Time { return testEnv.clock }),
 	)
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_session_integration"}, nil //nolint:gosec // G101: synthetic test API key id
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_integration"), nil //nolint:gosec // G101: synthetic test API key id
 	})
 	testEnv.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
 	return testEnv

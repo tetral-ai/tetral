@@ -97,7 +97,7 @@ func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, r, err)
 		return
 	}
-	token, err := cfg.Signer.MintWithRequestMetadata(auth.Principal{Workspace: result.Workspace, APIKeyID: result.APIKeyID}, originalMethod, originalPath, requestID, forwardedFor, principalTTL(cfg))
+	token, err := cfg.Signer.MintWithRequestMetadata(auth.IndependentKeyPrincipal(result.Workspace, result.APIKeyID), originalMethod, originalPath, requestID, forwardedFor, principalTTL(cfg))
 	if err != nil {
 		writeAuthError(w, r, err)
 		return

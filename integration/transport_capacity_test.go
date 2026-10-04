@@ -69,7 +69,7 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 		httpapi.NewSessionHandler(nil),
 		"",
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-			return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}}, nil
+			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_transport_fixture"), nil
 		})),
 		httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(eventService)),
 	)

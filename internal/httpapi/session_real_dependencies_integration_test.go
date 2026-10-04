@@ -116,7 +116,7 @@ func newSessionRealDependenciesIntegrationEnv(t *testing.T) *sessionRealDependen
 	env.otherWorkspaceFileID = createSessionRealDependenciesFile(t, fileService, otherWorkspaceID, "other-session-file.txt", "other contents")
 
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_session_real_dependencies"}, nil //nolint:gosec // G101: synthetic test API key id
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_real_dependencies"), nil //nolint:gosec // G101: synthetic test API key id
 	})
 	env.router = httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", httpapi.WithAuthenticator(authenticator))
 	return env

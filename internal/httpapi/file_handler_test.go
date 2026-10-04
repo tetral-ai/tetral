@@ -63,7 +63,7 @@ func newFileRouter(handler *httpapi.FileHandler) http.Handler {
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithFileHandler(handler))
 }

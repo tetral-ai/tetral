@@ -900,10 +900,7 @@ func testInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *au
 func signedRequest(t *testing.T, signer *auth.InternalPrincipalSigner, method string, target string) *http.Request {
 	t.Helper()
 	request := httptest.NewRequest(method, target, nil)
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"},
-		APIKeyID:  "ak_event_stream_test", //nolint:gosec // Test principal id, not a secret.
-	}, method, request.URL.Path, "req_event_stream_test", time.Minute)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, "ak_event_stream_test"), method, request.URL.Path, "req_event_stream_test", time.Minute)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}

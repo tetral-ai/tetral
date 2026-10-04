@@ -439,7 +439,7 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_event_fixture"), nil
 	})
 	handler := httpapi.NewSessionEventHandler(
 		service,
@@ -632,10 +632,7 @@ func newSessionEventHTTPRouter(service *recordingSessionEventHTTPService) http.H
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{
-			Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default", CreatedAt: "2026-01-01T00:00:00Z"},
-			APIKeyID:  "ak_test",
-		}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default", CreatedAt: "2026-01-01T00:00:00Z"}, "ak_test"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)))
 }

@@ -327,10 +327,7 @@ func tetralAPITestPrincipalToken(method string, path string, apiKeyID string) st
 	if err != nil {
 		panic(err)
 	}
-	token, err := signer.Mint(auth.Principal{
-		Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace"},
-		APIKeyID:  apiKeyID,
-	}, method, path, "req_tetralapi_test", time.Minute)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace"}, apiKeyID), method, path, "req_tetralapi_test", time.Minute)
 	if err != nil {
 		panic(err)
 	}

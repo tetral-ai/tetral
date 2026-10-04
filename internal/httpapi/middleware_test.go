@@ -31,7 +31,7 @@ func testAuthenticator(apiKey string) auth.Authenticator {
 		if rawKey != apiKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, APIKeyID: "ak_test"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID, Type: "workspace", Name: "Default"}, "ak_test"), nil
 	})
 }
 

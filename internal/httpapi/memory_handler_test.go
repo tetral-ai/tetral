@@ -249,7 +249,7 @@ func TestMemoryHTTPOversizedMemoryContentIsInvalidRequest(t *testing.T) {
 func TestMemoryHTTPCreateMemoryRejectsNullContentAndAcceptsEmptyContent(t *testing.T) {
 	service := &createMemoryCaptureService{}
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_empty_content"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_empty_content"), nil
 	})
 	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 
@@ -284,7 +284,7 @@ func TestMemoryHTTPCreateMemoryRejectsNullContentAndAcceptsEmptyContent(t *testi
 func TestMemoryHTTPUpdateMemoryDefaultsToBasicView(t *testing.T) {
 	service := &updateMemoryCaptureService{}
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_basic_update"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_basic_update"), nil
 	})
 	router := httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 
@@ -333,7 +333,7 @@ func (s *createMemoryCaptureService) CreateMemory(_ context.Context, _ workspace
 
 func newMemoryValidationRouter() http.Handler {
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_memory_content_validation"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_memory_content_validation"), nil
 	})
 	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(panicMemoryService{})))
 }

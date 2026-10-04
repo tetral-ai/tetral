@@ -10,13 +10,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// Principal is the public-safe authentication identity derived from a
-// raw API key. APIKeyID is the api_keys.id value, never the raw key.
-type Principal struct {
-	Workspace workspace.Workspace
-	APIKeyID  string
-}
-
 type principalContextKey struct{}
 
 // WithPrincipal attaches the authenticated principal to ctx.
@@ -65,7 +58,7 @@ func (a *StoreAuthenticator) Authenticate(ctx context.Context, rawKey string) (P
 	if err != nil {
 		return Principal{}, err
 	}
-	return Principal{Workspace: result.Workspace, APIKeyID: result.APIKeyID}, nil
+	return IndependentKeyPrincipal(result.Workspace, result.APIKeyID), nil
 }
 
 // requestIDFromContext is the reflective accessor used by the audit
@@ -123,6 +116,9 @@ func MiddlewareWithAudit(authenticator Authenticator, errorWriter ErrorWriter, r
 				return
 			}
 			principal, err := authenticator.Authenticate(ctx, provided)
+			if err == nil {
+				err = principal.Validate()
+			}
 			if err != nil {
 				var authErr *AuthenticationError
 				if errors.As(err, &authErr) {

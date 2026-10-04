@@ -13,18 +13,23 @@ import (
 )
 
 const InternalPrincipalAudience = "tetral-public-api"
+const MaxInternalPrincipalBytes = 32 * 1024
+const MaxInternalPrincipalTTL = 5 * time.Minute
 
 type InternalPrincipalClaims struct {
-	WorkspaceID  string `json:"workspace_id"`
-	APIKeyID     string `json:"api_key_id"`
-	Audience     string `json:"aud"`
-	Method       string `json:"method"`
-	Path         string `json:"path"`
-	IssuedAt     string `json:"iat"`
-	ExpiresAt    string `json:"exp"`
-	TokenID      string `json:"jti"`
-	RequestID    string `json:"request_id"`
-	ForwardedFor string `json:"forwarded_for,omitempty"`
+	WorkspaceID  string     `json:"workspace_id"`
+	APIKeyID     string     `json:"api_key_id,omitempty"`
+	Identity     *Identity  `json:"identity,omitempty"`
+	Credential   Credential `json:"credential"`
+	Authority    Authority  `json:"authority"`
+	Audience     string     `json:"aud"`
+	Method       string     `json:"method"`
+	Path         string     `json:"path"`
+	IssuedAt     string     `json:"iat"`
+	ExpiresAt    string     `json:"exp"`
+	TokenID      string     `json:"jti"`
+	RequestID    string     `json:"request_id"`
+	ForwardedFor string     `json:"forwarded_for,omitempty"`
 }
 
 type InternalPrincipalSigner struct {
@@ -141,13 +146,20 @@ func (s *InternalPrincipalSigner) MintWithRequestMetadata(principal Principal, m
 	if s == nil {
 		return "", &AuthenticationError{Message: "internal principal signing unavailable"}
 	}
-	if ttl <= 0 {
-		return "", &ValidationError{Message: "internal principal ttl must be positive"}
+	if err := principal.Validate(); err != nil {
+		return "", err
+	}
+	if method == "" || len(method) > 16 || path == "" || len(path) > 4096 || len(requestID) > 256 || len(forwardedFor) > 1024 {
+		return "", &ValidationError{Message: "invalid request metadata"}
+	}
+	if ttl <= 0 || ttl > MaxInternalPrincipalTTL {
+		return "", &ValidationError{Message: "internal principal ttl must be positive and at most five minutes"}
 	}
 	now := s.now().UTC()
 	claims := InternalPrincipalClaims{
-		WorkspaceID:  string(principal.Workspace.ID),
-		APIKeyID:     principal.APIKeyID,
+		WorkspaceID: string(principal.Workspace.ID),
+		APIKeyID:    principal.APIKeyID,
+		Identity:    principal.Identity, Credential: principal.Credential, Authority: principal.Authority,
 		Audience:     InternalPrincipalAudience,
 		Method:       method,
 		Path:         path,
@@ -186,12 +198,17 @@ func (v *InternalPrincipalVerifier) Verify(token string, method string, path str
 	if err != nil || !v.now().UTC().Before(expiresAt) {
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "internal principal expired"}
 	}
-	if claims.WorkspaceID == "" || claims.APIKeyID == "" {
+	issuedAt, issuedErr := time.Parse(time.RFC3339, claims.IssuedAt)
+	if issuedErr != nil || issuedAt.After(v.now().UTC().Add(5*time.Second)) || !expiresAt.After(issuedAt) || expiresAt.Sub(issuedAt) > MaxInternalPrincipalTTL || claims.Method == "" || len(claims.Method) > 16 || len(claims.Path) > 4096 || claims.Path == "" || len(claims.RequestID) > 256 || len(claims.ForwardedFor) > 1024 || !boundedIdentity(claims.TokenID) {
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "invalid internal principal"}
 	}
 	principal := Principal{
 		Workspace: workspace.Workspace{ID: workspace.ID(claims.WorkspaceID), Type: "workspace"},
 		APIKeyID:  claims.APIKeyID,
+		Identity:  claims.Identity, Credential: claims.Credential, Authority: claims.Authority,
+	}
+	if err := principal.Validate(); err != nil {
+		return Principal{}, InternalPrincipalClaims{}, err
 	}
 	return principal, claims, nil
 }
@@ -214,6 +231,9 @@ func signCompactJSON(privateKey ed25519.PrivateKey, tokenType string, payload an
 }
 
 func verifyCompactJSON(publicKey ed25519.PublicKey, token string, tokenType string, payload any) error {
+	if len(token) > MaxInternalPrincipalBytes {
+		return &AuthenticationError{Message: "invalid internal principal"}
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return &AuthenticationError{Message: "invalid internal principal"}
@@ -223,7 +243,7 @@ func verifyCompactJSON(publicKey ed25519.PublicKey, token string, tokenType stri
 		return &AuthenticationError{Message: "invalid internal principal"}
 	}
 	var header map[string]string
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
+	if err := DecodeStrictJSON(headerJSON, &header); err != nil {
 		return &AuthenticationError{Message: "invalid internal principal"}
 	}
 	if header["alg"] != "EdDSA" || header["typ"] != tokenType {
@@ -241,7 +261,7 @@ func verifyCompactJSON(publicKey ed25519.PublicKey, token string, tokenType stri
 	if err != nil {
 		return &AuthenticationError{Message: "invalid internal principal"}
 	}
-	if err := json.Unmarshal(payloadJSON, payload); err != nil {
+	if err := DecodeStrictJSON(payloadJSON, payload); err != nil {
 		return &AuthenticationError{Message: "invalid internal principal"}
 	}
 	return nil

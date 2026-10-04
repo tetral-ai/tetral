@@ -159,7 +159,7 @@ func TestFilesAndVaultsRequireBetaMarkerBeforeDomainServices(t *testing.T) {
 
 func TestSessionSubresourcesRequireBetaMarkerBeforeDomainServices(t *testing.T) {
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_beta_marker"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_beta_marker"), nil
 	})
 	router := httpapi.NewRouter(httpapi.NewSessionHandler(nil), "", httpapi.WithAuthenticator(authenticator))
 	routes := []struct {
@@ -193,7 +193,7 @@ func TestSessionSubresourcesRequireBetaMarkerBeforeDomainServices(t *testing.T) 
 
 func newBetaQueryMarkerTestRouter(options ...httpapi.RouterOption) http.Handler {
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.Principal{Workspace: workspace.Workspace{ID: workspace.DefaultID}, APIKeyID: "ak_beta_marker"}, nil
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_beta_marker"), nil
 	})
 	options = append([]httpapi.RouterOption{httpapi.WithAuthenticator(authenticator)}, options...)
 	return httpapi.NewRouter(nil, "", options...)

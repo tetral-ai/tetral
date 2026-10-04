@@ -207,10 +207,7 @@ func TestAPIKeyManagementTooLargeErrorsUseInvalidRequestEnvelope(t *testing.T) {
 		Signer:              signer,
 		PrincipalTTLSeconds: 60,
 	})
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"},
-		APIKeyID:  "ak_test_principal", //nolint:gosec // Test principal id, not a secret.
-	}, http.MethodPost, "/v1/api_keys", "req_large_test", 60_000_000_000)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"}, "ak_test_principal"), http.MethodPost, "/v1/api_keys", "req_large_test", 60_000_000_000)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}
@@ -266,10 +263,7 @@ func mintTestPrincipal(t *testing.T, privateKey string, method string, path stri
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
-	token, err := signer.Mint(auth.Principal{ //nolint:gosec // Test principal token fixture.
-		Workspace: workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"},
-		APIKeyID:  "ak_test_principal", //nolint:gosec // Test principal id, not a secret.
-	}, method, path, "req_test", 60_000_000_000)
+	token, err := signer.Mint(auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.ID("ws_auth_test"), Type: "workspace"}, "ak_test_principal"), method, path, "req_test", 60_000_000_000)
 	if err != nil {
 		t.Fatalf("mint principal: %v", err)
 	}

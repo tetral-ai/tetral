@@ -68,8 +68,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 	ttl := DefaultInternalPrincipalTTL
 	if raw := env.Getenv(EnvInternalPrincipalTTLSeconds); raw != "" {
 		seconds, err := strconv.Atoi(raw)
-		if err != nil || seconds <= 0 {
-			return Config{}, workload.NewConfigError(EnvInternalPrincipalTTLSeconds + " must be a positive integer")
+		if err != nil || seconds <= 0 || seconds > int(auth.MaxInternalPrincipalTTL.Seconds()) {
+			return Config{}, workload.NewConfigError(EnvInternalPrincipalTTLSeconds + " must be a positive integer at most 300")
 		}
 		ttl = time.Duration(seconds) * time.Second
 	}

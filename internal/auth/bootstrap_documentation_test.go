@@ -55,10 +55,7 @@ func TestBootstrapDocumentedEd25519PairRoundTripsAcrossSignerAndVerifier(t *test
 	if err != nil {
 		t.Fatalf("build verifier from documented public output: %v", err)
 	}
-	principal := auth.Principal{
-		Workspace: workspace.Workspace{ID: "docs-round-trip", Type: "workspace"},
-		APIKeyID:  "ak_docs_round_trip",
-	}
+	principal := auth.IndependentKeyPrincipal(workspace.Workspace{ID: "docs-round-trip", Type: "workspace"}, "ak_docs_round_trip")
 	token, err := signer.Mint(principal, "GET", "/v1/sessions", "req_docs_round_trip", time.Minute)
 	if err != nil {
 		t.Fatalf("mint with documented private key: %v", err)
