@@ -355,23 +355,28 @@ it preserves the stated invariants and passes the named suites.
   settles or the actual Writable closes; successful delivery also requires any
   needed drain. Handler and server shutdown join these custody promises. A close
   witness releases application ownership; it does not claim peer consumption.
-- **Retention.** The pinned `ai@6.0.168` SDK retains recorded content, step results,
-  and an unread `baseStream` tee branch. `providers/sdk-retention-guard.ts` installs
-  an `experimental_transform` before those owners, counts every forwarded record
-  and its serialized payload before enqueueing, and stops the source on exhaustion.
-  Record order, lifecycle, metadata, and required signatures are preserved.
-  `providers/block-assembler.ts` separately coalesces text/reasoning segments and
-  accounts for live content, cumulative content, open blocks, identities, and
-  reasoning request limits. Streamed tool argument bytes and the SDK-provided
-  complete call JSON both count toward the cumulative budget. Incremental scalar
-  accounting validates fragments without retaining a second arguments string. Required metadata overflow fails explicitly rather
-  than silently dropping a signature.
-- **Operating policy.** Constructor-injected assembly and SDK bounds are owned by
-  `providers/resource-policy.ts` and `providers/sdk-retention-guard.ts`. The current
-  calibration candidates add rejection boundaries beyond legal per-block content;
-  they require resource and compatibility acceptance before selecting shipped
-  defaults. They are not new public environment overrides. Resource exhaustion
-  produces a fatal, nonretryable request error, never a truncated successful block.
+- **Provider conversion and retention.** `providers/model-stream.ts` calls the pinned
+  official `LanguageModelV3.doStream` adapters directly. It converts resolved
+  prompts, declarations, schemas and provider options, safely parses Tool inputs,
+  and translates usage and signed reasoning events one at a time. Unused SDK
+  recorded content, step results and stream tees are absent. Completed content
+  and record counts are diagnostics, not request-lifetime rejection rules.
+  `providers/block-assembler.ts` coalesces text/reasoning segments and bounds live
+  content, open blocks, identities, segments and request-wide reasoning. Existing
+  canonical per-block, Tool and metadata bounds still apply. Required metadata
+  overflow fails explicitly rather than silently dropping a signature.
+- **HTTP ownership.** `providers/transport.ts` uses pinned official Undici's public
+  dispatcher request API and its pinned experimental decompression interceptor.
+  Response reads follow downstream demand, including gzip/error bodies; they do
+  not pump unread response history into Bun's native fetch buffer. Egress,
+  credentials, OAuth rewrites, deadlines and manual redirects remain owned by
+  the client wrappers. Discarded redirect bodies are cancelled and joined.
+  Shutdown closes the process-owned dispatcher after request operations join,
+  before SQL closes. This changes neither deployment settings nor admission.
+- **Operating policy.** Constructor-injected active assembly bounds are owned by
+  `providers/resource-policy.ts`. Resource exhaustion produces a fatal,
+  nonretryable request error, never a truncated successful block. No raw-record,
+  completed-content history or attachment-envelope limit is introduced here.
 - **Observations.** The service emits content-free `provider.stage_completed`
   samples for dispatch → first private content fragment, first fragment → first
   complete semantic frame, and complete frame → local write callback. Each sample
@@ -392,7 +397,7 @@ it preserves the stated invariants and passes the named suites.
   SSRF classification, which lives in the `web-connector` service). AI SDK
   versions are pinned; workspace overrides keep the patched provider utilities
   and their matching provider types consistent across the pinned adapters. Abort
-  must deterministically error the stream so `streamText` cannot hang.
+  must deterministically error the stream so the official adapter stream cannot hang.
 - **Conformance.** `packages/provider-gateway/test/unit/clients.test.ts`,
   `packages/provider-gateway/test/unit/provider-response-bounds.test.ts`
   (buffered SDK responses reject an advertised size above the upstream cap and

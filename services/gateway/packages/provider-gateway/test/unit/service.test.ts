@@ -924,7 +924,7 @@ describe("ProviderGatewayServiceShell", () => {
     const pool = new RecordingPlatformCredentialPool(["pfk_1"]);
     const providerStreamer = new ProviderClientRegistry({
       anthropicProviderFactory: () => () => ({}),
-      streamText: () => {
+      streamModel: () => {
         attempts += 1;
         return {
           fullStream: (async function* () {
@@ -1102,7 +1102,7 @@ describe("ProviderGatewayServiceShell", () => {
       const pool = new RecordingPlatformCredentialPool(["pfk_opaque"]);
       const providerStreamer = new ProviderClientRegistry({
         openAICompatibleProviderFactory: () => (modelId) => ({ provider: "deepseek", modelId }),
-        streamText: () => ({
+        streamModel: () => ({
           fullStream: (async function* () {
             yield { type: "error" as const, error: { data: body } };
           })(),

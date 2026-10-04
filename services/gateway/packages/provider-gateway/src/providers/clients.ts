@@ -24,12 +24,14 @@ import { APICallError } from "@ai-sdk/provider";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { jsonSchema, Output, streamText } from "ai";
+import { jsonSchema, Output } from "ai";
 import { providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { lowerProviderRequest, remapOpenAICompatibleMessageMetadataForSDK } from "@tetral/gateway-lowering/src/request.js";
 import { lookupGatewayProviderRules } from "@tetral/gateway-lowering/src/rules/index.js";
-import { createProviderSdkRetentionGuard, ProviderSdkRetentionCalibrationCandidate } from "./sdk-retention-guard.js";
-import type { ProviderSdkRetentionBounds, ProviderSdkRetentionResources } from "./sdk-retention-guard.js";
+import { createProviderTransport } from "./transport.js";
+import type { ProviderTransport } from "./transport.js";
+import { streamLanguageModel } from "./model-stream.js";
+import type { ProviderModelStreamResources } from "./model-stream.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
 import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
@@ -42,7 +44,6 @@ import type {
   TextStreamPart,
   Tool,
   ToolSet,
-  StreamTextTransform,
 } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
 import type { FetchFunction, ProviderOptions } from "@ai-sdk/provider-utils";
@@ -68,9 +69,8 @@ import type { OpenAIOAuthCredentialRefreshWriter } from "./openai-oauth-refresh.
 
 /** Dependencies and transport overrides used to construct a provider client registry. */
 export interface ProviderClientRegistryOptions {
-  readonly streamText?: GatewayStreamTextFunction | undefined;
-  readonly sdkRetentionBounds?: ProviderSdkRetentionBounds;
-  readonly observeSdkRetention?: (resources: ProviderSdkRetentionResources) => void;
+  readonly streamModel?: GatewayModelStreamFunction | undefined;
+  readonly observeModelStream?: (resources: ProviderModelStreamResources) => void;
   readonly anthropicProviderFactory?: AnthropicProviderFactory | undefined;
   readonly openAIProviderFactory?: OpenAIProviderFactory | undefined;
   readonly openAICompatibleProviderFactory?: OpenAICompatibleProviderFactory | undefined;
@@ -105,7 +105,7 @@ export type OpenAICompatibleProviderSettings = Pick<AIOpenAICompatibleProviderSe
 export type OpenAICompatibleProviderFactory = (settings: OpenAICompatibleProviderSettings) => (modelId: string) => unknown;
 
 /** Canonical AI SDK streaming call shape emitted after provider-specific lowering. */
-export interface GatewayStreamTextInput {
+export interface GatewayModelStreamInput {
   readonly model: unknown;
   readonly messages: readonly ModelMessage[];
   readonly tools?: ToolSet | undefined;
@@ -117,24 +117,24 @@ export interface GatewayStreamTextInput {
   readonly topK?: number | undefined;
   readonly headers?: Record<string, string | undefined> | undefined;
   readonly abortSignal?: AbortSignal | undefined;
-  readonly experimental_transform?: StreamTextTransform<ToolSet>;
   readonly maxRetries: 0;
   readonly onError?: ((event: { readonly error: unknown }) => void | Promise<void>) | undefined;
 }
 
 /** Streaming portion of the AI SDK result consumed by the Gateway stream raiser. */
-export interface GatewayStreamTextResult {
+export interface GatewayModelStreamResult {
   readonly fullStream: AsyncIterable<TextStreamPart<ToolSet>>;
 }
 
-/** Injectable boundary around the AI SDK `streamText` operation. */
-export type GatewayStreamTextFunction = (input: GatewayStreamTextInput) => GatewayStreamTextResult;
+/** Injectable boundary around the one-step official adapter conversion. */
+export type GatewayModelStreamFunction = (input: GatewayModelStreamInput) => GatewayModelStreamResult;
 
 /** Raw provider-body inter-chunk watchdog duration. First normalized event liveness is service-owned. */
 export interface ProviderFetchTimeoutOptions {
   readonly interChunkTimeoutMs?: number | undefined;
 }
 
+let nextModelStreamOperationId = 1;
 const DefaultProviderFetchInterChunkTimeoutMs = 30_000;
 const MaxProviderRedirects = 5;
 
@@ -150,45 +150,51 @@ const MaxProviderRedirects = 5;
  */
 export class ProviderClientRegistry implements ProviderRequestStreamer {
   readonly joinIteratorReturn = true as const;
-  private readonly streamText: GatewayStreamTextFunction;
+  private readonly streamModel: GatewayModelStreamFunction;
   private readonly anthropicProviderFactory: AnthropicProviderFactory;
   private readonly openAIProviderFactory: OpenAIProviderFactory;
   private readonly openAICompatibleProviderFactory: OpenAICompatibleProviderFactory;
-  private readonly fetch: FetchFunction | undefined;
+  private readonly fetch: FetchFunction;
+  private readonly transport: ProviderTransport | undefined;
   private readonly providerFetchTimeouts: ProviderFetchTimeoutOptions;
   private readonly openAIOAuthCredentialRefreshWriter: OpenAIOAuthCredentialRefreshWriter | undefined;
 
   constructor(options: ProviderClientRegistryOptions = {}) {
-    const invoke = options.streamText ?? defaultStreamText;
-    this.streamText = (input) => {
+    const invoke = options.streamModel ?? defaultModelStream;
+    this.streamModel = (input) => {
       const controller = new AbortController();
-      const guard = createProviderSdkRetentionGuard({
-        bounds: options.sdkRetentionBounds ?? ProviderSdkRetentionCalibrationCandidate,
-        abort: reason => controller.abort(reason),
-        ...(options.observeSdkRetention === undefined ? {} : {observe:options.observeSdkRetention}),
-      });
+      const operationId = nextModelStreamOperationId++;
+      let records = 0;
+      const observe = (active: boolean): void => {
+        try { options.observeModelStream?.({operationId,sourceRecords:records,forwardedRecords:records,active}); } catch { /* Fail-open telemetry. */ }
+      };
+      observe(true);
       const signal = input.abortSignal === undefined ? controller.signal : AbortSignal.any([input.abortSignal,controller.signal]);
-      let result: GatewayStreamTextResult;
-      try { result = invoke({...input,abortSignal:signal,experimental_transform:guard.transform}); }
-      catch (error) { controller.abort(); guard.release(); throw error; }
+      let result: GatewayModelStreamResult;
+      try { result = invoke({...input,abortSignal:signal,}); }
+      catch (error) { controller.abort(); observe(false); throw error; }
       return { fullStream: (async function* () {
         const iterator=result.fullStream[Symbol.asyncIterator]();
         try {
-          while(true){const next=await iterator.next();if(next.done)return;yield next.value;}
+          while(true){const next=await iterator.next();if(next.done)return;records++;observe(true);yield next.value;}
         } finally {
           controller.abort();
           try { await iterator.return?.(); } catch { /* Original stream failure remains authoritative. */ }
-          guard.release();
+          observe(false);
         }
       })() };
     };
     this.anthropicProviderFactory = options.anthropicProviderFactory ?? ((settings) => createAnthropic(settings));
     this.openAIProviderFactory = options.openAIProviderFactory ?? ((settings) => createOpenAI(settings));
     this.openAICompatibleProviderFactory = options.openAICompatibleProviderFactory ?? ((settings) => createOpenAICompatible(settings));
-    this.fetch = options.fetch;
+    this.transport = options.fetch === undefined ? createProviderTransport() : undefined;
+    this.fetch = options.fetch ?? this.transport!.fetch;
     this.providerFetchTimeouts = options.providerFetchTimeouts ?? {};
     this.openAIOAuthCredentialRefreshWriter = options.openAIOAuthCredentialRefreshWriter;
   }
+
+  /** Close process-owned HTTP connections only after provider operations have joined. */
+  async close(deadline?: Date): Promise<void> { await this.transport?.close(deadline); }
 
   /** Streams one validated request through its catalog-selected provider client. */
   async *stream(input: ProviderRequestStreamInput): AsyncGenerator<ProviderStreamEvent> {
@@ -288,7 +294,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       }),
     };
     const provider = this.anthropicProviderFactory(providerSettings);
-    const result = this.streamText({
+    const result = this.streamModel({
       model: provider(entry.apiModelId),
       messages: lowered.messages.map(toAIModelMessage),
       tools: toAITools(lowered.tools),
@@ -401,7 +407,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       fetch: fetchImpl,
     });
     const callShape = openAIResponsesCallShape(lowered, credential.authType === "provider_oauth");
-    const result = this.streamText({
+    const result = this.streamModel({
       model: provider.responses(entry.apiModelId),
       messages: callShape.messages,
       tools: toAITools(lowered.tools, provider.tools?.customTool),
@@ -480,7 +486,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     };
     const provider = this.openAICompatibleProviderFactory(providerSettings);
     const sdkMessages = remapOpenAICompatibleMessageMetadataForSDK(lowered.messages, rules);
-    const result = this.streamText({
+    const result = this.streamModel({
       model: provider(entry.apiModelId),
       messages: sdkMessages.map(toAIModelMessage),
       tools: toAITools(lowered.tools),
@@ -517,8 +523,8 @@ export function createProviderClientRegistry(options: ProviderClientRegistryOpti
   return new ProviderClientRegistry(options);
 }
 
-function defaultStreamText(input: GatewayStreamTextInput): GatewayStreamTextResult {
-  return streamText(input as unknown as Parameters<typeof streamText>[0]) as unknown as GatewayStreamTextResult;
+function defaultModelStream(input: GatewayModelStreamInput): GatewayModelStreamResult {
+  return streamLanguageModel(input);
 }
 
 function ignoreProviderStreamError(): void {}
@@ -614,13 +620,18 @@ function providerFetch(options: {
         }
         const location = response.headers.get("location");
         if (location === null || location.length === 0) {
-          timers.clearAll();
-          return response;
+          return wrapProviderResponseBody(response,timers,options.onTransportActivity);
         }
-        if (redirectCount === MaxProviderRedirects) {
-          throw new TypeError("provider egress redirect limit exceeded");
+        let redirected: Request;
+        try {
+          if (redirectCount === MaxProviderRedirects) throw new TypeError("provider egress redirect limit exceeded");
+          redirected = providerRedirectRequest(request, location, response.status, allowedRoots);
+        } catch (error) {
+          try {await response.body?.cancel(error);} catch { /* Preserve redirect validation failure. */ }
+          throw error;
         }
-        request = providerRedirectRequest(request, location, response.status, allowedRoots);
+        await response.body?.cancel();
+        request = redirected;
       }
       throw new TypeError("provider egress redirect limit exceeded");
     } catch (error) {
@@ -891,7 +902,9 @@ function wrapProviderResponseBody(
       } catch (error) {
         if(completed)return;
         const failure=timers.timeoutError() ?? error;
-        cleanup(); reader.releaseLock(); controller.error(failure);
+        cleanup(); controller.error(failure);
+        cancellation=reader.cancel(failure).catch(()=>{}).finally(()=>{try{reader.releaseLock();}catch{}});
+        await cancellation;
       }
     },
     cancel(reason) {

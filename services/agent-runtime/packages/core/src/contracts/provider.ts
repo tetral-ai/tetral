@@ -37,6 +37,7 @@ export const ProviderErrorCodes = [
 	"provider_tool_protocol_error",
 	"provider_timeout",
 	"provider_stream_error",
+	"provider_stream_limit_exceeded",
 	"provider_unavailable",
 	"provider_cancelled",
 	"attachment_unavailable",
@@ -243,6 +244,8 @@ function defaultProviderErrorMessage(code: ProviderErrorCode): string {
 			return "Provider request timed out.";
 		case "provider_stream_error":
 			return "Provider stream failed.";
+		case "provider_stream_limit_exceeded":
+			return "Provider output exceeded Gateway resource limits.";
 		case "provider_unavailable":
 			return "Provider is unavailable.";
 		case "provider_cancelled":
@@ -266,7 +269,8 @@ function isFatalProviderError(code: ProviderErrorCode): boolean {
 		code === "provider_context_overflow" ||
 		code === "provider_model_not_found" ||
 		code === "provider_invalid_request" ||
-		code === "provider_tool_protocol_error"
+		code === "provider_tool_protocol_error" ||
+		code === "provider_stream_limit_exceeded"
 	);
 }
 

@@ -30,6 +30,7 @@ func TestContentChangesSelectDurableAndTypeScriptConsumers(t *testing.T) {
 		"services/bridge/bridge_api_context.go",
 		"integration/content_lifecycle_e2e_test.go",
 		"integration/content_lifecycle_topology_test.go",
+		"integration/content_provider_failure_lifecycle_test.go",
 		"integration/content_process_recovery_test.go",
 		"integration/content_resource_lifecycle_test.go",
 		"integration/content_transport_limits_test.go",

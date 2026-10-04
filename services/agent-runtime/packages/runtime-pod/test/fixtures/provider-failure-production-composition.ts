@@ -12,8 +12,8 @@ import {
 import { createGatewayGrpcServer } from "../../../../../gateway/packages/provider-gateway/src/grpc-server.js";
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import type {
-	GatewayStreamTextInput,
-	GatewayStreamTextResult,
+	GatewayModelStreamInput,
+	GatewayModelStreamResult,
 } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import {
 	ProviderCredentialResolver,
@@ -165,12 +165,12 @@ const credentialResolver = new ProviderCredentialResolver({
 });
 const streamTextResult = (
 	parts: readonly GatewaySDKStreamPart[],
-): GatewayStreamTextResult => ({
+): GatewayModelStreamResult => ({
 	fullStream: (async function* () {
 		for (const part of parts) yield part;
 	})(),
 });
-type GatewaySDKStreamPart = GatewayStreamTextResult["fullStream"] extends AsyncIterable<
+type GatewaySDKStreamPart = GatewayModelStreamResult["fullStream"] extends AsyncIterable<
 	infer Part
 >
 	? Part
@@ -245,7 +245,7 @@ const providerClientRegistry = new ProviderClientRegistry({
 			fetch: settings.fetch,
 		}),
 	}),
-	streamText: (request: GatewayStreamTextInput) => {
+	streamModel: (request: GatewayModelStreamInput) => {
 		providerInvocations += 1;
 		providerRequestContexts.push(JSON.stringify(request.messages));
 		void writeRuntimeState();

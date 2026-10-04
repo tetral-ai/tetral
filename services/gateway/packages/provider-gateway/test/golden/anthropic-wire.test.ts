@@ -1264,10 +1264,8 @@ describe("Anthropic golden wire path", () => {
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
 			).toContain("271828");
+			// Preserve the delivered prefix and retryable classification without native socket wording.
 			expect(result.error).toBeInstanceOf(Error);
-			expect((result.error as Error).message).toContain(
-				"socket connection was closed unexpectedly",
-			);
 			expect(classifyProviderStreamError(result.error)).toMatchObject({
 				code: "provider_stream_error",
 				retryable: true,

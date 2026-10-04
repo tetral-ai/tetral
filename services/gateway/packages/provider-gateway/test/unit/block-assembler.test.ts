@@ -3,10 +3,11 @@ import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/norma
 import { describe, expect, test } from "bun:test";
 import { ProviderBlockAssembler, ProviderAssemblyLimitError, ProviderIncompleteStreamError } from "../../src/providers/block-assembler.js";
 import type { ProviderAssemblyBounds, ProviderPreviewOffer } from "../../src/providers/block-assembler.js";
+import { ProviderAssemblyCalibrationCandidate } from "../../src/providers/resource-policy.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
 import type { GatewayStreamPart } from "@tetral/gateway-lowering/src/stream.js";
 import { ProviderRequestKind, ProviderThreadRole, ProviderThreadVisibility, ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-const limits: ProviderAssemblyBounds = { maxRetainedBytes:64*1024*1024,maxCumulativeContentBytes:128*1024*1024,maxOpenBlocks:64,maxIdentities:4096,maxSegments:8192,coalesceCodeUnits:8192 };
+const limits: ProviderAssemblyBounds = { maxRetainedBytes:64*1024*1024,maxOpenBlocks:64,maxIdentities:4096,maxSegments:8192,coalesceCodeUnits:8192 };
 function setup(options: { bounds?:Partial<ProviderAssemblyBounds>; previews?: Parameters<ProviderPreviewOffer>[0][]; role?:ProviderThreadRole; visibility?:ProviderThreadVisibility; kind?:ProviderRequestKind } = {}) {
  let ids = 0;
  const assembler = new ProviderBlockAssembler({ bounds:{...limits,...options.bounds},request:{requestKind:options.kind??ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,threadRole:options.role??ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN,threadVisibility:options.visibility??ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC},allocateEventId:()=>`evt_${(++ids).toString(16).padStart(32,"0")}`,offerPreview:preview=>options.previews?.push(preview) });
@@ -15,6 +16,24 @@ function setup(options: { bounds?:Partial<ProviderAssemblyBounds>; previews?: Pa
  return {assembler,send,ids:()=>ids};
 }
 describe("Gateway complete block ownership",()=>{
+ test("completed blocks do not consume the next block's live-content budget",()=>{
+  // This byte-boundary fixture checks the assembly contract, not model capacity.
+  const {assembler,send}=setup({bounds:ProviderAssemblyCalibrationCandidate});
+  const textBytes=16*1024*1024-2;
+  for(let index=0;index<3;index++) {
+   const id=`part-${index}`,text=String.fromCharCode(65+index).repeat(textBytes);
+   send({type:"text-start",id},{type:"text-delta",id,delta:text});
+   const frames=send({type:"text-end",id});
+   expect(frames).toHaveLength(1);
+   expect(frames[0]?.frameSequence).toBe(index+1);
+   expect(frames[0]?.textComplete?.providerPartId).toBe(id);
+   expect(frames[0]?.textComplete?.text).toBe(text);
+   expect(assembler.resources).toMatchObject({retainedBytes:0,segments:0,openBlocks:0});
+  }
+  expect(send({type:"finish",finishReason:"stop"})).toHaveLength(1);
+  assembler.assertComplete();
+  expect(assembler.resources.cumulativeContentBytes).toBe(3*textBytes);
+ });
  test("interleaves blocks, assigns IDs on nonempty text, suppresses empty text",()=>{
   const {assembler,send,ids}=setup(); expect(send({type:"text-start",id:"empty"},{type:"text-end",id:"empty"})).toEqual([]); expect(ids()).toBe(0);
   send({type:"text-start",id:"a"},{type:"text-start",id:"b"},{type:"text-delta",id:"a",delta:"A"},{type:"text-delta",id:"b",delta:"B"});
@@ -51,7 +70,7 @@ describe("Gateway complete block ownership",()=>{
  test("merged metadata stays bounded",()=>{
   const {send}=setup(); send({type:"reasoning-start",id:"r",metadata:{anthropic:{a:"a".repeat(10000)}}}); expect(()=>send({type:"reasoning-end",id:"r",metadata:{anthropic:{signature:"s".repeat(10000)}}})).toThrow(ProviderAssemblyLimitError);
  });
- for(const bounds of [{maxRetainedBytes:2},{maxCumulativeContentBytes:2},{maxOpenBlocks:1},{maxIdentities:1}]) test(`explicit cap ${Object.keys(bounds)[0]}`,()=>{
+ for(const bounds of [{maxRetainedBytes:2},{maxOpenBlocks:1},{maxIdentities:1}]) test(`explicit cap ${Object.keys(bounds)[0]}`,()=>{
   const {send}=setup({bounds}); send({type:"text-start",id:"t"}); expect(()=>Object.keys(bounds)[0]!.includes("Bytes") ? send({type:"text-delta",id:"t",delta:"abc"}) : send({type:"text-start",id:"u"})).toThrow(ProviderAssemblyLimitError);
  });
  for(const options of [{role:ProviderThreadRole.PROVIDER_THREAD_ROLE_SUBAGENT},{role:ProviderThreadRole.PROVIDER_THREAD_ROLE_APPROVAL_REVIEWER},{role:ProviderThreadRole.PROVIDER_THREAD_ROLE_UNSPECIFIED},{visibility:ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_INTERNAL},{visibility:ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_UNSPECIFIED},{kind:ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY}]) test(`preview admission ${JSON.stringify(options)}`,()=>{
@@ -95,17 +114,21 @@ describe("Gateway private fragment lifecycle rejection", () => {
 
 describe("streamed tool argument accounting",()=>{
  test("counts streamed arguments before completion without retaining a second payload",()=>{
-  const {assembler,send}=setup({bounds:{maxCumulativeContentBytes:8}});
+  const {assembler,send}=setup();
   send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:"    {}"});
   expect(assembler.resources).toMatchObject({cumulativeContentBytes:6,retainedBytes:2,segments:0});
   send({type:"tool-input-end",id:"call"});
-  expect(()=>send({type:"tool-call",id:"call",name:"Read",input:{}})).toThrow(ProviderAssemblyLimitError);
+  expect(send({type:"tool-call",id:"call",name:"Read",input:{}})[0]?.toolCallComplete?.inputJson).toBe("{}");
+  expect(assembler.resources.retainedBytes).toBe(0);
   assembler.release();expect(assembler.resources.cumulativeContentBytes).toBe(0);
  });
- test("charges each streamed byte before the complete call exists",()=>{
-  const {send}=setup({bounds:{maxCumulativeContentBytes:4}});
+ test("processed Tool argument bytes do not consume the live assembly budget",()=>{
+  const {assembler,send}=setup({bounds:{maxRetainedBytes:2}});
   send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:"    "});
-  expect(()=>send({type:"tool-input-delta",id:"call",delta:" "})).toThrow(ProviderAssemblyLimitError);
+  send({type:"tool-input-delta",id:"call",delta:" {}"},{type:"tool-input-end",id:"call"});
+  expect(assembler.resources).toMatchObject({cumulativeContentBytes:7,retainedBytes:2});
+  expect(send({type:"tool-call",id:"call",name:"Read",input:{}})[0]?.toolCallComplete?.inputJson).toBe("{}");
+  expect(assembler.resources.retainedBytes).toBe(0);
  });
  test("split Unicode arguments count joined UTF8 and reject incomplete scalars",()=>{
   const {assembler,send}=setup();send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:'{"q":"\ud83d'},{type:"tool-input-delta",id:"call",delta:'\ude00"}'},{type:"tool-input-end",id:"call"});

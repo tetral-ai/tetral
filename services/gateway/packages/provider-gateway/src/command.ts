@@ -27,6 +27,7 @@ import {
   ProviderCredentialResolver,
   SQLGatewayCredentialStore,
 } from "./providers/credentials.js";
+import { createProviderTransport } from "./providers/transport.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
 import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
@@ -289,10 +290,13 @@ export async function buildProviderGatewayCommandDependencies(input: {
     platformPool,
     masterKeyHex: input.config.vaultKeyHex,
   });
+  const providerTransport = createProviderTransport();
   const providerStreamer = createProviderClientRegistry({
+    fetch: providerTransport.fetch,
     openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
       sql,
       masterKeyHex: input.config.vaultKeyHex,
+      fetch: providerTransport.fetch,
     }),
   });
   const attachmentResolver = new BridgeAPIAttachmentResolver({
@@ -319,8 +323,16 @@ export async function buildProviderGatewayCommandDependencies(input: {
     tokenReviewClient,
     credentialResolver,
     close: async (deadline) => {
-      await attachmentResolver.close();
-      await sql.close({ deadline: deadline ?? new Date(Date.now() + 5000) });
+      let failure: unknown;
+      let failed = false;
+      for (const close of [
+        () => providerTransport.close(deadline),
+        () => attachmentResolver.close(),
+        () => sql.close({deadline:deadline ?? new Date(Date.now()+5000)}),
+      ]) {
+        try {await close();} catch (error) {if (!failed) failure=error;failed=true;}
+      }
+      if (failed) throw failure;
     },
   };
 }

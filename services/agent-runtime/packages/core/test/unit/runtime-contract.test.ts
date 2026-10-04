@@ -74,6 +74,30 @@ test("attachment_unavailable defaults to a non-fatal provider failure", () => {
 	});
 });
 
+test("Gateway stream resource failures preserve their identity and terminal policy", () => {
+	const failure = normalizeProviderError({
+		code: "provider_stream_limit_exceeded",
+		message: "Provider output exceeded Gateway resource limits.",
+		statusCode: 413,
+		retryable: false,
+		fatal: true,
+	});
+	expect(failure).toEqual({
+		code: "provider_stream_limit_exceeded",
+		message: "Provider output exceeded Gateway resource limits.",
+		statusCode: 413,
+		retryable: false,
+		fatal: true,
+	});
+	expect(
+		normalizeProviderError({ code: "provider_stream_limit_exceeded" }),
+	).toMatchObject({
+		code: "provider_stream_limit_exceeded",
+		retryable: false,
+		fatal: true,
+	});
+});
+
 test("runtime provider errors preserve valid UTF-8 at the exact message byte boundary", () => {
 	const exact = `${"a".repeat(MaxProviderErrorMessageBytes - 3)}€`;
 	const atLimit = normalizeProviderError({

@@ -260,6 +260,7 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
       return undefined;
     }
     if (!response.ok) {
+      try {await response.body?.cancel();} catch { /* Rejected issuer response remains authoritative. */ }
       return undefined;
     }
     let payload: TokenEndpointResponse;

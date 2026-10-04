@@ -31,7 +31,6 @@ import { NormalizedProviderEventType, validateNormalizedProviderEvent } from "@t
 import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { ProviderBlockAssembler, ProviderIncompleteStreamError, ProviderAssemblyLimitError } from "./providers/block-assembler.js";
 import type { ProviderAssemblyBounds, ProviderPreviewOffer, ProviderAssemblyResources } from "./providers/block-assembler.js";
-import { ProviderSdkRetentionLimitError } from "./providers/sdk-retention-guard.js";
 import { ProviderAssemblyCalibrationCandidate } from "./providers/resource-policy.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, validateProviderRequest } from "@tetral/gateway-protocol/src/bounds.js";
@@ -610,7 +609,7 @@ export class ProviderGatewayServiceShell {
         if (error instanceof GrpcStatusError) {
           throw error;
         }
-        if (error instanceof ProviderAssemblyLimitError || error instanceof ProviderSdkRetentionLimitError) {
+        if (error instanceof ProviderAssemblyLimitError) {
           yield* assembler.accept(providerErrorEvent({code:"provider_stream_limit_exceeded",message:"Provider output exceeded Gateway resource limits.",retryable:false,fatal:true,statusCode:413}));
           return;
         }

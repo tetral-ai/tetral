@@ -19,7 +19,7 @@ import { createGatewayGrpcServer } from "../../../../../gateway/packages/provide
 import { ProviderClientRegistry } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 import { ProviderCredentialResolver } from "../../../../../gateway/packages/provider-gateway/src/providers/credentials.js";
 import { ProviderGatewayServiceShell } from "../../../../../gateway/packages/provider-gateway/src/service.js";
-import type { GatewayStreamTextInput } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
+import type { GatewayModelStreamInput } from "../../../../../gateway/packages/provider-gateway/src/providers/clients.js";
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) {
@@ -72,7 +72,7 @@ const providerAttachmentCounts: number[] = [];
 const signalProviderStart = async (
 	attachmentCount: number,
 	attachmentBytes: number,
-	providerRequest: GatewayStreamTextInput,
+	providerRequest: GatewayModelStreamInput,
 ): Promise<void> => {
 	if (input.providerStartedPath === undefined) return;
 	await writeFile(
@@ -89,8 +89,16 @@ const signalProviderStart = async (
 };
 
 const providerStreamer = new ProviderClientRegistry({
+	// This fixture supplies provider events directly. Unexpected HTTP access
+	// must fail instead of creating an unused default transport owner.
+	fetch: Object.assign(
+		async () => {
+			throw new Error("Unexpected provider network access in scripted attachment fixture.");
+		},
+		{ preconnect: () => {} },
+	),
 	anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
-	streamText: (providerRequest) => {
+	streamModel: (providerRequest) => {
 		gatewayRequests += 1;
 		providerInvocations += 1;
 		const attachmentFacts = loweredProviderAttachmentFacts(providerRequest);
@@ -333,7 +341,7 @@ if (input.mode === "cold") {
 	}
 }
 
-function loweredProviderAttachmentFacts(input: GatewayStreamTextInput): {
+function loweredProviderAttachmentFacts(input: GatewayModelStreamInput): {
 	readonly count: number;
 	readonly bytes: number;
 } {

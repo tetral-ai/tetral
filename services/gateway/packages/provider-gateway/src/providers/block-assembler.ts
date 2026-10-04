@@ -13,7 +13,6 @@ import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/norma
 /** Operating resource caps are injectable and calibrated separately from legal content limits. */
 export interface ProviderAssemblyBounds {
   readonly maxRetainedBytes: number;
-  readonly maxCumulativeContentBytes: number;
   readonly maxOpenBlocks: number;
   readonly maxIdentities: number;
   readonly maxSegments: number;
@@ -21,6 +20,7 @@ export interface ProviderAssemblyBounds {
 }
 export interface ProviderAssemblyResources {
   readonly retainedBytes: number;
+  /** Diagnostic work counter; delivered content does not consume a live budget. */
   readonly cumulativeContentBytes: number;
   readonly segments: number;
   readonly openBlocks: number;
@@ -269,7 +269,6 @@ export class ProviderBlockAssembler {
   private check(): void {
     const limits = this.options.bounds;
     if (this.retainedBytes > limits.maxRetainedBytes) throw new ProviderAssemblyLimitError("retained_bytes");
-    if (this.cumulativeContentBytes > limits.maxCumulativeContentBytes) throw new ProviderAssemblyLimitError("cumulative_bytes");
     if (this.blocks.size + this.tools.size > limits.maxOpenBlocks) throw new ProviderAssemblyLimitError("open_blocks");
     if (this.seen.size > limits.maxIdentities) throw new ProviderAssemblyLimitError("identities");
     if (this.segments > limits.maxSegments) throw new ProviderAssemblyLimitError("segments");

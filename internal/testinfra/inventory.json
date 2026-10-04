@@ -47,6 +47,11 @@
       "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestContentProviderFailureLifecycle",
+      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/job-runner",
       "name": "TestPostgreSQLInstalledJobRunnerDeletesOutputCaptureCustody",
       "dependencies": ["postgresql"]

@@ -53,7 +53,8 @@
     "@tetral/gateway-protocol": "workspace:*",
     "@tetral/provider-gateway": "workspace:*",
     "ai": "6.0.168",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "undici": "7.30.0"
   },
   "overrides": {
     "protobufjs": "7.6.5",

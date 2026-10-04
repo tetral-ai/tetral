@@ -4,7 +4,6 @@ import { credentials } from "@grpc/grpc-js";
 import { ProviderGatewayServiceClient } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { contentLifecycleMetadata } from "./content-lifecycle-gateway.js";
-import { ProviderAssemblyCalibrationCandidate } from "../../src/providers/resource-policy.js";
 import type { ContentLifecycleGatewayFixtureOptions } from "./content-lifecycle-gateway.js";
 const cases:Record<string,{options:ContentLifecycleGatewayFixtureOptions;concurrency?:number;slowReader?:boolean;abort?:boolean}>= {
  "four8-barrier":{options:{scenario:"text-large",textCodeUnits:8*1024*1024,concurrentProviderBarrier:{count:4,retainedBytesPerRequest:4*1024*1024}},concurrency:4},
@@ -13,8 +12,7 @@ const cases:Record<string,{options:ContentLifecycleGatewayFixtureOptions;concurr
  "plain8":{options:{scenario:"text-large",textCodeUnits:8*1024*1024}},
  "plain16":{options:{scenario:"text-large",textCodeUnits:16*1024*1024-2}},
  "tiny8":{options:{scenario:"text-large",textCodeUnits:8*1024*1024,fragmentCodeUnits:1}},
- "empty-storm":{options:{scenario:"empty-storm",emptyRecords:1000,sdkBounds:{maxRecords:8,maxSerializedPayloadBytes:64*1024*1024}}},
- "three-max64":{options:{scenario:"multiple-large",textCodeUnits:16*1024*1024-2,blockCount:3,assemblyBounds:{...ProviderAssemblyCalibrationCandidate,maxCumulativeContentBytes:64*1024*1024}}},
+ "empty-storm":{options:{scenario:"empty-storm",emptyRecords:1000}},
  "three-max":{options:{scenario:"multiple-large",textCodeUnits:16*1024*1024-2,blockCount:3}},
  "slow8":{options:{scenario:"text-large",textCodeUnits:8*1024*1024},slowReader:true},
  "abort8":{options:{scenario:"text-large",textCodeUnits:8*1024*1024,holdFinish:true},abort:true},
@@ -27,7 +25,10 @@ const reader=child.stdout.getReader();let buffered="";
 const receive=async():Promise<any>=>{while(true){const newline=buffered.indexOf("\n");if(newline>=0){const line=buffered.slice(0,newline);buffered=buffered.slice(newline+1);return JSON.parse(line);}const next=await reader.read();if(next.done)throw new Error("fixture exited before response");buffered+=new TextDecoder().decode(next.value);if(buffered.length>65536)throw new Error("fixture output bound exceeded");}};
 const send=(value:unknown):void=>{child.stdin.write(JSON.stringify(value)+"\n");child.stdin.flush();};
 let forcedKill=false,watchdogExpired=false,failed=false;
-const watchdog=setTimeout(()=>{watchdogExpired=true;forcedKill=true;child.kill("SIGKILL");},name==="four-small"?4000:60000);
+// Eight million one-byte SDK records exercise structure, not ordinary model latency.
+// Extend only this test driver's wall/request budget; production watchdogs stay unchanged.
+const workloadTimeoutMs=name==="tiny8"?300000:120000;
+const watchdog=setTimeout(()=>{watchdogExpired=true;forcedKill=true;child.kill("SIGKILL");},name==="tiny8"?300000:name==="four-small"?4000:60000);
 let client:ProviderGatewayServiceClient|undefined;
 const started=performance.now();
 const clientTimeline:Array<{requestId:string;event:string;atMs:number;code?:number;details?:string}> = [];
@@ -36,7 +37,7 @@ try{
  send({kind:"start",options:{...selected.options,measureResources:true}});const ready=await receive();if(ready.kind!=="ready")throw new Error("fixture not ready");
  client=new ProviderGatewayServiceClient(ready.address,credentials.createInsecure(),{"grpc.max_receive_message_length":32*1024*1024});
  const run=async(index:number)=>{
-  const request={...ready.request,requestId:`req_resource_${index}`,modelRequestId:`mreq_resource_${index}`,limits:{...ready.request.limits,timeoutMs:120000}} as ProviderRequest;
+  const request={...ready.request,requestId:`req_resource_${index}`,modelRequestId:`mreq_resource_${index}`,limits:{...ready.request.limits,timeoutMs:workloadTimeoutMs}} as ProviderRequest;
   clientTimeline.push({requestId:request.requestId,event:"dispatch",atMs:performance.now()-started});
   const call=client!.streamProviderRequest(request,contentLifecycleMetadata());
   call.on("status",status=>{clientTimeline.push({requestId:request.requestId,event:"status",atMs:performance.now()-started,code:status.code,details:status.details.slice(0,512)});});
@@ -47,7 +48,7 @@ try{
   const expected=createHash("sha256"),units=(selected.options.textCodeUnits??0)*(selected.options.scenario==="multiple-large"?(selected.options.blockCount??3):1);
   for(let offset=0;offset<units;offset+=4096)expected.update("x".repeat(Math.min(4096,units-offset)));
   const sha256=digest.digest("hex"),expectedSha256=expected.digest("hex");
-  if(!selected.abort&&(selected.options.scenario==="text-large"||name==="three-max64")&&(terminal!=="finish"||textBytes!==units||sha256!==expectedSha256))failed=true;
+  if(!selected.abort&&(selected.options.scenario==="text-large"||selected.options.scenario==="multiple-large")&&(terminal!=="finish"||textBytes!==units||sha256!==expectedSha256))failed=true;
   return {frames,textBytes,terminal,errorCode,sha256,expectedSha256,digestMatches:sha256===expectedSha256};
  };
  const pending=Promise.all(Array.from({length:selected.concurrency??1},(_,index)=>run(index)));

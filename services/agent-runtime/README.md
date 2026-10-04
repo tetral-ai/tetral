@@ -281,6 +281,9 @@ Gateway owns all provider lowering and credential injection.
   `core/src/contracts/provider.ts`; stream validation and normalization
   (`validateProviderStreamEvent`, consumed in `llm-service.ts`) reject any
   malformed or misidentified `ProviderStreamEvent`.
+- Gateway resource failures preserve `provider_stream_limit_exceeded`, status
+  and message through normalization. They are fatal and nonretryable; existing
+  Tool custody and settlement still follow the committed Request End.
 - System-segment composition (assembly order): the platform base prompt (the
   `gpt` family also carries the `apply_patch` format instructions), the agent's
   create-time `system` text, one memory segment per attached store carrying that
