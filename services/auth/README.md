@@ -264,3 +264,17 @@ Restart-only `TETRAL_LOG_LEVEL`, `TETRAL_LOG_MAX_RECORD_BYTES`,
 bounded diagnostics. Failure records retain safe error tuples; repeated
 degradation emits suppression summaries. Cleanup completes before bounded
 process-diagnostic close. Credentials and assertion contents never enter logs.
+
+Auth outcomes use fixed `auth.stage` and `auth.result` values. Invalid input,
+credentials, and assertions differ from grant/operation denial, exchange limits,
+PostgreSQL unavailability (`auth_store_unavailable`), and issuer/JWKS
+unavailability (`auth_jwks_unavailable`). Successful exchange records retain
+trusted human/service kind and positive rule, identity, and grant revision
+numbers. Denials retain these facts only after their lookup or signed admission
+establishes them. Operation denials include the registered semantic
+`auth.operation`; resource selectors and identity IDs are omitted. Unknown facts
+stay absent. Successful request admission and operation checks stay quiet at the
+default level. Repeated failures share fixed stage/code suppression partitions;
+kind, revisions, and actions never expand limiter keys. The same shared audit
+context covers Auth, API, EventStream, and standalone event-list gates. Diagnostic
+sink failure cannot change the authorization result or business effects.

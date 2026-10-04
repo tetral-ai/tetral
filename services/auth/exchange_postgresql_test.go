@@ -1,6 +1,7 @@
 package tetralauth
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -74,7 +76,10 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(RouterConfig{Store: store, Resolver: resolver, AssertionVerifier: verifier, Signer: signer})
+	var diagnosticOutput bytes.Buffer
+	processLogger := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "unit", workload.DefaultDiagnosticConfig())
+	defer processLogger.CloseWithBudget()
+	router := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: store, Resolver: resolver, AssertionVerifier: verifier, Signer: signer})
 	server := httptest.NewServer(router)
 	defer server.Close()
 	counts := func(t *testing.T) (tokens, identities, grants int) {
@@ -279,7 +284,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		if err := closed.Close(); err != nil {
 			t.Fatal(err)
 		}
-		unavailableRouter := NewRouter(RouterConfig{Store: auth.NewAPIKeyStore(closed), Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b"), AssertionVerifier: verifier, Signer: signer})
+		unavailableRouter := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: auth.NewAPIKeyStore(closed), Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b"), AssertionVerifier: verifier, Signer: signer})
 		endpoint := httptest.NewServer(unavailableRouter)
 		defer endpoint.Close()
 		before, _, _ := counts(t)
@@ -336,4 +341,55 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		unavailable.Store(true)
 		exchange(t, "service", "", "", unavailableRule.ID, rule.OrganizationID, rule.Audience, "new-unknown-key", 503)
 	})
+	processLogger.CloseWithBudget()
+	events := map[string]map[string]any{}
+	kinds := map[string]bool{}
+	for _, line := range bytes.Split(bytes.TrimSpace(diagnosticOutput.Bytes()), []byte("\n")) {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if code, ok := event["error.code"].(string); ok {
+			stage, _ := event["auth.stage"].(string)
+			events[code+":"+stage] = event
+		}
+		if event["event"] == "auth.exchange.success" {
+			kind := event["auth.identity.kind"]
+			if value, ok := kind.(string); ok {
+				kinds[value] = true
+			}
+			if kind != auth.IdentityHuman && kind != auth.IdentityService {
+				t.Fatal("exchange lost verified identity kind")
+			}
+			for _, field := range []string{"auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
+				if value, ok := event[field].(float64); !ok || value <= 0 {
+					t.Fatalf("exchange missing trusted %s", field)
+				}
+			}
+		}
+	}
+	for code, want := range map[string]struct{ stage, result string }{
+		"auth_rule_invalid": {"rule", "invalid"}, "auth_assertion_invalid": {"assertion", "invalid"},
+		"auth_grant_denied": {"grant", "denied"}, "auth_admission_invalid": {"admission", "invalid"},
+		"auth_store_unavailable": {"rule", "unavailable"}, "auth_jwks_unavailable": {"assertion", "unavailable"},
+	} {
+		event, ok := events[code+":"+want.stage]
+		// Store failure occurs through admission and exchange; process suppression
+		// partitions by fixed stage as well as safe code, not by identity/revision.
+		if !ok || event["auth.stage"] != want.stage || event["auth.result"] != want.result {
+			t.Fatalf("missing semantic diagnostic %s", code)
+		}
+	}
+	if !kinds[auth.IdentityHuman] || !kinds[auth.IdentityService] {
+		t.Fatal("successful exchanges lost truthful kind diagnostics")
+	}
+	if event := events["auth_store_unavailable:admission"]; event == nil || event["auth.result"] != "unavailable" {
+		t.Fatal("store admission diagnostic missing")
+	}
+	for _, forbidden := range []string{issuer.URL, rule.ID, rule.OrganizationID, "identity_exchange_", "grant_exchange_", "tetral_at_", "selected-key", "database is closed"} {
+		if strings.Contains(diagnosticOutput.String(), forbidden) {
+			t.Fatal("authentication diagnostic leaked private request/store material")
+		}
+	}
+
 }

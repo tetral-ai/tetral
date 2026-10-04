@@ -29,12 +29,14 @@ func (h *PublicOperationHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	ctx := context.WithValue(r.Context(), operationContextKey{}, h.Operation)
 	principal, ok := auth.PrincipalFromContext(ctx)
 	if !ok {
-		writeError(w, r, &auth.AuthenticationError{Message: "missing authenticated principal"})
+		err := &auth.AuthenticationError{Message: "missing authenticated principal"}
+		auth.RecordDecision(ctx, "signed_principal", err, auth.AuditEvent{})
+		writeError(w, r, err)
 		return
 	}
 	// Admission checks the trusted workspace operation first. A denied action
 	// cannot probe resource existence by triggering its owner lookup.
-	if err := auth.Authorize(principal, h.Operation, workspaceReference(principal.Workspace.ID)); err != nil {
+	if err := auth.AuthorizeWithAudit(ctx, principal, h.Operation, workspaceReference(principal.Workspace.ID)); err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -59,9 +61,11 @@ func AuthorizePublicRequest(ctx context.Context, resource auth.ResourceReference
 	}
 	operation, ok := ctx.Value(operationContextKey{}).(auth.Operation)
 	if !ok {
-		return &auth.PermissionError{}
+		err := &auth.PermissionError{}
+		auth.RecordDecision(ctx, "operation", err, auth.AuditFacts(principal))
+		return err
 	}
-	return auth.Authorize(principal, operation, resource)
+	return auth.AuthorizeWithAudit(ctx, principal, operation, resource)
 }
 
 // authorizeWorkspace is called at the existing handler workspace boundary,

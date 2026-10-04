@@ -66,6 +66,7 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	if logger == nil {
 		logger = workload.ComponentLogger("auth")
 	}
+	cfg.Logger = logger
 	r.Use(httpapi.RequestIDMiddleware)
 	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))
 	r.Use(httpapi.PublicRecoveryMiddleware(logger))
@@ -81,8 +82,12 @@ func NewRouter(cfg RouterConfig) http.Handler {
 }
 
 func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
+	deny := func(err error) {
+		auth.RecordDecision(r.Context(), "input", err, auth.AuditEvent{})
+		writeAuthError(w, r, err)
+	}
 	if cfg.Store == nil || cfg.Signer == nil {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "authentication unavailable"})
+		deny(&auth.AuthenticationError{Message: "authentication unavailable"})
 		return
 	}
 	rawKey := r.Header.Get("X-Api-Key")
@@ -91,15 +96,15 @@ func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
 	requestID := r.Header.Get("X-Request-Id")
 	forwardedFor := r.Header.Get("X-Forwarded-For")
 	if rawKey == "" && r.Header.Get("Authorization") == "" {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "missing api key"})
+		deny(&auth.AuthenticationError{Message: "missing api key"})
 		return
 	}
 	if originalMethod == "" || originalPath == "" {
-		writeAuthError(w, r, &auth.ValidationError{Message: "original method and path are required"})
+		deny(&auth.ValidationError{Message: "original method and path are required"})
 		return
 	}
 	if requestID == "" || forwardedFor == "" {
-		writeAuthError(w, r, &auth.ValidationError{Message: "request id and forwarded-for are required"})
+		deny(&auth.ValidationError{Message: "request id and forwarded-for are required"})
 		return
 	}
 	result, err := (&auth.RequestAuthenticator{Resolver: cfg.Resolver}).AuthenticateRequest(r.Context(), auth.CredentialRequest{Method: originalMethod, Path: originalPath, APIKey: rawKey, Authorization: r.Header.Get("Authorization"), AuthorizationValues: r.Header.Values("Authorization")})
@@ -219,11 +224,14 @@ func (cfg RouterConfig) principalFromRequest(w http.ResponseWriter, r *http.Requ
 	}
 	token := r.Header.Get("X-Tetral-Internal-Principal")
 	if token == "" {
-		writeAuthError(w, r, &auth.AuthenticationError{Message: "missing internal principal"})
+		err := &auth.AuthenticationError{Message: "missing internal principal"}
+		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
+		writeAuthError(w, r, err)
 		return auth.Principal{}, false
 	}
 	principal, _, err := cfg.Signer.Verify(token, r.Method, r.URL.Path)
 	if err != nil {
+		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
 		writeAuthError(w, r, err)
 		return auth.Principal{}, false
 	}

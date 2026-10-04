@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -22,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/memory"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	publicstream "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -90,7 +92,7 @@ func identityAdmissionFixture(kind string) auth.Principal {
 	return auth.Principal{Workspace: ws, Identity: &auth.Identity{ID: "identity_" + kind, Kind: kind}, Credential: auth.Credential{Kind: auth.CredentialAccessToken, ID: "token_fixture_" + kind}, Authority: auth.Authority{Kind: auth.AuthorityIdentityGrant, RuleID: "rule_fixture", IdentityID: "identity_" + kind, GrantID: "grant_fixture", RuleRevision: 1, IdentityRevision: 1, GrantRevision: 1, PolicyVersion: auth.PolicyVersion, Operations: auth.RegisteredOperations(), Scope: auth.ResourceReference{WorkspaceID: ws.ID, Type: "workspace"}}}
 }
 
-func signedMemoryRouter(t *testing.T, service *memory.Service) (http.Handler, *auth.InternalPrincipalSigner) {
+func signedMemoryRouter(t *testing.T, service *memory.Service, options ...httpapi.RouterOption) (http.Handler, *auth.InternalPrincipalSigner) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -104,7 +106,8 @@ func signedMemoryRouter(t *testing.T, service *memory.Service) (http.Handler, *a
 	if err != nil {
 		t.Fatal(err)
 	}
-	return httpapi.NewRouter(nil, "", httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier)), signer
+	options = append(options, httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
+	return httpapi.NewRouter(nil, "", options...), signer
 }
 
 func signedPublicCall(t *testing.T, router http.Handler, signer *auth.InternalPrincipalSigner, principal auth.Principal, method, path, body string) *httptest.ResponseRecorder {
@@ -254,7 +257,10 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 func TestPublicAuthorizationMemoryDeniesBeforeDurableEffects(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
-	router, signer := signedMemoryRouter(t, service)
+	var diagnosticOutput bytes.Buffer
+	processLogger := workload.NewProcessLogger(&diagnosticOutput, "api", "test", "unit", workload.DefaultDiagnosticConfig())
+	defer processLogger.CloseWithBudget()
+	router, signer := signedMemoryRouter(t, service, httpapi.WithLogger(processLogger.Logger))
 	full := identityAdmissionFixture(auth.IdentityHuman)
 	call := func(principal auth.Principal, method, path, body string) *httptest.ResponseRecorder {
 		return signedPublicCall(t, router, signer, principal, method, path, body)
@@ -351,6 +357,38 @@ func TestPublicAuthorizationMemoryDeniesBeforeDurableEffects(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("wrong parent status=%d body=%s", response.Code, response.Body.String())
 	}
+	processLogger.CloseWithBudget()
+	found := false
+	for _, line := range bytes.Split(bytes.TrimSpace(diagnosticOutput.Bytes()), []byte("\n")) {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["event"] != "auth.operation.denied" {
+			continue
+		}
+		found = true
+		if value, ok := event["auth.operation"].(string); !ok || auth.Operation(value) != auth.OperationMemoryStoresCreate {
+			t.Fatal("operation denial omitted actual registered action")
+		}
+		if event["auth.stage"] != "operation" || event["auth.result"] != "denied" || event["auth.identity.kind"] != auth.IdentityHuman {
+			t.Fatal("signed operation denial lost trusted classification")
+		}
+		for _, field := range []string{"auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
+			if event[field] != float64(1) {
+				t.Fatalf("signed operation missing trusted %s", field)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("restricted production gate denied silently")
+	}
+	for _, forbidden := range []string{"identity_human", "token_fixture_", "rule_fixture", "grant_fixture", created.ID, store.ID, "workspace_forged", "ak_forged"} {
+		if strings.Contains(diagnosticOutput.String(), forbidden) {
+			t.Fatal("operation diagnostic leaked identities/selectors")
+		}
+	}
+
 }
 
 func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T) {

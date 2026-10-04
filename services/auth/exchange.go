@@ -80,9 +80,20 @@ type exchangeHandler struct{ cfg RouterConfig }
 
 func (h *exchangeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.cfg.exchange(w, r) }
 func (cfg RouterConfig) exchange(w http.ResponseWriter, r *http.Request) {
+	stage := "input"
+	facts := auth.AuditEvent{}
+	deny := func(err error) {
+		decisionStage := stage
+		var rate exchangeRateError
+		if errors.As(err, &rate) {
+			decisionStage = "limiter"
+		}
+		auth.RecordDecision(r.Context(), decisionStage, err, facts)
+		writeAuthError(w, r, err)
+	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(cfg.ExchangeLimits.BodyReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		writeAuthError(w, r, &auth.UnavailableError{})
+		deny(&auth.UnavailableError{})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, int64(cfg.ExchangeLimits.BodyBytes))
@@ -105,43 +116,46 @@ func (cfg RouterConfig) exchange(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "close")
 		_ = controller.SetReadDeadline(time.Now())
 		w.Header().Set("Retry-After", "60")
-		writeAuthError(w, r, exchangeRateError{})
+		deny(exchangeRateError{})
 		return
 	}
 	acquired = true
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
-		writeAuthError(w, r, &auth.ValidationError{Message: "token exchange requires application/json"})
+		deny(&auth.ValidationError{Message: "token exchange requires application/json"})
 		return
 	}
 	input, err := io.ReadAll(r.Body)
 	if err != nil {
 		var large *http.MaxBytesError
 		if errors.As(err, &large) {
-			writeAuthError(w, r, requestTooLargeError{message: "request body too large"})
+			deny(requestTooLargeError{message: "request body too large"})
 		} else {
-			writeAuthError(w, r, &auth.ValidationError{Message: "invalid token exchange body"})
+			deny(&auth.ValidationError{Message: "invalid token exchange body"})
 		}
 		return
 	}
 	var request exchangeRequest
 	trimmed := strings.TrimSpace(string(input))
 	if len(trimmed) == 0 || trimmed[0] != '{' || auth.DecodeStrictJSON(input, &request) != nil || request.GrantType != jwtBearerGrant || request.Assertion == "" || len(request.Assertion) > auth.MaxAssertionBytes || !exchangeSelector(request.FederationRuleID) || !exchangeSelector(request.OrganizationID) || request.WorkspaceID != "" && !exchangeSelector(request.WorkspaceID) || request.ServiceAccountID != "" && !exchangeSelector(request.ServiceAccountID) {
-		writeAuthError(w, r, &auth.ValidationError{Message: "invalid token exchange request"})
+		deny(&auth.ValidationError{Message: "invalid token exchange request"})
 		return
 	}
 	if cfg.Resolver == nil || cfg.AssertionVerifier == nil {
-		writeAuthError(w, r, &auth.UnavailableError{})
+		deny(&auth.UnavailableError{})
 		return
 	}
+	stage = "rule"
 	rule, err := cfg.Resolver.LoadFederationRule(r.Context(), request.FederationRuleID, request.OrganizationID)
 	if err != nil {
-		writeAuthError(w, r, auth.ExchangeError(err))
+		deny(auth.ExchangeError(err))
 		return
 	}
+	stage = "assertion"
+	facts.RuleRevision = rule.Revision
 	proof, err := cfg.AssertionVerifier.Verify(r.Context(), rule, request.Assertion)
 	if err != nil {
-		writeAuthError(w, r, auth.ExchangeError(err))
+		deny(auth.ExchangeError(err))
 		return
 	}
 	token, err := cfg.Resolver.Issue(r.Context(), proof, auth.ExchangeSelectors{WorkspaceID: request.WorkspaceID, ServiceAccountID: request.ServiceAccountID})

@@ -74,7 +74,8 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
-			next.ServeHTTP(tracker, r)
+			ctx := auth.WithAuditRecorder(r.Context(), authLogRecorder{logger: logger})
+			next.ServeHTTP(tracker, r.WithContext(ctx))
 			duration := time.Since(start)
 			if opts.metrics != nil {
 				opts.metrics.ObserveHTTPRequest(r.Method, tracker.status, duration)
@@ -157,7 +158,11 @@ type authLogRecorder struct {
 	logger *slog.Logger
 }
 
-func (r authLogRecorder) RecordAuthEvent(_ context.Context, event auth.AuditEvent) {
+func (r authLogRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEvent) {
+	if event.Stage != "" {
+		r.recordDecision(ctx, event)
+		return
+	}
 	eventKind := "auth_failure"
 	if event.Result == "error" {
 		eventKind = "auth_error"
@@ -222,4 +227,44 @@ func safeRequestPath(r *http.Request) string {
 		return "/v1/api_keys/{api_key_id}"
 	}
 	return r.URL.Path
+}
+
+// recordDecision accepts only the fixed Auth builder vocabulary and emits no
+// path, workspace selector, subject, identity ID, issuer URL, or credential.
+func (r authLogRecorder) recordDecision(ctx context.Context, event auth.AuditEvent) {
+	if r.logger == nil {
+		return
+	}
+	attrs := []any{slog.String("operation", "auth."+event.Stage), slog.String("component", "auth"), slog.String("auth.stage", event.Stage), slog.String("auth.result", event.Result), slog.String("request.id", RequestIDFromContext(ctx))}
+	if event.Operation != "" {
+		attrs = append(attrs, slog.String("auth.operation", string(event.Operation)))
+	}
+	if event.IdentityKind != "" {
+		attrs = append(attrs, slog.String("auth.identity.kind", event.IdentityKind))
+	}
+	for key, value := range map[string]int64{"auth.rule.revision": event.RuleRevision, "auth.identity.revision": event.IdentityRevision, "auth.grant.revision": event.GrantRevision} {
+		if value > 0 {
+			attrs = append(attrs, slog.Int64(key, value))
+		}
+	}
+	if event.Result == "success" {
+		if event.Stage == "grant" {
+			r.logger.Info("auth.exchange.success", attrs...)
+		} else {
+			r.logger.Debug("auth."+event.Stage+".success", attrs...)
+		}
+		return
+	}
+	class := "authentication_error"
+	if event.Result == "denied" {
+		class = "permission_error"
+	}
+	if event.Result == "limited" {
+		class = "rate_limit_error"
+	}
+	if event.Result == "unavailable" {
+		class = "dependency_unavailable"
+	}
+	attrs = append(attrs, slog.String("error.class", class), slog.String("error.code", event.Code), slog.String("error.message_safe", "authentication decision failed"))
+	r.logger.Warn("auth."+event.Stage+"."+event.Result, attrs...)
 }

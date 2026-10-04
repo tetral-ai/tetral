@@ -27,7 +27,8 @@ func sameOperations(a, b []Operation) bool {
 // CreateForPrincipal is the public issuance path. It preserves the exact
 // admitted root revisions and current ceiling; it never stamps stale authority
 // with newer database revisions or derives independent authority from identity.
-func (s *APIKeyStore) CreateForPrincipal(ctx context.Context, p Principal, name string) (*CreateAPIKeyResult, error) {
+func (s *APIKeyStore) CreateForPrincipal(ctx context.Context, p Principal, name string) (key *CreateAPIKeyResult, resultErr error) {
+	defer func() { RecordDecision(ctx, "issuance", resultErr, AuditFacts(p)) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := Authorize(p, OperationAPIKeysCreate, ResourceReference{WorkspaceID: p.Workspace.ID, Type: "workspace"}); err != nil {

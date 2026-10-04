@@ -67,11 +67,18 @@ type requestIDExtractor func(ctx context.Context) string
 // AuditEvent is the public-safe authentication outcome emitted to the HTTP
 // boundary logger. It intentionally carries no raw key material.
 type AuditEvent struct {
-	RequestID string
-	Method    string
-	Path      string
-	Result    string
-	ErrorType string
+	RequestID        string
+	Method           string
+	Path             string
+	Result           string
+	ErrorType        string
+	Stage            string
+	Operation        Operation
+	Code             string
+	IdentityKind     string
+	RuleRevision     int64
+	IdentityRevision int64
+	GrantRevision    int64
 }
 
 // AuditRecorder receives public-safe auth events.
@@ -87,8 +94,8 @@ type AuditRecorder interface {
 // chi request id from context for the audit log line; pass a noop
 // returning "" if the caller does not propagate request ids.
 //
-// Audit semantics: one log line per request, "auth=success",
-// "auth=failure", or "auth=error", with no raw key material.
+// Successful admission stays quiet. Failure/error events carry no raw key
+// material; the owning HTTP recorder uses the process logger suppression policy.
 // Credential failures return authentication_error responses; unexpected
 // authenticator/store failures keep their server-error semantics while
 // logging only a safe error type marker.

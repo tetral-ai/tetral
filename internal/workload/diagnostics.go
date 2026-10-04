@@ -292,7 +292,7 @@ func (s *diagnosticState) emit(writer diagnosticWriter, level slog.Level, fields
 			return
 		}
 		sample := map[string]any{}
-		for _, key := range []string{"event", "reason", "level", "service.name", "service.version", "deployment.environment", "service.instance.id", "process.pid", "workspace.id", "session.id", "thread.id", "request.id", "operation.id", "kubernetes.resource", "kubernetes.status", "error.class", "error.code", "error.message_safe", "phase", "component"} {
+		for _, key := range []string{"event", "reason", "level", "service.name", "service.version", "deployment.environment", "service.instance.id", "process.pid", "workspace.id", "session.id", "thread.id", "request.id", "operation.id", "kubernetes.resource", "kubernetes.status", "error.class", "error.code", "error.message_safe", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
 			if v, ok := fields[key]; ok {
 				sample[key] = v
 			}
@@ -302,7 +302,7 @@ func (s *diagnosticState) emit(writer diagnosticWriter, level slog.Level, fields
 		s.windows[key] = w
 	}
 	if _, hadFailure := w.sample["error.class"]; !hadFailure && fields["error.class"] != nil {
-		for _, field := range []string{"workspace.id", "session.id", "thread.id", "request.id", "operation.id", "error.class", "error.code", "error.message_safe", "phase", "component"} {
+		for _, field := range []string{"workspace.id", "session.id", "thread.id", "request.id", "operation.id", "error.class", "error.code", "error.message_safe", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
 			delete(w.sample, field)
 			if value, present := fields[field]; present {
 				w.sample[field] = value

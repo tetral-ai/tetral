@@ -22,13 +22,16 @@ type RequestAuthenticator struct{ Resolver *AuthorityResolver }
 
 func (a *RequestAuthenticator) AuthenticateRequest(ctx context.Context, r CredentialRequest) (Principal, error) {
 	if a == nil || a.Resolver == nil {
-		return Principal{}, &UnavailableError{}
+		err := &UnavailableError{}
+		RecordDecision(ctx, "admission", err, AuditEvent{})
+		return Principal{}, err
 	}
 	if r.APIKey != "" {
 		p, err := a.Resolver.AuthenticateKey(ctx, r.APIKey)
 		return p, authenticationDependencyError(err)
 	}
 	if len(r.AuthorizationValues) > 1 {
+		RecordDecision(ctx, "admission", authRejected(), AuditEvent{})
 		return Principal{}, authRejected()
 	}
 	if len(r.AuthorizationValues) == 1 {
@@ -36,7 +39,9 @@ func (a *RequestAuthenticator) AuthenticateRequest(ctx context.Context, r Creden
 	}
 	scheme, token, ok := strings.Cut(r.Authorization, " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return Principal{}, &AuthenticationError{Message: "missing or invalid credentials"}
+		err := &AuthenticationError{Message: "missing or invalid credentials"}
+		RecordDecision(ctx, "admission", err, AuditEvent{})
+		return Principal{}, err
 	}
 	p, err := a.Resolver.AuthenticateBearer(ctx, token)
 	return p, authenticationDependencyError(err)
@@ -133,7 +138,9 @@ func (s *AuthorityResolver) AuthenticateKey(ctx context.Context, raw string) (Pr
 func (s *AuthorityResolver) AuthenticateBearer(ctx context.Context, raw string) (Principal, error) {
 	return s.authenticate(ctx, raw, true)
 }
-func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer bool) (Principal, error) {
+func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer bool) (principal Principal, resultErr error) {
+	facts := AuditEvent{}
+	defer func() { RecordDecision(ctx, "admission", resultErr, facts) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if raw == "" || len(raw) > 4096 {
@@ -162,6 +169,7 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	} else if c.authority.Kind != AuthorityIndependentKey || bearer {
 		return Principal{}, authRejected()
 	}
+	facts = AuditEvent{IdentityKind: kind, RuleRevision: c.authority.RuleRevision, IdentityRevision: c.authority.IdentityRevision, GrantRevision: c.authority.GrantRevision}
 	if err = setAuthWorkspace(ctx, tx, c.workspaceID); err != nil {
 		return Principal{}, err
 	}
@@ -249,7 +257,9 @@ type AccessTokenResponse struct {
 
 // Issue consumes an immutable verifier proof, then locks/rechecks the same
 // security revision. No issuer I/O occurs while these PostgreSQL locks are held.
-func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, selectors ExchangeSelectors) (AccessTokenResponse, error) {
+func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, selectors ExchangeSelectors) (token AccessTokenResponse, resultErr error) {
+	facts := AuditEvent{}
+	defer func() { RecordDecision(ctx, "grant", resultErr, facts) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if selectors.WorkspaceID != "" && !boundedIdentity(selectors.WorkspaceID) {
@@ -261,6 +271,7 @@ func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, 
 	if proof.ruleID == "" || proof.ruleRevision <= 0 || proof.subject == "" {
 		return AccessTokenResponse{}, authRejected()
 	}
+	facts.RuleRevision = proof.ruleRevision
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return AccessTokenResponse{}, err
@@ -275,6 +286,8 @@ func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, 
 	if err != nil {
 		return AccessTokenResponse{}, err
 	}
+	facts.IdentityKind = identity.Kind
+	facts.IdentityRevision = identityRevision
 	if selectors.ServiceAccountID != "" && (identity.Kind != IdentityService || selectors.ServiceAccountID != identity.ServiceAccountID) {
 		return AccessTokenResponse{}, authRejected()
 	}
@@ -314,6 +327,8 @@ func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, 
 	if _, err = lockCurrentAuthority(ctx, tx, authority); err != nil {
 		return AccessTokenResponse{}, err
 	}
+	facts.RuleRevision = authority.RuleRevision
+	facts.GrantRevision = authority.GrantRevision
 	if err = setAuthWorkspace(ctx, tx, authority.Scope.WorkspaceID); err != nil {
 		return AccessTokenResponse{}, err
 	}
