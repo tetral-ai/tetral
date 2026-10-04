@@ -64,7 +64,7 @@ func LoadInventory() (Inventory, error) {
 		seenTests[key] = true
 		for _, dependency := range test.Dependencies {
 			switch dependency {
-			case "postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk", "envoy", "bun-image":
+			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "sdk", "envoy", "bun-image":
 			default:
 				return Inventory{}, fmt.Errorf("go test %q declares unknown dependency %q", test.Name, dependency)
 			}

@@ -111,6 +111,32 @@ cleanup before clients so they join first; cleanup removes even a stopped broker
 and its private credential files, including after partial startup, without
 changing the shared descriptor or environment.
 
+OIDC integration uses the native `keycloak` dependency. Full and the normal
+Go Race CI shards execute `TestKeycloakHTTPSIdentityAndSigningKeyLifecycle`;
+Affected selects the dependency for its declared consumers, while Fast only
+compiles the real-issuer test. The runner starts the exact version and immutable
+image digest in `internal/testinfra/keycloak.lock.json`, verifies the running
+version, and records the digest and public realm-recipe checksum. The selected
+[Keycloak 26.7.5 release](https://www.keycloak.org/2026/09/keycloak-2675-released)
+is a test dependency, separate from Engine deployment.
+
+The fixture serves actual HTTPS with a generated CA and an IP SAN for its
+loopback endpoint. Its private descriptor, named by
+`TETRAL_TEST_KEYCLOAK_CONFIG`, supplies the CA and an explicit `127.0.0.1/32`
+destination allowance to the owning test. TLS verification stays enabled;
+fixture clients reject redirects and any other destination. Every HTTPS request
+has a five-second maximum, startup has a 120-second bound, and each independent
+realm provision has a separate 180-second bound, all clipped by cancellation.
+Realm consumers use the same fixed client, Engine audience, human username and
+service selector, with distinct immutable subjects for simultaneous realms.
+Credential files stay private and ephemeral. Actual realm signing-key controls
+support fresh-key issuance, old/new overlap, passive keys and disabled-key
+retirement; the fixture test independently verifies JWT signatures and claims
+against observed JWKS. Realm close deletes its IdP state and credential files;
+native dependency teardown removes the container, trust material and admin
+credentials. This fixture proof supports the Auth/SDK compositions without
+claiming their business behavior or later Kubernetes issuer routing.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.

@@ -79,15 +79,16 @@ type ExecutionEnvelope struct {
 }
 
 type DependencyEvidence struct {
-	Name                 string        `json:"name"`
-	Source               string        `json:"source"`
-	Identity             string        `json:"identity"`
-	Version              string        `json:"version,omitempty"`
-	RunID                string        `json:"run_id,omitempty"`
-	SetupElapsed         time.Duration `json:"setup_elapsed_ns"`
-	TemplateIdentity     string        `json:"template_identity,omitempty"`
-	TemplateSetupElapsed time.Duration `json:"template_setup_elapsed_ns,omitempty"`
-	TeardownElapsed      time.Duration `json:"teardown_elapsed_ns"`
+	Name                  string        `json:"name"`
+	Source                string        `json:"source"`
+	Identity              string        `json:"identity"`
+	Version               string        `json:"version,omitempty"`
+	ConfigurationIdentity string        `json:"configuration_identity,omitempty"`
+	RunID                 string        `json:"run_id,omitempty"`
+	SetupElapsed          time.Duration `json:"setup_elapsed_ns"`
+	TemplateIdentity      string        `json:"template_identity,omitempty"`
+	TemplateSetupElapsed  time.Duration `json:"template_setup_elapsed_ns,omitempty"`
+	TeardownElapsed       time.Duration `json:"teardown_elapsed_ns"`
 }
 
 type StepResult struct {
