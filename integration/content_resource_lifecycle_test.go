@@ -157,15 +157,33 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 			decision = "deny"
 		}
 		if strings.HasSuffix(kind, "-cold") {
+			// Durable idle publication precedes the local run's finalizer. Join
+			// that owner before asking cleanup to remove pending approval state.
+			waitReply := c.runtimeControl(t, "wait", session)
+			var joined struct {
+				OK       bool  `json:"ok"`
+				Observed *bool `json:"observed"`
+				TimedOut *bool `json:"timedOut"`
+			}
+			waitValid := json.Unmarshal(waitReply["wait"], &joined) == nil
+			if !waitValid || !joined.OK || joined.Observed == nil || !*joined.Observed || joined.TimedOut == nil || *joined.TimedOut {
+				t.Fatalf("pending approval run did not join: valid=%t ok=%t observed_present=%t observed=%t timeout_present=%t timed_out=%t", waitValid, joined.OK, joined.Observed != nil, joined.Observed != nil && *joined.Observed, joined.TimedOut != nil, joined.TimedOut != nil && *joined.TimedOut)
+			}
 			reply := c.runtimeControl(t, "cleanup", session)
 			var cleanup struct {
-				OK bool `json:"ok"`
+				OK      bool `json:"ok"`
+				Cleaned bool `json:"cleaned"`
 			}
 			var thread struct {
 				Observed *bool `json:"observed"`
 			}
-			if json.Unmarshal(reply["cleanup"], &cleanup) != nil || json.Unmarshal(reply["thread"], &thread) != nil || !cleanup.OK || thread.Observed == nil || *thread.Observed {
-				t.Fatal("pending approval residency was not evicted")
+			cleanupValid := json.Unmarshal(reply["cleanup"], &cleanup) == nil
+			threadValid := json.Unmarshal(reply["thread"], &thread) == nil
+			if !cleanupValid || !threadValid || !cleanup.OK || !cleanup.Cleaned || thread.Observed == nil || *thread.Observed {
+				t.Fatalf("pending approval residency was not evicted: cleanup_valid=%t thread_valid=%t ok=%t cleaned=%t observed_present=%t observed=%t", cleanupValid, threadValid, cleanup.OK, cleanup.Cleaned, thread.Observed != nil, thread.Observed != nil && *thread.Observed)
+			}
+			if entry.starts.Load() != 0 {
+				t.Fatal("cold permission preparation dispatched an external command")
 			}
 			// The owning API commits the decision before Queue can deliver its
 			// new input; the released hot owner cannot service this continuation.

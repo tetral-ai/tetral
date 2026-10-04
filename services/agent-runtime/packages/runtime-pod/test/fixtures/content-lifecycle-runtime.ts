@@ -48,7 +48,7 @@ const trackObservation=(operation:Promise<void>)=>{
  void operation.then(()=>observations.delete(operation),()=>observations.delete(operation));
 };
 const controlSchema=z.strictObject({
- id:z.number().int().positive(),operation:z.enum(["inspect","cleanup"]),
+ id:z.number().int().positive(),operation:z.enum(["inspect","wait","cleanup"]),
  scope:z.strictObject({workspaceId:z.string().min(1),sessionId:z.string().min(1),sessionThreadId:z.string().min(1),
   bindingId:z.string().min(1),bindingGeneration:z.number().int().nonnegative(),targetPodUid:z.string().min(1),runtimeProcessId:z.string().min(1)}),
 });
@@ -150,12 +150,18 @@ try{
     try{
      const command=controlSchema.parse(JSON.parse(await readFile(path,"utf8")) as unknown);
      if(command.id!==ordinal)throw new Error("control ordinal mismatch");
+     const joined=command.operation==="wait"?await hosts!.subAgentRunHost.waitThread(command.scope,10_000,stop.signal):undefined;
+     if(joined!==undefined){
+      await trace("control-run-join",{sessionThreadId:command.scope.sessionThreadId,ok:joined.ok,observed:joined.ok?joined.observed:false,timedOut:joined.ok?joined.timedOut:false});
+      if(!joined.ok||!joined.observed||joined.timedOut)throw new Error("fixture run join failed");
+     }
      const cleanup=command.operation==="cleanup"?await hosts!.cleanupRunHost.handleCleanupSession({
       ...command.scope,cleanupOperationId:`fixture_cleanup_${input.processID}_${ordinal}`,
      }):undefined;
+     if(cleanup!==undefined)await trace("control-cleanup",{sessionThreadId:command.scope.sessionThreadId,ok:cleanup.ok,cleaned:cleanup.ok?cleanup.cleaned:false,reason:cleanup.ok?"":cleanup.reason});
      const inspected=await hosts!.subAgentRunHost.inspectThread(command.scope);
      const metrics=dependencies.metrics.snapshot();
-     reply={id:ordinal,ok:true,...(cleanup===undefined?{}:{cleanup}),
+     reply={id:ordinal,ok:true,...(joined===undefined?{}:{wait:joined}),...(cleanup===undefined?{}:{cleanup}),
       thread:inspected.ok?{observed:inspected.observed,status:inspected.status??null,
        ...(input.observeContextEntries?{contextEntries:inspected.entries??null}:{}),
        currentRequestMessage:inspected.currentRequestMessage??null,modelRequestId:inspected.modelRequestId??null,
