@@ -40,7 +40,9 @@ import (
 )
 
 type contentE2EOptions struct {
-	ExecutionWorkers      int
+	ExecutionWorkers int
+	// Zero preserves the existing shared fixture preparation budget.
+	PreparationTimeout    time.Duration
 	Runtime, Gateway      map[string]any
 	Provider              tetralsandbox.ProviderAdapter
 	StopProvider          func()
@@ -216,7 +218,11 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	activate := &tetralsandbox.SandboxActivationJobRunner{Queue: q, Store: lifecycle, Providers: providers, Config: config}
 	materialize := &tetralsandbox.SandboxMaterializationJobRunner{Queue: q, Store: lifecycle, Providers: providers, Config: config}
 	capture := &tetralsandbox.SandboxOutputCaptureJobRunner{Queue: q, Store: tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(client), Providers: providers, BlobStore: objects, Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{WorkspaceID: "default", LeaseOwner: "content-e2e-capture", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second}}
-	execute := &tetralsandbox.SandboxToolExecutionJobRunner{Queue: q, Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute), Providers: providers, Media: tetralsandbox.NewPostgreSQLSandboxMediaMaterializer(client, objects), Config: tetralsandbox.SandboxToolExecutionRunnerConfig{WorkspaceID: "default", LeaseOwner: "content-e2e-tool", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second, PreparationTimeout: time.Second}}
+	preparationTimeout := overrides.PreparationTimeout
+	if preparationTimeout == 0 {
+		preparationTimeout = time.Second
+	}
+	execute := &tetralsandbox.SandboxToolExecutionJobRunner{Queue: q, Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute), Providers: providers, Media: tetralsandbox.NewPostgreSQLSandboxMediaMaterializer(client, objects), Config: tetralsandbox.SandboxToolExecutionRunnerConfig{WorkspaceID: "default", LeaseOwner: "content-e2e-tool", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second, PreparationTimeout: preparationTimeout}}
 	delivery := contentCrashDeliveryStore(t, pools.OpenWorkload(t, "job_runner", nil), &contentCrashRuntime{contentRuntimeChild: runtime, httpURL: httpURL}, pod)
 	runner := &jobrunner.JobRunner{Queue: q, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "content-e2e-delivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Second}}
 	for _, worker := range []struct {

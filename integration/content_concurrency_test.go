@@ -26,9 +26,12 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := startContentE2EWithOptions(t, "durable-read-three", false, false, contentE2EOptions{Provider: p, StopProvider: p.finishAll, ExecutionWorkers: 3, Runtime: map[string]any{"maxConcurrentTools": 2, "controlCommands": true}, Gateway: map[string]any{"measureResources": true, "followupScenario": "done"}})
+	// Preserve real cold admission with the normal Sandbox preparation budget
+	// (ProviderCommandTimeout defaults to 45s). Held command completion isolates
+	// per-Session concurrency and result pairing from preparation deadline tests.
+	c := startContentE2EWithOptions(t, "durable-read-three", false, false, contentE2EOptions{Provider: p, StopProvider: p.finishAll, PreparationTimeout: 45 * time.Second, ExecutionWorkers: 3, Runtime: map[string]any{"maxConcurrentTools": 2, "controlCommands": true}, Gateway: map[string]any{"measureResources": true, "followupScenario": "done"}})
 	c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
-	first := map[string]bool{p.waitStart(t): true, p.waitStart(t): true}
+	first := map[string]bool{p.waitStart(t, c, "first-admission"): true, p.waitStart(t, c, "second-admission"): true}
 	if !reflect.DeepEqual(first, map[string]bool{"one": true, "two": true}) {
 		t.Fatalf("first admitted commands %v", first)
 	}
@@ -69,7 +72,7 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 	}
 	p.finish("two")
 	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result'`, c.session, 1)
-	if name := p.waitStart(t); name != "three" {
+	if name := p.waitStart(t, c, "queued-admission"); name != "three" {
 		t.Fatalf("wrong queued command %s", name)
 	}
 	p.finish("three")
@@ -126,12 +129,24 @@ type contentConcurrentCommand struct {
 }
 type contentConcurrentProvider struct {
 	contentE2EProvider
-	mu           sync.Mutex
-	root         string
-	commands     map[string]*contentConcurrentCommand
-	identities   map[string]string
-	started      chan string
-	active, peak int
+	mu                      sync.Mutex
+	root                    string
+	commands                map[string]*contentConcurrentCommand
+	identities              map[string]string
+	started                 chan string
+	active, peak            int
+	startNames              []string
+	executeEntries          []contentConcurrentExecuteDiagnostic
+	executeEntriesTruncated bool
+}
+
+type contentConcurrentExecuteDiagnostic struct {
+	ToolUseEventID string `json:"toolUseEventId"`
+	Name           string `json:"name"`
+	InputMatched   bool   `json:"inputMatched"`
+	NameMatched    bool   `json:"nameMatched"`
+	IDPresent      bool   `json:"idPresent"`
+	Duplicate      bool   `json:"duplicate"`
 }
 
 func (p *contentConcurrentProvider) finish(name string) {
@@ -142,16 +157,106 @@ func (p *contentConcurrentProvider) finishAll() {
 		p.finish(name)
 	}
 }
-func (p *contentConcurrentProvider) waitStart(t *testing.T) string {
+func (p *contentConcurrentProvider) waitStart(t *testing.T, c *contentE2E, phase string) string {
 	t.Helper()
 	select {
 	case name := <-p.started:
+		p.mu.Lock()
+		p.startNames = append(p.startNames, name)
+		p.mu.Unlock()
 		return name
 	case <-time.After(20 * time.Second):
-		t.Fatal("external command did not start")
+		p.logStartFailure(t, c, phase)
+		t.Fatalf("external command did not start (%s)", phase)
 		return ""
 	}
 }
+
+// Failure-only snapshot occurs before t.Fatal starts cleanup/release. Inspection
+// failure is explicit; absence of a row is never reported as successful custody.
+func (p *contentConcurrentProvider) logStartFailure(t *testing.T, c *contentE2E, phase string) {
+	t.Helper()
+	p.mu.Lock()
+	adapter, _ := json.Marshal(struct {
+		Phase              string                               `json:"phase"`
+		ObservedStartNames []string                             `json:"observedStartNames"`
+		Entries            []contentConcurrentExecuteDiagnostic `json:"executeEntries"`
+		Truncated          bool                                 `json:"truncated"`
+	}{phase, p.startNames, p.executeEntries, p.executeEntriesTruncated})
+	p.mu.Unlock()
+	t.Logf("concurrency adapter diagnostic: %s", adapter)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	rows, err := c.db.QueryContext(ctx, `
+	WITH selected AS (
+	 SELECT workspace_id,session_id,session_thread_id,event_id,sequence,payload_json::jsonb AS payload
+	 FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_use'
+	 ORDER BY sequence LIMIT 4
+	)
+	SELECT jsonb_build_object(
+	 'toolUseEventId',u.event_id,'declarationSequence',u.sequence,
+	 'callId',left(r.model_tool_call_id,128),
+	 'expectedInput',CASE u.payload->'input'->>'file_path'
+	   WHEN '/workspace/one.txt' THEN 'one' WHEN '/workspace/two.txt' THEN 'two'
+	   WHEN '/workspace/three.txt' THEN 'three' ELSE 'unmatched' END,
+	 'resultEventId',e.event_id,'resultSequence',e.sequence,'resultCreatedAt',e.created_at,'isError',e.payload_json::jsonb->'is_error',
+	 'publicError',CASE split_part(e.payload_json::jsonb->'content'->0->>'text',E'\n',1)
+	   WHEN 'sandbox execution could not be started' THEN 'sandbox_execution_unavailable'
+	   WHEN 'fixed external operation failed' THEN 'fixture_io_error'
+	   WHEN 'sandbox execution outcome is unknown' THEN 'sandbox_execution_outcome_unknown'
+	   WHEN 'sandbox execution was cancelled' THEN 'cancelled'
+	   WHEN 'sandbox execution is no longer available' THEN 'session_deleted'
+	   ELSE CASE WHEN e.event_id IS NULL THEN 'absent' ELSE 'unclassified' END END,
+	 'state',r.execution_state,'generation',r.execution_attempt_generation,
+	 'preparationDeadline',r.preparation_deadline,'executionUpdatedAt',r.updated_at,
+	 'cancelRequestedAt',r.cancel_requested_at,'providerReferencePresent',r.provider_command_reference_json IS NOT NULL,
+	 'unconsumedError',CASE r.result_json::jsonb->'error'->>'kind'
+	   WHEN 'sandbox_execution_unavailable' THEN 'sandbox_execution_unavailable'
+	   WHEN 'fixture_io_error' THEN 'fixture_io_error'
+	   WHEN 'sandbox_execution_outcome_unknown' THEN 'sandbox_execution_outcome_unknown'
+	   WHEN 'cancelled' THEN 'cancelled' WHEN 'session_deleted' THEN 'session_deleted'
+	   ELSE CASE WHEN r.result_json IS NULL THEN 'absent' ELSE 'unclassified' END END,
+	 'queueId',q.id,'queueStatus',q.status,'queueAttempts',q.attempt_count,'queueMaxAttempts',q.max_attempts,
+	 'queueUpdatedAt',q.updated_at,'queueLeasedAt',q.leased_at,'queueAvailableAt',q.available_at,
+	 'queueError',CASE q.last_error_kind
+	   WHEN 'sandbox_execution_store_error' THEN 'sandbox_execution_store_error'
+	   WHEN 'sandbox_execution_reinspection' THEN 'sandbox_execution_reinspection'
+	   WHEN 'sandbox_execution_attempts_exhausted' THEN 'sandbox_execution_attempts_exhausted'
+	   WHEN 'lease_expired' THEN 'lease_expired'
+	   ELSE CASE WHEN q.last_error_kind IS NULL THEN 'absent' ELSE 'unclassified' END END,
+	 'databaseNow',clock_timestamp())
+	FROM selected u
+	LEFT JOIN session_runtime_tool_results r ON r.workspace_id=u.workspace_id AND r.session_id=u.session_id
+	 AND r.session_thread_id=u.session_thread_id AND r.tool_use_event_id=u.event_id
+	LEFT JOIN session_events e ON e.workspace_id=u.workspace_id AND e.session_id=u.session_id
+	 AND e.session_thread_id=u.session_thread_id AND e.type='agent.tool_result'
+	 AND e.payload_json::jsonb->>'tool_use_id'=u.event_id
+	LEFT JOIN queue_jobs q ON q.workspace_id=u.workspace_id AND q.kind='sandbox_tool_execute'
+	 AND q.partition_key='sandbox-execution:'||u.workspace_id||':'||u.session_id||':'||u.session_thread_id||':'||u.event_id
+	 AND q.dedupe_key='sandbox_tool_execute:'||u.workspace_id||':'||u.session_id||':'||u.session_thread_id||':'||u.event_id||':'||r.execution_attempt_generation::text
+	ORDER BY u.sequence,e.sequence LIMIT 9`, c.session)
+	if err != nil {
+		t.Logf("concurrency SQL diagnostic unavailable (phase=%s timeout=%t)", phase, ctx.Err() != nil)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	count := 0
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Logf("concurrency SQL diagnostic scan unavailable (phase=%s)", phase)
+			return
+		}
+		t.Logf("concurrency SQL diagnostic: %s", raw)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Logf("concurrency SQL diagnostic iteration unavailable (phase=%s timeout=%t)", phase, ctx.Err() != nil)
+		return
+	}
+	t.Logf("concurrency SQL diagnostic rows=%d capped=%t", count, count == 9)
+}
+
 func (p *contentConcurrentProvider) ExecuteTool(_ context.Context, r tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -160,6 +265,22 @@ func (p *contentConcurrentProvider) ExecuteTool(_ context.Context, r tetralsandb
 		if r.Invocation.InputJSON == fmt.Sprintf(`{"file_path":"/workspace/%s.txt"}`, key) {
 			name = key
 		}
+	}
+	// Record only closed fixture categories; never retain arbitrary input/errors.
+	entry := contentConcurrentExecuteDiagnostic{ToolUseEventID: r.Invocation.ToolUseEventID, Name: name,
+		InputMatched: name != "", NameMatched: r.Invocation.ToolName == "Read", IDPresent: r.Invocation.ToolUseEventID != ""}
+	if len(entry.ToolUseEventID) > 128 {
+		entry.ToolUseEventID = "oversize"
+	}
+	if name == "" {
+		entry.Name = "unmatched"
+	} else {
+		entry.Duplicate = p.commands[name].tool != ""
+	}
+	if len(p.executeEntries) < 12 {
+		p.executeEntries = append(p.executeEntries, entry)
+	} else {
+		p.executeEntriesTruncated = true
 	}
 	if name == "" || r.Invocation.ToolName != "Read" || r.Invocation.ToolUseEventID == "" || p.commands[name].tool != "" {
 		return contentExternalToolFailure()
