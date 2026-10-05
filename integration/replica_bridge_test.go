@@ -4,20 +4,26 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -269,7 +275,13 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			seedBridgeAPISession(t, admin, "default", session, thread)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, "pod_background")
 			seedReadySandboxForSharedToolExecution(t, admin, "default", session)
-			store, addresses := replicaBridgePair(t, runtimeDB, "pod_background", nil)
+			gates := map[string]*replicaBackgroundAdmissionGate{
+				"original_poll":         newReplicaBackgroundAdmissionGate(),
+				"original_stdin":        newReplicaBackgroundAdmissionGate(),
+				"original_cancel":       newReplicaBackgroundAdmissionGate(),
+				"original_control_poll": newReplicaBackgroundAdmissionGate(),
+			}
+			store, addresses := replicaBackgroundBridgePair(t, runtimeDB, "pod_background", gates)
 			scope := bridgeAPIScope(session, thread, binding, 1, "pod_background")
 			chars := ""
 			if method == "sendCommandInput" {
@@ -287,18 +299,42 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			case "cancelCommand":
 				request = &bridgev1.CancelCommandRequest{Scope: scope, TaskId: task, ToolUseEventId: toolID, OperationId: "original_cancel", Reason: "runtime_interrupted"}
 			}
-			actions := []map[string]any{bridgeChildAction("expired", 0, method, bridgeChildRequest(t, request), 200, codes.DeadlineExceeded), bridgeChildAction("rejoin", 1, method, bridgeChildRequest(t, request), 5000), bridgeChildAction("replay", 0, method, bridgeChildRequest(t, request), 5000)}
+			actions := []map[string]any{bridgeChildAction("expired", 0, method, bridgeChildRequest(t, request), 5000, codes.DeadlineExceeded), bridgeChildAction("rejoin", 1, method, bridgeChildRequest(t, request), 5000), bridgeChildAction("replay", 0, method, bridgeChildRequest(t, request), 5000)}
 			expectedReceipts, expectedCalls := 1, int32(1)
 			if method == "cancelCommand" {
-				actions = append([]map[string]any{bridgeChildAction("initial_poll", 0, "readCommandResult", bridgeChildRequest(t, &bridgev1.ReadCommandResultRequest{Scope: scope, TaskId: task, ToolUseEventId: toolID, OperationId: "original_control_poll"}), 200, codes.DeadlineExceeded)}, actions...)
+				actions = append([]map[string]any{bridgeChildAction("initial_poll", 0, "readCommandResult", bridgeChildRequest(t, &bridgev1.ReadCommandResultRequest{Scope: scope, TaskId: task, ToolUseEventId: toolID, OperationId: "original_control_poll"}), 5000, codes.DeadlineExceeded)}, actions...)
 				expectedReceipts = 2
 				expectedCalls = 2
 			}
+			// Five seconds is a fixture admission/caller guard, not an admission SLO.
+			// Park only the postcommit wait and prove exact custody while the real
+			// caller is alive; a failed admission cannot masquerade as preserved work.
+			actions[len(actions)-2]["waitFor"] = "continue_after_expired"
+			if method == "cancelCommand" {
+				actions[1]["waitFor"] = "continue_after_initial_poll"
+			}
 			child := startReplicaBridgeChild(t, addresses, actions)
-			bridgeChildResult(t, child, "expired")
+			if method == "cancelCommand" {
+				assertReplicaBackgroundAdmissionExpiry(t, admin, child, gates["original_control_poll"], scope, toolID, task, "original_control_poll", "poll", "initial_poll", 1)
+				if err := os.WriteFile(filepath.Join(child.directory, "continue_after_initial_poll"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			operation := request.(interface{ GetOperationId() string }).GetOperationId()
+			receiptID, kind := toolID, "poll"
+			if method == "sendCommandInput" {
+				kind = "stdin"
+			}
+			if method == "cancelCommand" {
+				receiptID, kind = "background_receipt:"+operation, "cancel"
+			}
+			assertReplicaBackgroundAdmissionExpiry(t, admin, child, gates[operation], scope, receiptID, task, operation, kind, "expired", expectedReceipts)
 			var receipts int
 			if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND background_operation_state='pending'`, session).Scan(&receipts); err != nil || receipts != expectedReceipts {
 				t.Fatalf("original pending receipt=%d/%v", receipts, err)
+			}
+			if err := os.WriteFile(filepath.Join(child.directory, "continue_after_expired"), nil, 0600); err != nil {
+				t.Fatal(err)
 			}
 			provider := &replicaBackgroundProvider{terminalBackgroundProvider: terminalBackgroundProvider{result: sandboxdriver.CommandResult{ResultJSON: `{"status":"completed","stdout":{"text":"original result","truncated":false},"stderr":{"text":"","truncated":false}}`, TerminalStatus: "completed"}}}
 			providers, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{"daytona": provider})
@@ -484,6 +520,170 @@ func startReplicaFinishIdleCoreChild(t *testing.T, address string, request json.
 		}
 	})
 	return child
+}
+
+// The tracer parks only the first read-only wait for the exact operation. The
+// admission transaction has committed before this marker; no fixture write or
+// server-generated status substitutes for actual caller expiry.
+type replicaBackgroundAdmissionGate struct {
+	entered               chan context.Context
+	release               chan struct{}
+	returned              chan struct{}
+	parkOnce, releaseOnce sync.Once
+	calls                 atomic.Int32
+}
+
+func newReplicaBackgroundAdmissionGate() *replicaBackgroundAdmissionGate {
+	return &replicaBackgroundAdmissionGate{entered: make(chan context.Context, 1), release: make(chan struct{}), returned: make(chan struct{})}
+}
+func (g *replicaBackgroundAdmissionGate) resume() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+type replicaBackgroundGateContextKey struct{}
+type replicaBackgroundQueryContextKey struct{}
+type replicaBackgroundAdmissionTracer struct{}
+
+func (replicaBackgroundAdmissionTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, replicaBackgroundQueryContextKey{}, strings.Contains(data.SQL, "/* runtime receipt scope validation */"))
+}
+func (replicaBackgroundAdmissionTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	matched, _ := ctx.Value(replicaBackgroundQueryContextKey{}).(bool)
+	gate, _ := ctx.Value(replicaBackgroundGateContextKey{}).(*replicaBackgroundAdmissionGate)
+	if matched && gate != nil && data.Err == nil {
+		gate.parkOnce.Do(func() { gate.entered <- ctx; <-gate.release })
+	}
+}
+
+func replicaBackgroundBridgePair(t *testing.T, db *sql.DB, podUID string, gates map[string]*replicaBackgroundAdmissionGate) (*bridge.PostgreSQLBridgeAPIStore, []string) {
+	t.Helper()
+	first := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, db, replicaBackgroundAdmissionTracer{})))
+	second := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, db, nil)))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handlers sync.WaitGroup
+	var admission sync.Mutex
+	stopping := false
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		admission.Lock()
+		if stopping {
+			admission.Unlock()
+			return nil, status.Error(codes.Unavailable, "background fixture is stopping")
+		}
+		handlers.Add(1)
+		admission.Unlock()
+		defer handlers.Done()
+		md, _ := metadata.FromIncomingContext(ctx)
+		values := md.Get("authorization")
+		if len(values) != 1 || values[0] != "Bearer runtime" {
+			return nil, status.Error(codes.Unauthenticated, "verified fixture identity required")
+		}
+		identity := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: podUID}
+		if err := bridge.BridgeAPIMethodAuthorizer(identity, info.FullMethod); err != nil {
+			return nil, err
+		}
+		if operation, ok := request.(interface{ GetOperationId() string }); ok {
+			if gate := gates[operation.GetOperationId()]; gate != nil && gate.calls.Add(1) == 1 {
+				ctx = context.WithValue(ctx, replicaBackgroundGateContextKey{}, gate)
+				defer close(gate.returned)
+			}
+		}
+		return handler(auth.ContextWithIdentity(ctx, identity), request)
+	}))
+	bridge.RegisterBridgeAPI(server, first)
+	joined := make(chan struct{})
+	go func() { defer close(joined); _ = server.Serve(listener) }()
+	// The child uses actual generated clients; this first endpoint needs no
+	// extra Go channel. Second-replica authentication remains the shared seam.
+	t.Cleanup(func() {
+		admission.Lock()
+		stopping = true
+		admission.Unlock()
+		for _, gate := range gates {
+			gate.resume()
+		}
+		server.Stop()
+		_ = listener.Close()
+		handlersJoined := make(chan struct{})
+		go func() { handlers.Wait(); close(handlersJoined) }()
+		select {
+		case <-handlersJoined:
+		case <-time.After(5 * time.Second):
+			t.Error("background Bridge handlers did not join")
+		}
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("background Bridge server did not join")
+		}
+	})
+	b := serveReplicaBridge(t, second, map[string]string{"runtime": podUID}, nil)
+	return first, []string{listener.Addr().String(), b.Address}
+}
+
+func replicaBackgroundCustody(ctx context.Context, t *testing.T, admin *sql.DB, session string) string {
+	t.Helper()
+	var snapshot string
+	if err := admin.QueryRowContext(ctx, `SELECT jsonb_build_object(
+	 'receipts',(SELECT jsonb_agg(to_jsonb(r) ORDER BY tool_use_event_id) FROM session_runtime_tool_results r WHERE session_id=$1),
+	 'tasks',(SELECT jsonb_agg(to_jsonb(b) ORDER BY task_id) FROM session_background_tasks b WHERE session_id=$1),
+	 'jobs',(SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM queue_jobs j WHERE kind=$2 AND payload_json::jsonb->>'session_id'=$1))::text`, session, queue.KindSandboxBackgroundCommand).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertReplicaBackgroundAdmissionExpiry(t *testing.T, admin *sql.DB, child *handoffRuntimeChild, gate *replicaBackgroundAdmissionGate, scope *bridgev1.RuntimeScope, receiptID, taskID, operationID, kind, action string, totalJobs int) {
+	t.Helper()
+	var caller context.Context
+	waitHandoffCondition(t, "postcommit background wait "+operationID, func() bool {
+		select {
+		case caller = <-gate.entered:
+			return true
+		default:
+		}
+		if raw, err := os.ReadFile(filepath.Join(child.directory, "results.json")); err == nil {
+			var results map[string]json.RawMessage
+			if json.Unmarshal(raw, &results) == nil && results[action] != nil {
+				t.Fatalf("actual caller returned before committed admission boundary for %s", operationID)
+			}
+		}
+		select {
+		case <-child.done:
+			out, _ := os.ReadFile(filepath.Join(child.directory, "output.log"))
+			t.Fatalf("background admission child exited %v: %s", child.err, out)
+		default:
+		}
+		return false
+	})
+	defer gate.resume()
+	var state, storedKind, storedOperation, storedTask string
+	if err := admin.QueryRowContext(caller, `SELECT background_operation_state,background_operation_kind,background_request_id,background_task_id FROM session_runtime_tool_results
+	 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`, scope.WorkspaceId, scope.SessionId, scope.SessionThreadId, receiptID).Scan(&state, &storedKind, &storedOperation, &storedTask); err != nil || state != "pending" || storedKind != kind || storedOperation != operationID || storedTask != taskID {
+		t.Fatalf("exact admitted receipt=%s/%s/%s/%s/%v", state, storedKind, storedOperation, storedTask, err)
+	}
+	var jobs, matching int
+	var jobID string
+	if err := admin.QueryRowContext(caller, `SELECT count(*),count(*) FILTER(WHERE workspace_id=$2 AND payload_json::jsonb->>'session_id'=$3 AND payload_json::jsonb->>'task_id'=$4 AND payload_json::jsonb->>'request_id'=$5 AND status='pending'),
+	 COALESCE(min(id) FILTER(WHERE workspace_id=$2 AND payload_json::jsonb->>'session_id'=$3 AND payload_json::jsonb->>'task_id'=$4 AND payload_json::jsonb->>'request_id'=$5),'') FROM queue_jobs WHERE kind=$1`, queue.KindSandboxBackgroundCommand, scope.WorkspaceId, scope.SessionId, taskID, operationID).Scan(&jobs, &matching, &jobID); err != nil || jobs != totalJobs || matching != 1 || jobID == "" {
+		t.Fatalf("exact admitted Queue=%d/%d/%s/%v", jobs, matching, jobID, err)
+	}
+	before := replicaBackgroundCustody(caller, t, admin, scope.SessionId)
+	if err := caller.Err(); err != nil {
+		t.Fatalf("caller expired before independent exact admission proof: %v", err)
+	}
+	t.Logf("background phase admitted operation=%s receipt=%s queue=%s kind=%s", operationID, receiptID, jobID, kind)
+	bridgeChildResult(t, child, action) // Actual generated client must consume DeadlineExceeded.
+	gate.resume()
+	select {
+	case <-gate.returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expired first background handler did not join")
+	}
+	if after := replicaBackgroundCustody(context.Background(), t, admin, scope.SessionId); after != before {
+		t.Fatal("caller expiry changed accepted receipt/task/Queue custody")
+	}
+	t.Logf("background phase expired-and-joined operation=%s queue=%s", operationID, jobID)
 }
 
 type replicaBackgroundProvider struct {

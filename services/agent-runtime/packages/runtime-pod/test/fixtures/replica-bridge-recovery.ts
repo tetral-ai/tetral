@@ -16,6 +16,7 @@ const input = JSON.parse(await readFile(process.argv[2]!, "utf8")) as {
     request: unknown;
     timeoutMs?: number;
     error?: number;
+    waitFor?: string;
   }>;
 };
 const policies = parseBridgeMethodPolicies(input.env);
@@ -33,6 +34,13 @@ const results: Record<string, unknown> = {};
 const completionSamples: Array<Record<string, string | number>> = [];
 try {
   for (const action of input.actions) {
+    // Controlled test ingress pauses the next actual call until the parent has
+    // joined the prior handler and independently checked accepted custody.
+    if (action.waitFor !== undefined) {
+      while (!(await Bun.file(`${input.directory}/${action.waitFor}`).exists())) {
+        await Bun.sleep(10);
+      }
+    }
     await writeFile(`${input.directory}/${action.name}.started`, "");
     const started = performance.now();
     let outcome = "success";
