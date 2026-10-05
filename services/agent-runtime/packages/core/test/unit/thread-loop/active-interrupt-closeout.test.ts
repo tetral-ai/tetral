@@ -64,6 +64,10 @@ for (const boundary of [
 				async (envelope) => {
 					order.push("request_end");
 					requestEnds.push(envelope);
+					if (boundary === "admitted_open_request") {
+						entered.resolve();
+						await release.promise;
+					}
 					const result = requestEndResultForTest(envelope);
 					return result.ok && result.type !== "stale"
 						? { ...result, type: receipt }
@@ -112,15 +116,17 @@ for (const boundary of [
 				),
 			);
 			try {
+				// PR4's preload wrapper yields before entering the production run.
+				// Cancel only after the owned closeout adapter has actually entered.
+				await Promise.race([
+					entered.promise,
+					Effect.runPromise(Fiber.await(fiber)).then((exit) => {
+						throw new Error(
+							`run exited before closeout: ${JSON.stringify(exit)}`,
+						);
+					}),
+				]);
 				if (boundary === "failed_reviewer_closeout") {
-					await Promise.race([
-						entered.promise,
-						Effect.runPromise(Fiber.await(fiber)).then((exit) => {
-							throw new Error(
-								`run exited before closeout: ${JSON.stringify(exit)}`,
-							);
-						}),
-					]);
 					admit();
 				}
 				const interrupt = Effect.runPromise(Fiber.interrupt(fiber));
@@ -169,7 +175,13 @@ for (const boundary of [
 		}, 5000);
 	}
 }
-for (const outcome of ["stale", "failed", "malformed", "closed"] as const) {
+for (const outcome of [
+	"stale",
+	"failed",
+	"malformed",
+	"matching_projection",
+	"closed",
+] as const) {
 	test(`open-request interrupt ${outcome} preserves the terminal write fence`, async () => {
 		const session = new ThreadRuntime("sesn_1");
 		session.state.markPersistentContextLoaded();
@@ -200,11 +212,15 @@ for (const outcome of ["stale", "failed", "malformed", "closed"] as const) {
 			},
 			{ routes: [] },
 		);
-		if (outcome === "malformed") {
-			session.state.contextManager.installOpenRequestDraft({
-				modelRequestId: "original_request",
+		if (outcome === "malformed" || outcome === "matching_projection") {
+			session.state.contextManager.installAssistantMessage({
 				messageSequence: 1,
-				parts: [],
+				contextKind: "assistant",
+				parts: [{ type: "text", text: "Committed response before interrupt" }],
+			});
+			session.state.installCurrentRequestMessage({
+				modelRequestId: "original_request",
+				assistantMessageSequence: 1,
 			});
 		}
 		let ends = 0;
@@ -232,14 +248,30 @@ for (const outcome of ["stale", "failed", "malformed", "closed"] as const) {
 					};
 				return requestEndResultForTest(
 					envelope,
-					outcome === "malformed"
-						? { type: "ordinary", sealedMessageSequence: 99 }
+					outcome === "malformed" || outcome === "matching_projection"
+						? { type: "ordinary", sealedMessageSequence: 1 }
 						: undefined,
 				);
 			},
 		);
 		const writer: SessionEventWriter = {
 			...baseWriter,
+			writeRequestEnd: async (envelope) => {
+				const result = await baseWriter.writeRequestEnd(envelope);
+				// PR4 rejects mismatched sealed identities before joined application.
+				// Fault the Tool projection after the fixture fills its committed facts.
+				return outcome === "malformed" && result.ok && result.type !== "stale"
+					? {
+							...result,
+							interruptToolResults: [
+								{
+									toolUseEventId: "undeclared_interrupt_tool",
+									result: { type: "cancelled" as const },
+								},
+							],
+						}
+					: result;
+			},
 			finishIdle: async () => {
 				idle++;
 				return { ok: true, type: "committed", idleEventId: "idle" };
@@ -283,8 +315,12 @@ for (const outcome of ["stale", "failed", "malformed", "closed"] as const) {
 		);
 		expect(ends).toBe(outcome === "closed" ? 0 : outcome === "failed" ? 3 : 1);
 		expect(standalone).toBe(outcome === "closed" ? 1 : 0);
-		expect(idle).toBe(outcome === "closed" ? 1 : 0);
-		expect(completed).toBe(outcome === "closed");
+		expect(idle).toBe(
+			outcome === "closed" || outcome === "matching_projection" ? 1 : 0,
+		);
+		expect(completed).toBe(
+			outcome === "closed" || outcome === "matching_projection",
+		);
 		expect(reloadRequired).toBe(outcome === "malformed");
 		if (outcome === "stale")
 			expect(attempts).toEqual([
@@ -295,5 +331,7 @@ for (const outcome of ["stale", "failed", "malformed", "closed"] as const) {
 			]);
 		if (outcome === "failed" || outcome === "malformed")
 			expect(Exit.isFailure(exit)).toBe(true);
+		if (outcome === "matching_projection")
+			expect(Exit.isSuccess(exit)).toBe(true);
 	});
 }
