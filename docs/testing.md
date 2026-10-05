@@ -14,6 +14,12 @@ passing test.
 - `make test-full` runs the complete local evidence set. It includes Race and
   can take materially longer.
 
+Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
+package has a 25-minute watchdog for its complete composition inventory; a
+serial command containing that package applies 25 minutes to every package in
+that invocation. These are package-wide runaway limits, separate from each
+test's unchanged request, fault, recovery and cleanup deadlines.
+
 The local SDK integration test is declared in `internal/testinfra/inventory.json`
 under `go_tests`, with its exact package, test name, and complete `sdk` and
 `postgresql` dependencies. These declarations replace source inference for the

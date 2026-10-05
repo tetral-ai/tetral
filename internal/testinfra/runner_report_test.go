@@ -10,6 +10,62 @@ import (
 	"testing"
 )
 
+func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
+	// Force tool lookup to fail after the native worker constructs its command;
+	// this command-contract test must not execute the selected compositions.
+	t.Setenv("PATH", t.TempDir())
+	tests := []struct {
+		name    string
+		profile Profile
+		pkg     string
+		timeout string
+	}{
+		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "unrelated package", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
+		{name: "integration subpackage", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration/static", timeout: "-timeout=20m"},
+		{name: "fast integration", profile: ProfileFast, pkg: "github.com/tetral-ai/tetral/integration"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selection := Selection{Group: "go", Packages: []string{test.pkg}, Tests: []string{"TestSelected"}}
+			want := []string{"go", "test", "-json", "-count=1"}
+			if test.timeout != "" {
+				want = append(want, "-race", test.timeout)
+			}
+			serial, err := commandsForSelection(Plan{Profile: test.profile}, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+			if err != nil || len(serial) != 1 {
+				t.Fatalf("serial commands = %v/%v; want one command", serial, err)
+			}
+			if !slices.Equal(serial[0].Arguments, append(slices.Clone(want), test.pkg)) {
+				t.Fatalf("serial command = %v; want %v", serial[0].Arguments, append(slices.Clone(want), test.pkg))
+			}
+			worker, err := executeGoSelections(context.Background(), test.profile, []Selection{selection}, RunOptions{
+				Root: t.TempDir(), OutputDir: t.TempDir(), MaxWorkers: 1,
+			}, &dependencyManager{})
+			if err == nil || len(worker) != 1 || worker[0].Status != "apparatus-failed" {
+				t.Fatalf("worker result = %v/%v; want tool lookup failure", worker, err)
+			}
+			want = append(want, "-run", "^(?:TestSelected)$", test.pkg)
+			if !slices.Equal(worker[0].Command, want) {
+				t.Fatalf("worker command = %v; want %v", worker[0].Command, want)
+			}
+		})
+	}
+
+	t.Run("serial multiple packages", func(t *testing.T) {
+		packages := []string{"github.com/tetral-ai/tetral/services/bridge", "github.com/tetral-ai/tetral/integration"}
+		commands, err := commandsForSelection(Plan{Profile: ProfileFull}, Selection{Group: "go", Packages: packages}, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+		if err != nil || len(commands) != 1 {
+			t.Fatalf("serial commands = %v/%v; want one command", commands, err)
+		}
+		want := append([]string{"go", "test", "-json", "-count=1", "-race", "-timeout=25m"}, packages...)
+		if !slices.Equal(commands[0].Arguments, want) {
+			t.Fatalf("serial multi-package command = %v; want %v", commands[0].Arguments, want)
+		}
+	})
+}
+
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {
 	commands, err := commandsForSelection(
 		Plan{},

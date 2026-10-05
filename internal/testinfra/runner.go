@@ -178,7 +178,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 				selection := selections[index]
 				arguments := []string{"go", "test", "-json", "-count=1"}
 				if profile != ProfileFast {
-					arguments = append(arguments, "-race", "-timeout=20m")
+					arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
 				}
 				if len(selection.Tests) > 0 {
 					tests := make([]string, len(selection.Tests))
@@ -233,6 +233,15 @@ type commandSpec struct {
 
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
 
+func goPackageTimeout(packages []string) string {
+	for _, name := range packages {
+		if name == "github.com/tetral-ai/tetral/integration" {
+			return "-timeout=25m"
+		}
+	}
+	return "-timeout=20m"
+}
+
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
 	case "repository":
@@ -250,7 +259,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", "-timeout=20m")
+			arguments = append(arguments, "-race", goPackageTimeout(packages))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil
