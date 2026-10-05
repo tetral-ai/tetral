@@ -52,6 +52,14 @@ one owning package; the repository profiles are the pre-submission contract.
 
 ## Continuous integration
 
+CI Go Race evidence jobs using the shared evidence action run at most two Go
+package processes at a time. Each Race package can also run concurrent Go
+goroutines, Bun children, and shared database work; the package limit is
+intended to leave capacity for those owners on the four-CPU hosted runner.
+It changes package scheduling only. Shards, test selection, per-scenario
+concurrency, deadlines, and assertions retain their own policies. Local runs
+keep their existing default and can set `--workers` explicitly.
+
 The readable CI topology is:
 
 - **Pull Request Verification**: read-only, hermetic PR evidence split by

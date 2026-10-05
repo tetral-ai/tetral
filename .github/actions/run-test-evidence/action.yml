@@ -103,6 +103,7 @@ runs:
         fi
         go run ./internal/testinfra/cmd/tetral-test \
           --profile full \
+          --workers 2 \
           --dependency-audit '${{ inputs.dependency-audit }}' \
           "${group_args[@]}" \
           --shard-index '${{ inputs.shard-index }}' \
