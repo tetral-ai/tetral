@@ -70,6 +70,13 @@ most two seconds, clipped by the caller's deadline; a resource still present or
 an unavailable daemon remains a cleanup failure. Containers close before their
 networks, including after partial fixture startup.
 
+The runner's NATS broker is shared across concurrent package consumers; tests
+may publish and subscribe but must not stop, restart or reconfigure its lifetime.
+Destructive broker cases use `testinfra.NewNATSFixture` with the same pinned image
+and role permissions. Register its cleanup before clients so they join first;
+cleanup removes even a stopped broker and its private credential files, including
+after partial startup, without changing the shared descriptor or environment.
+
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing
 one owning package; the repository profiles are the pre-submission contract.

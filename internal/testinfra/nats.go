@@ -43,11 +43,15 @@ type NATSFixture struct {
 }
 
 func LoadNATSFixture() (NATSFixture, error) {
-	var fixture NATSFixture
 	name := os.Getenv(EnvNATSFixture)
 	if name == "" {
-		return fixture, errors.New("NATS fixture is required; run the Affected or Full dependency profile")
+		return NATSFixture{}, errors.New("NATS fixture is required; run the Affected or Full dependency profile")
 	}
+	return loadNATSFixture(name)
+}
+
+func loadNATSFixture(name string) (NATSFixture, error) {
+	var fixture NATSFixture
 	// The runner owns the fixture path and never publishes its file contents.
 	//nolint:gosec
 	data, err := os.ReadFile(name)
@@ -72,6 +76,28 @@ func LoadNATSFixture() (NATSFixture, error) {
 		}
 	}
 	return fixture, nil
+}
+
+// NewNATSFixture owns a separate broker for tests that interrupt its lifetime.
+// It uses the runner's pinned starter and never changes the shared descriptor or
+// process environment. Register close immediately; it removes even a stopped
+// broker and its credential directory after all of the test's clients join.
+func NewNATSFixture(ctx context.Context, root string) (NATSFixture, func(context.Context) error, error) {
+	manager := &dependencyManager{root: root}
+	if err := manager.startNATS(ctx); err != nil {
+		return NATSFixture{}, nil, errors.Join(err, manager.stopBounded())
+	}
+	var descriptor string
+	for _, variable := range manager.environment {
+		if path, ok := strings.CutPrefix(variable, EnvNATSFixture+"="); ok {
+			descriptor = path
+		}
+	}
+	fixture, err := loadNATSFixture(descriptor)
+	if err != nil {
+		return NATSFixture{}, nil, errors.Join(err, manager.stopBounded())
+	}
+	return fixture, manager.stop, nil
 }
 
 // PinnedNATSImage shares the deployment lock with local broker compositions.

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
@@ -20,18 +21,9 @@ func TestPostgreSQLPublicStreamingBrokerFailure(t *testing.T) {
 	}
 	for _, mode := range []string{"unavailable-at-start", "disconnect-after-first-delta"} {
 		t.Run(mode, func(t *testing.T) {
-			broker, err := testinfra.LoadNATSFixture()
-			if err != nil {
-				t.Fatal(err)
-			}
-			stopped := false
-			stop := func() { publicBrokerCommand(t, broker, "stop"); stopped = true }
-			start := func() { publicBrokerCommand(t, broker, "start"); stopped = false }
-			t.Cleanup(func() {
-				if stopped {
-					start()
-				}
-			})
+			broker := publicFaultBroker(t)
+			stop := func() { publicBrokerCommand(t, broker, "stop") }
+			start := func() { publicBrokerCommand(t, broker, "start") }
 			if mode == "unavailable-at-start" {
 				stop()
 			}
@@ -141,7 +133,8 @@ func publicPublisherControl(t *testing.T, h *publicStreamingHarness, operation s
 	h.gateway.control(t, map[string]any{"kind": "publisher_control", "operation": operation}, "publisher_controlled")
 }
 func runPublicAcceptedFlushFailure(t *testing.T) {
-	h := newPublicStreamingHarness(t, "public-text", publicStreamingOptions{gateway: map[string]any{"holdEveryRequest": true, "followupScenario": "public-text", "previewPublisherControls": map[string]any{}}})
+	broker := publicFaultBroker(t)
+	h := newPublicStreamingHarness(t, "public-text", publicStreamingOptions{broker: &broker, gateway: map[string]any{"holdEveryRequest": true, "followupScenario": "public-text", "previewPublisherControls": map[string]any{}}})
 	h.open(t, "preview", []string{"agent.message"}, "")
 	h.open(t, "formal", nil, "")
 	h.send(t)
@@ -152,13 +145,7 @@ func runPublicAcceptedFlushFailure(t *testing.T) {
 	h.releaseFragments(t, 1)
 	publicWait(t, "server positively accepted held flush batch", func() bool { s := publicPublisherState(t, h); return s.FlushWaiting && s.FlushServerProcessed > before })
 	h.waitEvent(t, "preview", "event_delta", 1)
-	stopped := true
 	publicBrokerCommand(t, h.broker, "stop")
-	t.Cleanup(func() {
-		if stopped {
-			publicBrokerCommand(t, h.broker, "start")
-		}
-	})
 	publicWait(t, "native publisher observes disconnect during held flush", func() bool { return publicGatewayMetric(t, h, "connected") == 0 })
 	publicPublisherControl(t, h, "release_flush")
 	h.releaseFragments(t, 3)
@@ -169,7 +156,6 @@ func runPublicAcceptedFlushFailure(t *testing.T) {
 	assertContentE2EProvider(t, h.contentE2E, h.gateway.control(t, map[string]any{"kind": "observe"}, "observation"), 1, 0)
 	old := countPublicEvents(h.snapshot(t, "preview"), "event_delta")
 	publicBrokerCommand(t, h.broker, "start")
-	stopped = false
 	publicWait(t, "native publisher and subscriber recover after accepted flush cut", func() bool {
 		return publicGatewayMetric(t, h, "connected") == 1 && len(publicBrokerSubscriptions(t, h.broker, h.session)) == 1
 	})
@@ -267,6 +253,29 @@ func publicBrokerCPU(t *testing.T, broker testinfra.NATSFixture) uint64 {
 	}
 	return total
 }
+
+// Fault owners must not stop the runner's shared broker: other Full workers
+// may be executing independent role or service contracts against it.
+func publicFaultBroker(t *testing.T) testinfra.NATSFixture {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	broker, closeBroker, err := testinfra.NewNATSFixture(ctx, transporttest.RepositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Registered before the harness so LIFO joins clients before broker removal.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := closeBroker(ctx); err != nil {
+			t.Errorf("isolated fault broker cleanup: %v", err)
+		}
+	})
+	t.Logf("isolated fault broker container=%s image=%s servers=%v", broker.Container, broker.Image, broker.Servers)
+	return broker
+}
+
 func publicBrokerCommand(t *testing.T, broker testinfra.NATSFixture, operation string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
