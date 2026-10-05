@@ -1406,7 +1406,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 				quiesceStarted = time.Now()
 				old.signal(t, "quiesce")
 				waitHandoffAdmissionClosed(t, old)
-				assertHandoffUnrelatedInputRejected(t, old, session, thread, "bind_review")
+				if scenario == "hold" {
+					assertHandoffUnrelatedInputRejected(t, old, session, thread, "bind_review")
+				}
 			}
 			old.signal(t, session+"-1.release")
 			waitHandoffCondition(t, "admitted reviewer provider", func() bool {
@@ -1438,12 +1440,11 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 					}
 					return true
 				})
-				var effects int
-				if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2)+(SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND session_thread_id=$2)`, session, unrelatedReviewerID).Scan(&effects); err != nil || effects != 0 || old.calls(session) != 2 {
-					t.Fatalf("unrelated review effects=%d providerCalls=%d err=%v", effects, old.calls(session), err)
+				if old.calls(session) != 2 {
+					t.Fatal("unrelated reviewer started another provider while Read held")
 				}
 			}
-			if stage == "starts-after-quiesce" {
+			if stage == "starts-after-quiesce" && scenario == "hold" {
 				assertUnrelatedReviewRejected()
 			}
 			if scenario != "hold" {
@@ -1454,6 +1455,10 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 				})
 				external := startHandoffSandboxOwner(t, runtimeDB, session)
 				waitHandoffCondition(t, "reviewer Read command owned", func() bool { return external.observations.Load() > 0 })
+				if stage == "starts-after-quiesce" {
+					assertHandoffUnrelatedInputRejected(t, old, session, thread, "bind_review")
+					assertUnrelatedReviewRejected()
+				}
 				if stage == "continues-after-read" || reviewerCase.holdRead {
 					if reviewerCase.holdRead {
 						waitHandoffCondition(t, "actual captured reviewer Await active before drain", func() bool { return observed.activeAwait.Load() == 1 })
@@ -1482,6 +1487,22 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			}
 			old.join(t)
 			oldExitDuration := time.Since(quiesceStarted)
+			var effects int
+			if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2)+(SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND session_thread_id=$2)`, session, unrelatedReviewerID).Scan(&effects); err != nil || effects != 0 {
+				t.Fatalf("unrelated review effects=%d providerCalls=%d err=%v", effects, old.calls(session), err)
+			}
+			expectedProviderCalls := 3
+			if expired {
+				expectedProviderCalls = 2
+			}
+			if old.calls(session) != expectedProviderCalls {
+				t.Fatalf("reviewer provider census=%d expected=%d", old.calls(session), expectedProviderCalls)
+			}
+			for _, entry := range old.providerEntries(t, session) {
+				if entry.SessionThreadID == unrelatedReviewerID {
+					t.Fatal("unrelated reviewer admitted provider work during drain")
+				}
+			}
 			if expired && (quiesceStarted.IsZero() || oldExitDuration > 5*time.Second) {
 				t.Fatalf("reviewer expiry exceeds unchanged 2s+2s+1s application phases: %v", oldExitDuration)
 			}
