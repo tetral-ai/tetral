@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -41,6 +42,7 @@ func (env sdkIntegrationEnv) Getenv(name string) string {
 
 type sdkIntegrationEdge struct {
 	client          *http.Client
+	authGRPCAddress string
 	authBaseURL     *url.URL
 	apiBaseURL      *url.URL
 	eventBaseURL    *url.URL
@@ -50,7 +52,7 @@ type sdkIntegrationEdge struct {
 	requestID uint64
 }
 
-func newSDKIntegrationEdge(authBaseURL string, apiBaseURL string, eventBaseURL string) (http.Handler, error) {
+func newSDKIntegrationEdge(authBaseURL string, apiBaseURL string, eventBaseURL string, authGRPCAddress string) (http.Handler, error) {
 	authURL, err := url.Parse(authBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse auth base URL: %w", err)
@@ -65,6 +67,7 @@ func newSDKIntegrationEdge(authBaseURL string, apiBaseURL string, eventBaseURL s
 	}
 	return &sdkIntegrationEdge{
 		client:          http.DefaultClient,
+		authGRPCAddress: authGRPCAddress,
 		authBaseURL:     authURL,
 		apiBaseURL:      apiURL,
 		eventBaseURL:    eventURL,
@@ -78,13 +81,10 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 		return
 	}
 
-	requestID := request.Header.Get("X-Request-Id")
-	if requestID == "" {
-		edge.mu.Lock()
-		edge.requestID++
-		requestID = fmt.Sprintf("%s%d", edge.requestIDPrefix, edge.requestID)
-		edge.mu.Unlock()
-	}
+	edge.mu.Lock()
+	edge.requestID++
+	requestID := fmt.Sprintf("%s%d", edge.requestIDPrefix, edge.requestID)
+	edge.mu.Unlock()
 
 	principal, ok := edge.authorize(w, request, requestID)
 	if !ok {
@@ -144,36 +144,32 @@ func (w sdkIntegrationFlushWriter) Write(data []byte) (int, error) {
 }
 
 func (edge *sdkIntegrationEdge) authorize(w http.ResponseWriter, request *http.Request, requestID string) (string, bool) {
-	authorizeURL := edge.authBaseURL.ResolveReference(&url.URL{Path: "/internal/auth/authorize"})
-	authorizeRequest, err := http.NewRequestWithContext(request.Context(), http.MethodPost, authorizeURL.String(), nil)
+	headers := request.Header.Clone()
+	stripSDKIntegrationUntrustedMetadata(headers)
+	response, err := directEdgeCheck(request.Context(), edge.authGRPCAddress, request.Method, request.URL.RequestURI(), requestID, headers)
 	if err != nil {
-		http.Error(w, "authorization unavailable", http.StatusBadGateway)
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return "", false
 	}
-	authorizeRequest.Header.Set("X-Api-Key", request.Header.Get("X-Api-Key"))
-	authorizeRequest.Header.Set("X-Original-Method", request.Method)
-	authorizeRequest.Header.Set("X-Original-Path", request.URL.Path)
-	authorizeRequest.Header.Set("X-Request-Id", requestID)
-	authorizeRequest.Header.Set("X-Forwarded-For", "127.0.0.1")
-
-	response, err := edge.client.Do(authorizeRequest)
-	if err != nil {
-		http.Error(w, "authorization unavailable", http.StatusBadGateway)
+	status, principal := directEdgeCheckStatus(response)
+	if status != http.StatusOK {
+		forwardFixtureCheckDenial(w, response)
 		return "", false
 	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		copySDKIntegrationResponseHeaders(w.Header(), response.Header)
-		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
-		return "", false
-	}
-	principal := response.Header.Get("X-Tetral-Internal-Principal")
 	if principal == "" {
-		http.Error(w, "authorization unavailable", http.StatusBadGateway)
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return "", false
 	}
 	return principal, true
+}
+
+func stripSDKIntegrationUntrustedMetadata(header http.Header) {
+	for name := range header {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-tetral-") || strings.HasPrefix(lower, "x-original-") || lower == "x-request-id" || lower == "x-forwarded-for" || lower == "forwarded" || lower == "x-real-ip" || lower == "x-envoy-external-address" {
+			header.Del(name)
+		}
+	}
 }
 
 func isSDKIntegrationAPIKeyPath(path string) bool {
@@ -201,7 +197,7 @@ func isSDKIntegrationStreamPath(path string) bool {
 func stripSDKIntegrationClientHeaders(header http.Header) {
 	for name := range header {
 		lower := strings.ToLower(name)
-		if lower == "x-api-key" || strings.HasPrefix(lower, "x-tetral-") {
+		if lower == "authorization" || lower == "x-api-key" || strings.HasPrefix(lower, "x-original-") || strings.HasPrefix(lower, "x-tetral-") {
 			header.Del(name)
 		}
 	}
@@ -250,17 +246,7 @@ func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *test
 	eventServer := upstream("event")
 	defer eventServer.Close()
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/internal/auth/authorize" {
-			if request.Header.Get("X-Api-Key") != "test-key" {
-				t.Errorf("authorization key = %q; want test-key", request.Header.Get("X-Api-Key"))
-			}
-			if request.Header.Get("X-Original-Path") == "" || request.Header.Get("X-Original-Method") == "" {
-				t.Error("authorization request missing original request identity")
-			}
-			w.Header().Set("X-Tetral-Internal-Principal", "signed-principal")
-			_, _ = io.WriteString(w, `{"allow":true}`)
-			return
-		}
+
 		mu.Lock()
 		observations["auth"] = observation{
 			path:      request.URL.Path,
@@ -273,7 +259,17 @@ func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *test
 	}))
 	defer authServer.Close()
 
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL)
+	checkAddress := startCheckFixture(t, checkFixture{check: func(_ context.Context, request *authv3.CheckRequest) (*authv3.CheckResponse, error) {
+		headers := fixtureCheckHeaders(request)
+		if headers.Get("X-Api-Key") != "test-key" {
+			t.Error("authorization key was not preserved")
+		}
+		if request.GetAttributes().GetRequest().GetHttp().GetPath() == "" || request.GetAttributes().GetRequest().GetHttp().GetMethod() == "" {
+			t.Error("authorization request missing request identity")
+		}
+		return fixtureCheckAllowed("signed-principal"), nil
+	}})
+	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL, checkAddress)
 	if err != nil {
 		t.Fatalf("new integration edge: %v", err)
 	}
@@ -373,6 +369,8 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	authServer := httptest.NewServer(authRouter)
 	defer authServer.Close()
 
+	checkAddress := startSDKAuthorization(t, runtimeDB, signer, time.Minute)
+
 	dataDir := t.TempDir()
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		t.Fatalf("secure API data directory: %v", err)
@@ -404,7 +402,7 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	))
 	defer eventServer.Close()
 
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL)
+	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL, checkAddress)
 	if err != nil {
 		t.Fatalf("build integration edge: %v", err)
 	}

@@ -31,11 +31,12 @@ type StartupReadinessClient interface {
 type StartupOpenFunc func(context.Context) (StartupDatabase, error)
 
 type Application struct {
-	Handler        http.Handler
-	Client         *dbconnect.Client
-	Verifier       *auth.AssertionVerifier
-	Pruner         *auth.TokenPruner
-	PruningMetrics workload.MetricsCollector
+	ExternalAuthorization *ExternalAuthorization
+	Handler               http.Handler
+	Client                *dbconnect.Client
+	Verifier              *auth.AssertionVerifier
+	Pruner                *auth.TokenPruner
+	PruningMetrics        workload.MetricsCollector
 }
 
 func (a *Application) Close() error {
@@ -82,7 +83,7 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 		return nil, err
 	}
 
-	handler, err := BuildRouter(ctx, RouterBuildConfig{
+	routerConfig, err := buildRouterConfig(ctx, RouterBuildConfig{
 		RawDatabase:       database.OpenResult.RawDatabaseForExcludedStores,
 		AssertionVerifier: verifier,
 		Config:            cfg,
@@ -94,8 +95,15 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 		_ = database.OpenResult.Client.Close()
 		return nil, err
 	}
-	pruner := auth.StartTokenPruner(ctx, auth.NewAuthorityResolver(database.OpenResult.RawDatabaseForExcludedStores, cfg.BootstrapWorkspaceID), opts.logger)
-	return &Application{Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector()}, nil
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: routerConfig.Resolver}, Signer: routerConfig.Signer, PrincipalTTL: cfg.InternalPrincipalTTL, Logger: opts.logger})
+	if err != nil {
+		verifier.Close()
+		_ = database.OpenResult.Client.Close()
+		return nil, err
+	}
+	handler := NewRouter(routerConfig)
+	pruner := auth.StartTokenPruner(ctx, routerConfig.Resolver, opts.logger)
+	return &Application{ExternalAuthorization: adapter, Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector()}, nil
 }
 
 type RouterBuildConfig struct {
@@ -126,31 +134,38 @@ func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) ApplicationOptio
 }
 
 func BuildRouter(ctx context.Context, cfg RouterBuildConfig) (http.Handler, error) {
+	routerConfig, err := buildRouterConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewRouter(routerConfig), nil
+}
+
+func buildRouterConfig(ctx context.Context, cfg RouterBuildConfig) (RouterConfig, error) {
 	if cfg.RawDatabase == nil {
-		return nil, fmt.Errorf("raw database is required")
+		return RouterConfig{}, fmt.Errorf("raw database is required")
 	}
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(cfg.Config.InternalPrincipalPrivateKeyB64)
 	if err != nil {
-		return nil, err
+		return RouterConfig{}, err
 	}
 	store := auth.NewAPIKeyStore(cfg.RawDatabase)
 	workspaceStore := workspace.NewStore(cfg.RawDatabase)
 	if _, err := workspaceStore.Get(ctx, cfg.Config.BootstrapWorkspaceID); err != nil {
-		return nil, err
+		return RouterConfig{}, err
 	}
 	if err := auth.RefreshBootstrap(ctx, store, cfg.Config.BootstrapWorkspaceID, cfg.Config.BootstrapAPIKey); err != nil {
-		return nil, fmt.Errorf("bootstrap api key: %w", err)
+		return RouterConfig{}, fmt.Errorf("bootstrap api key: %w", err)
 	}
-	return NewRouter(RouterConfig{
-		Store:               store,
-		Resolver:            auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID),
-		AssertionVerifier:   cfg.AssertionVerifier,
-		ExchangeLimits:      cfg.Config.ExchangeLimits,
-		Signer:              signer,
-		PrincipalTTLSeconds: int(cfg.Config.InternalPrincipalTTL.Seconds()),
-		Logger:              cfg.Logger,
-		RequestMetrics:      cfg.RequestMetrics,
-	}), nil
+	return RouterConfig{
+		Store:             store,
+		Resolver:          auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID),
+		AssertionVerifier: cfg.AssertionVerifier,
+		ExchangeLimits:    cfg.Config.ExchangeLimits,
+		Signer:            signer,
+		Logger:            cfg.Logger,
+		RequestMetrics:    cfg.RequestMetrics,
+	}, nil
 }
 
 func prepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {

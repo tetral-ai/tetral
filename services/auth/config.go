@@ -1,10 +1,12 @@
 package tetralauth
 
 import (
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -16,6 +18,12 @@ const (
 	EnvExchangeConcurrency            = "TETRAL_AUTH_EXCHANGE_CONCURRENCY"
 	EnvExchangeRequestsPerMinute      = "TETRAL_AUTH_EXCHANGE_REQUESTS_PER_MINUTE"
 	EnvExchangeBodyReadTimeoutMS      = "TETRAL_AUTH_EXCHANGE_BODY_READ_TIMEOUT_MS"
+	EnvGRPCAddress                    = "TETRAL_AUTH_GRPC_ADDR"
+	EnvGRPCTransport                  = "TETRAL_AUTH_GRPC_TRANSPORT"
+	EnvGRPCTLSCAPath                  = "TETRAL_AUTH_GRPC_TLS_CA_PATH"
+	EnvGRPCTLSCertPath                = "TETRAL_AUTH_GRPC_TLS_CERT_PATH"
+	EnvGRPCTLSKeyPath                 = "TETRAL_AUTH_GRPC_TLS_KEY_PATH"
+	EnvGRPCTLSEdgeClientURI           = "TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI"
 	EnvHTTPAddress                    = "TETRAL_AUTH_HTTP_ADDR"
 	EnvMetricsAddress                 = "TETRAL_AUTH_METRICS_ADDR"
 	EnvBootstrapAPIKey                = "ENGINE_API_KEY" //nolint:gosec // Env-var name, not an API key value.
@@ -29,16 +37,20 @@ type Env interface {
 }
 
 type Config struct {
-	JWKSCacheTTL                   time.Duration
-	ExchangeLimits                 ExchangeLimits
-	HTTPAddress                    string
-	MetricsAddress                 string
-	DeploymentEnvironment          string
-	ServiceVersion                 string
-	BootstrapAPIKey                string
-	BootstrapWorkspaceID           workspace.ID
-	InternalPrincipalPrivateKeyB64 string
-	InternalPrincipalTTL           time.Duration
+	HTTPTransport                                                        transportsecurity.HTTPConfig
+	JWKSCacheTTL                                                         time.Duration
+	ExchangeLimits                                                       ExchangeLimits
+	GRPCAddress                                                          string
+	GRPCTransport                                                        string
+	GRPCTLSCAPath, GRPCTLSCertPath, GRPCTLSKeyPath, GRPCTLSEdgeClientURI string
+	HTTPAddress                                                          string
+	MetricsAddress                                                       string
+	DeploymentEnvironment                                                string
+	ServiceVersion                                                       string
+	BootstrapAPIKey                                                      string
+	BootstrapWorkspaceID                                                 workspace.ID
+	InternalPrincipalPrivateKeyB64                                       string
+	InternalPrincipalTTL                                                 time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -55,6 +67,33 @@ func ConfigFromEnv(env Env) (Config, error) {
 	}
 	if metricsAddress == httpAddress {
 		return Config{}, workload.NewConfigError(EnvMetricsAddress + " must not equal " + EnvHTTPAddress)
+	}
+	grpcAddress := env.Getenv(EnvGRPCAddress)
+	if grpcAddress == "" {
+		grpcAddress = ":9095"
+	}
+	if grpcAddress == httpAddress || grpcAddress == metricsAddress {
+		return Config{}, workload.NewConfigError(EnvGRPCAddress + " must be separate from HTTP and metrics listeners")
+	}
+	transport := env.Getenv(EnvGRPCTransport)
+	if transport == "" {
+		transport = "plaintext"
+	}
+	if transport != "plaintext" && transport != "native-mtls" {
+		return Config{}, workload.NewConfigError(EnvGRPCTransport + " must be plaintext or native-mtls")
+	}
+	ca, cert, key, peer := env.Getenv(EnvGRPCTLSCAPath), env.Getenv(EnvGRPCTLSCertPath), env.Getenv(EnvGRPCTLSKeyPath), env.Getenv(EnvGRPCTLSEdgeClientURI)
+	if transport == "native-mtls" {
+		uri, err := url.Parse(peer)
+		if ca == "" || cert == "" || key == "" || err != nil || uri.Scheme != "spiffe" || uri.Host == "" || uri.Path != "/ns/envoy-gateway-system/sa/tetral-public-edge" || uri.User != nil || uri.RawQuery != "" || uri.Fragment != "" {
+			return Config{}, workload.NewConfigError("native-mtls requires complete Auth gRPC material and public edge client URI")
+		}
+	} else if ca != "" || cert != "" || key != "" || peer != "" {
+		return Config{}, workload.NewConfigError("plaintext Auth gRPC transport must not configure native TLS material")
+	}
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return Config{}, workload.NewConfigError(err.Error())
 	}
 	resource := workload.ResourceConfigFromEnv(env.Getenv)
 	bootstrapWorkspaceID := env.Getenv(EnvBootstrapWorkspaceID)
@@ -105,8 +144,10 @@ func ConfigFromEnv(env Env) (Config, error) {
 	limits.BodyReadTimeout = time.Duration(readMS) * time.Millisecond
 
 	return Config{
-		JWKSCacheTTL:                   time.Duration(cacheTTL) * time.Second,
-		ExchangeLimits:                 limits,
+		HTTPTransport:  httpTransport,
+		JWKSCacheTTL:   time.Duration(cacheTTL) * time.Second,
+		ExchangeLimits: limits,
+		GRPCAddress:    grpcAddress, GRPCTransport: transport, GRPCTLSCAPath: ca, GRPCTLSCertPath: cert, GRPCTLSKeyPath: key, GRPCTLSEdgeClientURI: peer,
 		HTTPAddress:                    httpAddress,
 		MetricsAddress:                 metricsAddress,
 		DeploymentEnvironment:          resource.DeploymentEnvironment,

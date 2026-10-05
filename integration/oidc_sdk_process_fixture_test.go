@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -198,6 +200,7 @@ type oidcAuthProcess struct {
 	joined          chan error
 	output          lockedBuffer
 	URL, MetricsURL string
+	GRPCAddress     string
 	verifier        *auth.InternalPrincipalVerifier
 	once            sync.Once
 }
@@ -224,9 +227,11 @@ func buildOIDCAuthCommand(ctx context.Context, t *testing.T) string {
 // while every process retains distinct listeners, PID, join and shutdown owner.
 func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary string, database *sql.DB, privateKey string, overrides map[string]string) *oidcAuthProcess {
 	t.Helper()
-	addresses, release := publicReserveAddresses(t, 2)
-	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + addresses[0], MetricsURL: "http://" + addresses[1]}
+	addresses, release := publicReserveAddresses(t, 3)
+	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + addresses[0], MetricsURL: "http://" + addresses[1], GRPCAddress: addresses[2]}
 	values := map[string]string{
+		"TETRAL_AUTH_GRPC_ADDR":                          process.GRPCAddress,
+		"TETRAL_AUTH_GRPC_TRANSPORT":                     "plaintext",
 		"TETRAL_AUTH_HTTP_ADDR":                          strings.TrimPrefix(process.URL, "http://"),
 		"TETRAL_AUTH_METRICS_ADDR":                       strings.TrimPrefix(process.MetricsURL, "http://"),
 		"TETRAL_DATABASE_URL":                            storagetest.RuntimeDatabaseURL(t, database),
@@ -244,7 +249,7 @@ func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary st
 		"TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS":             "600",
 	}
 	for name, value := range overrides {
-		if name == "TETRAL_AUTH_HTTP_ADDR" || name == "TETRAL_AUTH_METRICS_ADDR" {
+		if name == "TETRAL_AUTH_HTTP_ADDR" || name == "TETRAL_AUTH_METRICS_ADDR" || name == "TETRAL_AUTH_GRPC_ADDR" {
 			t.Fatal("Auth fixture listeners are owned independently per process")
 		}
 		values[name] = value
@@ -317,6 +322,7 @@ func (p *oidcAuthProcess) stop(t *testing.T) {
 // emitted in the assertion oracle; token bytes remain only in private memory.
 type oidcEdge struct {
 	authURL, apiURL *url.URL
+	authGRPCAddress string
 	client          *http.Client
 	mu              sync.Mutex
 	exchanges       []oidcExchange
@@ -336,7 +342,7 @@ type oidcAttempt struct {
 }
 type oidcEdgeMark struct{ exchanges, attempts int }
 
-func newOIDCEdge(t *testing.T, authURL, apiURL string) *oidcEdge {
+func newOIDCEdge(t *testing.T, authURL, apiURL string, authGRPCAddress string) *oidcEdge {
 	t.Helper()
 	a, err := url.Parse(authURL)
 	if err != nil {
@@ -346,7 +352,7 @@ func newOIDCEdge(t *testing.T, authURL, apiURL string) *oidcEdge {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &oidcEdge{authURL: a, apiURL: b, client: &http.Client{Timeout: 30 * time.Second}}
+	return &oidcEdge{authURL: a, apiURL: b, authGRPCAddress: authGRPCAddress, client: &http.Client{Timeout: 30 * time.Second}}
 }
 func (edge *oidcEdge) mark() oidcEdgeMark {
 	edge.mu.Lock()
@@ -367,38 +373,24 @@ func (edge *oidcEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	edge.sequence++
 	id := fmt.Sprintf("req_oidc_%d", edge.sequence)
 	edge.mu.Unlock()
-	check, err := http.NewRequestWithContext(request.Context(), http.MethodPost, edge.authURL.ResolveReference(&url.URL{Path: "/internal/auth/authorize"}).String(), nil)
+	headers := request.Header.Clone()
+	stripSDKIntegrationUntrustedMetadata(headers)
+	response, err := directEdgeCheck(request.Context(), edge.authGRPCAddress, request.Method, request.URL.RequestURI(), id, headers)
 	if err != nil {
-		http.Error(w, "fixture authorization unavailable", http.StatusBadGateway)
+		http.Error(w, "fixture authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	for _, name := range []string{"Authorization", "X-Api-Key"} {
-		check.Header[name] = append([]string(nil), request.Header.Values(name)...)
-	}
-	check.Header.Set("X-Original-Method", request.Method)
-	check.Header.Set("X-Original-Path", request.URL.Path)
-	check.Header.Set("X-Request-Id", id)
-	// This acceptance edge only serves local fixture clients. Supply its trusted
-	// loopback address rather than forwarding a client-selected value.
-	check.Header.Set("X-Forwarded-For", "127.0.0.1")
-	response, err := edge.client.Do(check)
-	if err != nil {
-		http.Error(w, "fixture authorization unavailable", http.StatusBadGateway)
+	status, principal := directEdgeCheckStatus(response)
+	if status != http.StatusOK {
+		edge.record(request, status)
+		forwardFixtureCheckDenial(w, response)
 		return
 	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		edge.record(request, response.StatusCode)
-		copySDKIntegrationResponseHeaders(w.Header(), response.Header)
-		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
-		return
-	}
-	principal := response.Header.Get("X-Tetral-Internal-Principal")
 	if principal == "" {
-		http.Error(w, "fixture signed principal missing", http.StatusBadGateway)
+		http.Error(w, "fixture signed principal missing", http.StatusServiceUnavailable)
 		return
 	}
+
 	outbound := request.Clone(request.Context())
 	outbound.URL.Scheme, outbound.URL.Host = edge.apiURL.Scheme, edge.apiURL.Host
 	outbound.Host = edge.apiURL.Host
@@ -481,13 +473,7 @@ func TestOIDCEdgePreservesExchangeAndBearerBoundary(t *testing.T) {
 			_, _ = io.WriteString(w, `{"access_token":"fixture-token","token_type":"Bearer","expires_in":600}`)
 			return
 		}
-		authentications++
-		if request.Header.Get("X-Original-Path") != "/v1/models" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		trustedInputs = request.Method == http.MethodPost && request.Header.Get("X-Original-Method") == http.MethodGet && request.Header.Get("Authorization") == bearer && request.Header.Get("X-Tetral-Internal-Principal") == "" && request.Header.Get("X-Request-Id") != "" && request.Header.Get("X-Forwarded-For") == "127.0.0.1"
-		w.Header().Set("X-Tetral-Internal-Principal", "fixture-signed-principal")
+		http.NotFound(w, request)
 	}))
 	defer actualAuth.Close()
 	actualAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -498,7 +484,19 @@ func TestOIDCEdgePreservesExchangeAndBearerBoundary(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":[]}`)
 	}))
 	defer actualAPI.Close()
-	edge := newOIDCEdge(t, actualAuth.URL, actualAPI.URL)
+	checkAddress := startCheckFixture(t, checkFixture{check: func(_ context.Context, request *authv3.CheckRequest) (*authv3.CheckResponse, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		authentications++
+		httpRequest := request.GetAttributes().GetRequest().GetHttp()
+		headers := fixtureCheckHeaders(request)
+		if httpRequest.GetPath() != "/v1/models" {
+			return fixtureCheckDenied(http.StatusUnauthorized), nil
+		}
+		trustedInputs = httpRequest.GetMethod() == http.MethodGet && headers.Get("Authorization") == bearer && headers.Get("X-Tetral-Internal-Principal") == "" && headers.Get("X-Request-Id") != "" && headers.Get("X-Forwarded-For") == "127.0.0.1" && headers.Get("X-Original-Method") == "" && headers.Get("X-Original-Path") == ""
+		return fixtureCheckAllowed("fixture-signed-principal"), nil
+	}})
+	edge := newOIDCEdge(t, actualAuth.URL, actualAPI.URL, checkAddress)
 	call := func(method, path, body string) int {
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
 		request.Header.Set("Authorization", bearer)

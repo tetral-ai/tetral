@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -53,8 +55,49 @@ func run(ctx context.Context, env tetralauth.Env) error {
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", app.Client)),
 		workload.WithMetricsCollector("auth_token_pruning", app.PruningMetrics),
 	)
+	httpCredentials, httpTLS, err := cfg.HTTPTransport.Open(ctx)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "auth", err)
+	}
+	if httpCredentials != nil {
+		defer workload.ProcessCleanup(ctx, func() { _ = httpCredentials.Close() })
+	}
+	grpcServer, err := tetralauth.OpenExternalAuthorizationServer(ctx, cfg, app.ExternalAuthorization, logger)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "auth", err)
+	}
+	defer grpcServer.Close()
+	publicListener, err := net.Listen("tcp", cfg.HTTPAddress)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "auth", err)
+	}
+	defer publicListener.Close()
+	metricsListener, err := net.Listen("tcp", cfg.MetricsAddress)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "auth", err)
+	}
+	defer metricsListener.Close()
 	readiness.MarkReady()
-	return runPublicAndMetricsHTTP(ctx, cfg, readiness, logger, handler, metricsHandler)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() { results <- grpcServer.Run(runCtx, readiness) }()
+	go func() {
+		results <- runPublicAndMetricsHTTP(runCtx, cfg, readiness, logger, handler, metricsHandler, boundHTTPListeners{publicListener, metricsListener, httpTLS})
+	}()
+	var firstErr error
+	for range 2 {
+		if err := <-results; err != nil && firstErr == nil {
+			firstErr = err
+		}
+		cancel()
+	}
+	return firstErr
+}
+
+type boundHTTPListeners struct {
+	public, metrics net.Listener
+	tls             *tls.Config
 }
 
 func runPublicAndMetricsHTTP(
@@ -64,6 +107,7 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
+	listeners ...boundHTTPListeners,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -72,10 +116,15 @@ func runPublicAndMetricsHTTP(
 	defer cancel()
 	results := make(chan error, 2)
 	go func() {
-		results <- runWorkload(runCtx, tetralauth.WorkloadConfig(cfg, publicHandler, readiness, logger))
+		publicConfig := tetralauth.WorkloadConfig(cfg, publicHandler, readiness, logger)
+		if len(listeners) == 1 {
+			publicConfig.Listener = listeners[0].public
+			publicConfig.TLSConfig = listeners[0].tls
+		}
+		results <- runWorkload(runCtx, publicConfig)
 	}()
 	go func() {
-		results <- runWorkload(runCtx, workload.Config{
+		metricsConfig := workload.Config{
 			ServiceName:           "auth",
 			DeploymentEnvironment: cfg.DeploymentEnvironment,
 			ServiceVersion:        cfg.ServiceVersion,
@@ -85,7 +134,11 @@ func runPublicAndMetricsHTTP(
 			Readiness:             readiness,
 			ShutdownTimeout:       tetralauth.DefaultShutdownTimeout,
 			Logger:                logger,
-		})
+		}
+		if len(listeners) == 1 {
+			metricsConfig.Listener = listeners[0].metrics
+		}
+		results <- runWorkload(runCtx, metricsConfig)
 	}()
 
 	var firstErr error

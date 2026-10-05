@@ -4,11 +4,11 @@
 
 Auth authenticates selected public API keys and exchanged access tokens, resolves
 current Engine workspace authority, and mints request-bound Ed25519 internal
-principals. It owns `POST /v1/oauth/token`, `/v1/api_keys`, the legacy
-`POST /internal/auth/authorize` adapter, and bootstrap key refresh. Public API and
+principals. It owns `POST /v1/oauth/token`, `/v1/api_keys`, the Envoy v3
+`Authorization/Check` gRPC adapter, and bootstrap key refresh. Public API and
 Event Stream services receive signed principals rather than raw credentials.
 Reusable verification, authority, policy and credential logic lives in
-`internal/auth`; this service owns configuration, PostgreSQL, HTTP and process
+`internal/auth`; this service owns configuration, PostgreSQL, HTTP, gRPC and process
 lifecycle. The serving binary is `services/auth/cmd/tetral-auth`.
 
 Authentication identifies a credential and its truthful actor. Authorization is
@@ -44,7 +44,7 @@ format, see [authentication](../../docs/authentication.md).
 | Route | Identity and input | Success | Failure |
 |-------|--------------------|---------|---------|
 | `POST /v1/oauth/token` | JSON JWT bearer exchange; registered rule, organization, upstream assertion, optional Engine workspace/service selector | opaque `access_token`, `token_type: Bearer`, integer `expires_in` | malformed/ambiguous input `400`; oversized body `413`; invalid assertion or missing/currently invalid authority `401`; issuer/database unavailable `503`; bounded admission exhausted `429` |
-| `POST /internal/auth/authorize` | selected public credential plus original method/path, request ID and forwarded-for | `200 {"allow":true}` and `X-Tetral-Internal-Principal` | missing/invalid credential `401`; missing request metadata `400`; dependency unavailable `503` |
+| `envoy.service.auth.v3.Authorization/Check` | raw public headers, actual method/request URI, one trusted request ID and forwarded-for | OK Check response overwrites one `X-Tetral-Internal-Principal` and enumerates credential/untrusted header removals | JSON denied response: invalid credential `401`, invalid metadata `400`, internal/dependency failure `500`; edge Check transport unavailability maps to `503` |
 | `POST /v1/api_keys` | verified internal principal; `{ "name": ... }`, at most one MiB of strict JSON | metadata and one-time raw `api_key` at `200` | invalid name/body `400`; oversized body `413`; denied action `403`; stale authority/issuer credential `401` |
 | `GET /v1/api_keys` | verified internal principal; `limit` defaults to 20, cap 100; opaque `page` | metadata page at `200` | foreign/mismatched cursor `400`; denied action `403` |
 | `DELETE /v1/api_keys/{api_key_id}` | verified internal principal and tenant-resolved durable key facts | empty `204` | absent/revoked/foreign row `404`; malformed ID `400`; denied action `403` |
@@ -70,6 +70,27 @@ and exact bytes. Its invalidity never falls back to Bearer. A selected key does
 not borrow a simultaneously supplied Bearer's identity. With no selected key,
 Auth accepts one unambiguous `Authorization: Bearer <token>` value; repeated or
 combined Bearer values are rejected. Query-string credentials are ignored.
+
+Check requires Envoy `encode_raw_headers: true`; its raw repeated entries preserve
+header order and mixed-case duplicate semantics. The first API-key value remains
+the selected value, including an empty first value admitting Bearer instead of a
+later key. Auth never calls its own HTTP surface or duplicates authority SQL.
+
+Auth validates the actual HTTP method and request URI attributes, optional raw
+`:method`/`:path` consistency, and exactly one bounded request ID and forwarded-for.
+A supplied HTTP request ID attribute must match the raw request ID. The edge owns
+fresh request-ID generation and trusted source forwarding. `X-Original-*` and
+`X-Tetral-*` values never supply authority. `url.ParseRequestURI` produces the
+same decoded `URL.Path` used by Go HTTP handlers, excluding the query from the
+signature. A Check uses at most five seconds and preserves a shorter caller
+cancellation; it neither requests nor buffers the public request body.
+
+An allow response contains exactly one overwrite mutation for the newly minted
+principal. Auth enumerates all presented case-insensitive `X-Tetral-*` (except
+that overwritten principal), `X-Original-*`, `X-Api-Key`, and `Authorization`
+headers for removal. Denials contain no principal, carry the SDK JSON error
+envelope and an explicit HTTP status, and do not use Envoy's default `403`.
+Protected business routes perform their normal operation gate after admission.
 
 Admission uses one bounded transaction:
 
@@ -211,7 +232,11 @@ Auth's separate metrics listener exports fixed status counters
 available after a failed pass; initial values do not claim a completed pass.
 There are no token, identity or workspace metric labels. Healthy ticks are
 quiet; degradation/recovery diagnostics are bounded and contain safe tuples.
-Listener shutdown joins requests, then Application closes and joins pruning and
+All listeners bind and native credential material validates before readiness.
+A listener failure cancels its siblings and clears readiness. The separate gRPC
+health service reports `envoy.service.auth.v3.Authorization`; the process probes
+remain on HTTP/metrics. Listener shutdown joins requests within the ten-second
+drain budget, cancelling forced gRPC work, then Application closes and joins pruning and
 issuer work before closing PostgreSQL and the trust observer.
 
 ### Config and ports
@@ -219,7 +244,13 @@ issuer work before closing PostgreSQL and the trust observer.
 | Setting | Default | Supported bound |
 |---------|---------|-----------------|
 | `TETRAL_AUTH_HTTP_ADDR` | `:8080` | public routes plus `/health` and `/ready`; `/metrics` is `404` |
-| `TETRAL_AUTH_METRICS_ADDR` | `:8081` | must differ from HTTP; `/metrics`, `/health`, `/ready` |
+| `TETRAL_AUTH_METRICS_ADDR` | `:8081` | must differ from HTTP and gRPC; `/metrics`, `/health`, `/ready` |
+| `TETRAL_AUTH_GRPC_ADDR` | `:9095` | separate Check and gRPC health listener |
+| `TETRAL_AUTH_GRPC_TRANSPORT` | `plaintext` | explicitly `plaintext` for standard mesh or `native-mtls` for hardened Auth/edge hop |
+| `TETRAL_AUTH_GRPC_TLS_CA_PATH`, `TETRAL_AUTH_GRPC_TLS_CERT_PATH`, `TETRAL_AUTH_GRPC_TLS_KEY_PATH` | none | all required for `native-mtls`; rejected for plaintext |
+| `TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI` | none | exact configured SPIFFE public edge client role, required for `native-mtls` |
+| `TETRAL_HTTP_TRANSPORT` | `plaintext` | public Auth HTTP only: `plaintext` or `native-mtls` |
+| `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`, `TETRAL_HTTP_TLS_KEY_PATH`, `TETRAL_HTTP_TLS_EDGE_CLIENT_URI` | none | complete trust/leaf/edge role for native HTTP; metrics stay internal |
 | `TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS` | 600 | integer 1–600 |
 | `TETRAL_AUTH_EXCHANGE_BODY_BYTES` | 32768 | integer 1024–65536 |
 | `TETRAL_AUTH_EXCHANGE_CONCURRENCY` | 32 | integer 1–32 |
@@ -232,15 +263,30 @@ read deadline. A rejected request terminates its body read and connection
 without consuming a full drain budget outside a slot. The limiter retains no
 assertions or caller identifiers. Bootstrap requires an existing configured
 workspace, a strong `ENGINE_API_KEY`, and a valid Ed25519 private signing key.
-Startup verifies config, canonical schema and the serving role before seeding.
+Startup verifies config, canonical schema and the serving role before refreshing
+the bootstrap key once. The workspace must already exist. HTTP and Check borrow
+the same authority resolver and signer; constructing the adapter does not create
+workspaces or repeat bootstrap writes. Native Check credentials reload complete
+mounted generations through `internal/transportsecurity`, require the exact edge
+client role, and never retry a failed TLS connection as plaintext. The hardened
+edge verifies the exact Auth DNS name `auth.tetral-system.svc.cluster.local`.
+Every new native RPC verifies the established peer against current trust, exact
+edge role and certificate validity. CA overlap keeps the listener and admitted
+requests alive. Operators distribute overlap trust, rotate leaves and observe
+fresh handshakes, then replace/drain old Auth Pods within the ten-second listener
+budget before removing old trust. Retirement does not silently stop the whole
+Auth process. A missed drain cannot admit a new Check on an old connection:
+retired or expired peer certificates produce transport unavailability, and the
+edge returns `503` without a principal.
 
 ## Seams
 
-- **Edge adapter:** sends the selected public credential and original request
-  metadata to Auth, strips public credentials and client-supplied internal
-  headers, and forwards only the signed principal. The existing reference nginx
-  manifest remains its own API-key deployment contract; this change does not
-  add an interim deployed OIDC route.
+- **Edge adapter:** `NewExternalAuthorization(ExternalAuthorizationConfig)` borrows
+  the real request authenticator and signer; `Register(grpc.ServiceRegistrar)`
+  installs the v3 Check service. `OpenExternalAuthorizationServer` owns its
+  separately bound listener, native credential observer, gRPC health, and drain.
+  Deployment routing and its real Envoy proof live with the public edge. The
+  former nginx HTTP authorization endpoint has been removed.
 - **Principal signer:** only Auth owns the private signing key. Public services
   receive the verify key. Claims bind audience, exact method/path, request audit
   metadata, issuance/expiry and a mandatory discriminated credential/identity/
@@ -261,7 +307,16 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
 - `services/auth/exchange_bounds_test.go`: strict exchange fields, typed config,
   protected responses and real-socket slow body/admission bounds.
 - `services/auth/exchange_postgresql_test.go`: actual HTTP exchange, Engine
-  selectors, human/service bindings, credential precedence and error classes.
+  selectors, human/service bindings, ported Check credential precedence and error classes.
+- `services/auth/ext_authz_test.go`: actual gRPC Check, real Auth-role private
+  PostgreSQL, signature/typed actor/touch/path binding, foreign and revoked keys,
+  frozen Bearer selection/duplicates, malformed metadata, actual lock-graph
+  revoke/admission orders and interrupted database waits.
+- `services/auth/grpc_test.go`: listener configuration and, within the owning
+  PostgreSQL root, real native TLS peer rejection without credential admission,
+  held Check across leaf renewal and trust overlap, retired-channel rejection,
+  and readiness withdrawal with an admitted Check completing before listener,
+  credential observer and pool shutdown join.
 - `services/auth/operation_coverage_test.go`: actual Auth route registrations.
 - `internal/auth/authority_resolver_test.go` and `authority_transactions_test.go`:
   durable lineage/ceilings, parent pruning, exact revisions, actual Auth-role

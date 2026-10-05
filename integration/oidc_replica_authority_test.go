@@ -123,28 +123,18 @@ func oidcReplicaExchange(ctx context.Context, t *testing.T, process *oidcAuthPro
 }
 func oidcReplicaAuthorize(ctx context.Context, t *testing.T, process *oidcAuthProcess, token oidcFrozenBearer, requestID string) int {
 	t.Helper()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, process.URL+"/internal/auth/authorize", nil)
+	response, err := directEdgeCheck(ctx, process.GRPCAddress, http.MethodGet, "/v1/sessions", requestID, http.Header{"Authorization": []string{"Bearer " + token.raw}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("actual replica bearer Check transport failed")
 	}
-	request.Header.Set("Authorization", "Bearer "+token.raw)
-	request.Header.Set("X-Original-Method", http.MethodGet)
-	request.Header.Set("X-Original-Path", "/v1/sessions")
-	request.Header.Set("X-Request-Id", requestID)
-	request.Header.Set("X-Forwarded-For", "127.0.0.1")
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		t.Fatal("actual replica bearer authorization transport failed")
-	}
-	defer func() { _ = response.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
-	if response.StatusCode == http.StatusOK {
-		principal, claims, err := process.verifier.Verify(response.Header.Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/sessions")
+	status, signed := directEdgeCheckStatus(response)
+	if status == http.StatusOK {
+		principal, claims, err := process.verifier.Verify(signed, http.MethodGet, "/v1/sessions")
 		if err != nil || claims.RequestID != requestID || principal.Workspace.ID != workspace.DefaultID || principal.Identity == nil || principal.Identity.ID != "identity_replica" || principal.Identity.Kind != auth.IdentityHuman || principal.Credential.Kind != auth.CredentialAccessToken || principal.APIKeyID != "" || principal.Authority.Kind != auth.AuthorityIdentityGrant {
 			t.Fatal("actual Auth response lacks its valid bound typed identity principal")
 		}
 	}
-	return response.StatusCode
+	return status
 }
 func oidcAssertFrozenReplicas(ctx context.Context, t *testing.T, issuer *oidcReplicaIssuer, processes []*oidcAuthProcess, token oidcFrozenBearer, status int, label string) {
 	t.Helper()
@@ -189,7 +179,7 @@ func TestOIDCReplicaAuthority(t *testing.T) {
 		}
 		binary := buildOIDCAuthCommand(ctx, t)
 		processes := []*oidcAuthProcess{startOIDCAuthProcessFromBinary(ctx, t, binary, pools.DB, privateKey, nil), startOIDCAuthProcessFromBinary(ctx, t, binary, pools.DB, privateKey, nil)}
-		if processes[0].command.Process.Pid == processes[1].command.Process.Pid || processes[0].URL == processes[1].URL || processes[0].MetricsURL == processes[1].MetricsURL {
+		if processes[0].command.Process.Pid == processes[1].command.Process.Pid || processes[0].URL == processes[1].URL || processes[0].MetricsURL == processes[1].MetricsURL || processes[0].GRPCAddress == processes[1].GRPCAddress {
 			t.Fatal("replica fixture lacks two independently observed actual Auth processes")
 		}
 		for _, process := range processes {

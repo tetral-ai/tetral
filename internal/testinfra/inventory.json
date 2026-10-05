@@ -8,6 +8,11 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/services/auth",
+      "name": "TestPostgreSQLAuthExternalAuthorization",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/auth",
       "name": "TestPostgreSQLOIDCExchange",
       "dependencies": ["postgresql"]
     },

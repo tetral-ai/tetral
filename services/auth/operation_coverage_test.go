@@ -17,9 +17,6 @@ func TestAuthPublicOperationRouteCoverage(t *testing.T) {
 	router := NewRouter(RouterConfig{})
 	checked := 0
 	err := chi.Walk(router.(chi.Routes), func(method, path string, handler http.Handler, _ ...func(http.Handler) http.Handler) error {
-		if method == http.MethodPost && path == "/internal/auth/authorize" {
-			return nil
-		}
 		if method == http.MethodPost && path == "/v1/oauth/token" {
 			if _, ok := handler.(*exchangeHandler); !ok {
 				return fmt.Errorf("exchange route lost its exact public boundary")

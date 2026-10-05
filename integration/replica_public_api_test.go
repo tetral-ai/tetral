@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"google.golang.org/grpc"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
@@ -79,6 +81,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Fatalf("bootstrap authorities=%d/%v", bootstrapCount, err)
 	}
 	authServers := make([]*httptest.Server, 2)
+	authGRPCAddresses := make([]string, 2)
 	apiServers := make([]*httptest.Server, 2)
 	var authCounts, apiCounts [2]atomic.Int64
 	var apiChildren [2]*replicaPublicAPIChild
@@ -89,6 +92,29 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			authRouters[index].ServeHTTP(w, r)
 		}))
 		t.Cleanup(authServers[i].Close)
+		adapter, err := authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: 2 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := grpc.NewServer(grpc.WaitForHandlers(true), grpc.UnaryInterceptor(func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+			authCounts[index].Add(1)
+			return next(ctx, request)
+		}))
+		adapter.Register(server)
+		authGRPCAddresses[i] = listener.Addr().String()
+		joined := make(chan error, 1)
+		go func() { joined <- server.Serve(listener) }()
+		t.Cleanup(func() {
+			server.Stop()
+			if err := <-joined; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+				t.Errorf("Auth Check listener join: %v", err)
+			}
+		})
+
 		apiChildren[i] = startReplicaPublicAPIChild(ctx, t, runtimeDB, signer.PublicKeyBase64())
 		target, err := url.Parse(apiChildren[i].URL)
 		if err != nil {
@@ -100,7 +126,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	}
 	var edges []*httptest.Server
 	for _, pair := range [][2]int{{0, 0}, {1, 1}, {0, 1}, {1, 0}} {
-		handler, err := newSDKIntegrationEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL)
+		handler, err := newSDKIntegrationEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL, authGRPCAddresses[pair[0]])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,28 +204,15 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	}
 	// Auth tokens are issued by each actual replica and consumed by both APIs.
 	for authIndex, server := range authServers {
-		r, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/internal/auth/authorize", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for name, value := range map[string]string{"X-Api-Key": standard, "X-Original-Method": "GET", "X-Original-Path": strings.Split(sessionPath, "?")[0], "X-Request-Id": "replica-principal", "X-Forwarded-For": "127.0.0.1", "X-Tetral-Internal-Principal": "forged"} {
-			r.Header.Set(name, value)
-		}
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := directEdgeCheck(ctx, authGRPCAddresses[authIndex], "GET", sessionPath, "replica-principal", http.Header{"X-Api-Key": []string{standard}, "X-Tetral-Internal-Principal": []string{"forged"}, "X-Original-Method": []string{"POST"}, "X-Original-Path": []string{"/wrong"}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := io.Copy(io.Discard, response.Body); err != nil {
-			t.Fatal(err)
-		}
-		if err := response.Body.Close(); err != nil {
-			t.Fatal(err)
-		}
-		replicaRecordCompletion(t, "public_authentication_api", "authorize", server.URL, http.StatusText(response.StatusCode), started)
-		token := response.Header.Get("X-Tetral-Internal-Principal")
-		if response.StatusCode != 200 || token == "" {
-			t.Fatalf("Auth%d mint status%d", authIndex, response.StatusCode)
+		status, token := directEdgeCheckStatus(response)
+		replicaRecordCompletion(t, "public_authentication_api", "Check", server.URL, http.StatusText(status), started)
+		if status != 200 || token == "" {
+			t.Fatalf("Auth%d mint status%d", authIndex, status)
 		}
 		for apiIndex, apiServer := range apiServers {
 			code, raw := request(apiServer.URL, "GET", sessionPath, "", "", map[string]string{"X-Tetral-Internal-Principal": token, "X-Tetral-Workspace-Id": "replica_other"})
@@ -369,7 +382,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	// The surviving child owns its original listener, pool, and router. Its
 	// new route must list/read state, replay the committed receipt, and accept
 	// the identity whose uncommitted attempt died with A.
-	survivorHandler, err := newSDKIntegrationEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL)
+	survivorHandler, err := newSDKIntegrationEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL, authGRPCAddresses[1])
 	if err != nil {
 		t.Fatal(err)
 	}

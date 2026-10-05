@@ -52,7 +52,8 @@ func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.Worklo
 	}
 	bootstrapKey := strings.Repeat("b", auth.MinBootstrapKeyBytes)
 	ctx := context.Background()
-	authRouter, err := tetralauth.BuildRouter(ctx, tetralauth.RouterBuildConfig{RawDatabase: pools.OpenWorkload(t, "auth", nil), Config: tetralauth.Config{
+	authPool := pools.OpenWorkload(t, "auth", nil)
+	authRouter, err := tetralauth.BuildRouter(ctx, tetralauth.RouterBuildConfig{RawDatabase: authPool, Config: tetralauth.Config{
 		BootstrapAPIKey: bootstrapKey, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: privateKey, InternalPrincipalTTL: time.Minute,
 	}})
 	if err != nil {
@@ -74,7 +75,7 @@ func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.Worklo
 	reader := internaleventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)))
 	events := httptest.NewServer(eventsFactory(reader, verifier, signer.PublicKeyBase64()))
 	t.Cleanup(events.Close)
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, events.URL)
+	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, events.URL, startSDKAuthorization(t, authPool, signer, time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}

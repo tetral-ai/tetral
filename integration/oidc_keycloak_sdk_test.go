@@ -111,7 +111,7 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 		}
 		apiServer := httptest.NewServer(api)
 		t.Cleanup(apiServer.Close)
-		edge := newOIDCEdge(t, authProcess.URL, apiServer.URL)
+		edge := newOIDCEdge(t, authProcess.URL, apiServer.URL, authProcess.GRPCAddress)
 		server := httptest.NewServer(edge)
 		t.Cleanup(server.Close)
 

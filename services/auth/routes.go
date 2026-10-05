@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,15 +19,14 @@ import (
 const apiKeyBodyByteCap = 1 << 20
 
 type RouterConfig struct {
-	ExchangeLimits      ExchangeLimits
-	Resolver            *auth.AuthorityResolver
-	AssertionVerifier   *auth.AssertionVerifier
-	exchangeLimiter     *exchangeLimiter
-	Store               *auth.APIKeyStore
-	Signer              *auth.InternalPrincipalSigner
-	PrincipalTTLSeconds int
-	Logger              *slog.Logger
-	RequestMetrics      httpapi.RequestMetricsRecorder
+	ExchangeLimits    ExchangeLimits
+	Resolver          *auth.AuthorityResolver
+	AssertionVerifier *auth.AssertionVerifier
+	exchangeLimiter   *exchangeLimiter
+	Store             *auth.APIKeyStore
+	Signer            *auth.InternalPrincipalSigner
+	Logger            *slog.Logger
+	RequestMetrics    httpapi.RequestMetricsRecorder
 }
 
 type apiKeyCreateRequest struct {
@@ -44,10 +42,6 @@ type apiKeyCursor struct {
 	WorkspaceID string `json:"workspace_id"`
 	AfterID     string `json:"after_id"`
 	Limit       int    `json:"limit"`
-}
-
-type authorizeResponse struct {
-	Allow bool `json:"allow"`
 }
 
 func NewRouter(cfg RouterConfig) http.Handler {
@@ -67,7 +61,6 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	r.Use(httpapi.RequestIDMiddleware)
 	r.Use(httpapi.RequestLogMiddleware(logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(cfg.RequestMetrics)))
 	r.Use(httpapi.PublicRecoveryMiddleware(logger))
-	r.Post("/internal/auth/authorize", cfg.authorize)
 	r.Method(http.MethodPost, "/v1/oauth/token", &exchangeHandler{cfg: cfg})
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(cfg.signedPrincipalMiddleware)
@@ -76,46 +69,6 @@ func NewRouter(cfg RouterConfig) http.Handler {
 		r.Method(http.MethodDelete, "/api_keys/{api_key_id}", httpapi.DeclarePublicOperation(http.MethodDelete, "/v1/api_keys/{api_key_id}", cfg.deleteAPIKey))
 	})
 	return r
-}
-
-func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
-	deny := func(err error) {
-		auth.RecordDecision(r.Context(), "input", err, auth.AuditEvent{})
-		writeAuthError(w, r, err)
-	}
-	if cfg.Store == nil || cfg.Signer == nil {
-		deny(&auth.AuthenticationError{Message: "authentication unavailable"})
-		return
-	}
-	rawKey := r.Header.Get("X-Api-Key")
-	originalMethod := r.Header.Get("X-Original-Method")
-	originalPath := r.Header.Get("X-Original-Path")
-	requestID := r.Header.Get("X-Request-Id")
-	forwardedFor := r.Header.Get("X-Forwarded-For")
-	if rawKey == "" && r.Header.Get("Authorization") == "" {
-		deny(&auth.AuthenticationError{Message: "missing api key"})
-		return
-	}
-	if originalMethod == "" || originalPath == "" {
-		deny(&auth.ValidationError{Message: "original method and path are required"})
-		return
-	}
-	if requestID == "" || forwardedFor == "" {
-		deny(&auth.ValidationError{Message: "request id and forwarded-for are required"})
-		return
-	}
-	result, err := (&auth.RequestAuthenticator{Resolver: cfg.Resolver}).AuthenticateRequest(r.Context(), auth.CredentialRequest{Method: originalMethod, Path: originalPath, APIKey: rawKey, Authorization: r.Header.Get("Authorization"), AuthorizationValues: r.Header.Values("Authorization")})
-	if err != nil {
-		writeAuthError(w, r, err)
-		return
-	}
-	token, err := cfg.Signer.MintWithRequestMetadata(result, originalMethod, originalPath, requestID, forwardedFor, principalTTL(cfg))
-	if err != nil {
-		writeAuthError(w, r, err)
-		return
-	}
-	w.Header().Set("X-Tetral-Internal-Principal", token)
-	writeAuthJSON(w, http.StatusOK, authorizeResponse{Allow: true})
 }
 
 func (cfg RouterConfig) createAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -265,13 +218,6 @@ func parseLimit(raw string) int {
 		return 100
 	}
 	return limit
-}
-
-func principalTTL(cfg RouterConfig) time.Duration {
-	if cfg.PrincipalTTLSeconds <= 0 {
-		return 60 * time.Second
-	}
-	return time.Duration(cfg.PrincipalTTLSeconds) * time.Second
 }
 
 func (cfg RouterConfig) signedPrincipalMiddleware(next http.Handler) http.Handler {

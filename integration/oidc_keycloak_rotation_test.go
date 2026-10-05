@@ -263,23 +263,13 @@ func oidcRotationAssertBearer(ctx context.Context, t *testing.T, process *oidcAu
 	if !time.Now().Before(token.conservativeExpiry) {
 		t.Fatal("rotation Engine bearer expired before control")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, process.URL+"/internal/auth/authorize", nil)
+	response, err := directEdgeCheck(ctx, process.GRPCAddress, http.MethodGet, "/v1/sessions", requestID, http.Header{"Authorization": []string{"Bearer " + token.raw}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("rotation Engine bearer Check transport failed")
 	}
-	request.Header.Set("Authorization", "Bearer "+token.raw)
-	request.Header.Set("X-Original-Method", http.MethodGet)
-	request.Header.Set("X-Original-Path", "/v1/sessions")
-	request.Header.Set("X-Request-Id", requestID)
-	request.Header.Set("X-Forwarded-For", "127.0.0.1")
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		t.Fatal("rotation Engine bearer transport failed")
-	}
-	defer func() { _ = response.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
-	principal, claims, err := process.verifier.Verify(response.Header.Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/sessions")
-	if response.StatusCode != http.StatusOK || err != nil || claims.RequestID != requestID || principal.Identity == nil || principal.Identity.ID != identityID || principal.Identity.Kind != auth.IdentityHuman || principal.Workspace.ID != workspace.DefaultID || principal.Credential.Kind != auth.CredentialAccessToken || principal.APIKeyID != "" || principal.Authority.Kind != auth.AuthorityIdentityGrant {
+	status, signed := directEdgeCheckStatus(response)
+	principal, claims, err := process.verifier.Verify(signed, http.MethodGet, "/v1/sessions")
+	if status != http.StatusOK || err != nil || claims.RequestID != requestID || principal.Identity == nil || principal.Identity.ID != identityID || principal.Identity.Kind != auth.IdentityHuman || principal.Workspace.ID != workspace.DefaultID || principal.Credential.Kind != auth.CredentialAccessToken || principal.APIKeyID != "" || principal.Authority.Kind != auth.AuthorityIdentityGrant {
 		t.Fatal("rotation bearer lacks actual bound Auth identity admission")
 	}
 }

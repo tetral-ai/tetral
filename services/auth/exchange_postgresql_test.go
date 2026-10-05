@@ -29,22 +29,7 @@ import (
 func TestPostgreSQLOIDCExchange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var unavailable atomic.Bool
-	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/keys" {
-			http.NotFound(w, r)
-			return
-		}
-		if unavailable.Load() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "RSA", "kid": "exchange-key", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())}}})
-	}))
+	issuer, key, unavailable, _ := newTestFederationIssuer(t)
 	defer issuer.Close()
 	admin := storagetest.NewPostgreSQLAdminDB(t)
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, "workspace_exchange_b", "second"); err != nil {
@@ -81,6 +66,10 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 	processLogger := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "unit", workload.DefaultDiagnosticConfig())
 	defer processLogger.CloseWithBudget()
 	router := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: store, Resolver: resolver, AssertionVerifier: verifier, Signer: signer})
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: processLogger.Logger})
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(router)
 	defer server.Close()
 	counts := func(t *testing.T) (tokens, identities, grants int) {
@@ -206,20 +195,15 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			{"combined bearer denies", "", []string{"Bearer " + serviceToken.AccessToken + ", Bearer invalid"}, 401},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				request := httptest.NewRequest(http.MethodPost, "/internal/auth/authorize", nil)
-				request.Header.Set("X-Api-Key", tc.key)
-				request.Header["Authorization"] = tc.authorization
-				request.Header.Set("X-Original-Method", http.MethodGet)
-				request.Header.Set("X-Original-Path", "/v1/sessions")
-				request.Header.Set("X-Request-Id", "request_exchange_test")
-				request.Header.Set("X-Forwarded-For", "127.0.0.1")
-				response := httptest.NewRecorder()
-				router.ServeHTTP(response, request)
-				if response.Code != tc.want {
-					t.Fatalf("authorize status=%d want=%d", response.Code, tc.want)
+				response, err := adapter.Check(ctx, externalTestRequest(http.MethodGet, "/v1/sessions", tc.key, tc.authorization))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if externalTestStatus(response) != tc.want {
+					t.Fatalf("Check status=%d want=%d", externalTestStatus(response), tc.want)
 				}
 				if tc.want == 200 {
-					principal, _, err := signer.Verify(response.Header().Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/sessions")
+					principal, _, err := signer.Verify(externalTestPrincipal(response), http.MethodGet, "/v1/sessions")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -247,27 +231,19 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			{[]string{"invalid-first", key.APIKey}, 401, false},
 			{[]string{"", key.APIKey}, 200, false},
 		} {
-			request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/internal/auth/authorize", nil)
+			request := externalTestRequest(http.MethodGet, "/v1/sessions", "", []string{"Bearer " + serviceToken.AccessToken})
+			for _, value := range tc.keys {
+				request.Attributes.Request.Http.HeaderMap.Headers = append(request.Attributes.Request.Http.HeaderMap.Headers, externalTestHeader("x-aPi-kEy", value))
+			}
+			response, err := adapter.Check(ctx, request)
 			if err != nil {
 				t.Fatal(err)
 			}
-			request.Header["x-aPi-kEy"] = tc.keys
-			request.Header.Set("Authorization", "Bearer "+serviceToken.AccessToken)
-			request.Header.Set("X-Original-Method", http.MethodGet)
-			request.Header.Set("X-Original-Path", "/v1/sessions")
-			request.Header.Set("X-Request-Id", "request_exchange_wire")
-			request.Header.Set("X-Forwarded-For", "127.0.0.1")
-			response, err := server.Client().Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _ = io.Copy(io.Discard, response.Body)
-			_ = response.Body.Close()
-			if response.StatusCode != tc.want {
-				t.Fatalf("wire selected-key status=%d want=%d", response.StatusCode, tc.want)
+			if externalTestStatus(response) != tc.want {
+				t.Fatalf("raw selected-key status=%d want=%d", externalTestStatus(response), tc.want)
 			}
 			if tc.want == 200 {
-				principal, _, err := signer.Verify(response.Header.Get("X-Tetral-Internal-Principal"), http.MethodGet, "/v1/sessions")
+				principal, _, err := signer.Verify(externalTestPrincipal(response), http.MethodGet, "/v1/sessions")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -288,10 +264,18 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		unavailableRouter := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: auth.NewAPIKeyStore(closed), Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b"), AssertionVerifier: verifier, Signer: signer})
 		endpoint := httptest.NewServer(unavailableRouter)
 		defer endpoint.Close()
+		unavailableAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b")}, Signer: signer, Logger: processLogger.Logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, credentials := range []struct{ key, bearer string }{{"selected-key", ""}, {"", "Bearer " + serviceToken.AccessToken}} {
+			result, err := unavailableAdapter.Check(ctx, externalTestRequest(http.MethodGet, "/v1/sessions", credentials.key, []string{credentials.bearer}))
+			if err != nil || externalTestStatus(result) != 500 || !strings.Contains(result.GetDeniedResponse().Body, "authentication unavailable") {
+				t.Fatal("Check dependency failure lost safe500 response")
+			}
+		}
 		before, _, _ := counts(t)
 		for _, tc := range []struct{ path, body, key, bearer string }{
-			{"/internal/auth/authorize", "", "selected-key", ""},
-			{"/internal/auth/authorize", "", "", "Bearer " + serviceToken.AccessToken},
 			{"/v1/oauth/token", "exchange", "", ""},
 		} {
 			body := tc.body
@@ -306,8 +290,6 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Api-Key", tc.key)
 			request.Header.Set("Authorization", tc.bearer)
-			request.Header.Set("X-Original-Method", http.MethodGet)
-			request.Header.Set("X-Original-Path", "/v1/sessions")
 			request.Header.Set("X-Request-Id", "request_dependency_exchange")
 			request.Header.Set("X-Forwarded-For", "127.0.0.1")
 			response, err := endpoint.Client().Do(request)
@@ -393,4 +375,29 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		}
 	}
 
+}
+
+// newTestFederationIssuer supplies the same real HTTPS/JWKS fixture to exchange
+// and external authorization owner tests.
+func newTestFederationIssuer(t *testing.T) (*httptest.Server, *rsa.PrivateKey, *atomic.Bool, *atomic.Int64) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable := &atomic.Bool{}
+	calls := &atomic.Int64{}
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/keys" {
+			http.NotFound(w, r)
+			return
+		}
+		if unavailable.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "RSA", "kid": "exchange-key", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())}}})
+	}))
+	return issuer, key, unavailable, calls
 }

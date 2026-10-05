@@ -20,6 +20,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 		"TestOIDCKeycloakSDK":                                              {"keycloak", "postgresql", "docker", "sdk"},
 		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
 		"TestOIDCReplicaAuthority":                                         {"postgresql", "docker"},
+		"TestPostgreSQLAuthExternalAuthorization":                          {"postgresql"},
 		"TestPostgreSQLOIDCExchange":                                       {"postgresql"},
 		"TestPostgreSQLAuthPolicyCommand":                                  {"postgresql", "docker"},
 		"TestAuthorityResolverDerivedKeysPreserveCeilingAndDurableLineage": {"postgresql"},
