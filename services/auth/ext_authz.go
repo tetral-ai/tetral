@@ -139,7 +139,10 @@ func externalRequestMetadata(req *authv3.CheckRequest) (externalMetadata, error)
 		}
 	}
 	ids, forwarding := headers.Values("X-Request-Id"), headers.Values("X-Forwarded-For")
-	if len(ids) != 1 || len(ids[0]) > 256 || !visibleMetadata(ids[0], false) || strings.Contains(ids[0], ",") || (h.Id != "" && h.Id != ids[0]) || len(forwarding) != 1 || !visibleMetadata(forwarding[0], true) || strings.TrimSpace(forwarding[0]) == "" || len(forwarding[0]) > 1024 {
+	// Envoy's HttpRequest.Id is its decimal stream ID, independent of the
+	// generated x-request-id header. Only the trusted header supplies the
+	// request identity carried by the signed principal and audit records.
+	if len(ids) != 1 || len(ids[0]) > 256 || !visibleMetadata(ids[0], false) || strings.Contains(ids[0], ",") || len(forwarding) != 1 || !visibleMetadata(forwarding[0], true) || strings.TrimSpace(forwarding[0]) == "" || len(forwarding[0]) > 1024 {
 		return externalMetadata{}, bad
 	}
 	removals := make([]string, 0, len(remove))

@@ -38,7 +38,30 @@ func externalTestRequest(method, path, key string, authorization []string) *auth
 	for _, value := range authorization {
 		headers = append(headers, externalTestHeader("authorization", value))
 	}
-	return &authv3.CheckRequest{Attributes: &authv3.AttributeContext{Request: &authv3.AttributeContext_Request{Http: &authv3.AttributeContext_HttpRequest{Method: method, Path: path, HeaderMap: &corev3.HeaderMap{Headers: headers}}}}}
+	return &authv3.CheckRequest{Attributes: &authv3.AttributeContext{Request: &authv3.AttributeContext_Request{Http: &authv3.AttributeContext_HttpRequest{Id: "18446744073709551615", Method: method, Path: path, HeaderMap: &corev3.HeaderMap{Headers: headers}}}}}
+}
+
+func TestExternalRequestMetadataUsesGeneratedHeaderIdentity(t *testing.T) {
+	// Envoy v1.39.2 CheckRequestUtils::setHttpRequest serializes stream_id
+	// into HttpRequest.Id; the generated UUID remains a separate raw header.
+	const requestID = "b321ef5e-fb32-4f42-8811-efb5b7e997aa"
+	req := externalTestRequest("POST", "/v1/sessions?limit=1", "", nil)
+	req.Attributes.Request.Http.HeaderMap.Headers[0].RawValue = []byte(requestID)
+	metadata, err := externalRequestMetadata(req)
+	if err != nil || metadata.requestID != requestID || metadata.method != "POST" || metadata.path != "/v1/sessions" {
+		t.Fatal("independent Envoy stream ID changed trusted request metadata")
+	}
+	// A valid stream ID cannot replace a missing or duplicated trusted header.
+	for _, values := range [][]string{nil, {""}, {requestID, requestID}} {
+		req := externalTestRequest("POST", "/v1/sessions", "", nil)
+		req.Attributes.Request.Http.HeaderMap.Headers = req.Attributes.Request.Http.HeaderMap.Headers[1:]
+		for _, value := range values {
+			req.Attributes.Request.Http.HeaderMap.Headers = append(req.Attributes.Request.Http.HeaderMap.Headers, externalTestHeader("x-request-id", value))
+		}
+		if _, err := externalRequestMetadata(req); err == nil {
+			t.Fatal("stream identity substituted for required unique request header")
+		}
+	}
 }
 func externalTestStatus(response *authv3.CheckResponse) int {
 	if response.GetOkResponse() != nil {
@@ -188,7 +211,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			"duplicate forwarded for": func(h *authv3.AttributeContext_HttpRequest) {
 				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Forwarded-For", "127.0.0.1"))
 			},
-			"request id mismatch": func(h *authv3.AttributeContext_HttpRequest) { h.Id = "different" },
+			"empty request id": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers[0].RawValue = nil },
 			"method mismatch": func(h *authv3.AttributeContext_HttpRequest) {
 				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":method", "POST"))
 			},

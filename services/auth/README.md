@@ -78,7 +78,8 @@ later key. Auth never calls its own HTTP surface or duplicates authority SQL.
 
 Auth validates the actual HTTP method and request URI attributes, optional raw
 `:method`/`:path` consistency, and exactly one bounded request ID and forwarded-for.
-A supplied HTTP request ID attribute must match the raw request ID. The edge owns
+Envoy's `HttpRequest.Id` is a stream identifier, independent of `x-request-id`.
+The generated header supplies the signed principal's request ID. The edge owns
 fresh request-ID generation and trusted source forwarding. `X-Original-*` and
 `X-Tetral-*` values never supply authority. `url.ParseRequestURI` produces the
 same decoded `URL.Path` used by Go HTTP handlers, excluding the query from the
