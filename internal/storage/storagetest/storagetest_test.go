@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -840,5 +843,99 @@ func assertCloneCapabilitiesAbsent(t *testing.T, control *sql.DB, registration c
 	}
 	if databaseExists || roleExists || registryExists {
 		t.Fatalf("clone cleanup left database=%v role=%v registry=%v", databaseExists, roleExists, registryExists)
+	}
+}
+
+func TestDatabaseFailureClassificationPreservesSafeNativeAndContextDistinction(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadline, finish := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer finish()
+	postgres := &pgconn.PgError{Code: "55P03", Message: sensitiveSentinel, Detail: "postgres://user:secret@host/database " + sensitiveSentinel, Where: "SELECT private_statement " + sensitiveSentinel}
+	for _, test := range []struct {
+		name                     string
+		ctx                      context.Context
+		err                      error
+		native, caller, sqlstate string
+	}{
+		{"postgresql", context.Background(), postgres, "postgresql", "none", "55P03"},
+		{"postgresql_with_expired_context", deadline, errors.Join(postgres, context.DeadlineExceeded), "postgresql", "deadline", "55P03"},
+		{"wrapped_deadline", deadline, fmt.Errorf("%s: %w", sensitiveSentinel, context.DeadlineExceeded), "deadline", "deadline", ""},
+		{"wrapped_cancellation", canceled, fmt.Errorf("%s: %w", sensitiveSentinel, context.Canceled), "canceled", "canceled", ""},
+		{"network", context.Background(), &net.OpError{Op: "dial", Net: "tcp", Err: errors.New(sensitiveSentinel)}, "network", "none", ""},
+		{"unknown", context.Background(), databaseNativeMessageMustNotBeRead{}, "other", "none", ""},
+		{"invalid_sqlstate", context.Background(), &pgconn.PgError{Code: sensitiveSentinel, Message: sensitiveSentinel}, "postgresql", "none", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := classifyDatabaseFailure(test.ctx, "run_heartbeat.update", test.err)
+			if d.native != test.native || d.context != test.caller || d.sqlstate != test.sqlstate {
+				t.Fatalf("safe classification=%+v", d)
+			}
+			for _, err := range []error{&DatabaseSetupError{Stage: "refresh_run_heartbeat", diagnostic: d}, &DatabaseCleanupError{Database: "tetral_test_fixture", Stage: "revoke_workload_login", diagnostic: d}} {
+				for _, output := range []string{err.Error(), fmt.Sprintf("%+v", err), fmt.Sprintf("%#v", err)} {
+					for _, secret := range []string{sensitiveSentinel, "postgres://", "SELECT private_statement"} {
+						if strings.Contains(output, secret) {
+							t.Fatal("database error disclosed underlying native data")
+						}
+					}
+				}
+				if !strings.Contains(err.Error(), "context="+test.caller) || !strings.Contains(err.Error(), "native="+test.native) {
+					t.Fatal("diagnostic failed to retain classified cause/context")
+				}
+			}
+		})
+	}
+}
+
+type databaseNativeMessageMustNotBeRead struct{}
+
+func (databaseNativeMessageMustNotBeRead) Error() string { panic("native message must not be read") }
+
+func TestDatabaseFailureProjectionRejectsUnapprovedScalarsAndKeepsLegacyErrors(t *testing.T) {
+	for _, d := range []databaseFailure{
+		{}, {operation: sensitiveSentinel, context: "none", native: "other"},
+		{operation: "run_heartbeat.update", context: sensitiveSentinel, native: "other"},
+		{operation: "run_heartbeat.update", context: "none", native: sensitiveSentinel},
+	} {
+		if d.suffix() != "" {
+			t.Fatal("invalid scalar produced diagnostic")
+		}
+	}
+	d := databaseFailure{operation: "run_heartbeat.update", context: "none", native: "postgresql", sqlstate: sensitiveSentinel}
+	if strings.Contains(d.suffix(), "sqlstate=") || strings.Contains(d.suffix(), sensitiveSentinel) {
+		t.Fatal("invalid SQLSTATE disclosed")
+	}
+	d.native = "other"
+	d.sqlstate = "55P03"
+	if strings.Contains(d.suffix(), "sqlstate=") {
+		t.Fatal("non-PostgreSQL error supplied SQLSTATE")
+	}
+	if got := classifyDatabaseFailure(context.Background(), "run_heartbeat.update", nil); got != (databaseFailure{}) {
+		t.Fatal("absent native error manufactured diagnostics")
+	}
+	if got := classifyDatabaseFailure(context.Background(), sensitiveSentinel, errors.New(sensitiveSentinel)); got != (databaseFailure{}) {
+		t.Fatal("unknown operation manufactured diagnostics")
+	}
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{&DatabaseSetupError{Stage: "lost_run_heartbeat_lease"}, `storagetest: database setup failed at stage "lost_run_heartbeat_lease"`},
+		{&DatabaseSetupError{Stage: "setup", Database: "tetral_test_fixture"}, `storagetest: database setup failed at stage "setup" for database "tetral_test_fixture"`},
+		{&DatabaseCleanupError{Stage: "verify_authority", Database: "tetral_test_fixture"}, `storagetest: database cleanup failed at stage "verify_authority" for database "tetral_test_fixture"`},
+	} {
+		if test.err.Error() != test.want {
+			t.Fatalf("legacy error changed: %s", test.err)
+		}
+	}
+	for _, value := range []string{"55P03", "57014", "08006"} {
+		if !validDatabaseSQLState(value) {
+			t.Fatal("real SQLSTATE rejected", value)
+		}
+	}
+	for _, value := range []string{"55p03", "55P0", "55P030", "55P;3", "55P\n3"} {
+		if validDatabaseSQLState(value) {
+			t.Fatal("invalid SQLSTATE accepted")
+		}
 	}
 }
