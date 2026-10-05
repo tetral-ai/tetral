@@ -196,7 +196,14 @@ thread's accepted-input queue is non-empty) remains the final authority.
 durable `sandbox_release` operation. The `session_delete_cleanup` branch clears
 hot Runtime custody, joins that release operation idempotently, and waits for
 Sandbox Service and Sandbox Queue custody to close before deleting private
-Sandbox rows. Job Runner never performs the provider call.
+Sandbox rows. Job Runner never performs the provider call. The serving
+`job_runner` role can lock and schedule cleanup of output-capture operations and
+retire their private operation/blob rows after release and Queue custody close.
+It cannot create captures. Staged captures first retain one durable Sandbox
+cleanup job; adopted or cleaned receipts can retire without another provider
+call. The installed-role regression in
+[runtime_output_capture_role_test.go](runtime_output_capture_role_test.go) checks
+these phases, missing-grant rollback and workspace isolation.
 
 ## Delivery and custody
 

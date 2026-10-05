@@ -3,6 +3,11 @@
   "go_tests": [
     {
       "package": "github.com/tetral-ai/tetral/services/job-runner",
+      "name": "TestPostgreSQLInstalledJobRunnerDeletesOutputCaptureCustody",
+      "dependencies": ["postgresql"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/services/job-runner",
       "name": "TestPostgreSQLInstalledJobRunnerPodLossRecordsTerminalUsage",
       "dependencies": ["postgresql"]
     },

@@ -196,6 +196,8 @@
         "session_memory_store_resources": ["SELECT"],
         "session_sandbox_bindings": ["SELECT", "UPDATE", "DELETE"],
         "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_output_capture_operations": ["SELECT", "UPDATE", "DELETE"],
+        "sandbox_output_capture_blobs": ["SELECT", "DELETE"],
         "session_events": ["SELECT", "INSERT", "UPDATE"],
         "session_event_stream_changes": ["SELECT", "INSERT"],
         "request_usage_details": ["SELECT", "INSERT"],
