@@ -112,7 +112,7 @@ func writeEventDeclarationDigest(
 func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, prepared preparedRuntimeToolDeclaration) (string, error) {
 	declaration := prepared.projection
 	contextDelta := map[string]any{"parts": prepared.contextParts}
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	raw, err := marshalPreparedRuntimeToolDeclarationObject(map[string]any{
 		"assistant_context_delta": contextDelta,
 		"evaluated_permission":    declaration.EvaluatedPermission,
 		"event_type":              declaration.EventType,
@@ -126,7 +126,7 @@ func writeToolDeclarationDigest(request *bridgev1.WriteEventRequest, prepared pr
 		"runtime_write_id":        request.GetRuntimeWriteId(),
 		"session_thread_id":       request.GetScope().GetSessionThreadId(),
 		"tool_name":               declaration.ToolName,
-	})
+	}, prepared)
 	if err != nil {
 		return "", err
 	}
@@ -1157,4 +1157,65 @@ func declarationApplicationObservationTx(
 func (s *PostgreSQLBridgeAPIStore) runtimeScopeApplicationCurrent(ctx context.Context, scope *bridgev1.RuntimeScope) (bool, error) {
 	observation, err := s.declarationApplicationObservation(ctx, scope)
 	return observation.Current, err
+}
+
+// marshalPreparedRuntimeToolDeclarationObject reuses the fresh canonical raw
+// inputs owned by successful normalization, avoiding their redundant encoder
+// validation. Other fields retain the ordinary encoder; changed or unprepared
+// envelopes fall back to it. Separator restoration must cover the assembled
+// object before the caller performs whole-envelope canonicalization.
+func marshalPreparedRuntimeToolDeclarationObject(value map[string]any, prepared preparedRuntimeToolDeclaration) ([]byte, error) {
+	if !prepared.rawInputsNormalized {
+		return marshalRuntimeDeclarationObject(value)
+	}
+	keys := []string{"assistant_context_delta", "evaluated_permission", "event_type", "mcp_server_name", "model_request_id", "model_tool_call_id", "operation_kind", "provider_input", "public_execution_input", "route_capability", "runtime_write_id", "session_thread_id", "tool_name"}
+	if len(value) != len(keys) {
+		return marshalRuntimeDeclarationObject(value)
+	}
+	for _, key := range keys {
+		if _, ok := value[key]; !ok {
+			return marshalRuntimeDeclarationObject(value)
+		}
+	}
+	fields := make([][]byte, len(keys))
+	size := 2 + len(keys) - 1
+	for i, key := range keys {
+		if key == "provider_input" || key == "public_execution_input" {
+			raw, ok := value[key].(json.RawMessage)
+			owned := prepared.projection.ProviderInput
+			if key == "public_execution_input" {
+				owned = prepared.projection.CanonicalExecutionInput
+			}
+			if !ok || len(raw) == 0 || !bytes.Equal(raw, owned) {
+				return marshalRuntimeDeclarationObject(value)
+			}
+			fields[i] = raw
+			size += len(key) + 3 + len(raw)
+			continue
+		}
+		var field bytes.Buffer
+		encoder := json.NewEncoder(&field)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(map[string]any{key: value[key]}); err != nil {
+			return marshalRuntimeDeclarationObject(value)
+		}
+		encoded := bytes.TrimSuffix(field.Bytes(), []byte{'\n'})
+		fields[i] = encoded[1 : len(encoded)-1]
+		size += len(fields[i])
+	}
+	encoded := make([]byte, 0, size)
+	encoded = append(encoded, '{')
+	for i, key := range keys {
+		if i > 0 {
+			encoded = append(encoded, ',')
+		}
+		if key == "provider_input" || key == "public_execution_input" {
+			encoded = append(encoded, '"')
+			encoded = append(encoded, key...)
+			encoded = append(encoded, '"', ':')
+		}
+		encoded = append(encoded, fields[i]...)
+	}
+	encoded = append(encoded, '}')
+	return runtimecontrol.RestoreJSONStringifySeparatorEscapes(encoded), nil
 }

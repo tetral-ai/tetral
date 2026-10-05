@@ -283,6 +283,12 @@ separators while keeping literal backslash-u text escaped. Declaration identity,
 stored context validation, and stable reasoning metadata accounting use this
 same correction; a literal `\\u2028` is not a Unicode separator.
 
+Tool declaration normalization owns fresh canonical Provider and public execution
+inputs alongside their decoded context. Digest encoding reuses those validated
+raw bytes while retaining their numeric and escape spelling. It applies separator
+restoration to the entire envelope, then canonicalizes and hashes that envelope;
+unsupported or unprepared envelopes retain the ordinary encoder and its errors.
+
 `CommitInputs`, `WriteEvent`, `SettleToolResult`, `WriteRequestEnd`, repair,
 compaction, idle, and termination retain separate request and result types.
 There is no generic declaration result. Each successful hot-path application

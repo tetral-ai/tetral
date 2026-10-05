@@ -1140,8 +1140,9 @@ func runtimeToolEventPayloadJSON(projection runtimecontrol.ToolProjection) (stri
 // preparedRuntimeToolDeclaration owns decoded context for one WriteEvent invocation.
 // Digest and append only read these fresh maps; raw projection fields remain unchanged.
 type preparedRuntimeToolDeclaration struct {
-	projection   runtimecontrol.ToolProjection
-	contextParts []map[string]any
+	projection          runtimecontrol.ToolProjection
+	contextParts        []map[string]any
+	rawInputsNormalized bool
 }
 
 func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaration) (preparedRuntimeToolDeclaration, error) {
@@ -1200,7 +1201,7 @@ func normalizeRuntimeToolDeclaration(declaration *bridgev1.RuntimeToolDeclaratio
 	if err != nil {
 		return preparedRuntimeToolDeclaration{}, err
 	}
-	return preparedRuntimeToolDeclaration{projection: projection, contextParts: parts}, nil
+	return preparedRuntimeToolDeclaration{projection: projection, contextParts: parts, rawInputsNormalized: true}, nil
 }
 
 func runtimeToolContextDelta(projection runtimecontrol.ToolProjection) *bridgev1.RuntimeContextDelta {
