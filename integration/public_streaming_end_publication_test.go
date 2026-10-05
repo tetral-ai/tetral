@@ -88,12 +88,16 @@ func (w *publicHeldWriter) Write(data []byte) (int, error) {
 }
 
 func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
-	for _, preview := range []bool{false, true} {
-		name := "ordinary-held"
-		if preview {
-			name = "preview-held"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, variant := range []struct {
+		name     string
+		preview  bool
+		decision string
+	}{
+		{name: "ordinary-held", decision: "allow"},
+		{name: "preview-held", preview: true, decision: "allow"},
+		{name: "denied-before-End", decision: "deny"},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
 			vectors := loadPublicStreamingVectors(t)
 			provider := &publicApprovalProvider{contentE2EProvider: contentE2EProvider{handoffCaptureProvider: handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}, path: filepath.Join(t.TempDir(), "effect.txt")}, content: vectors.Content.ToolInputMarker}
 			barrier := newPublicTextWriteBarrier(t)
@@ -102,11 +106,11 @@ func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
 			h := newPublicStreamingHarness(t, "public-approval", publicStreamingOptions{approval: "ask_for_approval", provider: provider, wrapWriter: barrier.wrap, gateway: map[string]any{"holdEveryRequest": true}})
 			t.Cleanup(barrier.unblock)
 			var types []string
-			if preview {
+			if variant.preview {
 				types = []string{"agent.message"}
 			}
 			h.open(t, "held", types, "")
-			if preview {
+			if variant.preview {
 				h.open(t, "healthy", nil, "")
 			} else {
 				h.open(t, "healthy", []string{"agent.message"}, "")
@@ -138,8 +142,23 @@ func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
 			if !found || provider.calls.Load() != 0 {
 				t.Fatal("committed text unavailable in history or permission wait dispatched tool")
 			}
-			h.client.control(t, "confirm", map[string]any{"sessionId": h.session, "toolUseEventId": tool, "result": "allow"})
+			h.client.control(t, "confirm", map[string]any{"sessionId": h.session, "toolUseEventId": tool, "result": variant.decision})
 			waitContentSQLCount(t, h.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='user.tool_confirmation'`, h.session, 1)
+			// Observe the actual Runtime confirmation ACK through its committed
+			// inbox and Queue custody before releasing the original provider End.
+			// This targets live route dispatch, rather than a later idle recovery.
+			waitContentSQLCount(t, h.db, `SELECT count(*) FROM session_runtime_inbox i
+			  JOIN queue_jobs j ON j.workspace_id=i.workspace_id
+			    AND j.dedupe_key='runtime_input:'||i.workspace_id||':'||i.session_id||':'||i.runtime_input_id
+			  JOIN session_events e ON e.workspace_id=i.workspace_id AND e.session_id=i.session_id
+			    AND i.event_ids_json::jsonb ? e.event_id
+			  WHERE i.session_id=$1 AND i.input_kind='tool_confirmation' AND i.status='committed'
+			    AND j.status='acknowledged' AND e.type='user.tool_confirmation'`, h.session, 1)
+			var confirmationTool, confirmationDecision string
+			if err := h.db.QueryRow(`SELECT payload_json::jsonb->>'tool_use_id',payload_json::jsonb->>'result'
+			  FROM session_events WHERE session_id=$1 AND type='user.tool_confirmation'`, h.session).Scan(&confirmationTool, &confirmationDecision); err != nil || confirmationTool != tool || confirmationDecision != variant.decision {
+				t.Fatalf("applied confirmation differs from named decision: tool=%s decision=%s err=%v", confirmationTool, confirmationDecision, err)
+			}
 			barrier.armed.Store(true)
 			h.finish(t)
 			select {
@@ -150,12 +169,29 @@ func TestPostgreSQLPublicStreamingEndPublication(t *testing.T) {
 			// Tool continuation runs through its existing scheduler after provider
 			// completion while this particular consumer still owns a blocked write.
 			waitContentSQLCount(t, h.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result'`, h.session, 1)
-			if provider.calls.Load() != 1 {
-				t.Fatal("approved external tool did not execute exactly once")
+			var resultTool string
+			var resultIsError bool
+			if err := h.db.QueryRow(`SELECT payload_json::jsonb->>'tool_use_id',
+			  COALESCE((payload_json::jsonb->>'is_error')::boolean,false)
+			  FROM session_events WHERE session_id=$1 AND type='agent.tool_result'`, h.session).Scan(&resultTool, &resultIsError); err != nil || resultTool != tool || resultIsError != (variant.decision == "deny") {
+				t.Fatalf("named Tool Result differs from decision: tool=%s error=%t err=%v", resultTool, resultIsError, err)
 			}
-			body, err := os.ReadFile(provider.path)
-			if err != nil || string(body) != vectors.Content.ToolInputMarker {
-				t.Fatal("external execution ledger differs")
+			if variant.decision == "deny" {
+				if provider.calls.Load() != 0 {
+					t.Fatal("denied live Tool dispatched external execution")
+				}
+				waitContentSQLCount(t, h.db, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_kind='sandbox_tool'`, h.session, 0)
+				if _, err := os.Stat(provider.path); !os.IsNotExist(err) {
+					t.Fatalf("denied Tool has a filesystem effect: %v", err)
+				}
+			} else {
+				if provider.calls.Load() != 1 {
+					t.Fatal("approved external tool did not execute exactly once")
+				}
+				body, err := os.ReadFile(provider.path)
+				if err != nil || string(body) != vectors.Content.ToolInputMarker {
+					t.Fatal("external execution ledger differs")
+				}
 			}
 			h.assertFormal(t, h.waitEvent(t, "healthy", "span.model_request_end", 1), []string{"alpha βeta omega\n"})
 			if countPublicEvents(h.snapshot(t, "held"), "agent.message") != 0 {
