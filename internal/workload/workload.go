@@ -3,11 +3,13 @@ package workload
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -474,6 +476,7 @@ type Config struct {
 	ListenConfigKey       string
 	Listen                func(network string, address string) (net.Listener, error)
 	Listener              net.Listener
+	TLSConfig             *tls.Config
 	Handler               http.Handler
 	Readiness             *Readiness
 	ReadHeaderTimeout     time.Duration
@@ -549,6 +552,8 @@ func Run(ctx context.Context, cfg Config) error {
 		Handler:           users.wrap(cfg.Handler),
 		BaseContext:       func(net.Listener) context.Context { return workCtx },
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		TLSConfig:         cfg.TLSConfig,
+		ErrorLog:          log.New(&httpServerDiagnostics{logger: cfg.Logger}, "", 0),
 	}
 	cfg.Logger.Info("workload.started",
 		slog.String("operation", "workload.lifecycle"),
@@ -559,7 +564,13 @@ func Run(ctx context.Context, cfg Config) error {
 	)
 	serverErr := make(chan error, 1)
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		var err error
+		if cfg.TLSConfig != nil {
+			err = server.ServeTLS(listener, "", "")
+		} else {
+			err = server.Serve(listener)
+		}
+		if err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
 		close(serverErr)

@@ -61,7 +61,7 @@ func Open(ctx context.Context, cfg Config) (*Owner, error) {
 	if cfg.CAPath == "" || (cfg.CertPath == "") != (cfg.KeyPath == "") {
 		return nil, errors.New("TLS trust and a complete optional certificate/key pair are required")
 	}
-	if cfg.Purpose != "" && cfg.Purpose != "runtime-direct" && cfg.Purpose != "database" && cfg.Purpose != "blob" && cfg.Purpose != "nats" {
+	if cfg.Purpose != "" && cfg.Purpose != "runtime-direct" && cfg.Purpose != "database" && cfg.Purpose != "blob" && cfg.Purpose != "nats" && cfg.Purpose != "edge-http" && cfg.Purpose != "edge-check" {
 		return nil, errors.New("unknown TLS purpose")
 	}
 	g, err := load(cfg)
