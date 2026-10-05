@@ -43,7 +43,7 @@ function harness(toolCount = 1) {
 		writer,
 		events: [
 			...Array.from({ length: toolCount }, (_, index) => ({
-				type: "tool-call" as const,
+				type: "tool-call-complete" as const,
 				id: `write-${index}`,
 				toolName: "Write",
 				input: { file_path: `file-${index}.txt`, content: "content" },
@@ -78,7 +78,7 @@ function harness(toolCount = 1) {
 			return {
 				ok: true,
 				type: "committed",
-				assignedContextSequences: [Math.max(0, ...session.state.contextManager.entries().map(message => message.messageSequence), session.state.contextManager.openRequestDraft()?.messageSequence ?? 0) + 1],
+				assignedContextSequences: [Math.max(0, ...session.state.contextManager.messages().map(message => message.messageSequence)) + 1],
 				pendingAttachments: [],
 				interruptToolResults: [],
 			};
@@ -116,7 +116,7 @@ for (const decision of ["allow", "deny"] as const) {
 			expect(h.executions).toEqual(decision === "allow" ? ["write-0"] : []);
 			expect(h.settlements).toHaveLength(1);
 			expect(h.settlements[0]!.settlement.toolUseEventId).toBe(h.confirmedTools.get("write-0")!);
-			expect(h.session.state.contextManager.entries().flatMap(message => message.parts).filter(part => part.type === "tool_result")).toEqual([expect.objectContaining({
+			expect(h.session.state.contextManager.historyMessages().flatMap(message => message.parts).filter(part => part.type === "tool_result")).toEqual([expect.objectContaining({
 				type: "tool_result", modelToolCallId: "write-0", result: expect.objectContaining({ type: decision === "allow" ? "completed" : "error" }),
 			})]);
 			expect(h.requests).toHaveLength(2);
@@ -126,9 +126,7 @@ for (const decision of ["allow", "deny"] as const) {
 				expect(h.idleTurns).toHaveLength(2);
 				expect(h.idleTurns[1]!.durableTurnId).not.toBe(h.idleTurns[0]!.durableTurnId);
 			}
-			expect(h.session.state.pendingApprovalToolJobs()).toEqual([]);
-			expect(h.session.state.resolvedToolRouteJobs()).toEqual([]);
-			expect(h.session.state.pendingSandboxExecutionJobs()).toEqual([]);
+			expect(h.session.state.activeTools()).toEqual([]);
 			expect(h.session.state.threadTurnTransition().nextStep).toEqual({ action: "await_input" });
 		});
 	}
@@ -159,12 +157,20 @@ test("a sibling confirmation during recovered-route FinishIdle resumes without a
 	expect(h.requests).toHaveLength(2);
 	expect(h.executions).toEqual(["write-0"]);
 	expect(h.settlements).toHaveLength(2);
-	expect(h.session.state.pendingApprovalToolJobs()).toEqual([]);
-	expect(h.session.state.resolvedToolRouteJobs()).toEqual([]);
-	expect(h.session.state.pendingSandboxExecutionJobs()).toEqual([]);
+	expect(h.session.state.activeTools()).toEqual([]);
 	expect(h.session.state.threadTurnTransition().nextStep).toEqual({ action: "await_input" });
 });
 
+
+test("a resolved route without a hot or cold decision fails closed", async () => {
+	const h = harness();
+	expect(await h.run()).toMatchObject({ type: "completed" });
+	const pending = h.session.state.pendingApprovalToolJobs()[0]!;
+	h.session.state.recordThreadToolRoute(pending.toolUseEventId, "resume_approval_settlement");
+	expect(() => h.session.state.resolvedToolRouteJobs()).toThrow("resolved Tool route has no approval decision");
+	expect(h.executions).toEqual([]);
+	expect(h.settlements).toEqual([]);
+});
 
 test("checkpoint admission fence wins over confirmation received during FinishIdle ACK", async () => {
 	const h = harness();

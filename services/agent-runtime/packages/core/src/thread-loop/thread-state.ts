@@ -496,7 +496,19 @@ export class ThreadState {
 	resolvedToolRouteJobs(): readonly RuntimeResolvedToolRouteJobState[] {
 		return this.toolControlSnapshots("resume_approval_settlement").map(state => {
 			const tool = this.#activeTools.get(state.toolUseEventId)!;
-			return { ...state, recoveryKind: "resolved_route", decision: tool.decision!, ...(tool.denyMessage === undefined ? {} : { denyMessage: tool.denyMessage }) };
+			// Hot confirmation moves the route before its next dispatch; cold routes
+			// already carry the same durable decision in their restored control.
+			const confirmation = this.#toolConfirmations[state.toolUseEventId] ?? tool;
+			const decision = confirmation.decision;
+			if (decision === undefined)
+				throw new Error("resolved Tool route has no approval decision");
+			const denyMessage = confirmation.denyMessage;
+			return {
+				...state,
+				recoveryKind: "resolved_route",
+				decision,
+				...(denyMessage === undefined ? {} : { denyMessage }),
+			};
 		});
 	}
 
