@@ -207,6 +207,13 @@ state are awaited Effects, never detached background work.
 | `FinishIdle` | enter local idle (after output capture / status) |
 | `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; apply the closed termination result before removing pending tools or releasing the turn |
 
+An active interrupt also closes any still-open recovered Request before its
+control receipt and idle transition. Outstanding failed-run writes join before
+this fallback starts. The same joined-End application gates the idle and active
+paths; a stale result stops further writes, and a committed result that cannot
+be applied evicts the invalid resident projection for cold reconstruction.
+Already-closed requests do not receive a second End.
+
 An interrupt delivery attempt reports a retryable Request-End failure through
 the current `ThreadRunSlot`; retryable attempt state is never promoted into the
 terminal replay memo. A joined duplicate is different: the durable operation

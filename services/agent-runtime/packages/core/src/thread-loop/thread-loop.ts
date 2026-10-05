@@ -460,10 +460,11 @@ export interface Interface {
 /** Read access to the reducer-owned active durable turn identity. */
 export interface ThreadLoopRunCustody {
 	readonly activeTurnId: (session: ThreadRuntime) => string | undefined;
-	/** Reports one in-run interrupt attempt without turning retryable failure into replay state. */
+	/** Reports an attempt and, for an unapplicable joined ACK, asks the owner to cold-reload. */
 	readonly recordInterruptAttemptResult: (
 		runtimeInputId: string,
 		result: RuntimeControlInputCommitResult,
+		disposition?: { readonly reloadHotState: true },
 	) => void;
 	readonly interruptLeaseRef: (
 		runtimeInputId: string,
@@ -965,7 +966,7 @@ async function executeRecoveredCloseInterruptedNextStep(
 function failRecoveredOpenRequest(
 	session: ThreadRuntime,
 	reloadHotState = false,
-): ThreadLoopRunResult {
+): Extract<ThreadLoopRunResult, { readonly type: "failed" }> & { readonly error: RuntimeFailure } {
 	return {
 		type: "failed",
 		...(reloadHotState ? { reloadHotState: true as const } : {}),
@@ -1015,11 +1016,15 @@ async function executeRecoveredRequestRetryOrRescheduleNextStep(
 	};
 }
 
-async function closeRecoveredOpenRequestForUserInterrupt(
+type OpenRequestInterruptCloseoutResult =
+	| Extract<ThreadLoopRunResult, { readonly type: "interrupted" }>
+	| (Extract<ThreadLoopRunResult, { readonly type: "failed" }> & { readonly error: RuntimeFailure });
+
+async function closeOpenRequestForUserInterrupt(
 	session: ThreadRuntime,
 	options: ThreadLoopRuntimeOptions,
 	custody: ThreadLoopRunCustody,
-): Promise<ThreadLoopRunResult> {
+): Promise<OpenRequestInterruptCloseoutResult> {
 	const request = session.state.threadTurnTransition().checkpoint.request;
 	if (request === undefined || request.requestEnd !== undefined) {
 		session.state.markUserInterruptCloseoutEligible();
@@ -1058,6 +1063,7 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 			retryable: end.error.retryable,
 			errorCode: end.error.code,
 		};
+		custody.recordInterruptAttemptResult(command.runtimeInputId, attemptResult);
 		session.state.recordJoinedUserInterruptResult(
 			command.runtimeInputId,
 			attemptResult,
@@ -1070,6 +1076,10 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		};
 	}
 	if (end.type === "stale") {
+		custody.recordInterruptAttemptResult(command.runtimeInputId, {
+			ok: true,
+			stale: true,
+		});
 		session.state.recordJoinedUserInterruptResult(
 			command.runtimeInputId,
 			{ ok: true, stale: true },
@@ -1078,7 +1088,13 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		return { type: "interrupted", discardHotState: true };
 	}
 	if (!applyJoinedInterruptRequestEnd(session, end)) {
-		return failRecoveredOpenRequest(session, true);
+		const failure = failRecoveredOpenRequest(session, true);
+		custody.recordInterruptAttemptResult(
+			command.runtimeInputId,
+			{ ok: false, retryable: false, errorCode: failure.error.code },
+			{ reloadHotState: true },
+		);
+		return failure;
 	}
 	releaseInterruptedPendingTools(
 		session,
@@ -1086,6 +1102,32 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 		end.interruptToolResults.map((result) => result.toolUseEventId),
 	);
 	session.state.markUserInterruptCloseoutEligible();
+	custody.recordInterruptAttemptResult(command.runtimeInputId, {
+		ok: true,
+		joined: true,
+	});
+	return { type: "interrupted" };
+}
+
+async function closeRecoveredOpenRequestForUserInterrupt(
+	session: ThreadRuntime,
+	options: ThreadLoopRuntimeOptions,
+	custody: ThreadLoopRunCustody,
+): Promise<ThreadLoopRunResult> {
+	const request = session.state.threadTurnTransition().checkpoint.request;
+	const needsEnd = request !== undefined && request.requestEnd === undefined;
+	const closeout = await closeOpenRequestForUserInterrupt(
+		session,
+		options,
+		custody,
+	);
+	if (
+		!needsEnd ||
+		closeout.type !== "interrupted" ||
+		closeout.discardHotState === true
+	) {
+		return closeout;
+	}
 	const idle = await appendIdleEvent(
 		options,
 		session,
@@ -1101,7 +1143,10 @@ async function closeRecoveredOpenRequestForUserInterrupt(
 			releaseSession: { reason: "event_write_failed" },
 		};
 	}
-	session.state.completeUserInterrupt(command.runtimeInputId);
+	const command = session.state.userInterruptCommand();
+	if (command !== undefined) {
+		session.state.completeUserInterrupt(command.runtimeInputId);
+	}
 	return { type: "interrupted" };
 }
 
@@ -2327,7 +2372,7 @@ function runThreadLoopEffect(
 	);
 	return run.pipe(
 		Effect.flatMap((result) =>
-			Effect.promise(() =>
+			nonAbandonablePromise(() =>
 				closeFailedThreadRun(
 					options,
 					session,
@@ -2383,13 +2428,28 @@ function settleUserInterruptAtRunExitEffect(
 	custody: ThreadLoopRunCustody,
 ): Effect.Effect<void, unknown> {
 	return Effect.gen(function* () {
-		const pendingApprovalSettlement = yield* resumeRecoveredToolJobsEffect(
-			session,
-			options,
-			custody,
-		);
-		if (pendingApprovalSettlement.type === "failed") {
-			return yield* failRequestCloseout(pendingApprovalSettlement.error);
+		const request = session.state.threadTurnTransition().checkpoint.request;
+		if (request !== undefined && request.requestEnd === undefined) {
+			// The interrupt receipt and Tool cancellation must join the original End;
+			// a standalone control commit cannot discharge an open request.
+			const closeout = yield* nonAbandonablePromise(() =>
+				closeOpenRequestForUserInterrupt(session, options, custody),
+			);
+			if (closeout.type === "failed") {
+				return yield* failRequestCloseout(closeout.error);
+			}
+			if (closeout.type === "interrupted" && closeout.discardHotState === true) {
+				return;
+			}
+		} else {
+			const pendingApprovalSettlement = yield* resumeRecoveredToolJobsEffect(
+				session,
+				options,
+				custody,
+			);
+			if (pendingApprovalSettlement.type === "failed") {
+				return yield* failRequestCloseout(pendingApprovalSettlement.error);
+			}
 		}
 		session.state.markUserInterruptCloseoutEligible();
 		const interruptFence = yield* settleUserInterruptFenceEffect(

@@ -521,6 +521,7 @@ interface ThreadRunSlot {
 	>;
 	readonly scope: Scope.Scope;
 	stopping: boolean;
+	interruptCloseoutReloadRequired: boolean;
 	interruptAttemptResult:
 		| {
 				readonly runtimeInputId: string;
@@ -1133,6 +1134,7 @@ export function layer(
 						scope: runScope,
 						stopping: false,
 						interruptAttemptResult: undefined,
+						interruptCloseoutReloadRequired: false,
 						reviewerExecutionToken:
 							reviewId === undefined
 								? undefined
@@ -1148,8 +1150,11 @@ export function layer(
 					const custody: ThreadLoop.ThreadLoopRunCustody = {
 						activeTurnId: (session) =>
 							session.state.threadTurnTransition().checkpoint.executionRunId,
-						recordInterruptAttemptResult: (runtimeInputId, result) => {
+						recordInterruptAttemptResult: (runtimeInputId, result, disposition) => {
 							runSlot.interruptAttemptResult = { runtimeInputId, result };
+							if (disposition?.reloadHotState === true) {
+								runSlot.interruptCloseoutReloadRequired = true;
+							}
 						},
 						interruptLeaseRef: (runtimeInputId) =>
 							threadEntry.runtimeThread.state.userInterruptCommand()
@@ -1308,6 +1313,13 @@ export function layer(
 						return;
 					}
 					yield* closeRunScope(runSlot, exit);
+					if (runSlot.interruptCloseoutReloadRequired) {
+						// A joined interrupt End could not be projected. Cold reload owns
+						// repair; invalid hot state must not issue another failure write.
+						yield* releaseThreadEntry(sessionEntry, threadEntry);
+						yield* completeRunSlot(runSlot, exit);
+						return;
+					}
 					if (Exit.isSuccess(exit) && exit.value.type === "checkpoint_yield") {
 						// The durable turn remains owned until the binding-release receipt.
 						// A scheduling yield cannot settle it or start a successor locally.

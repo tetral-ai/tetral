@@ -2504,6 +2504,101 @@ describe("SessionManager", () => {
 		);
 	});
 
+	for (const disposition of ["malformed", "stale"] as const) {
+		test(`joined interrupt ${disposition} releases without post-ACK failure writes`, async () => {
+			let failureCloseouts = 0;
+			const layer = Layer.succeed(
+				ThreadLoop.Service,
+				threadLoopService({
+					run: (session, custody) =>
+						Effect.never.pipe(
+							Effect.onInterrupt(() =>
+								Effect.sync(() => {
+									const command = session.state.userInterruptCommand();
+									if (command === undefined)
+										throw new Error("interrupt was not applied");
+									if (disposition === "stale") {
+										custody.recordInterruptAttemptResult(command.runtimeInputId, {
+											ok: true,
+											stale: true,
+										});
+									} else {
+										custody.recordInterruptAttemptResult(
+											command.runtimeInputId,
+											{
+												ok: false,
+												retryable: false,
+												errorCode: "runtime_invalid_sequence",
+											},
+											{ reloadHotState: true },
+										);
+									}
+								}).pipe(
+									Effect.andThen(
+										disposition === "malformed"
+											? Effect.die(new Error("joined End projection failed"))
+											: Effect.void,
+									),
+								),
+							),
+						),
+					closeFailedRun: () => {
+						failureCloseouts++;
+						return Effect.succeed({ type: "landed", disposition: "terminal" });
+					},
+				}),
+			);
+			await withSessionManager(
+				sessionManagerLayer({ layer }),
+				async (manager) => {
+					const sessionId = "sesn_interrupt_reload";
+					const threadId = "thrd_interrupt_reload";
+					await Effect.runPromise(
+						manager.acceptInput(acceptedInput(sessionId, "rin_active", threadId)),
+					);
+					const command = {
+						...threadControl(sessionId, "rin_interrupt_reload", threadId),
+						inputOrder: 2,
+					};
+					expect(
+						await Effect.runPromise(
+							manager.interruptControl(
+								sessionId,
+								command,
+								testControlCommit(command),
+							),
+						),
+					).toEqual(
+						disposition === "malformed"
+							? {
+									ok: false,
+									sessionId,
+									reason: "context_load_failed",
+									retryable: false,
+									errorCode: "runtime_invalid_sequence",
+								}
+							: {
+									ok: true,
+									sessionId,
+									created: false,
+									interrupted: true,
+									idleInterrupt: false,
+									stale: true,
+								},
+					);
+					expect(failureCloseouts).toBe(0);
+					expect(
+						await Effect.runPromise(
+							manager.inspectThread(
+								threadControl(sessionId, undefined, threadId),
+							),
+						),
+					).toMatchObject({ observed: false });
+				},
+			);
+		});
+	}
+
 	test("joined idle interrupt wakes one successor only after releasing its matching fence", async () => {
 		const runs: ThreadRuntime.ThreadRuntime[] = [];
 		const layer = Layer.succeed(
