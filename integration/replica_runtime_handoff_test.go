@@ -115,6 +115,142 @@ func (s *handoffFaultBridgeStore) AcceptSandboxExecution(ctx context.Context, r 
 	return response, err
 }
 
+// handoffOrderedBridgeStore establishes one selected legal order at the actual
+// ACK boundary. Waiting happens before the production store opens a transaction;
+// independent SQL confirms the original request/tool before releasing it.
+type handoffOrderedBridgeStore struct {
+	bridge.BridgeAPIStore
+	admin                         *sql.DB
+	session                       string
+	endFirst                      bool
+	modelRequest                  atomic.Value
+	endCommitted, resultCommitted chan struct{}
+	endOnce, resultOnce           sync.Once
+	endEntered, resultEntered     atomic.Bool
+	ctx                           context.Context
+	cancel                        context.CancelFunc
+	mu                            sync.Mutex
+	closed                        bool
+	calls                         sync.WaitGroup
+}
+
+func newHandoffOrderedBridgeStore(store bridge.BridgeAPIStore, admin *sql.DB, session string, endFirst bool) *handoffOrderedBridgeStore {
+	//nolint:gosec // The returned fixture's close method owns cancellation and bounded call join.
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &handoffOrderedBridgeStore{BridgeAPIStore: store, admin: admin, session: session, endFirst: endFirst, endCommitted: make(chan struct{}), resultCommitted: make(chan struct{}), ctx: ctx, cancel: cancel}
+	s.modelRequest.Store("")
+	return s
+}
+
+func (s *handoffOrderedBridgeStore) enter() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.calls.Add(1)
+	return true
+}
+
+func (s *handoffOrderedBridgeStore) close(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	s.closed = true
+	s.cancel()
+	s.mu.Unlock()
+	joined := make(chan struct{})
+	go func() { s.calls.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Error("ordering Bridge calls did not join within cleanup bound")
+	}
+}
+
+func (s *handoffOrderedBridgeStore) wait(ctx context.Context, committed <-chan struct{}) error {
+	select {
+	case <-committed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+}
+
+func (s *handoffOrderedBridgeStore) WriteRequestEnd(ctx context.Context, r *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error) {
+	if r.GetScope().GetSessionId() != s.session || r.GetModelRequestId() != s.modelRequest.Load().(string) {
+		return s.BridgeAPIStore.WriteRequestEnd(ctx, r)
+	}
+	if !s.enter() {
+		return nil, context.Canceled
+	}
+	defer s.calls.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	s.endEntered.Store(true)
+	if !s.endFirst {
+		if err := s.wait(ctx, s.resultCommitted); err != nil {
+			return nil, err
+		}
+	}
+	response, err := s.BridgeAPIStore.WriteRequestEnd(ctx, r)
+	if err != nil {
+		return response, err
+	}
+	if response.GetCommitted() == nil && response.GetDuplicate() == nil {
+		return nil, status.Error(codes.Internal, "original ordering End was not committed")
+	}
+	var count int
+	if err := s.admin.QueryRowContext(ctx, `SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'`, s.session, r.ModelRequestId).Scan(&count); err != nil || count != 1 {
+		return nil, status.Errorf(codes.Internal, "original ordering End oracle count=%d err=%v", count, err)
+	}
+	s.endOnce.Do(func() { close(s.endCommitted) })
+	return response, nil
+}
+
+func (s *handoffOrderedBridgeStore) SettleToolResult(ctx context.Context, r *bridgev1.SettleToolResultRequest) (*bridgev1.SettleToolResultResponse, error) {
+	if r.GetScope().GetSessionId() != s.session {
+		return s.BridgeAPIStore.SettleToolResult(ctx, r)
+	}
+	if !s.enter() {
+		return nil, context.Canceled
+	}
+	defer s.calls.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	var modelRequest string
+	if err := s.admin.QueryRowContext(ctx, `SELECT model_request_id FROM session_events WHERE session_id=$1 AND event_id=$2 AND type='agent.tool_use'`, s.session, r.GetSettlement().GetToolUseEventId()).Scan(&modelRequest); err != nil {
+		return nil, err
+	}
+	if modelRequest != s.modelRequest.Load().(string) {
+		return s.BridgeAPIStore.SettleToolResult(ctx, r)
+	}
+	s.resultEntered.Store(true)
+	if s.endFirst {
+		if err := s.wait(ctx, s.endCommitted); err != nil {
+			return nil, err
+		}
+	}
+	response, err := s.BridgeAPIStore.SettleToolResult(ctx, r)
+	if err != nil {
+		return response, err
+	}
+	if response.GetCommitted() == nil && response.GetDuplicate() == nil {
+		return nil, status.Error(codes.Internal, "original ordering result was not committed")
+	}
+	var count int
+	if err := s.admin.QueryRowContext(ctx, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$2`, s.session, r.Settlement.ToolUseEventId).Scan(&count); err != nil || count != 1 {
+		return nil, status.Errorf(codes.Internal, "original ordering result oracle count=%d err=%v", count, err)
+	}
+	s.resultOnce.Do(func() { close(s.resultCommitted) })
+	return response, nil
+}
+
 type handoffObservedDeliverer struct {
 	jobrunner.RuntimePodDirectDeliverer
 	result                          jobrunner.RuntimeDeliveryResult
@@ -732,7 +868,7 @@ func assertHandoffLateWriteFence(t *testing.T, admin *sql.DB, endpoint replicaBr
 }
 
 func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
-	t.Run("independent current step and successor process", func(t *testing.T) {
+	runPrimary := func(t *testing.T, endFirst bool) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		client := dbconnect.NewClientForTesting(runtimeDB)
 		store := bridge.NewPostgreSQLBridgeAPIStore(client)
@@ -750,7 +886,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		var lost, preCommitLost, declarationLost, acceptanceLost atomic.Bool
 		var faultMu sync.Mutex
 		var releaseOperations, acceptTools []string
-		faultStore := &handoffFaultBridgeStore{BridgeAPIStore: store}
+		orderedStore := newHandoffOrderedBridgeStore(store, admin, sessions[0], endFirst)
+		defer orderedStore.close(t)
+		faultStore := &handoffFaultBridgeStore{BridgeAPIStore: orderedStore}
 		faultStore.beforeRelease = func(r *bridgev1.ReleaseRuntimeBindingRequest) error {
 			if r.SessionId != sessions[2] {
 				return nil
@@ -814,6 +952,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 				return old.calls(session) == 1 && err == nil
 			})
 		}
+		orderedStore.modelRequest.Store(old.providerEntries(t, sessions[0])[0].ModelRequestID)
 		var originalTurnID string
 		if err := admin.QueryRow(`SELECT event_id FROM session_events WHERE session_id=$1 AND type='session.status_running' ORDER BY sequence DESC LIMIT 1`, sessions[0]).Scan(&originalTurnID); err != nil {
 			t.Fatal(err)
@@ -893,9 +1032,13 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if err := admin.QueryRow(`SELECT tool.event_id,ended.sequence,result.sequence,result.payload_json,(SELECT event_id FROM session_events WHERE session_id=$1 AND type='session.status_running' ORDER BY sequence DESC LIMIT 1) FROM session_events tool JOIN session_events ended ON ended.session_id=tool.session_id AND ended.model_request_id=tool.model_request_id AND ended.type='span.model_request_end' JOIN session_events result ON result.session_id=tool.session_id AND result.type='agent.tool_result' AND result.payload_json::jsonb->>'tool_use_id'=tool.event_id WHERE tool.session_id=$1 AND tool.model_request_id=$2 AND tool.type='agent.tool_use'`, sessions[0], originalA1.ModelRequestID).Scan(&originalTool, &originalEnd, &resultSequence, &resultPayload, &turnID); err != nil {
 			t.Fatal(err)
 		}
-		if originalEnd >= resultSequence || turnID != originalTurnID || originalA1.RequestID == nextA1.RequestID || originalA1.ModelRequestID == nextA1.ModelRequestID || !strings.Contains(nextA1.MessagesJSON, "tool-current") || !strings.Contains(nextA1.MessagesJSON, "list_agents") || !strings.Contains(nextA1.MessagesJSON, "initial_"+sessions[0]) || !strings.Contains(nextA1.MessagesJSON, "queued_during_quiesce") {
+		if (endFirst && originalEnd >= resultSequence) || (!endFirst && resultSequence >= originalEnd) || turnID != originalTurnID || originalA1.RequestID == nextA1.RequestID || originalA1.ModelRequestID == nextA1.ModelRequestID || !strings.Contains(nextA1.MessagesJSON, "tool-current") || !strings.Contains(nextA1.MessagesJSON, "list_agents") || !strings.Contains(nextA1.MessagesJSON, "initial_"+sessions[0]) || !strings.Contains(nextA1.MessagesJSON, "queued_during_quiesce") {
 			t.Fatalf("original continuation identity/order/context original=%+v next=%+v tool=%s End=%d result=%d turn=%s/%s resultPayload=%s", originalA1, nextA1, originalTool, originalEnd, resultSequence, turnID, originalTurnID, resultPayload)
 		}
+		if !orderedStore.endEntered.Load() || !orderedStore.resultEntered.Load() {
+			t.Fatalf("original Bridge ordering boundaries not both entered End=%t result=%t", orderedStore.endEntered.Load(), orderedStore.resultEntered.Load())
+		}
+		t.Logf("original Bridge ACK ordering end_first=%t request=%s tool=%s End=%d result=%d", endFirst, originalA1.ModelRequestID, originalTool, originalEnd, resultSequence)
 		assertHandoffExactToolContext(t, admin, sessions[0], originalA1.ModelRequestID, nextA1.MessagesJSON)
 		assertHandoffOldOwnerFence(t, admin, a, sessions[0], "thr_"+sessions[0], "bind_"+sessions[0], 1)
 		assertHandoffUnrelatedInputRejected(t, old, sessions[0], "thr_"+sessions[0], "bind_"+sessions[0])
@@ -1003,7 +1146,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if !seenIdle || !seenRecover || !seenNewProcess || !seenRecovery {
 			t.Fatalf("actual diagnostic correlation idle=%t recover=%t new=%t recovery=%t", seenIdle, seenRecover, seenNewProcess, seenRecovery)
 		}
-	})
+	}
+	t.Run("independent current step and successor process", func(t *testing.T) { runPrimary(t, true) })
+	t.Run("independent current step and successor process result before End", func(t *testing.T) { runPrimary(t, false) })
 
 	t.Run("queued business input before checkpoint retains original continuation", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -1675,6 +1820,13 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		external := startHandoffSandboxOwner(t, runtimeDB, session)
 		waitHandoffCondition(t, "old actual external command and Bridge wait", func() bool {
 			return external.calls.Load() == 1 && external.observations.Load() > 0 && observed.activeAwait.Load() == 1
+		})
+		// This scenario intentionally exercises End-before-result. Confirm the
+		// actual successful End before death while the external result is held.
+		waitHandoffCondition(t, "original container successful End before kill", func() bool {
+			var count int
+			_ = admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'`, session, originalProvider.ModelRequestID).Scan(&count)
+			return count == 1
 		})
 		first.kill(t)
 		waitHandoffCondition(t, "dead container raw Bridge waiter returned", func() bool { return observed.activeAwait.Load() == 0 && observed.joinedAwait.Load() > 0 })
