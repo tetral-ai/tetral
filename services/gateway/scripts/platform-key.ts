@@ -1,3 +1,4 @@
+import { fstatSync, writeSync } from "node:fs";
 import { encryptAES256GCM } from "../packages/provider-gateway/src/providers/crypto.js";
 
 type PlatformProviderId = "anthropic" | "openai" | "deepseek";
@@ -11,6 +12,8 @@ interface TextByteWriter {
   readonly write: (chunk: Uint8Array) => unknown;
 }
 
+export type PlatformKeyPhase = "cli_enter" | "stdin_begin" | "stdin_complete" | "query_begin" | "query_complete" | "body_error" | "close_begin" | "close_complete" | "exit_begin";
+
 export interface PlatformKeyCLIOptions {
   readonly argv: readonly string[];
   readonly env?: Record<string, string | undefined> | undefined;
@@ -19,6 +22,7 @@ export interface PlatformKeyCLIOptions {
   readonly stderr?: TextByteWriter | undefined;
   readonly sqlFactory?: ((databaseUrl: string) => PlatformKeySQL & { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> }) | undefined;
   readonly randomBytes?: ((length: number) => Uint8Array) | undefined;
+  readonly observePhase?: ((phase: PlatformKeyPhase) => void) | undefined;
 }
 
 interface ParsedInsertCommand {
@@ -47,6 +51,7 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
   let sql: (PlatformKeySQL & { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> }) | undefined;
   const env = options.env ?? process.env;
   let stdinKeySecrets: readonly string[] = [];
+  observePhase(options.observePhase, "cli_enter");
   try {
     const parsed = parsePlatformKeyArgs(options.argv, env);
     if (parsed.command === "help") {
@@ -55,13 +60,16 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
     }
     sql = options.sqlFactory?.(parsed.databaseUrl) ?? new Bun.SQL(parsed.databaseUrl);
     if (parsed.command === "insert") {
+      observePhase(options.observePhase, "stdin_begin");
       const plaintext = await readPlaintextKey(options.stdin ?? Bun.stdin.stream());
+      observePhase(options.observePhase, "stdin_complete");
       const plaintextText = new TextDecoder().decode(plaintext);
       stdinKeySecrets = [...new Set([plaintextText, plaintextText.trim()])].filter((secret) => secret.length > 0);
       if (plaintext.byteLength === 0) {
         throw new PlatformKeyCLIError("platform key stdin is empty");
       }
       const encrypted = await encryptAES256GCM(plaintext, parsed.masterKeyHex, options.randomBytes);
+      observePhase(options.observePhase, "query_begin");
       const rows = await sql<readonly { readonly key_id: string }[]>`
         INSERT INTO platform_provider_keys (
           key_id,
@@ -96,6 +104,7 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
           updated_at = now()
         RETURNING key_id
       `;
+      observePhase(options.observePhase, "query_complete");
       assertOneRow(rows, parsed.keyId);
       await writeText(options.stdout, `upserted ${parsed.keyId} for ${parsed.providerId}\n`);
       return 0;
@@ -109,10 +118,13 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
     await writeText(options.stdout, `enabled ${parsed.keyId}\n`);
     return 0;
   } catch (error) {
+    observePhase(options.observePhase, "body_error");
     await writeText(options.stderr, `${safeCLIErrorMessage(error, env, stdinKeySecrets)}\n`);
     return 1;
   } finally {
+    observePhase(options.observePhase, "close_begin");
     await sql?.close?.({ timeout: 1 });
+    observePhase(options.observePhase, "close_complete");
   }
 }
 
@@ -350,11 +362,54 @@ function safeCLIErrorMessage(
   return message;
 }
 
+// Only closed phases and elapsed time enter this explicit diagnostic rail.
+// The caller owns a private regular file and descriptor; no stdio or SQL error
+// is copied. A failed observer never changes the operation or native close.
+export function createPlatformKeyPhaseObserver(env: Record<string, string | undefined>): ((phase: PlatformKeyPhase) => void) | undefined {
+  const configured = env.TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD;
+  if (configured === undefined || !/^[1-9][0-9]*$/.test(configured)) return undefined;
+  const fd = Number(configured);
+  if (!Number.isSafeInteger(fd) || fd < 3 || fd > 1024) return undefined;
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) return undefined;
+  } catch {
+    return undefined;
+  }
+  const started = performance.now();
+  let records = 0;
+  let bytes = 0;
+  let disabled = false;
+  return (phase) => {
+    if (disabled || records >= 9) return;
+    if (!["cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "body_error", "close_begin", "close_complete", "exit_begin"].includes(phase)) { disabled = true; return; }
+    try {
+      const elapsed = performance.now() - started;
+      if (!Number.isFinite(elapsed) || elapsed < 0) { disabled = true; return; }
+      const line = JSON.stringify({ phase, elapsed_ms: Math.round(elapsed * 1000) / 1000 }) + "\n";
+      const size = Buffer.byteLength(line);
+      if (bytes + size > 4096) { disabled = true; return; }
+      records += 1;
+      bytes += size;
+      if (writeSync(fd, line) !== size) disabled = true;
+    } catch {
+      disabled = true;
+    }
+  };
+}
+
+function observePhase(observer: PlatformKeyCLIOptions["observePhase"], phase: PlatformKeyPhase): void {
+  try { observer?.(phase); } catch { /* Diagnostics cannot own the CLI outcome. */ }
+}
+
 if (import.meta.main) {
+  const observer = createPlatformKeyPhaseObserver(process.env);
   const exitCode = await runPlatformKeyCLI({
     argv: Bun.argv.slice(2),
     stdout: Bun.stdout.writer(),
     stderr: Bun.stderr.writer(),
+    observePhase: observer,
   });
+  observePhase(observer, "exit_begin");
   process.exit(exitCode);
 }

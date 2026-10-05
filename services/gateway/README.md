@@ -971,6 +971,28 @@ export TETRAL_DATABASE_URL='postgres://...'
 export ENGINE_VAULT_KEY='<64 hex chars>'
 ```
 
+### CLI phase diagnostics
+
+The CLI normally emits no phase observations. An operator or test caller can
+explicitly set `TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD` to an inherited descriptor
+number (3–1024) for a private regular file with mode `0600`. The caller owns the
+file, descriptor and cleanup; stdout, stderr, stdin and SQL execution are unchanged.
+The Backpressure integration fixture opts in only for its three real CLI calls.
+
+At most nine records (4096 bytes) contain only a closed `phase` name and monotonic
+`elapsed_ms`: CLI entry, stdin begin/complete, insert query begin/complete, body
+error, close begin/complete and exit begin. No credentials, SQL, error text or
+payloads enter this file. Invalid descriptors and observation/write failures
+disable diagnostics without changing the operation or native close outcome.
+Missing or invalid observations cannot establish which native phase ran. A partial
+chain proves only recorded checkpoints; a missing next record can also reflect
+an observation failure. The Go fixture disables the diagnostic on Windows, where
+`os/exec` cannot pass `ExtraFiles`, and still runs the original CLI and assertions.
+
+These checkpoints bracket existing awaits; they do not explain an intermittent
+native failure. An inherited descriptor and synchronous writes can affect timing,
+so a successful observed run is not proof that the failure has been repaired.
+
 ### Initialize
 
 Run this before first traffic, after the platform master key exists.
