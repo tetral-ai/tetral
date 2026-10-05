@@ -7,6 +7,11 @@
       "dependencies": ["postgresql", "docker", "bun-workspaces"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLManagedInitialization",
+      "dependencies": ["postgresql", "docker"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/auth",
       "name": "TestPostgreSQLAuthExternalAuthorization",
       "dependencies": ["postgresql"]

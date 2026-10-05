@@ -20,6 +20,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 		"TestOIDCKeycloakSDK":                                              {"keycloak", "postgresql", "docker", "sdk"},
 		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
 		"TestOIDCReplicaAuthority":                                         {"postgresql", "docker"},
+		"TestPostgreSQLManagedInitialization":                              {"postgresql", "docker"},
 		"TestPostgreSQLAuthExternalAuthorization":                          {"postgresql"},
 		"TestPostgreSQLOIDCExchange":                                       {"postgresql"},
 		"TestPostgreSQLAuthPolicyCommand":                                  {"postgresql", "docker"},
@@ -67,7 +68,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"TestForkSDKIntegrationCompatibilityProofs", "TestOIDCKeycloakSDK", "TestOIDCKeycloakAuthRotation", "TestOIDCReplicaAuthority"} {
+	for _, name := range []string{"TestForkSDKIntegrationCompatibilityProofs", "TestOIDCKeycloakSDK", "TestOIDCKeycloakAuthRotation", "TestOIDCReplicaAuthority", "TestPostgreSQLManagedInitialization"} {
 		found := false
 		for _, selection := range expanded {
 			if !slices.Contains(selection.Tests, name) {
