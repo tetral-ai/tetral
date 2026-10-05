@@ -48,6 +48,10 @@ const input = JSON.parse(await readFile(inputPath, "utf8")) as {
 	readonly recoveryResultPath?: string;
 	readonly closePath?: string;
 	readonly waitForSandboxObservation?: boolean;
+	// This scenario must account for the already-created child independently
+	// from the parent's one bounded recovery attempt.
+	readonly heldChildThreadId?: string;
+	readonly providerStatePath?: string;
 };
 const command = {
 	workspaceId: input.workspaceId,
@@ -80,8 +84,55 @@ let markSandboxObservationStarted: (() => void) | undefined;
 const sandboxObservationStarted = new Promise<void>((resolve) => {
 	markSandboxObservationStarted = resolve;
 });
+type RecoveryProviderEntry = {
+	readonly sessionId: string;
+	readonly sessionThreadId: string;
+	readonly modelRequestId: string;
+	readonly requestId: string;
+	stage: "requested" | "failed" | "held" | "cancelled";
+	joined: boolean;
+};
+const providerEntries: RecoveryProviderEntry[] = [];
+let parentErrorEnd: {
+	readonly modelRequestId: string;
+	readonly eventId: string;
+	readonly type: "committed" | "duplicate";
+} | undefined;
+let providerStateWrites = Promise.resolve();
+function publishProviderState(): Promise<void> {
+	if (input.providerStatePath === undefined) return Promise.resolve();
+	const state = JSON.stringify({ providerEntries, parentErrorEnd });
+	providerStateWrites = providerStateWrites.then(() =>
+		writeFile(input.providerStatePath!, state, { mode: 0o600 }),
+	);
+	return providerStateWrites;
+}
+class RecoveryEventWriter extends BridgeAPIEventWriter {
+	override async writeRequestEnd(
+		envelope: Parameters<BridgeAPIEventWriter["writeRequestEnd"]>[0],
+	) {
+		const result = await super.writeRequestEnd(envelope);
+		if (
+			input.heldChildThreadId !== undefined &&
+			envelope.sessionId === input.sessionId &&
+			envelope.sessionThreadId === input.sessionThreadId &&
+			envelope.isError && result.ok &&
+			(result.type === "committed" || result.type === "duplicate") &&
+			result.outcome.type === "ordinary" &&
+			providerEntries.some((entry) => entry.modelRequestId === envelope.modelRequestId)
+		) {
+			parentErrorEnd = {
+				modelRequestId: envelope.modelRequestId,
+				eventId: result.requestEndEventId,
+				type: result.type,
+			};
+			await publishProviderState();
+		}
+		return result;
+	}
+}
 let nextID = 0;
-const writer = new BridgeAPIEventWriter(bridgeOptions);
+const writer = new RecoveryEventWriter(bridgeOptions);
 const toolRunner = new RuntimePodToolRunner({
 	bridgeAddress: input.bridgeAddress,
 	webAddress: "127.0.0.1:1",
@@ -137,7 +188,41 @@ const hosts = await buildRuntimeCoreHosts({
 			stream: (request) => {
 				providerInvocations += 1;
 				providerRequests.push(request);
-				if (providerInvocations === 1) {
+				let entry: RecoveryProviderEntry | undefined;
+				if (input.heldChildThreadId !== undefined) {
+					entry = {
+						sessionId: request.sessionId,
+						sessionThreadId: request.sessionThreadId,
+						modelRequestId: request.modelRequestId,
+						requestId: request.requestId,
+						stage: "requested", joined: false,
+					};
+					providerEntries.push(entry);
+					if (request.sessionThreadId === input.heldChildThreadId) {
+						const heldEntry = entry;
+						// Consuming the stream is the child-entry boundary. Keep it
+						// interruptible and emit no finish/completion mail before close.
+						return Stream.fromEffect(Effect.gen(function* () {
+							heldEntry.stage = "held";
+							yield* Effect.promise(publishProviderState);
+							return yield* Effect.never;
+						}).pipe(
+							Effect.onInterrupt(() => Effect.sync(() => {
+								heldEntry.stage = "cancelled";
+							})),
+							Effect.ensuring(Effect.promise(async () => {
+								heldEntry.joined = true;
+								await publishProviderState();
+							})),
+						));
+					}
+				}
+				const parentAttempt = providerRequests.filter((call) =>
+					call.sessionThreadId === input.sessionThreadId,
+				).length;
+				if (input.heldChildThreadId === undefined ? providerInvocations === 1 :
+					request.sessionThreadId === input.sessionThreadId && parentAttempt === 1) {
+					if (entry !== undefined) entry.stage = "failed";
 					return Stream.fail({
 						type: "llm-service" as const,
 						error: {
@@ -149,7 +234,9 @@ const hosts = await buildRuntimeCoreHosts({
 							fatal: false,
 							reason: "gateway_transport_completion_deadline" as const,
 						},
-					});
+					}).pipe(Stream.ensuring(Effect.sync(() => {
+						if (entry !== undefined) entry.joined = true;
+					})));
 				}
 				return Stream.fromIterable([
 					{ type: "text-start" as const, id: "recovered-text" },
@@ -272,9 +359,12 @@ if (input.serveRecovery === true) {
 		await server.shutdown();
 		await hosts.close();
 	}
+	await providerStateWrites;
 	process.stdout.write(JSON.stringify({
 		resultType: "completed",
 		providerInvocations,
+		providerEntries,
+		parentErrorEnd,
 		executorInvocations,
 		sandboxAcceptanceInvocations,
 		sandboxObservationInvocations,
@@ -283,7 +373,8 @@ if (input.serveRecovery === true) {
 		acceptedInputCommitBarrierReleased,
 		acceptedInputCommitCalls,
 		acceptedInputCommitMaxInFlight,
-		providerContext: providerRequests[0]?.context ?? [],
+		providerContext: (input.heldChildThreadId === undefined ? providerRequests[0] :
+			providerRequests.find((request) => request.sessionThreadId === input.sessionThreadId))?.context ?? [],
 		recoveredTurnEventIds,
 	}));
 	process.exit(0);

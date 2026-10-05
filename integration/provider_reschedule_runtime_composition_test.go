@@ -754,9 +754,24 @@ func waitForPendingOutputCapture(db *sql.DB, sessionID, excludedWriteID string) 
 	return "", 0, fmt.Errorf("pending output capture was not created for session %s", sessionID)
 }
 
+type providerRecoveryProviderEntry struct {
+	SessionID       string `json:"sessionId"`
+	SessionThreadID string `json:"sessionThreadId"`
+	ModelRequestID  string `json:"modelRequestId"`
+	RequestID       string `json:"requestId"`
+	Stage           string `json:"stage"`
+	Joined          bool   `json:"joined"`
+}
+
 type providerRescheduleRecoveryComposition struct {
-	ResultType                     string          `json:"resultType"`
-	ProviderInvocations            int             `json:"providerInvocations"`
+	ResultType          string                          `json:"resultType"`
+	ProviderInvocations int                             `json:"providerInvocations"`
+	ProviderEntries     []providerRecoveryProviderEntry `json:"providerEntries"`
+	ParentErrorEnd      struct {
+		ModelRequestID string `json:"modelRequestId"`
+		EventID        string `json:"eventId"`
+		Type           string `json:"type"`
+	} `json:"parentErrorEnd"`
 	ExecutorInvocations            int             `json:"executorInvocations"`
 	SandboxAcceptanceInvocations   int             `json:"sandboxAcceptanceInvocations"`
 	SandboxObservationInvocations  int             `json:"sandboxObservationInvocations"`
@@ -782,11 +797,12 @@ type providerRescheduleRecoveryComposition struct {
 }
 
 type providerRecoveryProcess struct {
-	command    *exec.Cmd
-	output     bytes.Buffer
-	port       int
-	resultPath string
-	closePath  string
+	command           *exec.Cmd
+	output            bytes.Buffer
+	port              int
+	resultPath        string
+	providerStatePath string
+	closePath         string
 }
 
 type providerRecoveryTokenSource struct{}
@@ -820,22 +836,29 @@ func startProviderRecoveryRuntime(
 	bridgeAddress, sessionID, threadID, podUID string,
 	now time.Time,
 	waitForSandboxObservation bool,
+	heldChildThreadID ...string,
 ) *providerRecoveryProcess {
 	t.Helper()
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready.json")
 	process := &providerRecoveryProcess{
-		resultPath: filepath.Join(tempDir, "result.json"),
-		closePath:  filepath.Join(tempDir, "close"),
+		resultPath:        filepath.Join(tempDir, "result.json"),
+		closePath:         filepath.Join(tempDir, "close"),
+		providerStatePath: filepath.Join(tempDir, "provider-state.json"),
 	}
 	inputPath := filepath.Join(tempDir, "input.json")
-	encoded, err := json.Marshal(map[string]any{
+	params := map[string]any{
 		"serveRecovery": true, "bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
 		"sessionId": sessionID, "sessionThreadId": threadID, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
 		"now": now.Format(time.RFC3339Nano), "readyPath": readyPath,
 		"recoveryResultPath": process.resultPath, "closePath": process.closePath,
 		"waitForSandboxObservation": waitForSandboxObservation,
-	})
+	}
+	if len(heldChildThreadID) > 0 {
+		params["heldChildThreadId"] = heldChildThreadID[0]
+		params["providerStatePath"] = process.providerStatePath
+	}
+	encoded, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("encode serving recovery composition: %v", err)
 	}
@@ -1706,7 +1729,7 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		t.Fatalf("read subagent reschedule recovery root: %v", err)
 	}
 	runtimeProcess := startProviderRecoveryRuntime(
-		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond), false,
+		t, listener.Addr().String(), sessionID, threadID, newPodUID, acceptedAt.Add(300*time.Millisecond), false, childID,
 	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", newPodUID)
@@ -1732,6 +1755,31 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if preloaded.Command.SourceEventID != rescheduleEventID || preloaded.Command.TargetPodUID != newPodUID || preloaded.ResultType != "preloaded" {
 		t.Fatalf("subagent recovery preload = %+v; want exact Queue-owned recovery", preloaded)
 	}
+	// A parent recovery request and the already-created child's request are
+	// distinct work. Observe both actual boundaries before closing either owner.
+	var providerState providerRescheduleRecoveryComposition
+	waitHandoffCondition(t, "parent recovery error-End ACK and held created child", func() bool {
+		raw, readErr := os.ReadFile(runtimeProcess.providerStatePath)
+		if readErr != nil || json.Unmarshal(raw, &providerState) != nil {
+			return false
+		}
+		childHeld := false
+		for _, entry := range providerState.ProviderEntries {
+			childHeld = childHeld || entry.SessionThreadID == childID && entry.Stage == "held" && !entry.Joined
+		}
+		return childHeld && providerState.ParentErrorEnd.ModelRequestID != "" &&
+			(providerState.ParentErrorEnd.Type == "committed" || providerState.ParentErrorEnd.Type == "duplicate")
+	})
+	var parentEndCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+		  AND model_request_id=$3 AND event_id=$4 AND type='span.model_request_end'
+		  AND payload_json::jsonb->>'is_error'='true'
+		  AND payload_json::jsonb->>'error_kind'='gateway_stream_error'
+		  AND COALESCE(payload_json::jsonb->'reschedule','null'::jsonb)='null'::jsonb`, sessionID, threadID,
+		providerState.ParentErrorEnd.ModelRequestID, providerState.ParentErrorEnd.EventID).Scan(&parentEndCount); err != nil || parentEndCount != 1 {
+		t.Fatalf("actual parent recovery error-End ACK SQL count=%d state=%+v err=%v", parentEndCount, providerState, err)
+	}
 	captureSettled := make(chan error, 1)
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, durableTurnID, 1, "staged")
@@ -1740,7 +1788,30 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	if err := <-captureSettled; err != nil {
 		t.Fatalf("stage subagent reschedule closeout capture: %v", err)
 	}
-	if result.ResultType != "completed" || result.ProviderInvocations != 1 || result.ExecutorInvocations != 0 {
+	parentCalls, childCalls, unknownCalls := 0, 0, 0
+	modelRequests := make(map[string]bool)
+	for _, entry := range result.ProviderEntries {
+		if entry.SessionID != sessionID || entry.ModelRequestID == "" || entry.RequestID == "" || modelRequests[entry.ModelRequestID] || !entry.Joined {
+			t.Fatalf("invalid/unjoined provider identity ledger entry=%+v", entry)
+		}
+		modelRequests[entry.ModelRequestID] = true
+		switch entry.SessionThreadID {
+		case threadID:
+			parentCalls++
+			if entry.Stage != "failed" || entry.ModelRequestID != providerState.ParentErrorEnd.ModelRequestID {
+				t.Fatalf("parent recovery did not use its exact failed request: %+v", entry)
+			}
+		case childID:
+			childCalls++
+			if entry.Stage != "cancelled" {
+				t.Fatalf("created child was not held until shutdown cancellation: %+v", entry)
+			}
+		default:
+			unknownCalls++
+		}
+	}
+	if result.ResultType != "completed" || result.ProviderInvocations != 2 || result.ExecutorInvocations != 0 ||
+		parentCalls != 1 || childCalls != 1 || unknownCalls != 0 {
 		t.Fatalf("replacement Runtime subagent recovery = %+v", result)
 	}
 	recoveredSnapshot := string(preloaded.LastSnapshot)
