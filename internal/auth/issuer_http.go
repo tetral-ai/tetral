@@ -113,7 +113,14 @@ func permittedAddress(rule FederationRule, address netip.Addr) bool {
 
 // fetchIssuerJSON performs native TLS validation and resolves/dials only an
 // allowed destination. Proxy environment and redirects cannot widen the policy.
-func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, target any) error {
+func fetchIssuerJSON(ctx context.Context, rule FederationRule, endpoint string, target any) (resultErr error) {
+	// A response can finish while cancellation races body reading or decoding.
+	// Preserve the same caller-context result across every HTTP response phase.
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			resultErr = err
+		}
+	}()
 	u, err := secureURL(endpoint)
 	if err != nil {
 		return &AuthenticationError{Message: "invalid issuer endpoint"}

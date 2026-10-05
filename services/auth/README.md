@@ -116,6 +116,13 @@ is checked before connecting. Private, loopback and link-local addresses need
 explicit allowed CIDRs. TLS verifies hostname and configured trust. Issuer calls
 have a five-second deadline and one-MiB response limit. Invalid assertions use
 `401`; unavailable issuer dependencies use a safe `503` envelope.
+Cancelled or deadline-expired refresh callers retain their own context error,
+even when response reading or JSON/key validation also fails. Such a failed
+refresh is recorded as unavailable for subsequent live callers within the
+existing cooldown; another caller never inherits its predecessor's cancellation.
+A completed malformed response for a live caller remains invalid. Context
+classification is captured before the refresh owner cancels its temporary
+context to release resources.
 
 Caches are partitioned by rule and trust revision, bounded to 128 entries with
 at most 16 concurrent refreshes. Known keys refresh after 90 percent of recorded

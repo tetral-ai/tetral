@@ -306,6 +306,11 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 	refreshCtx, cancel := context.WithTimeout(ctx, issuerHTTPTimeout)
 	stop := context.AfterFunc(v.ctx, cancel)
 	keys, err := loadIssuerKeys(refreshCtx, rule)
+	// Include post-fetch key validation in the refresh cancellation boundary.
+	// Read it before our unconditional cancel, which only releases resources.
+	if contextErr := refreshCtx.Err(); contextErr != nil {
+		err = contextErr
+	}
 	stop()
 	cancel()
 	v.mu.Lock()
