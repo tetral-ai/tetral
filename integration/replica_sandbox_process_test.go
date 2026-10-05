@@ -87,6 +87,36 @@ func (s *sandboxSuccessorLeaseStore) Lease(ctx context.Context, r queue.LeaseReq
 	return jobs, err
 }
 
+// The process fault selects the sixth actual submission, after the first five
+// real commands settle. Provider timing controls no transaction or Queue lease.
+type sandboxProcessFaultProvider struct {
+	*sandboxReplicaProvider
+	selected string // guarded by ledger.mu
+}
+
+func (p *sandboxProcessFaultProvider) ExecuteTool(ctx context.Context, r sandbox.ToolExecutionRequest) sandbox.ProviderOutcome[driver.ToolExecution] {
+	id := r.Invocation.ToolUseEventID
+	p.ledger.mu.Lock()
+	p.ledger.submits[id]++
+	if p.selected == "" && len(p.ledger.submits) == 6 {
+		p.selected = id
+	}
+	hold := id == p.selected
+	p.ledger.mu.Unlock()
+	if !hold {
+		return sandbox.ProviderOutcome[driver.ToolExecution]{Value: driver.ToolExecution{ResultJSON: `{"status":"completed","stdout":{"text":"original command","truncated":false},"stderr":{"text":"","truncated":false}}`}}
+	}
+	observation := &driver.ForegroundCommandObservation{Reference: driver.CommandReference{Target: r.Invocation.Target, ToolUseEventID: id, Task: driver.BackgroundTask{TaskID: "task_" + id, ProviderSessionID: r.Handle.SandboxID, ProviderCommandID: "command_" + id}}}
+	if p.beforeReference {
+		p.entered <- id
+		select {
+		case <-ctx.Done():
+		case <-p.release:
+		}
+	}
+	return sandbox.ProviderOutcome[driver.ToolExecution]{Value: driver.ToolExecution{ForegroundObservation: observation}}
+}
+
 func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 	if os.Getenv("TETRAL_SANDBOX_PROCESS_CHILD") == "true" {
 		ctx := context.Background()
@@ -134,7 +164,7 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 			defer stop()
 			ledger := &sandboxReplicaLedger{submits: map[string]int{}, observes: map[string][]string{}}
 			release := make(chan struct{})
-			provider := &sandboxReplicaProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}, ledger: ledger, entered: make(chan string, 20), release: release, beforeReference: beforeReference}
+			provider := &sandboxProcessFaultProvider{sandboxReplicaProvider: &sandboxReplicaProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}, ledger: ledger, entered: make(chan string, 20), release: release, beforeReference: beforeReference}}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var result sandbox.ProviderOutcome[driver.ToolExecution]
 				if r.URL.Path == "/execute" {
@@ -175,6 +205,26 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 			case selected = <-provider.entered:
 			case <-ctx.Done():
 				t.Fatal("child did not reach external effect")
+			}
+			// The fault selects the sixth actual external submission, so an
+			// unrelated recoverable lease loss cannot be mistaken for a missing
+			// provider effect after death. All six commands still execute through
+			// the real child runner. ReplicaSandboxTakeover independently covers
+			// two live owners holding distinct work; this root owns exact PID
+			// death and reference/unknown recovery of the selected command.
+			ledger.mu.Lock()
+			selectedMatch := selected == provider.selected
+			sixEffects := len(ledger.submits) == 6
+			for _, n := range ledger.submits {
+				sixEffects = sixEffects && n == 1
+			}
+			ledger.mu.Unlock()
+			if !selectedMatch || !sixEffects {
+				t.Fatal("six actual single effects were not established before selected process death")
+			}
+			var completed, acknowledged int
+			if err := admin.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM session_runtime_tool_results WHERE tool_use_event_id<>$1 AND execution_state='terminal_unconsumed' AND result_json IS NOT NULL),(SELECT count(*) FROM queue_jobs WHERE kind=$2 AND payload_json::jsonb->>'tool_use_event_id'<>$1 AND status='acknowledged')`, selected, queue.KindSandboxToolExecute).Scan(&completed, &acknowledged); err != nil || completed != 5 || acknowledged != 5 {
+				t.Fatalf("first five real commands terminal/ACK=%d/%d/%v", completed, acknowledged, err)
 			}
 			var reference string
 			waitHandoffCondition(t, "actual worker process durable running boundary", func() bool {
