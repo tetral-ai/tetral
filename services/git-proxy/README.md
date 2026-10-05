@@ -267,3 +267,24 @@ diagnostic close after listeners and business resources.
 Deployment environment and service version retain their existing parsing:
 leading/trailing whitespace is trimmed, then empty values default to `local`
 and `unknown`. The shared resource parser selects that policy explicitly.
+
+## Public backend TLS
+
+`TETRAL_HTTP_TRANSPORT` defaults to `plaintext` for the standard routed profile.
+The hardened profile selects `native-mtls` on the existing business listener and
+requires `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`,
+`TETRAL_HTTP_TLS_KEY_PATH` and the exact `TETRAL_HTTP_TLS_EDGE_CLIENT_URI`.
+The server verifies the edge client certificate and full role URI before HTTP
+admission; Envoy verifies this service's DNS/server identity independently.
+There is no additional plaintext business listener. Health/metrics use their
+separate restricted listener.
+
+Mount the complete CA/certificate/key directories read-only without `subPath`.
+The shared validated loader activates valid generations for fresh TLS handshakes,
+preserves established requests during leaf renewal, and retains valid last-known-good
+material after malformed replacement. Its observer closes only after the public
+listener and admitted requests join. CA replacement requires old+new trust first,
+new leaves and successful fresh peer probes, then bounded service drain/join
+before old trust removal and restart. Removing trust alone does not retire an
+established connection. The [deployment guide](../../deploy/helm/tetral/README.md)
+owns Secret projections, native role issuance and profile prerequisites.

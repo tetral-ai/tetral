@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -31,6 +32,7 @@ type Env interface {
 }
 
 type Config struct {
+	HTTPTransport         transportsecurity.HTTPConfig
 	HTTPAddress           string
 	MetricsAddress        string
 	DatabaseURL           string
@@ -47,7 +49,12 @@ func ConfigFromEnv(env Env) (Config, error) {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
 	resource := workload.ResourceConfigFromEnvWithTrimPolicy(env.Getenv, true)
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return Config{}, workload.NewConfigError(err.Error())
+	}
 	cfg := Config{
+		HTTPTransport:         httpTransport,
 		HTTPAddress:           valueOrDefault(env.Getenv(EnvHTTPAddress), DefaultHTTPAddress),
 		MetricsAddress:        valueOrDefault(env.Getenv(EnvMetricsAddress), DefaultMetricsAddress),
 		DatabaseURL:           strings.TrimSpace(env.Getenv(EnvDatabaseURL)),

@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	internaleventstream "github.com/tetral-ai/tetral/internal/eventstream"
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	eventstream "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -34,6 +35,7 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 type commandConfig struct {
+	HTTPTransport         transportsecurity.HTTPConfig
 	ListenAddress         string
 	MetricsAddress        string
 	DeploymentEnvironment string
@@ -62,6 +64,10 @@ func configFromEnv(env envReader) (commandConfig, error) {
 		return commandConfig{}, workload.NewConfigError(envMetricsAddress + " must not equal " + envHTTPAddress)
 	}
 	resource := workload.ResourceConfigFromEnv(env.Getenv)
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return commandConfig{}, workload.NewConfigError(err.Error())
+	}
 	principalVerifier, err := loadInternalPrincipalVerifierFromEnv(env)
 	if err != nil {
 		return commandConfig{}, err
@@ -75,6 +81,7 @@ func configFromEnv(env envReader) (commandConfig, error) {
 		return commandConfig{}, err
 	}
 	return commandConfig{
+		HTTPTransport:         httpTransport,
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
 		DeploymentEnvironment: resource.DeploymentEnvironment,
@@ -170,6 +177,14 @@ func runPublicAndMetricsHTTP(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
+	if err != nil {
+		return workload.NewConfigError("native HTTP credential preparation failed")
+	}
+	if tlsOwner != nil {
+		defer func() { _ = tlsOwner.Close() }()
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 2)
@@ -180,6 +195,7 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.ListenAddress,
 			ListenConfigKey:       envHTTPAddress,
+			TLSConfig:             tlsConfig,
 			Handler:               publicHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,

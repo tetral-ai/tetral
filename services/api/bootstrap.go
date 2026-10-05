@@ -66,6 +66,14 @@ func runPublicAndMetricsHTTP(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	tlsOwner, tlsConfig, err := cfg.HTTPTransport.Open(ctx)
+	if err != nil {
+		return workload.NewConfigError("native HTTP credential preparation failed")
+	}
+	if tlsOwner != nil {
+		defer func() { _ = tlsOwner.Close() }()
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 2)
@@ -76,6 +84,7 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.ListenAddress,
 			ListenConfigKey:       EnvHTTPAddress,
+			TLSConfig:             tlsConfig,
 			Handler:               publicHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,

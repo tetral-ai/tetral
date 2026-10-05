@@ -1,6 +1,9 @@
 package tetralapi
 
-import "github.com/tetral-ai/tetral/internal/workload"
+import (
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
+)
 
 const (
 	EnvHTTPAddress           = "TETRAL_API_HTTP_ADDR"
@@ -23,6 +26,7 @@ type Env interface {
 
 // Config is the service-local api workload configuration.
 type Config struct {
+	HTTPTransport         transportsecurity.HTTPConfig
 	ListenAddress         string
 	MetricsAddress        string
 	VaultKey              string
@@ -54,7 +58,12 @@ func ConfigFromEnv(env Env) (Config, error) {
 		dataDir = defaultDataDir
 	}
 	resource := workload.ResourceConfigFromEnv(env.Getenv)
+	httpTransport, err := transportsecurity.HTTPConfigFromEnv(env.Getenv)
+	if err != nil {
+		return Config{}, workload.NewConfigError(err.Error())
+	}
 	return Config{
+		HTTPTransport:         httpTransport,
 		ListenAddress:         listenAddress,
 		MetricsAddress:        metricsAddress,
 		VaultKey:              env.Getenv(EnvVaultKey),
