@@ -22,6 +22,12 @@ func TestPostgreSQLPublicStreamingSubscribers(t *testing.T) {
 	publicIsolatedProcessCase(t, runPublicStreamingSubscribers)
 }
 func runPublicStreamingSubscribers(t *testing.T) {
+	// Independent scenarios release their owned fixtures before the next starts.
+	t.Run("independent-process-fanout", runPublicStreamingFanout)
+	t.Run("last-unsubscribe-races-new-viewer", runPublicLastUnsubscribeRace)
+}
+
+func runPublicStreamingFanout(t *testing.T) {
 	h, group := newPublicStreamingProcesses(t, "public-text", 2, nil)
 	group.selectProcess(0)
 	h.open(t, "a1", []string{"agent.message"}, "")
@@ -75,7 +81,6 @@ func runPublicStreamingSubscribers(t *testing.T) {
 	publicAssertProcessBaseline(t, group.processes[1])
 	publicWait(t, "broker unsubscribe after last viewers", func() bool { return len(publicBrokerSubscriptions(t, h.broker, h.session)) == 0 })
 	publicLogAssertion(t, "actual-independent-process-fanout-refcounts-restart-no-replay")
-	t.Run("last-unsubscribe-races-new-viewer", runPublicLastUnsubscribeRace)
 }
 
 type publicClosingTransport struct {
