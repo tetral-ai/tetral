@@ -1782,10 +1782,25 @@ function runThreadLoopEffect(
 					if (custody.activeTurnId(session) === undefined) {
 						return completedHotStateRunResult(session);
 					}
+					const waitingNextStep = session.state.threadTurnTransition().nextStep;
+					if (waitingNextStep.action === "resume_tool_routes") {
+						pendingInput = { type: "empty" };
+						continue;
+					}
+					if (waitingNextStep.action === "await_tool_results") {
+						return completedHotStateRunResult(session);
+					}
+					if (
+						waitingNextStep.action !== "finish_idle" ||
+						waitingNextStep.stopReason.type !== "requires_action"
+					) {
+						throw new Error("pending approval wait has no requires-action closeout");
+					}
+					const blockingEventIds = [...waitingNextStep.stopReason.eventIds];
 					const idleAppend = yield* nonAbandonablePromise(() =>
 						appendIdleEvent(options, session, custody, {
 							type: "requires_action",
-							event_ids: [...pendingApprovalResume.blockingEventIds],
+							event_ids: blockingEventIds,
 						}),
 					);
 					if (!idleAppend.ok) {
@@ -1794,6 +1809,15 @@ function runThreadLoopEffect(
 							error: idleAppend.error,
 							releaseSession: { reason: "event_write_failed" },
 						};
+					}
+					// A confirmation can commit while the frozen FinishIdle is awaiting
+					// its ACK. Its route remains owned by this run, not a lost wake.
+					if (
+						session.state.threadTurnTransition().nextStep.action ===
+						"resume_tool_routes"
+					) {
+						pendingInput = { type: "empty" };
+						continue;
 					}
 					return completedHotStateRunResult(session);
 				}
@@ -2202,23 +2226,6 @@ function runThreadLoopEffect(
 						? { type: "interrupted", discardHotState: true }
 						: { type: "interrupted" };
 				}
-				if (runtimeResult.type === "waiting_external") {
-					reactiveContextOverflowPending = false;
-					const idleAppend = yield* nonAbandonablePromise(() =>
-						appendIdleEvent(options, session, custody, {
-							type: "requires_action",
-							event_ids: [...runtimeResult.blockingEventIds],
-						}),
-					);
-					if (!idleAppend.ok) {
-						return {
-							type: "failed",
-							error: idleAppend.error,
-							releaseSession: { reason: "event_write_failed" },
-						};
-					}
-					return baseResult;
-				}
 				reactiveContextOverflowPending = false;
 				const turnTransition = session.state.threadTurnTransition();
 				const turnNextStep = interpretThreadTurnNextStep(
@@ -2238,9 +2245,42 @@ function runThreadLoopEffect(
 					pendingInput = { type: "empty" };
 					continue;
 				}
-				if (turnNextStep.action === "prepare_next_request") {
+				if (
+					turnNextStep.action === "prepare_next_request" ||
+					turnNextStep.action === "resume_tool_routes"
+				) {
 					pendingInput = { type: "empty" };
 					continue;
+				}
+				if (turnNextStep.action === "await_tool_results") {
+					return baseResult;
+				}
+				if (
+					turnNextStep.action === "finish_idle" &&
+					turnNextStep.stopReason.type === "requires_action"
+				) {
+					const blockingEventIds = [...turnNextStep.stopReason.eventIds];
+					const idleAppend = yield* nonAbandonablePromise(() =>
+						appendIdleEvent(options, session, custody, {
+							type: "requires_action",
+							event_ids: blockingEventIds,
+						}),
+					);
+					if (!idleAppend.ok) {
+						return {
+							type: "failed",
+							error: idleAppend.error,
+							releaseSession: { reason: "event_write_failed" },
+						};
+					}
+					if (
+						session.state.threadTurnTransition().nextStep.action ===
+						"resume_tool_routes"
+					) {
+						pendingInput = { type: "empty" };
+						continue;
+					}
+					return baseResult;
 				}
 				if (turnNextStep.action === "complete_reviewer") {
 					const idleAppend = yield* nonAbandonablePromise(() =>
@@ -4177,9 +4217,15 @@ function coordinateProviderTurnEffect(
 						);
 					}
 					commitProcessorProjection(session, processor);
-					if (streamState.waitingToolUseEventIds.length > 0) {
+					// The stream's approval observations are historical. A committed
+					// confirmation may already have made the durable route actionable.
+					const nextStep = session.state.threadTurnTransition().nextStep;
+					if (
+						nextStep.action === "finish_idle" &&
+						nextStep.stopReason.type === "requires_action"
+					) {
 						return requestEndCommitted(
-							providerTurnWaitingExternal(streamState.waitingToolUseEventIds),
+							providerTurnWaitingExternal(nextStep.stopReason.eventIds),
 							"settled",
 						);
 					}

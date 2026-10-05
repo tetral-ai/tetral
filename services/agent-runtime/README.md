@@ -151,6 +151,14 @@ the durable Thread-turn transition. Hot context changes only after the matching
 ACK. Compaction, approval, reviewer, retry, interrupt and failure are typed
 next steps around the six states rather than extra top-level states.
 
+Approval waits are selected from the current committed Tool routes, not the
+stream's earlier approval observations. A confirmation committed before Request
+End dispatches its named allow or deny settlement in the same run. A confirmation
+committed while `FinishIdle(requires_action)` awaits its ACK remains actionable
+after that frozen closeout commits; the existing route coordinator resumes it
+under the newly opened execution owner. Still-undecided members remain passive
+and do not start a successor provider request.
+
 | Loop state | Owner | Durable boundary |
 | --- | --- | --- |
 | `idle` | ThreadRun owner fiber | `CommitInputs` installs pending context; the Reducer decides when that context authorizes Request Start |
