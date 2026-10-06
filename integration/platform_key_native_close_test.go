@@ -67,8 +67,12 @@ func runPlatformKeyNativeClose(t *testing.T) {
 	if err != nil {
 		t.Fatal("platform key database observer unavailable")
 	}
-	defer observer.Close()
-	baselinePeers := platformKeyDatabasePeers(t, ctx, observer)
+	defer func() {
+		if observer.Close() != nil {
+			t.Error("platform key database observer cleanup failed")
+		}
+	}()
+	baselinePeers := platformKeyDatabasePeers(ctx, t, observer)
 	childURL, err := url.Parse(storagetest.AdminDatabaseURL(t, admin))
 	if err != nil {
 		t.Fatal("platform key child database URL invalid")
@@ -93,7 +97,11 @@ func runPlatformKeyNativeClose(t *testing.T) {
 		if err != nil {
 			t.Fatal("platform key phase file unavailable")
 		}
-		defer phaseFile.Close()
+		defer func() {
+			if phaseFile.Close() != nil {
+				t.Error("platform key phase file cleanup failed")
+			}
+		}()
 		command.ExtraFiles = []*os.File{phaseFile}
 		command.Env = append(command.Env, "TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD=3")
 	}
@@ -145,7 +153,7 @@ func runPlatformKeyNativeClose(t *testing.T) {
 	probe, stopProbe := context.WithTimeout(ctx, 3*time.Second)
 	defer stopProbe()
 	for {
-		peers := platformKeyDatabasePeers(t, probe, observer)
+		peers := platformKeyDatabasePeers(probe, t, observer)
 		extra := 0
 		for pid := range peers {
 			if !baselinePeers[pid] {
@@ -170,13 +178,17 @@ func runPlatformKeyNativeClose(t *testing.T) {
 	t.Log("platform_key_native_close_assertion=serial-native-write-close-and-peer-cleanup")
 }
 
-func platformKeyDatabasePeers(t *testing.T, ctx context.Context, observer *sql.Conn) map[int]bool {
+func platformKeyDatabasePeers(ctx context.Context, t *testing.T, observer *sql.Conn) map[int]bool {
 	t.Helper()
 	rows, err := observer.QueryContext(ctx, "SELECT pid FROM pg_stat_activity WHERE datname=current_database()")
 	if err != nil {
 		t.Fatal("platform key peer oracle unavailable")
 	}
-	defer rows.Close()
+	defer func() {
+		if rows.Close() != nil {
+			t.Error("platform key peer rows cleanup failed")
+		}
+	}()
 	peers := map[int]bool{}
 	for rows.Next() {
 		var pid int
@@ -220,7 +232,7 @@ func newPlatformKeyHandshakeRelay(backend string) (*platformKeyHandshakeRelay, e
 			relay.mu.Lock()
 			if relay.closed {
 				relay.mu.Unlock()
-				peer.Close()
+				_ = peer.Close()
 				return
 			}
 			relay.accepted++
@@ -234,19 +246,28 @@ func newPlatformKeyHandshakeRelay(backend string) (*platformKeyHandshakeRelay, e
 	}()
 	return relay, nil
 }
+
+// Relay close calls are idempotent wakeups; joined copies and peer absence
+// establish cleanup even when a socket was already closed by its other owner.
 func (r *platformKeyHandshakeRelay) forward(peer net.Conn, ordinal int) {
 	defer r.workers.Done()
-	defer func() { peer.Close(); r.mu.Lock(); delete(r.sockets, peer); r.active--; r.mu.Unlock() }()
+	defer func() { _ = peer.Close(); r.mu.Lock(); delete(r.sockets, peer); r.active--; r.mu.Unlock() }()
 	if ordinal > 1 {
 		// The fixed PostgreSQL SSLRequest precedes the encrypted handshake.
 		// Holding it keeps spare connections pending through the real CLI close.
 		var request [8]byte
-		peer.SetReadDeadline(time.Now().Add(3 * time.Second))
-		_, err := io.ReadFull(peer, request[:])
-		peer.SetReadDeadline(time.Time{})
+		err := peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if err == nil {
+			_, err = io.ReadFull(peer, request[:])
+			if resetErr := peer.SetReadDeadline(time.Time{}); resetErr != nil {
+				err = resetErr
+			}
+		}
 		if err != nil || !bytes.Equal(request[:], []byte{0, 0, 0, 8, 4, 210, 22, 47}) {
 			r.mu.Lock()
-			r.failed = true
+			if !r.closed {
+				r.failed = true
+			}
 			r.mu.Unlock()
 			return
 		}
@@ -263,17 +284,17 @@ func (r *platformKeyHandshakeRelay) forward(peer net.Conn, ordinal int) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		server.Close()
+		_ = server.Close()
 		return
 	}
 	r.sockets[server] = true
 	r.mu.Unlock()
-	defer func() { server.Close(); r.mu.Lock(); delete(r.sockets, server); r.mu.Unlock() }()
+	defer func() { _ = server.Close(); r.mu.Lock(); delete(r.sockets, server); r.mu.Unlock() }()
 	joined := make(chan struct{})
-	go func() { defer close(joined); _, _ = io.Copy(server, peer); server.Close(); peer.Close() }()
+	go func() { defer close(joined); _, _ = io.Copy(server, peer); _ = server.Close(); _ = peer.Close() }()
 	_, _ = io.Copy(peer, server)
-	server.Close()
-	peer.Close()
+	_ = server.Close()
+	_ = peer.Close()
 	<-joined
 }
 func (r *platformKeyHandshakeRelay) close() {
@@ -282,10 +303,10 @@ func (r *platformKeyHandshakeRelay) close() {
 		r.closed = true
 		close(r.stopped)
 		for peer := range r.sockets {
-			peer.Close()
+			_ = peer.Close()
 		}
 		r.mu.Unlock()
-		r.listener.Close()
+		_ = r.listener.Close()
 	})
 	r.workers.Wait()
 }
