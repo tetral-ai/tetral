@@ -71,7 +71,7 @@ jobs:
           - name: Deployment Definitions
             group: deployment
             producer: deployment
-            needs_bun: 'false'
+            needs_bun: 'true'
             needs_buf: 'false'
             needs_helm: 'true'
             needs_lint: 'false'

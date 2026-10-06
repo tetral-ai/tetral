@@ -12,6 +12,9 @@ API availability and current dependency security before installation. Existing
 compatible provider-owned Gateway API CRDs retain their ownership. Inspect their
 served versions and schemas; do not overwrite them solely because this checkout
 contains an archive. Missing or incompatible prerequisites block installation.
+Local verification checks the pinned CLI with `egctl version --remote=false`,
+which does not require kubeconfig or contact a Kubernetes cluster. Deployment
+CI also installs Bun to execute the owning TypeScript configuration parsers.
 
 Create the independently owned controller namespace before installation:
 

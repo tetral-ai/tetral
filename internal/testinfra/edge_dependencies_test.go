@@ -151,8 +151,10 @@ func TestPinnedEdgeEnvoyRuntimeAndTranslator(t *testing.T) {
 	if executable == "" || helper == "" {
 		t.Fatal("native matching CLI/upstream helper prerequisites are absent")
 	}
-	output, err := exec.CommandContext(ctx, executable, "version").CombinedOutput() //nolint:gosec // Native checksum-verified executable and fixed version argument.
-	if err != nil || strings.TrimSpace(string(output)) != "client: v1.9.2" {
+	// A local prerequisite must remain usable on CI hosts without cluster access.
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent-kubeconfig"))
+	output, err := exec.CommandContext(ctx, executable, "version", "--remote=false").CombinedOutput() //nolint:gosec // Native checksum-verified executable and fixed local version arguments.
+	if err != nil || strings.TrimSpace(string(output)) != "v1.9.2" {
 		t.Fatal("actual matching CLI version differs from selected release")
 	}
 	info, err := buildinfo.ReadFile(helper)

@@ -176,9 +176,10 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	if err := os.WriteFile(path, executable, 0700); err != nil {
 		return err
 	}
-	//nolint:gosec // Checksum-verified locked executable, fixed version argument.
-	output, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(output)) != "client: v"+tool.Version {
+	// Version verification must work without kubeconfig and never query a cluster.
+	//nolint:gosec // Checksum-verified locked executable, fixed local version arguments.
+	output, err := exec.CommandContext(ctx, path, "version", "--remote=false").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "v"+tool.Version {
 		return errors.New("egctl executable version differs from lock")
 	}
 	m.environment = append(withoutEnvironmentVariable(m.environment, EnvTestEGCTL), EnvTestEGCTL+"="+path)

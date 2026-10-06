@@ -60,6 +60,18 @@ func TestGoWorkflowsRejectMissingTransportRenderer(t *testing.T) {
 					t.Fatal("coverage accepted an unpinned transport renderer")
 				}
 			}
+			bunInput := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
+			if tc.file == "main-branch-verification.yml" {
+				bunInput = "            producer: deployment\n            needs_bun: 'true'"
+			}
+			changed = strings.Replace(string(body), bunInput, strings.Replace(bunInput, "'true'", "'false'", 1), 1)
+			if changed == string(body) {
+				t.Fatal("missing deployment Bun input")
+			}
+			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
+			if err := tc.verify(fixture); err == nil {
+				t.Fatal("deployment workflow accepted missing configuration parser runtime")
+			}
 		})
 	}
 }

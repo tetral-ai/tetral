@@ -160,6 +160,7 @@ jobs:
           group: deployment
           producer: deployment
           artifact-prefix: pr-evidence
+          needs-bun: 'true'
           needs-helm: 'true'
 
   sandbox-image:

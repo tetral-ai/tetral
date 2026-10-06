@@ -73,6 +73,9 @@ func VerifyPullRequestWorkflow(root string) error {
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
 	}
+	if !jobEvidenceInputEquals(mappingValue(jobs, "deployment-definitions"), "needs-bun", "true") {
+		return fmt.Errorf("deployment verification does not install Bun for the owning configuration parsers")
+	}
 	if !jobEvidenceInputEquals(mappingValue(jobs, "dependency-security"), "dependency-audit", string(DependencyAuditChanged)) {
 		return fmt.Errorf("pull request dependency security does not audit changed dependency graphs")
 	}
@@ -142,7 +145,7 @@ func VerifyMainBranchWorkflow(root string) error {
 		"runtime":       {name: "Agent Runtime", producer: "runtime", bun: "true", buf: "false", helm: "false", lint: "false"},
 		"gateway":       {name: "Provider Gateway", producer: "gateway", bun: "true", buf: "false", helm: "false", lint: "false"},
 		"protocol":      {name: "Protocol and SDK Compatibility", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
-		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "false", buf: "false", helm: "true", lint: "false"},
+		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "true", buf: "false", helm: "true", lint: "false"},
 		"sandbox-image": {name: "Sandbox Image", producer: "sandbox-image", bun: "false", buf: "false", helm: "false", lint: "false"},
 		"security":      {name: "Dependency Security", producer: "security", bun: "true", buf: "false", helm: "false", lint: "false"},
 	}
