@@ -365,15 +365,7 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	if err := os.WriteFile(tokenPath, []byte("fixture-reviewer"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	addresses := make([]string, 2)
-	for i := range addresses {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addresses[i] = listener.Addr().String()
-		_ = listener.Close()
-	}
+	addresses, releaseAddresses := publicReserveAddresses(t, 2)
 	logPath := filepath.Join(dir, "command.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -395,6 +387,7 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	command.Stdout = logFile
 	command.Stderr = logFile
 	command.Env = commandEnv
+	releaseAddresses()
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +424,7 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 			select {
 			case err := <-done:
 				data, _ := os.ReadFile(logPath)
-				t.Fatalf("Web exited before readiness %d: %v %s", want, err, data)
+				t.Fatalf("Web exited before readiness %d: %v; %s", want, err, publicStartupDiagnostic(string(data)))
 			case <-readyCtx.Done():
 				t.Fatalf("Web readiness never became %d: %v", want, readyCtx.Err())
 			case <-time.After(10 * time.Millisecond):

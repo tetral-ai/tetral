@@ -434,6 +434,8 @@ The command follows the shared [Go process diagnostic contract](../../internal/w
 for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
 suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
+Listener-open failures name the fixed gRPC or metrics listener and omit the raw
+bind error and address.
 
 The internal gRPC boundary owns request rejection summaries: ordinary
 unauthenticated, invalid and denied requests emit Info, cancellation emits Debug,
