@@ -1,4 +1,5 @@
 import { access, readFile, writeFile } from "node:fs/promises";
+import { writeJsonSnapshot } from "./json-snapshot.js";
 import { appendFileSync } from "node:fs";
 import { createJsonLogger } from "../../src/logger.js";
 import { Metadata } from "@grpc/grpc-js";
@@ -121,7 +122,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                 ordinal,
                 messagesJson: JSON.stringify(request.request.context),
             });
-            await writeFile(`${input.directory}/ledger.json`, JSON.stringify(ledger));
+            await writeJsonSnapshot(`${input.directory}/ledger.json`, ledger);
             yield {
                 type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
                 text: {
@@ -380,12 +381,12 @@ try {
             targetPodUid: input.podUID,
             runtimeProcessId: input.processID,
         });
-    await writeFile(`${input.directory}/ready.json`, JSON.stringify({
+    await writeJsonSnapshot(`${input.directory}/ready.json`, {
         port: ready.grpcPort, httpUrl: ready.httpUrl.href
-    }));
+    });
     await wait(`${input.directory}/quiesce`);
     const shutdown = app.shutdown();
-    await writeFile(`${input.directory}/quiescing.json`, JSON.stringify(app.lifecycle.metricsSnapshot()));
+    await writeJsonSnapshot(`${input.directory}/quiescing.json`, app.lifecycle.metricsSnapshot());
     if (input.unrelatedReviewer !== undefined) {
         await wait(`${input.directory}/reject-unrelated-review`);
         const result = await hosts.subAgentRunHost.enqueueThreadInput({
@@ -409,15 +410,15 @@ try {
                 status: "idle",
             },
         });
-        await writeFile(`${input.directory}/unrelated-review.json`, JSON.stringify(result));
+        await writeJsonSnapshot(`${input.directory}/unrelated-review.json`, result);
     }
     await shutdown;
     await hosts.close();
     await gatewayService.shutdown(new Date(Date.now() + 1000));
     await gatewayServer.shutdown(new Date(Date.now() + 1000));
-    await writeFile(`${input.directory}/closed.json`, JSON.stringify({
+    await writeJsonSnapshot(`${input.directory}/closed.json`, {
         ledger
-    }));
+    });
 }
 finally {
     await app.shutdown();
