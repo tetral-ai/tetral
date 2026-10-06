@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -150,14 +151,7 @@ func runProcessTestChild(t *testing.T, mode string) {
 		}
 		defer func() { _ = listener.Close() }()
 		entered := make(chan struct{})
-		hold := func() {
-			close(entered)
-			if strings.HasSuffix(mode, "cooperative") {
-				<-ctx.Done()
-				return
-			}
-			select {}
-		}
+		hold := processTestHold(ctx, mode, entered)
 		go func() {
 			<-entered
 			if err := os.WriteFile(filepath.Join(dir, "ready"), []byte(fmt.Sprint(os.Getpid())), 0600); err != nil { //nolint:gosec // G703: isolated parent-owned test directory.
@@ -220,6 +214,56 @@ func runProcessTestChild(t *testing.T, mode string) {
 	})
 	if err != nil && !strings.Contains(err.Error(), "context") {
 		t.Fatal(err)
+	}
+}
+
+func processTestHold(ctx context.Context, mode string, entered chan struct{}) func() {
+	var admitted sync.Once
+	return func() {
+		// Maintenance can call again after the cooperative first cycle returns.
+		// Readiness witnesses first admission, not a one-call service contract.
+		admitted.Do(func() { close(entered) })
+		if strings.HasSuffix(mode, "cooperative") {
+			<-ctx.Done()
+			return
+		}
+		select {}
+	}
+}
+
+func TestProcessQueueMaintenanceHoldCanRepeatAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	store := &processQueueStore{hold: processTestHold(ctx, "queue-cooperative", entered)}
+	first := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-first:
+		case <-time.After(time.Second):
+			t.Error("first maintenance invocation did not join during cleanup")
+		}
+	})
+	go func() {
+		defer close(first)
+		_, _ = store.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first maintenance invocation did not admit")
+	}
+	cancel()
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("cooperative maintenance did not join after cancellation")
+	}
+	for i := 0; i < 2; i++ {
+		if n, err := store.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{}); n != 0 || err != nil {
+			t.Fatalf("subsequent maintenance invocation = %d/%v", n, err)
+		}
 	}
 }
 
