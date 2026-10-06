@@ -184,7 +184,8 @@ func buildOIDCAuthCommand(ctx context.Context, t *testing.T) string {
 // while every process retains distinct listeners, PID, join and shutdown owner.
 func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary string, database *sql.DB, privateKey string, overrides map[string]string) *oidcAuthProcess {
 	t.Helper()
-	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + publicFreeAddress(t), MetricsURL: "http://" + publicFreeAddress(t)}
+	addresses, release := publicReserveAddresses(t, 2)
+	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + addresses[0], MetricsURL: "http://" + addresses[1]}
 	values := map[string]string{
 		"TETRAL_AUTH_HTTP_ADDR":                          strings.TrimPrefix(process.URL, "http://"),
 		"TETRAL_AUTH_METRICS_ADDR":                       strings.TrimPrefix(process.MetricsURL, "http://"),
@@ -219,6 +220,7 @@ func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary st
 	process.command = exec.Command(binary) //nolint:gosec // Previously built actual repository-owned Auth command.
 	process.command.Env = oidcChildEnvironment(values)
 	process.command.Stdout, process.command.Stderr = &process.output, &process.output
+	release()
 	if err := process.command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -242,9 +244,9 @@ func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary st
 		select {
 		case err := <-process.joined:
 			process.joined <- err
-			t.Fatalf("actual Auth exited before readiness: %v", err)
+			t.Fatalf("actual Auth exited before readiness: %v; %s", err, publicStartupDiagnostic(process.output.String()))
 		case <-readiness.Done():
-			t.Fatal("actual Auth did not become ready by its fixture deadline")
+			t.Fatalf("actual Auth did not become ready by its fixture deadline; %s", publicStartupDiagnostic(process.output.String()))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
