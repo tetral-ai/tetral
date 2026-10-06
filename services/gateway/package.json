@@ -47,7 +47,7 @@
     "@ai-sdk/provider-utils": "4.0.33",
     "@bufbuild/protobuf": "2.12.0",
     "@grpc/grpc-js": "1.14.5",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@tetral/gateway-lowering": "workspace:*",
     "@tetral/mcp-connector": "workspace:*",
     "@tetral/gateway-protocol": "workspace:*",
