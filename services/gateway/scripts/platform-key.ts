@@ -58,7 +58,10 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
       await writeText(options.stdout, usageText());
       return 0;
     }
-    sql = options.sqlFactory?.(parsed.databaseUrl) ?? new Bun.SQL(parsed.databaseUrl);
+    // One serial operator command needs one connection. Bun 1.3.14 starts every
+    // pool connection eagerly; close can wait for unused pending TLS handshakes.
+    // Keep the real close await while avoiding those unused sibling connections.
+    sql = options.sqlFactory?.(parsed.databaseUrl) ?? new Bun.SQL(parsed.databaseUrl, { max: 1 });
     if (parsed.command === "insert") {
       observePhase(options.observePhase, "stdin_begin");
       const plaintext = await readPlaintextKey(options.stdin ?? Bun.stdin.stream());
@@ -404,12 +407,17 @@ function observePhase(observer: PlatformKeyCLIOptions["observePhase"], phase: Pl
 
 if (import.meta.main) {
   const observer = createPlatformKeyPhaseObserver(process.env);
+  const stdout = Bun.stdout.writer();
+  const stderr = Bun.stderr.writer();
   const exitCode = await runPlatformKeyCLI({
     argv: Bun.argv.slice(2),
-    stdout: Bun.stdout.writer(),
-    stderr: Bun.stderr.writer(),
+    stdout,
+    stderr,
     observePhase: observer,
   });
+  // FileSink.write buffers small messages; process.exit does not flush them.
+  await stdout.flush();
+  await stderr.flush();
   observePhase(observer, "exit_begin");
   process.exit(exitCode);
 }

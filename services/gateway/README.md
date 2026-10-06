@@ -971,6 +971,16 @@ export TETRAL_DATABASE_URL='postgres://...'
 export ENGINE_VAULT_KEY='<64 hex chars>'
 ```
 
+Each CLI database command owns one SQL connection for its serial command and awaits
+native close before exiting. The single connection avoids unused pool handshakes
+that can leave Bun 1.3.14 close waiting after the write has committed. This is an
+operator CLI setting; Gateway serving pools retain their own configuration.
+The entrypoint flushes its buffered stdout and stderr writers before exit so
+operator confirmations, help and redacted errors reach the caller.
+`TestPostgreSQLPlatformKeyCLINativeClose` runs the actual entrypoint against TLS
+PostgreSQL with spare handshakes held, checks the committed credential, and
+requires native close and process cleanup within the existing 35-second budget.
+
 ### CLI phase diagnostics
 
 The CLI normally emits no phase observations. An operator or test caller can

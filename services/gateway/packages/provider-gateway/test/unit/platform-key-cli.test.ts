@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { closeSync, fchmodSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ProviderFinishReason, ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { decryptAES256GCM } from "../../src/providers/crypto.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
@@ -18,6 +19,24 @@ const DatabaseUrl = "postgres://ops.example/tetral";
 const OpenAIFixtureUrl = new URL("../golden/fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse", import.meta.url);
 
 describe("Gateway platform-key ops CLI", () => {
+  test("actual entrypoint flushes help to stdout before successful exit", async () => {
+    const result = await runActualPlatformKeyCLI(["--help"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Usage:\n");
+    expect(result.stdout).toContain("insert reads the plaintext provider key from stdin only.\n");
+    expect(result.stderr).toBe("");
+  });
+
+  test("actual entrypoint flushes redacted invalid-command error before failed exit", async () => {
+    // A public fixture key is intentionally also the invalid command so this
+    // checks real error redaction, rather than absence of an unused secret.
+    const result = await runActualPlatformKeyCLI([MasterKeyHex]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("unknown platform-key command: [REDACTED]\n");
+    expect(result.stderr).not.toContain(MasterKeyHex);
+  });
+
   test.each(["disabled", "enabled", "throwing"] as const)("%s phase observer preserves encrypted insert and await/close order", async (mode) => {
     const phases: PlatformKeyPhase[] = [];
     const operations: string[] = [];
@@ -682,4 +701,19 @@ async function* textChunks(...chunks: readonly string[]): AsyncIterable<Uint8Arr
   for (const chunk of chunks) {
     yield new TextEncoder().encode(chunk);
   }
+}
+
+// Exercise import.meta.main and actual buffered FileSinks through OS pipes.
+// No SQL is reached by either help or argument validation, and no sink is mocked.
+async function runActualPlatformKeyCLI(argv: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const command = Bun.spawn([process.execPath, fileURLToPath(new URL("../../../../scripts/platform-key.ts", import.meta.url)), ...argv], {
+    env: { ...process.env, ENGINE_VAULT_KEY: MasterKeyHex, TETRAL_DATABASE_URL: DatabaseUrl, TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: "" },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 5000,
+    killSignal: "SIGKILL",
+  });
+  const [code, stdout, stderr] = await Promise.all([command.exited, new Response(command.stdout).text(), new Response(command.stderr).text()]);
+  return { code, stdout, stderr };
 }
