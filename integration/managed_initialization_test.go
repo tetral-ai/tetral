@@ -82,12 +82,15 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Reserved listener addresses are never started until all prerequisites pass.
+		// Allocate distinct addresses, then release for closed-listener probes and
+		// the negative pre-bootstrap Auth command. Each serving start reserves anew.
 		processEnv := managedInitializationClone(base)
 		delete(processEnv, "TETRAL_DATABASE_ADMIN_URL")
-		for key, value := range map[string]string{"TETRAL_DATABASE_URL": roleURL("auth"), "TETRAL_AUTH_HTTP_ADDR": publicFreeAddress(t), "TETRAL_AUTH_METRICS_ADDR": publicFreeAddress(t), "TETRAL_AUTH_GRPC_ADDR": publicFreeAddress(t), "TETRAL_AUTH_GRPC_TRANSPORT": "plaintext", "TETRAL_HTTP_TRANSPORT": "plaintext", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64": privateKey, "ENGINE_API_KEY": strings.Repeat("m", auth.MinBootstrapKeyBytes), "ENGINE_BOOTSTRAP_WORKSPACE_ID": "managed_workspace"} {
+		for key, value := range map[string]string{"TETRAL_DATABASE_URL": roleURL("auth"), "TETRAL_AUTH_GRPC_TRANSPORT": "plaintext", "TETRAL_HTTP_TRANSPORT": "plaintext", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64": privateKey, "ENGINE_API_KEY": strings.Repeat("m", auth.MinBootstrapKeyBytes), "ENGINE_BOOTSTRAP_WORKSPACE_ID": "managed_workspace"} {
 			processEnv[key] = value
 		}
+		releaseInitial := managedInitializationReserveListeners(t, processEnv)
+		releaseInitial()
 		document := auth.PolicyDocument{FederationRules: []auth.FederationRule{{ID: "managed_rule", OrganizationID: "managed_org", Issuer: "https://issuer.managed.test", Audience: "tetral-engine", JWKSURL: "https://issuer.managed.test/keys", Algorithm: "RS256", Enabled: true}}, Identities: []auth.IdentityBinding{{ID: "managed_identity", OrganizationID: "managed_org", Issuer: "https://issuer.managed.test", Subject: "managed_subject", Kind: auth.IdentityHuman, Enabled: true}}, WorkspaceGrants: []auth.WorkspaceGrant{{ID: "managed_grant", IdentityID: "managed_identity", WorkspaceID: workspace.ID("managed_workspace"), Role: auth.WorkspaceFullAccess, Enabled: true}}}
 		policyInput := managedInitializationJSON(t, document)
 		run := func(name string, environment map[string]string, input []byte, wantOK bool, args ...string) []byte {
@@ -260,8 +263,18 @@ func managedInitializationRows(ctx context.Context, t *testing.T, admin *sql.DB)
 	}
 	return rows
 }
+func managedInitializationReserveListeners(t *testing.T, values map[string]string) func() {
+	t.Helper()
+	addresses, release := publicReserveAddresses(t, 3)
+	values["TETRAL_AUTH_HTTP_ADDR"] = addresses[0]
+	values["TETRAL_AUTH_METRICS_ADDR"] = addresses[1]
+	values["TETRAL_AUTH_GRPC_ADDR"] = addresses[2]
+	return release
+}
+
 func managedInitializationStartAuth(ctx context.Context, t *testing.T, binary string, values map[string]string) *oidcAuthProcess {
 	t.Helper()
+	release := managedInitializationReserveListeners(t, values)
 	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + values["TETRAL_AUTH_HTTP_ADDR"], MetricsURL: "http://" + values["TETRAL_AUTH_METRICS_ADDR"], GRPCAddress: values["TETRAL_AUTH_GRPC_ADDR"]}
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(values["TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64"])
 	if err != nil {
@@ -274,6 +287,7 @@ func managedInitializationStartAuth(ctx context.Context, t *testing.T, binary st
 	process.command = exec.Command(binary) //nolint:gosec // Actual built Auth command, explicitly declared serving role.
 	process.command.Env = managedInitializationEnvironment(values)
 	process.command.Stdout, process.command.Stderr = &process.output, &process.output
+	release()
 	if err := process.command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -299,9 +313,9 @@ func managedInitializationStartAuth(ctx context.Context, t *testing.T, binary st
 		select {
 		case err := <-process.joined:
 			process.joined <- err
-			t.Fatal("actual initialized Auth exited before readiness")
+			t.Fatalf("actual initialized Auth exited before readiness: %v; %s", err, publicStartupDiagnostic(process.output.String()))
 		case <-ready.Done():
-			t.Fatal("actual initialized Auth did not become ready")
+			t.Fatalf("actual initialized Auth did not become ready: %v; %s", ready.Err(), publicStartupDiagnostic(process.output.String()))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
