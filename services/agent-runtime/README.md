@@ -738,3 +738,34 @@ cleanup failure after a successful run. Executable and signal boundaries use
 fixed safe phase/class records and nonzero failure exits without exception text
 or stacks. Diagnostic faults add no stderr-flush wait; bounded business drain
 settings remain owned by the lifecycle.
+
+## Operation measurement
+
+The existing owning duration hooks also expose the additive seconds histogram
+`tetral_operation_duration_seconds{service="agent-runtime",operation,outcome}`
+with the [shared fixed bounds](../../internal/workload/README.md#operation-durations).
+Operations are the closed provider-request classes, event/context operations,
+content commit/application phases and continuation stages described above.
+Content outcomes retain `committed`, `duplicate`, `stale` and `failed`;
+continuation/provider/context outcomes retain `success`, `error`, `cancelled`
+and `rejected`. Existing millisecond summaries and their class labels remain
+available. This common family aggregates content/request classes at each
+operation; use the existing class-specific summaries and scoped raw observations
+when defining a homogeneous cohort.
+
+Cold approvals with no local start timestamp increment
+`runtimepod_approval_wait_unavailable_total` and enter neither zero nor successful
+latency buckets. `runtimepod_approval_wait_started_total` and
+`runtimepod_approval_wait_outstanding` retain incomplete hot observations.
+`runtimepod_active_sessions`, `runtimepod_session_capacity`, active Thread/fiber/
+tool gauges and command-in-flight gauges retain their existing ownership.
+
+Shutdown operations are actual `shutdown_quiesce`, `shutdown_report`,
+`shutdown_release`, `shutdown_local_join`, `shutdown_clients` and
+`shutdown_listeners` boundaries. Session checkpoints and release can overlap;
+these observations are not additive global current-step/settlement intervals.
+A forced join records a timeout only after owned work actually joins. Final
+listener cleanup may complete after scraping stops and is not proof of a
+collected final sample. Admission, custody and deadline decisions never depend
+on metrics. Aggregate eligible replica buckets before computing percentiles,
+and retain all outcomes/unfinished work alongside success-conditional latency.

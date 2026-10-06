@@ -32,12 +32,22 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "plaintext"
             - name: TETRAL_GIT_PROXY_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_GIT_PROXY_METRICS_ADDR
@@ -70,12 +80,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           volumeMounts:
+
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -97,6 +108,7 @@ spec:
               drop:
                 - ALL
       volumes:
+
         - name: store-trust
           configMap:
             name: "tetral-store-trust"

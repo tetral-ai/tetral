@@ -33,7 +33,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	if buildApplication == nil {
 		buildApplication = BuildProductionApplication
 	}
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("api")
 	application, err := buildApplication(ctx, ApplicationConfig(cfg, env, logger, httpMetrics))
 	if err != nil {
 		return workload.LogStartupFailure(logger, "api", err)
@@ -51,7 +51,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	if runWorkload == nil {
 		runWorkload = workload.Run
 	}
-	return runPublicAndMetricsHTTP(ctx, runWorkload, cfg, readiness, logger, handler, metricsHandler)
+	return runPublicAndMetricsHTTP(ctx, runWorkload, cfg, readiness, logger, handler, metricsHandler, httpMetrics.Operations)
 }
 
 func runPublicAndMetricsHTTP(
@@ -62,7 +62,12 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
+	operationMetrics ...*workload.OperationMetrics,
 ) error {
+	var metrics *workload.OperationMetrics
+	if len(operationMetrics) != 0 {
+		metrics = operationMetrics[0]
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -85,6 +90,7 @@ func runPublicAndMetricsHTTP(
 			ListenAddress:         cfg.ListenAddress,
 			ListenConfigKey:       EnvHTTPAddress,
 			TLSConfig:             tlsConfig,
+			Metrics:               metrics,
 			Handler:               publicHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,
@@ -98,6 +104,7 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.MetricsAddress,
 			ListenConfigKey:       EnvMetricsAddress,
+			Metrics:               metrics,
 			Handler:               metricsHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,

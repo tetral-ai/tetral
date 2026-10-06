@@ -2,11 +2,13 @@ package testinfra
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +35,13 @@ type DockerMount struct {
 }
 
 type ContainerSpec struct {
+	// HostNetwork is reserved for local Linux transport fixtures whose emitted
+	// listeners and backends have been checked to bind only explicit loopback.
+	// It cannot be combined with Docker network aliases or published ports.
+	HostNetwork bool
+	// ExtraHosts provides container-only DNS for a confined host-network fixture.
+	// Every mapped address must be explicit loopback; the host resolver is unchanged.
+	ExtraHosts map[string]string
 	// NetworkContainer shares an already running fixture container's network
 	// namespace, as a sidecar does in a Pod. Publish ports on that container.
 	// It cannot be combined with Network, Aliases, Ports, or HostPorts.
@@ -109,7 +118,21 @@ func (r *DockerResources) Run(ctx context.Context, spec ContainerSpec) (*DockerC
 	if spec.Image == "" || strings.HasPrefix(spec.Image, "-") {
 		return nil, errors.New("invalid Docker fixture image")
 	}
+	if err := validateHostNetwork(spec); err != nil {
+		return nil, err
+	}
 	args := []string{"run", "-d"}
+	if spec.HostNetwork {
+		args = append(args, "--network", "host")
+	}
+	hostnames := make([]string, 0, len(spec.ExtraHosts))
+	for hostname := range spec.ExtraHosts {
+		hostnames = append(hostnames, hostname)
+	}
+	sort.Strings(hostnames)
+	for _, hostname := range hostnames {
+		args = append(args, "--add-host", hostname+":"+spec.ExtraHosts[hostname])
+	}
 	name, err := dependencyContainerName(r.kind)
 	if err != nil {
 		return nil, err
@@ -209,6 +232,25 @@ func (c *DockerContainer) Address(ctx context.Context, port int) (string, error)
 // output containing credential material. Errors never embed arguments/output.
 func (c *DockerContainer) Exec(ctx context.Context, args ...string) (string, error) {
 	return boundedDockerOutput(ctx, append([]string{"exec", c.Name}, args...)...)
+}
+
+// DockerContainerState exposes only finite process state for owning diagnostics.
+type DockerContainerState struct {
+	Running   bool `json:"running"`
+	ExitCode  int  `json:"exitCode"`
+	OOMKilled bool `json:"oomKilled"`
+}
+
+func (c *DockerContainer) State(ctx context.Context) (DockerContainerState, error) {
+	body, err := boundedDockerOutput(ctx, "inspect", "--format", `{"running":{{.State.Running}},"exitCode":{{.State.ExitCode}},"oomKilled":{{.State.OOMKilled}}}`, c.Name)
+	if err != nil {
+		return DockerContainerState{}, err
+	}
+	var state DockerContainerState
+	if err := json.Unmarshal([]byte(body), &state); err != nil {
+		return DockerContainerState{}, errors.New("decode finite Docker fixture state")
+	}
+	return state, nil
 }
 
 func (c *DockerContainer) Logs(ctx context.Context) (string, error) {
@@ -365,4 +407,34 @@ func boundedDockerOutput(ctx context.Context, args ...string) (string, error) {
 		return string(output.data), fmt.Errorf("docker fixture command failed: %w", err)
 	}
 	return string(output.data), nil
+}
+
+func validateHostNetwork(spec ContainerSpec) error {
+	if len(spec.ExtraHosts) != 0 && !spec.HostNetwork {
+		return errors.New("container-only loopback aliases require a confined host-network fixture")
+	}
+	for hostname, address := range spec.ExtraHosts {
+		if len(hostname) == 0 || len(hostname) > 253 {
+			return errors.New("invalid container-only fixture hostname")
+		}
+		for _, label := range strings.Split(hostname, ".") {
+			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' || strings.Trim(label, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
+				return errors.New("invalid container-only fixture hostname")
+			}
+		}
+		ip := net.ParseIP(address)
+		if ip == nil || !ip.IsLoopback() || ip.String() != address {
+			return errors.New("container-only fixture alias must be a canonical loopback IP")
+		}
+	}
+	if !spec.HostNetwork {
+		return nil
+	}
+	if runtime.GOOS != "linux" {
+		return errors.New("local host-network transport fixtures require Linux")
+	}
+	if spec.NetworkContainer != nil || spec.Network != "" || len(spec.Aliases) != 0 || len(spec.Ports) != 0 || len(spec.HostPorts) != 0 {
+		return errors.New("host-network fixture cannot declare a network, aliases or published ports")
+	}
+	return nil
 }

@@ -67,10 +67,12 @@ describe("ProviderGatewayServiceShell", () => {
     expect(providerCalls).toBe(1); expect(offers).toBe(1); expect(closes).toBe(1);
   });
   test("shutdown rejects an unjoined authentication worker and keeps its completion owned", async () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: line => lines.push(line) });
     let release!: () => void;
     const held = new Promise<void>(resolve=>{release=resolve;});
     const auth = new RecordingAuthenticator();
-    const service=createService({authenticate:async (...args)=>{await held;return auth.authenticate(...args);}});
+    const service=createService({authenticate:async (...args)=>{await held;return auth.authenticate(...args);}},true,undefined,{logger});
     const worker=collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId:""},metadata()));
     const outcome=worker.catch(error=>error);
     await Promise.resolve();
@@ -83,6 +85,17 @@ describe("ProviderGatewayServiceShell", () => {
     // Yield one macrotask so that a shutdown which skipped the join would have settled.
     await expired;await new Promise(resolve=>setImmediate(resolve));expect(completed).toBe(false);
     release();expect(await observed).toBeInstanceOf(Error);
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="timeout"} 1');
+    expect(service.metricsText()).toContain('operation="shutdown_cancel_join",outcome="timeout"} 1');
+    const phases = lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed");
+    expect(phases.map(record => record.operation)).toEqual(["shutdown_drain", "shutdown_cancel_join"]);
+    for (const record of phases) {
+      expect(record["service.instance.id"]).toBeString();
+      expect(record["metric.observation.count"]).toBe(1);
+      expect(record["duration.seconds"]).toBeGreaterThan(0);
+      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="provider-gateway",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+    }
+    logger.close();
     expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
     await service.shutdown(new Date(Date.now()+30));
   });
@@ -146,6 +159,11 @@ describe("ProviderGatewayServiceShell", () => {
     expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
   });
 
+  test("a throwing shutdown diagnostic sink does not change the joined phase result", async () => {
+    const service = createService(new RecordingAuthenticator(),true,undefined,{logger:{ info: () => { throw new Error("sink"); }, error: () => undefined }});
+    await service.shutdown(new Date(Date.now()+1000));
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="success"} 1');
+  });
   test("authorizes before request validation or provider-unavailable response construction", async () => {
     const authenticator = new RecordingAuthenticator({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
     const service = createService(authenticator);
@@ -518,7 +536,11 @@ describe("ProviderGatewayServiceShell", () => {
       retryable: true,
       fatal: false,
     });
+    expect(service.metricsText()).toContain("providergateway_provider_stream_capacity 1");
+    expect(service.metricsText()).toContain("providergateway_admission_rejections_total 1");
+    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="rejected"} 1');
     await first;
+    expect(service.metricsText()).toContain('tetral_operation_duration_seconds_count{service="provider-gateway",operation="StreamProviderRequest",outcome="error"} 1');
     expect(logs.filter((record) =>
       (record as { readonly event?: unknown }).event === "provider_request_streamed"
       && (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_2"

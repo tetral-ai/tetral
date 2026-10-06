@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +32,11 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics := workload.NewOperationMetrics("api")
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- workload.Run(ctx, workload.Config{
+			Metrics:         metrics,
 			ServiceName:     "api",
 			Listener:        listener,
 			Handler:         handler,
@@ -100,6 +104,11 @@ func TestWorkloadRunDrainsInFlightRequestBeforeReturning(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after drain completed")
 	}
+	response := httptest.NewRecorder()
+	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="success",service="api"} 1`) {
+		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
+	}
 }
 
 // TestWorkloadRunSurfacesDrainTimeoutError proves that when an in-flight request
@@ -123,9 +132,11 @@ func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics := workload.NewOperationMetrics("api")
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- workload.Run(ctx, workload.Config{
+			Metrics:         metrics,
 			ServiceName:     "api",
 			Listener:        listener,
 			Handler:         handler,
@@ -170,6 +181,11 @@ func TestWorkloadRunSurfacesDrainTimeoutError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after drain timeout")
+	}
+	response := httptest.NewRecorder()
+	workload.HealthRouter(workload.NewReadiness(), workload.WithMetricsCollector("operations", metrics.Collector())).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `tetral_operation_duration_seconds_count{operation="shutdown_http_drain",outcome="timeout",service="api"} 1`) {
+		t.Fatalf("missing actual drain outcome: %s", response.Body.String())
 	}
 }
 

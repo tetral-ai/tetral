@@ -25,6 +25,7 @@ type workloadManifest struct {
 	publicFacing    bool
 	autoscaling     bool
 	ciliumPolicy    bool
+	externalCheck   bool
 	internalGRPC    bool
 	grpcEnv         string
 	grpcPortName    string
@@ -110,6 +111,7 @@ var workloadManifests = []workloadManifest{
 		httpPortName:    "http",
 		metricsEnv:      "TETRAL_AUTH_METRICS_ADDR",
 		metricsPortName: "metrics",
+		externalCheck:   true,
 		publicFacing:    true,
 		requiredEnvVar: []string{
 			"ENGINE_API_KEY",
@@ -145,7 +147,7 @@ var workloadManifests = []workloadManifest{
 		binary:       "bun",
 		httpEnv:      "TETRAL_RUNTIME_POD_HTTP_ADDR",
 		httpPortName: "http",
-		ciliumPolicy: true,
+		ciliumPolicy: false,
 		internalGRPC: true,
 		grpcEnv:      "TETRAL_RUNTIME_POD_GRPC_PORT",
 		grpcPortName: "grpc",
@@ -171,10 +173,10 @@ var workloadManifests = []workloadManifest{
 			"KUBERNETES_API_CA_CERT_PATH",
 		},
 	},
-	{file: "provider-gateway.yaml", name: "provider-gateway", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", httpPortName: "http", internalGRPC: true, grpcEnv: "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR", grpcPortName: "provider-grpc", autoscaling: true, ciliumPolicy: true},
-	{file: "mcp-connector.yaml", name: "mcp-connector", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_MCP_CONNECTOR_HTTP_ADDR", httpPortName: "mcp-http", internalGRPC: true, grpcEnv: "TETRAL_MCP_CONNECTOR_GRPC_ADDR", grpcPortName: "mcp-grpc", ciliumPolicy: true},
-	{file: "web-connector.yaml", configMapName: "web-connector-config", name: "web-connector", namespace: "tetral-system", binary: "web-connector", httpEnv: "TETRAL_WEB_CONNECTOR_METRICS_ADDR", httpPortName: "web-metrics", internalGRPC: true, grpcEnv: "TETRAL_WEB_CONNECTOR_GRPC_ADDR", grpcPortName: "web-grpc", ciliumPolicy: true},
-	{file: "job-runner.yaml", name: "job-runner", namespace: "tetral-system", binary: "job-runner", httpEnv: "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR", httpPortName: "http-job", ciliumPolicy: true},
+	{file: "provider-gateway.yaml", name: "provider-gateway", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", httpPortName: "http", internalGRPC: true, grpcEnv: "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR", grpcPortName: "provider-grpc", autoscaling: true, ciliumPolicy: false},
+	{file: "mcp-connector.yaml", name: "mcp-connector", namespace: "tetral-system", binary: "bun", httpEnv: "TETRAL_MCP_CONNECTOR_HTTP_ADDR", httpPortName: "mcp-http", internalGRPC: true, grpcEnv: "TETRAL_MCP_CONNECTOR_GRPC_ADDR", grpcPortName: "mcp-grpc", ciliumPolicy: false},
+	{file: "web-connector.yaml", configMapName: "web-connector-config", name: "web-connector", namespace: "tetral-system", binary: "web-connector", httpEnv: "TETRAL_WEB_CONNECTOR_METRICS_ADDR", httpPortName: "web-metrics", internalGRPC: true, grpcEnv: "TETRAL_WEB_CONNECTOR_GRPC_ADDR", grpcPortName: "web-grpc", ciliumPolicy: false},
+	{file: "job-runner.yaml", name: "job-runner", namespace: "tetral-system", binary: "job-runner", httpEnv: "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR", httpPortName: "http-job", ciliumPolicy: false},
 	{
 		file:         "git-proxy.yaml",
 		name:         "git-proxy",
@@ -203,7 +205,7 @@ var workloadManifests = []workloadManifest{
 		internalGRPC:   true,
 		grpcEnv:        "TETRAL_BRIDGE_API_GRPC_ADDR",
 		grpcPortName:   "grpc",
-		ciliumPolicy:   true,
+		ciliumPolicy:   false,
 		requiredEnvVar: []string{"TETRAL_INTERNAL_GRPC_AUDIENCE", "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS"},
 	},
 	{
@@ -799,6 +801,12 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 				expectedGRPCAddress = "19090"
 			}
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.grpcEnv, expectedGRPCAddress)
+		} else if workload.externalCheck {
+			requireContains(t, deployment, "containerPort: 9095")
+			requireContains(t, service, "name: grpc-check\n      port: 9095\n      targetPort: grpc-check\n      appProtocol: kubernetes.io/h2c")
+			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_ADDR", ":9095")
+			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_TRANSPORT", "plaintext")
+			requireNotContains(t, deployment, "containerPort: 9090")
 		} else if strings.Contains(service.text, "targetPort: grpc") || strings.Contains(deployment.text, "containerPort: 9090") {
 			t.Fatalf("%s exposes gRPC without being declared as an internal gRPC workload", workload.file)
 		}
@@ -833,7 +841,14 @@ func TestKubernetesManifestDeploymentsHaveHTTPHealthAndReadinessProbes(t *testin
 		requireContains(t, deployment, "path: "+healthPath)
 		requireContains(t, deployment, "readinessProbe:")
 		requireContains(t, deployment, "path: "+readyPath)
-		if strings.Count(deployment.text, "port: "+workload.httpPortName) < 2 {
+		probePort := workload.httpPortName
+		if workload.metricsPortName != "" {
+			probePort = workload.metricsPortName
+		}
+		if workload.name == "git-proxy" {
+			probePort = "metrics"
+		}
+		if strings.Count(deployment.text, "port: "+probePort) < 2 {
 			t.Fatalf("%s Deployment probes must both target the HTTP probe port", workload.file)
 		}
 	}
@@ -894,147 +909,91 @@ func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing
 	}
 }
 
-func TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary(t *testing.T) {
-	documents := readEdgeGatewayAdapterDocuments(t, "ingress-nginx.yaml")
-	if len(documents) != 3 {
-		t.Fatalf("edge-gateway/ingress-nginx.yaml document count = %d; want public API, event stream, and git proxy ingress adapters", len(documents))
+func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
+	documents := readEdgeGatewayAdapterDocuments(t, "envoy-gateway.yaml")
+	if len(documents) != 12 {
+		t.Fatalf("edge object count=%d want12 application-owned resources", len(documents))
 	}
-	api := requireDocument(t, documents, "edge-gateway/ingress-nginx.yaml", "Ingress", "tetral-public-api")
-	eventStream := requireDocument(t, documents, "edge-gateway/ingress-nginx.yaml", "Ingress", "tetral-event-stream")
-	gitProxy := requireDocument(t, documents, "edge-gateway/ingress-nginx.yaml", "Ingress", "git-proxy")
-	for _, ingress := range []*manifestDocument{api, eventStream} {
-		for _, required := range []string{
-			"kubernetes.io/ingress.class: nginx",
-			"ingressClassName: nginx",
-			`nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"`,
-			`nginx.ingress.kubernetes.io/auth-method: "POST"`,
-			// The controller default is 1 MB; uploads die at the edge without this.
-			`nginx.ingress.kubernetes.io/proxy-body-size: "501m"`,
-			`nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"`,
-			"proxy_set_header X-Original-Method $request_method;",
-			// The auth_request location's own $uri is the internal
-			// /_external-auth-* path, so the parent location captures the
-			// client path into a variable the auth snippet forwards.
-			"proxy_set_header X-Original-Path $tetral_original_path;",
-			"set $tetral_original_path $uri;",
-			"proxy_set_header X-Request-Id $request_id;",
-			"proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
-			`more_clear_input_headers "X-Tetral-*";`,
-			`proxy_set_header X-Api-Key "";`,
-			`proxy_set_header Authorization "";`,
-			"proxy_set_header X-Tetral-Internal-Principal $upstream_http_x_tetral_internal_principal;",
-			`proxy_set_header X-Tetral-Internal-Workspace "";`,
-			`proxy_set_header X-Tetral-Workspace-Id "";`,
-		} {
-			requireContains(t, ingress, required)
+	gateway := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "Gateway", "tetral-public-edge")
+	for _, required := range []string{`gatewayClassName: "tetral-envoy-gateway"`, `hostname: "api.tetral.example"`, `hostname: "git.tetral.example"`, `name: "tetral-api-public-tls"`, `name: "tetral-git-public-tls"`, "name: http", "name: api-https", "name: git-https"} {
+		requireContains(t, gateway, required)
+	}
+	api := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-public-api")
+	routes := map[string]string{}
+	rules := strings.Split(api.text, "    - matches:\n")[1:]
+	for _, rule := range rules {
+		split := strings.Split(rule, "      backendRefs:\n")
+		if len(split) != 2 {
+			t.Fatal("route must have one backend list")
 		}
-		requireNotContains(t, ingress, "path: /internal/auth/authorize")
-		// $uri inside the auth_request location names the internal
-		// external-auth path, not the client path — signing it breaks
-		// principal verification for every request through the edge.
-		requireNotContains(t, ingress, "proxy_set_header X-Original-Path $uri;")
+		matches := regexp.MustCompile(`(?m)^            value: (.+)$`).FindAllStringSubmatch(split[0], -1)
+		backends := regexp.MustCompile(`(?m)^        - name: (.+)$`).FindAllStringSubmatch(split[1], -1)
+		if len(backends) != 1 || !strings.Contains(split[1], "          port: 8080") {
+			t.Fatal("route requires exactly one owning HTTP backend")
+		}
+		for _, match := range matches {
+			path := cleanManifestListValue(match[1])
+			if _, duplicate := routes[path]; duplicate {
+				t.Fatal("duplicate route")
+			}
+			routes[path] = backends[0][1]
+		}
 	}
-	for _, required := range []string{
-		"path: /v1/api_keys",
-		"name: auth",
-		"path: /v1",
-		"name: api",
-	} {
-		requireContains(t, api, required)
-	}
-	for _, required := range []string{
-		`nginx.ingress.kubernetes.io/use-regex: "true"`,
-		`nginx.ingress.kubernetes.io/proxy-buffering: "off"`,
-		`nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"`,
-		"path: /v1/sessions/[^/]+/events/stream$",
-		"path: /v1/sessions/[^/]+/threads/[^/]+/stream$",
-		"name: event-stream",
-	} {
-		requireContains(t, eventStream, required)
-	}
-	if got, want := ingressBackendByPath(t, api), map[string]string{
-		"/v1/api_keys": "auth",
-		"/v1":          "api",
-	}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("public API ingress routes = %#v; want %#v", got, want)
-	}
-	if got, want := ingressBackendByPath(t, eventStream), map[string]string{
-		"/v1/sessions/[^/]+/events/stream$":        "event-stream",
-		"/v1/sessions/[^/]+/threads/[^/]+/stream$": "event-stream",
-	}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("event-stream ingress routes = %#v; want %#v", got, want)
-	}
-	for _, required := range []string{
-		"kubernetes.io/ingress.class: nginx",
-		"ingressClassName: nginx",
-		`nginx.ingress.kubernetes.io/enable-access-log: "false"`,
-		`nginx.ingress.kubernetes.io/proxy-request-buffering: "off"`,
-		`nginx.ingress.kubernetes.io/proxy-buffering: "off"`,
-		`nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"`,
-		`nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"`,
-		"host: git.tetral.example",
-		"secretName: git-proxy-tls",
-		"path: /",
-		"name: git-proxy",
-		"name: http",
-	} {
-		requireContains(t, gitProxy, required)
-	}
-	for _, forbidden := range []string{
-		"nginx.ingress.kubernetes.io/auth-url",
-		"X-Tetral-Internal-Principal",
-		"path: /v1",
-	} {
-		requireNotContains(t, gitProxy, forbidden)
-	}
-	for _, ingress := range []*manifestDocument{api, eventStream} {
-		requireNotContains(t, ingress, `nginx.ingress.kubernetes.io/enable-access-log: "false"`)
-	}
-}
 
-func ingressBackendByPath(t *testing.T, document *manifestDocument) map[string]string {
-	t.Helper()
-	routes := make(map[string]string)
-	lines := strings.Split(document.text, "\n")
-	for index, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "- path: ") {
-			continue
-		}
-		path := cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "- path: ")))
-		pathIndent := len(line) - len(strings.TrimLeft(line, " "))
-		backend := ""
-		insideBackend := false
-		insideService := false
-		for _, nested := range lines[index+1:] {
-			nestedTrimmed := strings.TrimSpace(nested)
-			if nestedTrimmed == "" {
-				continue
-			}
-			nestedIndent := len(nested) - len(strings.TrimLeft(nested, " "))
-			if nestedIndent <= pathIndent {
-				break
-			}
-			switch nestedTrimmed {
-			case "backend:":
-				insideBackend = true
-			case "service:":
-				insideService = insideBackend
-			default:
-				if insideService && backend == "" && strings.HasPrefix(nestedTrimmed, "name: ") {
-					backend = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(nestedTrimmed, "name: ")))
-				}
-			}
-		}
-		if backend == "" {
-			t.Fatalf("%s %s/%s path %q has no service backend", document.file, document.kind, document.name, path)
-		}
-		if _, duplicate := routes[path]; duplicate {
-			t.Fatalf("%s %s/%s repeats ingress path %q", document.file, document.kind, document.name, path)
-		}
-		routes[path] = backend
+	want := map[string]string{`^/v1/sessions/[^/]+/events/stream$`: "event-stream", `^/v1/sessions/[^/]+/threads/[^/]+/stream$`: "event-stream", "/v1/api_keys": "auth", "/v1": "api"}
+	if !reflect.DeepEqual(routes, want) {
+		t.Fatalf("API backend routes=%v want%v", routes, want)
 	}
-	return routes
+	exchange := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-token-exchange")
+	for _, required := range []string{"method: POST", "type: Exact", "value: /v1/oauth/token", "name: auth", "port: 8080", "Authorization", "X-Api-Key"} {
+		requireContains(t, exchange, required)
+	}
+	redirect := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-public-redirect")
+	for _, required := range []string{"api.tetral.example", "git.tetral.example", "type: RequestRedirect", "scheme: https", "statusCode: 301"} {
+		requireContains(t, redirect, required)
+	}
+	requireNotContains(t, redirect, "backendRefs")
+	policy := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "SecurityPolicy", "tetral-public-api")
+	for _, required := range []string{"kind: HTTPRoute", "name: tetral-public-api", "grpc:", "name: auth", "port: 9095", "timeout: 5s", "failOpen: false", "statusOnError: 503", "recomputeRoute: false"} {
+		requireContains(t, policy, required)
+	}
+	for _, forbidden := range []string{"withRequestBody", "retry", "http:"} {
+		requireNotContains(t, policy, forbidden)
+	}
+	proxy := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "EnvoyProxy", "tetral-public-edge")
+	requireContains(t, proxy, "accessLog:\n      disable: true")
+	git := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-public-git")
+	for _, required := range []string{"git.tetral.example", "name: git-proxy", "port: 8080", "value: /", "Authorization", "X-Api-Key"} {
+		requireContains(t, git, required)
+	}
+	requireNotContains(t, git, "tetral-public-api")
+	for _, section := range []string{"http", "api-https", "git-https"} {
+		traffic := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "ClientTrafficPolicy", "tetral-public-"+section)
+		for _, required := range []string{"sectionName: " + section, "Generate", "x-forwarded-for", "forwarded", "x-real-ip", "x-envoy-external-address", "x-original-", "RejectRequest", "disableMergeSlashes: false", "requestReceivedTimeout: 0s", "streamIdleTimeout: 1800s"} {
+			requireContains(t, traffic, required)
+		}
+		if section == "git-https" {
+			requireContains(t, traffic, "git-ticket.+")
+		} else {
+			requireContains(t, traffic, "x-tetral-")
+		}
+	}
+	backend := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "BackendTrafficPolicy", "tetral-public-edge")
+	for _, required := range []string{"requestTimeout: 0s", "maxStreamDuration: 0s", "streamIdleTimeout: 1800s"} {
+		requireContains(t, backend, required)
+	}
+	patch := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "EnvoyPatchPolicy", "tetral-auth-raw-headers")
+	for _, required := range []string{"envoy.filters.http.ext_authz/securitypolicy/tetral-system/tetral-public-api", "path: /encode_raw_headers", "path: /validate_mutations", "name: tetral-system/tetral-public-edge/api-https"} {
+		requireContains(t, patch, required)
+	}
+	if strings.Count(patch.text, "value: true") != 2 {
+		t.Fatal("raw header patch must set exactly2 reviewed fields")
+	}
+	for index := range documents {
+		for _, forbidden := range []string{"nginx", "/internal/auth/authorize", "Ingress", "withRequestBody", "maxRequestBytes", "buffering"} {
+			requireNotContains(t, &documents[index], forbidden)
+		}
+	}
 }
 
 func TestKubernetesManifestTopLevelDeploymentsDeclareResourceBounds(t *testing.T) {

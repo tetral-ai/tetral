@@ -67,8 +67,8 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	serverCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	readiness := workload.NewReadiness()
-	httpMetrics := workload.NewHTTPMetrics()
-	grpcMetrics := workload.NewGRPCMetrics()
+	httpMetrics := workload.NewHTTPMetrics("queue")
+	grpcMetrics := workload.NewGRPCMetrics("queue")
 	grpcOptions := append(internalgrpc.QueueRPCServerOptions(),
 		grpc.WaitForHandlers(true),
 		grpc.ChainUnaryInterceptor(internalgrpc.MetricsUnaryInterceptor(grpcMetrics)),
@@ -79,6 +79,13 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, healthServer)
 	Register(grpcServer, store, logger)
+	var metricMethods []string
+	for service, info := range grpcServer.GetServiceInfo() {
+		for _, method := range info.Methods {
+			metricMethods = append(metricMethods, "/"+service+"/"+method.Name)
+		}
+	}
+	grpcMetrics.Operations.SetOperations(metricMethods)
 
 	drainTimeout := cfg.DrainTimeout
 	if drainTimeout <= 0 {
@@ -130,6 +137,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			ListenAddress:         cfg.HTTPAddress,
 			ListenConfigKey:       EnvHTTPAddress,
 			Listener:              httpListener,
+			Metrics:               httpMetrics.Operations,
 			Handler:               httpUsers.handler(workCtx, workload.HealthRouter(readiness, metricsOptions...)),
 			ShutdownTimeout:       drainTimeout,
 			Readiness:             readiness,
@@ -166,17 +174,22 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 		<-maintenanceDone
 		httpUsers.users.Wait()
 	}()
+	drainStarted := time.Now()
 	timer := time.NewTimer(drainTimeout)
 	defer timer.Stop()
 	select {
 	case <-joined:
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "success", time.Since(drainStarted))
 	case <-timer.C:
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_drain", "timeout", time.Since(drainStarted))
+		joinStarted := time.Now()
 		// All store and metrics operations receive cancellation before force-stop.
 		// WaitForHandlers plus the explicit joins keep their database pool alive
 		// until every admitted user has returned, including a cancelled SQL call.
 		cancelWork()
 		grpcServer.Stop()
 		<-joined
+		grpcMetrics.Operations.ObserveShutdown(logger, "shutdown_queue_cancel_join", "success", time.Since(joinStarted))
 		errOut = errors.Join(errOut, context.DeadlineExceeded)
 	}
 	return errors.Join(errOut, httpRunErr)
@@ -195,11 +208,12 @@ func queueMetricsCollector(store queueMetricsStore, now func() time.Time) worklo
 		if err != nil {
 			return nil, err
 		}
-		metrics := make([]workload.Metric, 0, len(snapshots)*5)
+		metrics := make([]workload.Metric, 0, len(snapshots)*6)
 		for _, snapshot := range snapshots {
 			labels := []workload.MetricLabel{{Name: "kind", Value: snapshot.Kind}}
 			metrics = append(metrics,
 				workload.Metric{Name: "queue_pending_jobs", Help: "Pending queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.PendingJobs)},
+				workload.Metric{Name: "queue_ready_jobs", Help: "Pending queue jobs whose available_at is at or before the observation time.", Type: "gauge", Labels: labels, Value: float64(snapshot.ReadyJobs)},
 				workload.Metric{Name: "queue_leased_jobs", Help: "Leased queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.LeasedJobs)},
 				workload.Metric{Name: "queue_retry_pending_jobs", Help: "Pending queue jobs that have retried at least once.", Type: "gauge", Labels: labels, Value: float64(snapshot.RetryPendingJobs)},
 				workload.Metric{Name: "queue_dead_lettered_jobs", Help: "Dead-lettered queue jobs.", Type: "gauge", Labels: labels, Value: float64(snapshot.DeadLetteredJobs)},

@@ -72,25 +72,3 @@ spec:
       ports:
         - protocol: TCP
           port: 443
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: provider-gateway-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: provider-gateway
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: provider-gateway
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP

@@ -46,6 +46,7 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.runnerDrainMs | quote }}
@@ -83,13 +84,13 @@ spec:
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
               value: bridge-job-runner
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
-              value: '30000'
+              value: {{ .Values.jobRunner.leaseDurationMs | quote }}
             - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
-              value: '10000'
+              value: {{ .Values.jobRunner.heartbeatIntervalMs | quote }}
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
-              value: '8'
+              value: {{ .Values.jobRunner.maxJobs | quote }}
             - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
-              value: '1000'
+              value: {{ .Values.jobRunner.pollIntervalMs | quote }}
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
@@ -284,7 +285,7 @@ spec:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.network.apiServerPort }}
     - to:
 {{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
       ports:

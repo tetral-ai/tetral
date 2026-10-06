@@ -11,6 +11,8 @@ import type {
   CleanupSessionRequest,
   CleanupSessionResponse,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
+import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { createRuntimePodApp } from "../../src/app.js";
 import type { RuntimeTokenReviewClient } from "../../src/auth.js";
 import type { RuntimePodConfig } from "../../src/config.js";
@@ -34,6 +36,14 @@ describe("RuntimePodApp production composition", () => {
       acceptGate.resolve();
       await expect(inFlight).resolves.toEqual({ accepted: {} });
       await shutdown;
+      expect(fixture.metrics.operations.render()).toContain('operation="shutdown_listeners",outcome="success"} 2');
+      expect(fixture.metrics.operations.render()).not.toContain('operation="shutdown_clients"');
+      const records = fixture.lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed" && record.operation === "shutdown_listeners");
+      expect(records).toHaveLength(2);
+      expect(records.map(record => record["metric.observation.count"]).sort()).toEqual([1,2]);
+      expect(new Set(records.map(record => record["service.instance.id"])).size).toBe(1);
+      const seconds = records.reduce((sum,record) => sum + record["duration.seconds"],0);
+      expect(fixture.metrics.operations.render()).toContain(`tetral_operation_duration_seconds_sum{service="agent-runtime",operation="shutdown_listeners",outcome="success"} ${seconds}`);
     } finally {
       await fixture.stop();
     }
@@ -94,7 +104,11 @@ async function startAppFixture(options: {
   readonly cleanupRunHost?: RuntimeCoreCleanupHost;
   readonly tokenReviewClient?: RuntimeTokenReviewClient;
 } = {}) {
+  const metrics = new RuntimePodMetricsRegistry();
+  const lines: string[] = [];
+  const logger = createJsonLogger({ write: line => lines.push(line) });
   const app = createRuntimePodApp({
+    metrics,
     runtimeProcess: {
       runtimeProcessId: "process-test",
       register: async () => undefined,
@@ -106,7 +120,7 @@ async function startAppFixture(options: {
     },
     quiesce: async () => undefined,
     config: validConfig(),
-    logger: { info: () => undefined, error: () => undefined },
+    logger,
     tokenReviewClient: options.tokenReviewClient ?? new AllowingTokenReviewClient(),
     commandRunHost: options.runHost ?? new RecordingRunHost(Promise.resolve()),
     cleanupRunHost: options.cleanupRunHost ?? new RecordingCleanupHost(Promise.resolve({ ok: true, sessionId: "sesn_1", cleaned: true })),
@@ -116,12 +130,15 @@ async function startAppFixture(options: {
   const client = new AgentRuntimePodServiceClient(grpcAddress, credentials.createInsecure());
   await waitForReady(client);
   return {
+    metrics,
+    lines,
     app,
     client,
     httpUrl: started.httpUrl,
     stop: async () => {
       client.close();
       await app.shutdown().catch(() => undefined);
+      logger.close();
     },
   };
 }

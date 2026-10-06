@@ -83,6 +83,8 @@ func (m *dependencyManager) preparePinnedImage(ctx context.Context, name string)
 	switch name {
 	case "envoy":
 		reference, err = PinnedEnvoyImage(m.root)
+	case "edge-envoy":
+		reference, err = PinnedEdgeEnvoyImage(m.root)
 	case "bun-image":
 		reference, err = PinnedBunImage()
 	default:

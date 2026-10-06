@@ -138,7 +138,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = closeStartupDatabase(database) })
 	readiness := workload.NewReadiness()
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("event-stream")
 	reader := internaleventstream.NewPostgreSQLReader(database.runtimeClient)
 	previewMetrics := eventstream.NewPreviewMetrics()
 	var previewHub *eventstream.PreviewHub
@@ -163,7 +163,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.runtimeClient)),
 	)
 	readiness.MarkReady()
-	return runPublicAndMetricsHTTP(ctx, cfg, readiness, logger, handler, metricsHandler)
+	return runPublicAndMetricsHTTP(ctx, cfg, readiness, logger, handler, metricsHandler, httpMetrics.Operations)
 }
 
 func runPublicAndMetricsHTTP(
@@ -173,7 +173,12 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
+	operationMetrics ...*workload.OperationMetrics,
 ) error {
+	var metrics *workload.OperationMetrics
+	if len(operationMetrics) != 0 {
+		metrics = operationMetrics[0]
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -196,6 +201,7 @@ func runPublicAndMetricsHTTP(
 			ListenAddress:         cfg.ListenAddress,
 			ListenConfigKey:       envHTTPAddress,
 			TLSConfig:             tlsConfig,
+			Metrics:               metrics,
 			Handler:               publicHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,
@@ -209,6 +215,7 @@ func runPublicAndMetricsHTTP(
 			ServiceVersion:        cfg.ServiceVersion,
 			ListenAddress:         cfg.MetricsAddress,
 			ListenConfigKey:       envMetricsAddress,
+			Metrics:               metrics,
 			Handler:               metricsHandler,
 			Readiness:             readiness,
 			ShutdownTimeout:       defaultShutdownTimeout,

@@ -59,10 +59,11 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	scheduler := tetralcleanup.NewScheduler(openResult.Client)
 	metrics := tetralcleanup.NewSchedulerMetrics()
 	defer exportCleanupMetrics(ctx, logger, newMetricsExporter(cfg.MetricsExportURL), metrics, cfg.MetricsExportTimeout)
-	if err := tetralcleanup.ClaimDueAcrossWorkspaces(ctx, workspace.NewStore(openResult.RawDatabaseForExcludedStores), scheduler, cfg.ClaimLimit, func(workspaceID workspace.ID, claimed int, duration time.Duration) {
+	err = tetralcleanup.ClaimDueAcrossWorkspaces(ctx, workspace.NewStore(openResult.RawDatabaseForExcludedStores), scheduler, cfg.ClaimLimit, func(workspaceID workspace.ID, claimed int, duration time.Duration) {
 		metrics.ObserveClaimDue(claimed, duration)
 		logCleanupClaimDue(logger, workspaceID, claimed, cfg.ClaimLimit, duration)
-	}); err != nil {
+	}, metrics)
+	if err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
 	return nil

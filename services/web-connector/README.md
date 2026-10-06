@@ -455,3 +455,18 @@ leaving the web-connector Pod's proxy allocation. One executable deadline covers
 service drain, cancellation, all joins and dependency cleanup. An uncooperative
 producer causes exit status 1 without closing dependencies under live work.
 Reusable `Run` callers retain join-before-close ownership.
+
+## Operation measurement
+
+The metrics port also exports `tetral_operation_duration_seconds` with
+`service="web-connector"`, a registered full RPC method (including `RunWeb`),
+and the shared gRPC outcome classification. This measures the authenticated
+RPC boundary; a gRPC success can contain a model-visible Tool error. Existing
+`web_request_duration_seconds{operation}` retains its execution boundary.
+The same family records actual `shutdown_grpc_drain`, forced
+`shutdown_grpc_cancel_join` and `shutdown_http_drain` phases. Samples appear
+only when those owning boundaries complete; completed shutdown observations
+require a remaining metrics listener or process-local evidence to collect.
+
+Fixed seconds buckets and replica percentile queries follow the
+[shared operation duration contract](../../internal/workload/README.md#operation-durations).

@@ -80,7 +80,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	var active atomic.Int64
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(serverCtx))
 	defer cancelWork()
-	server, healthServer, err := internalgrpc.NewServerWithHealth(internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{
+	server, healthServer, err := internalgrpc.NewServerWithHealth(internalgrpc.Config{Metrics: metrics.GRPC, ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{
 		grpc.WaitForHandlers(true), grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute}),
 		grpc.ChainUnaryInterceptor(func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			admission.Lock()
@@ -157,6 +157,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	if runtime.Logger != nil {
 		runtime.Logger.Info("web.drain.started", slog.String("operation", "workload.shutdown"), slog.String("shutdown.phase", "draining"), slog.Int64("closeout.active_count", active.Load()))
 	}
+	drainStarted := time.Now()
 	stopped := make(chan struct{})
 	go func() { server.GracefulStop(); close(stopped) }()
 	drain := cfg.DrainTimeout
@@ -167,10 +168,22 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	defer timer.Stop()
 	select {
 	case <-stopped:
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_drain", "success", time.Since(drainStarted))
 	case <-timer.C:
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_drain", "timeout", time.Since(drainStarted))
+		joinStarted := time.Now()
 		cancelWork()
 		server.Stop()
 		<-stopped
+		outcome := "success"
+		joinBound := cfg.CancelJoinTimeout
+		if joinBound <= 0 {
+			joinBound = 5 * time.Second
+		}
+		if time.Since(joinStarted) > joinBound {
+			outcome = "timeout"
+		}
+		metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_grpc_cancel_join", outcome, time.Since(joinStarted))
 	}
 	if !grpcConsumed {
 		err := <-grpcErr
@@ -184,10 +197,14 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), joinTimeout)
 	defer shutdownCancel()
+	httpDrainStarted := time.Now()
+	httpOutcome := "success"
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		httpOutcome = "timeout"
 		_ = httpServer.Close()
 		runErr = errors.Join(runErr, err)
 	}
+	metrics.GRPC.Operations.ObserveShutdown(runtime.Logger, "shutdown_http_drain", httpOutcome, time.Since(httpDrainStarted))
 	if !httpConsumed {
 		runErr = errors.Join(runErr, <-httpErr)
 	}

@@ -110,3 +110,81 @@ alternative DSN environment names; neither can be inferred from DATABASE_URL. */
 
 {{/* Existing Provider HPA floor, shared by its resource and validation. */}}
 {{- define "tetral.providerGatewayMinReplicas" -}}2{{- end -}}
+
+{{/* Fixed finite complement of the exact Git ticket header. */}}
+{{- define "tetral.gitPrivateHeadersPattern" -}}
+(?i)^x-tetral-(|[^g].*|g[^i].*|g|gi[^t].*|gi|git[^\-].*|git|git-[^t].*|git-|git-t[^i].*|git-t|git-ti[^c].*|git-ti|git-tic[^k].*|git-tic|git-tick[^e].*|git-tick|git-ticke[^t].*|git-ticke|git-ticket.+)$
+{{- end -}}
+
+{{- define "tetral.edgeHTTPEnv" -}}
+- name: TETRAL_HTTP_TRANSPORT
+  value: {{ ternary "native-mtls" "plaintext" (eq .root.Values.transport.profile "hardened") | quote }}
+{{- if eq .root.Values.transport.profile "hardened" }}
+- name: TETRAL_HTTP_TLS_CA_PATH
+  value: /var/run/tetral/edge-trust/ca.crt
+- name: TETRAL_HTTP_TLS_CERT_PATH
+  value: /var/run/tetral/edge-leaf/tls.crt
+- name: TETRAL_HTTP_TLS_KEY_PATH
+  value: /var/run/tetral/edge-leaf/tls.key
+- name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+  value: {{ printf "spiffe://%s/ns/envoy-gateway-system/sa/tetral-public-edge" .root.Values.routing.trustDomain | quote }}
+{{- end }}
+{{- end -}}
+{{- define "tetral.edgeHTTPMounts" -}}
+{{- if eq .Values.transport.profile "hardened" }}
+- name: edge-trust
+  mountPath: /var/run/tetral/edge-trust
+  readOnly: true
+- name: edge-leaf
+  mountPath: /var/run/tetral/edge-leaf
+  readOnly: true
+{{- end }}
+{{- end -}}
+{{- define "tetral.edgeHTTPVolumes" -}}
+{{- if eq .root.Values.transport.profile "hardened" }}
+- name: edge-trust
+  configMap:
+    name: {{ .root.Values.edge.trustConfigMap | quote }}
+- name: edge-leaf
+  secret:
+    secretName: {{ index .root.Values.edge.serverLeafSecrets .name | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "tetral.edgeProxyImage" -}}
+{{- $lock := .Files.Get "files/dependencies.lock.json" | fromJson -}}
+{{- $found := "" -}}
+{{- range $image := $lock.envoy_gateway.images -}}
+{{- if eq $image.component "proxy" -}}
+{{- if $found }}{{ fail "duplicate edge proxy image in deployment lock" }}{{ end -}}
+{{- $found = $image.reference -}}
+{{- end -}}
+{{- end -}}
+{{- if not (contains "@sha256:" $found) }}{{ fail "immutable edge proxy image absent from deployment lock" }}{{ end -}}
+{{- $found -}}
+{{- end -}}
+
+{{/* Portable diagnostics are boot controls, never credentials or request content. */}}
+{{- define "tetral.diagnosticEnv" -}}
+{{- if not (has .Values.observability.logLevel (list "debug" "info" "warn" "error")) }}{{ fail "observability.logLevel must be debug, info, warn, or error" }}{{ end -}}
+{{- range $setting := list (dict "name" "logMaxRecordBytes" "min" 1024 "max" 65536) (dict "name" "logSummaryIntervalMs" "min" 100 "max" 3600000) (dict "name" "logBurst" "min" 1 "max" 1000) -}}
+{{- $raw := printf "%v" (index $.Values.observability $setting.name) -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $raw)) (lt (float64 $raw) (float64 $setting.min)) (gt (float64 $raw) (float64 $setting.max)) }}{{ fail (printf "observability.%s is outside its supported integer range" $setting.name) }}{{ end -}}
+{{- end -}}
+{{- range $name, $value := dict "TETRAL_LOG_LEVEL" .Values.observability.logLevel "TETRAL_LOG_MAX_RECORD_BYTES" .Values.observability.logMaxRecordBytes "TETRAL_LOG_SUMMARY_INTERVAL_MS" .Values.observability.logSummaryIntervalMs "TETRAL_LOG_BURST" .Values.observability.logBurst }}
+- name: {{ $name }}
+  value: {{ $value | quote }}
+{{- end }}
+{{- end -}}
+
+{{/* Keep Queue retry and Runner lease validation at their own semantic boundary. */}}
+{{- define "tetral.workerOperationalValidation" -}}
+{{- range $owner := list "queue" "jobRunner" -}}
+{{- range $key, $value := index $.Values $owner -}}
+{{- $raw := printf "%v" $value -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $raw)) (gt (float64 $raw) 2147483647.0) }}{{ fail (printf "%s.%s must be a positive integer at most 2147483647" $owner $key) }}{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- if lt (float64 .Values.queue.retryCapMs) (float64 .Values.queue.retryBaseMs) }}{{ fail "queue.retryCapMs must be at least queue.retryBaseMs" }}{{ end -}}
+{{- if ge (float64 .Values.jobRunner.heartbeatIntervalMs) (float64 .Values.jobRunner.leaseDurationMs) }}{{ fail "jobRunner.heartbeatIntervalMs must be less than jobRunner.leaseDurationMs" }}{{ end -}}
+{{- end -}}

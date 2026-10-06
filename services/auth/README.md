@@ -240,6 +240,25 @@ remain on HTTP/metrics. Listener shutdown joins requests within the ten-second
 drain budget, cancelling forced gRPC work, then Application closes and joins pruning and
 issuer work before closing PostgreSQL and the trust observer.
 
+The same metrics listener exports fixed-bucket
+`tetral_operation_duration_seconds{service="auth",operation="/envoy.service.auth.v3.Authorization/Check",outcome=...}`
+from the actual Check unary boundary, including current-peer validation. A typed
+allow is `success`; a typed 4xx denial is `rejected`; a typed 5xx or transport
+failure is `error`. Actual caller/transport cancellation or deadline expiry is
+`cancelled`/`timeout`. A nil gRPC error on a denied response never means success.
+An internal dependency expiry returned as HTTP500 remains `error` unless the
+caller/transport context itself expired. No request, credential or workspace
+labels are added, and HTTP token/key metrics retain their names and units.
+
+`shutdown_grpc_drain` measures the actual bounded GracefulStop wait; expiry is
+`timeout`. Forced `shutdown_grpc_cancel_join` records only after Stop and the
+handler owner join, without a new join budget. The existing process logger
+records the same phase duration even if the metrics listener is already closed,
+subject to [shared collection limits](../../internal/workload/README.md#operation-durations).
+The owning PostgreSQL Check test verifies typed denial populations, a real
+closed Auth-role database failure with no principal or credential usage, and
+the existing held native Check transaction completing during graceful drain.
+
 ### Config and ports
 
 | Setting | Default | Supported bound |

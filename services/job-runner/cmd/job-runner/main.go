@@ -205,7 +205,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 			Config: cfg,
 		}, logger, queueWake)
 	}()
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("job-runner")
 	return runWorkload(ctx, workload.Config{
 		ServiceName:           jobrunner.ServiceNameJobRunner,
 		DeploymentEnvironment: cfg.DeploymentEnvironment,
@@ -213,6 +213,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		ListenAddress:         cfg.HTTPAddress,
 		ListenConfigKey:       jobrunner.EnvJobRunnerHTTPAddress,
 		Listener:              listener,
+		Metrics:               httpMetrics.Operations,
 		Handler: workload.HealthRouter(readiness,
 			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),

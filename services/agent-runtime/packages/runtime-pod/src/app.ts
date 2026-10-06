@@ -23,7 +23,7 @@ import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodConfig } from "./config.js";
 import type { RuntimePodLogger } from "./logger.js";
 import type { ContainerMemoryObservation } from "./metrics.js";
-import type { RuntimePodMetricsSource } from "./metrics.js";
+import type { RuntimeShutdownPhase, RuntimePodMetricsSource } from "./metrics.js";
 
 /**
  * Dependencies and optional bootstrap stages used to assemble one Runtime Pod application.
@@ -97,6 +97,7 @@ export function createRuntimePodApp(
   const lifecycle = new RuntimePodLifecycle({
     runtimeProcess: options.runtimeProcess,
     config: { ok: true, config: options.config },
+    observeShutdownPhase: (phase, durationMs, outcome) => options.metrics?.observeShutdownPhase?.(phase,durationMs,outcome,options.logger),
     logger: options.logger,
     bootstrap: {
       runtime: options.bootstrap?.runtime ?? (async () => undefined),
@@ -141,16 +142,21 @@ export function createRuntimePodApp(
         // immediately, and join every started operation even if one fails.
         let failed = false,
           firstFailure: unknown;
-        const observe = async (close: () => unknown): Promise<void> => {
+        const observe = async (close: () => unknown, phase?: RuntimeShutdownPhase): Promise<void> => {
+          const started = performance.now();
+          let outcome: "success" | "error" = "success";
           try {
             await close();
           } catch (error) {
+            outcome = "error";
             if (!failed) firstFailure = error;
             failed = true;
+          } finally {
+            if (phase !== undefined) try { options.metrics?.observeShutdownPhase?.(phase,performance.now()-started,outcome,options.logger); } catch { /* Metrics cannot skip cleanup. */ }
           }
         };
         await observe(() => lifecycle.shutdown());
-        await observe(() => options.closeClients?.());
+        await observe(() => options.closeClients?.(), options.closeClients === undefined ? undefined : "shutdown_clients");
         await Promise.all([
           observe(() =>
             grpcServer?.shutdown(
@@ -158,8 +164,9 @@ export function createRuntimePodApp(
                 Date.now() + options.config.lifecycle.proxyJoinTimeoutMs,
               ),
             ),
+            grpcServer === undefined ? undefined : "shutdown_listeners",
           ),
-          observe(() => httpServer?.stop()),
+          observe(() => httpServer?.stop(), httpServer === undefined ? undefined : "shutdown_listeners"),
         ]);
         if (failed) throw firstFailure;
       })();

@@ -1,3 +1,4 @@
+{{ include "tetral.workerOperationalValidation" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,11 +12,11 @@ data:
   TETRAL_QUEUE_GRPC_ADDR: ":9090"
   TETRAL_DEPLOYMENT_ENVIRONMENT: {{ .Values.observability.deploymentEnvironment | quote }}
   TETRAL_SERVICE_VERSION: {{ .Values.observability.serviceVersion | quote }}
-  TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS: "30"
-  TETRAL_QUEUE_LEASE_RECLAIM_LIMIT: "100"
-  TETRAL_QUEUE_RETRY_BASE_MS: "1000"
-  TETRAL_QUEUE_RETRY_CAP_MS: "60000"
-  TETRAL_QUEUE_RETRY_MAX_ATTEMPTS: "10"
+  TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS: {{ .Values.queue.leaseReclaimIntervalSeconds | quote }}
+  TETRAL_QUEUE_LEASE_RECLAIM_LIMIT: {{ .Values.queue.leaseReclaimLimit | quote }}
+  TETRAL_QUEUE_RETRY_BASE_MS: {{ .Values.queue.retryBaseMs | quote }}
+  TETRAL_QUEUE_RETRY_CAP_MS: {{ .Values.queue.retryCapMs | quote }}
+  TETRAL_QUEUE_RETRY_MAX_ATTEMPTS: {{ .Values.queue.retryMaxAttempts | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -70,6 +71,7 @@ spec:
           command:
             - /usr/local/bin/tetral-queue
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.queueDrainMs | quote }}

@@ -1275,3 +1275,42 @@ borrowers are joined under the 20-second drain bound. Shutdown interrupts
 candidate validation and uses the remaining application deadline; it does not
 start a fresh rotation budget.
 Go's independently owned pool policy remains distinct.
+
+## Operation measurement
+
+Both metrics listeners export the additive seconds histogram
+`tetral_operation_duration_seconds{service,operation,outcome}` with the
+[shared fixed bounds](../../internal/workload/README.md#operation-durations).
+Provider Gateway operations are `StreamProviderRequest`,
+`provider_first_fragment`, `provider_first_complete`, `complete_frame_write`,
+`shutdown_drain` and `shutdown_cancel_join`. Request duration covers the actual
+service entry through owned cleanup, including authentication, validation and
+capacity rejection. Stage durations retain their existing dispatch/fragment/
+complete/write-callback boundaries and success/error/cancelled populations;
+no-content failure observations remain included. A successful local write is
+not evidence of client delivery or a valid Agent turn.
+
+`providergateway_provider_streams_active` and
+`providergateway_provider_stream_capacity` expose current admitted work and its
+configured admission bound. `providergateway_admission_rejections_total` counts
+only concurrent-turn admission refusal. Existing provider stream/stage counters,
+millisecond sums, assembly gauges and pending-frame bytes retain their meaning.
+
+MCP operations are `RunMcpTool`, `ListMcpTools`, `shutdown_drain` and
+`shutdown_cancel_join`. Execution records one owning duration across claim,
+credential/SDK work and settlement, with success/error/rejected/timeout/cancelled
+outcomes. Tool names remain only in the existing legacy MCP series; the new
+histogram aggregates them under the fixed RPC operation. Discovery records its
+actual complete-list duration, including non-success. Shutdown records actual
+drain and forced worker joins, with deadline exhaustion retained as timeout.
+An unjoined worker contributes no fabricated completion sample.
+
+For all replica histograms, sum buckets by `le,service,operation` before
+`histogram_quantile`; add an `outcome` selector for a conditional distribution.
+Retain all-outcome counts alongside conditional latency. The existing
+`mcpconnector_sessions_active` counts SDK sessions, not active tool execution.
+Bun SQL's exposed pool interface has no physical acquisition-wait observation;
+query/transaction duration must not be relabeled as pool wait. Go owners expose
+actual SQL wait counters separately. Scheduled-arrival-to-validated-SDK-final
+latency and valid completed-turn counts remain the independent load ledger's
+boundary, not any one RPC or stage histogram.

@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 115 {
-		t.Fatalf("canonical object count = %d; want 115 including two preview-client egress policies", len(canonical))
+	if len(canonical) != 109 {
+		t.Fatalf("canonical object count = %d; want 109 including two preview-client egress policies", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -57,8 +57,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 		}
 	}
 
-	withoutCilium := renderChart(t, helm, chart, "cilium.enabled=false")
-	requireCiliumToggleShape(t, withoutCilium, rendered, []string{
+	withCilium := renderChart(t, helm, chart, "cilium.enabled=true")
+	requireCiliumToggleShape(t, rendered, withCilium, []string{
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-agent-runtime|agent-runtime-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|bridge-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|provider-gateway-apiserver-egress",
@@ -69,7 +69,7 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 
 	withEdge := renderChart(t, helm, chart, "edge.enabled=true")
 	edge := readManifestObjects(t, []string{
-		filepath.Join(engineRoot, "deploy", "kubernetes", "edge-gateway", "ingress-nginx.yaml"),
+		filepath.Join(engineRoot, "deploy", "kubernetes", "edge-gateway", "envoy-gateway.yaml"),
 	})
 	var edgeKeys []string
 	for _, object := range edge {
@@ -129,7 +129,7 @@ func TestHelmChartEnvironmentBuildTimingReachesContainer(t *testing.T) {
 func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	rendered := uniqueObjects(t, renderChart(t, helm, chart))
+	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.enabled=true"))
 
 	for _, policy := range []struct {
 		name      string
@@ -188,7 +188,7 @@ func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
+	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true"))
 	key := "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
 	policy, ok := rendered[key]
 	if !ok {
@@ -234,8 +234,8 @@ func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 func TestHelmChartGitProxyFQDNPolicyIsMutuallyExclusive(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	defaults := uniqueObjects(t, renderChart(t, helm, chart))
-	withFQDNPolicy := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
+	defaults := uniqueObjects(t, renderChart(t, helm, chart, "cilium.enabled=true"))
+	withFQDNPolicy := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true"))
 
 	const networkPolicyKey = "networking.k8s.io/v1|NetworkPolicy|tetral-system|git-proxy"
 	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
@@ -382,7 +382,7 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 		}
 	}
 
-	ciliumValues := append(append([]string(nil), overrideValues...), "cilium.gitProxyFQDNPolicy=true")
+	ciliumValues := append(append([]string(nil), overrideValues...), "cilium.gitProxyFQDNPolicy=true", "cilium.enabled=true")
 	ciliumRendered := uniqueObjects(t, renderChart(t, helm, chart, ciliumValues...))
 	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
 	ciliumPolicy, ok := ciliumRendered[ciliumPolicyKey]
@@ -461,9 +461,7 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 		"bootstrapWorkspaceID=true",
 		"secrets.apiSecrets=true",
 		"secrets.tetralBlob=custom-blob",
-		"edge.enabled=true",
 		"gitProxyHost=true",
-		"edge.tlsSecretName=true",
 		"image.registry=registry.example/tetral",
 		"image.tag=false",
 	))
@@ -529,10 +527,10 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
 	)
 
-	gitProxy := rendered["networking.k8s.io/v1|Ingress|tetral-system|git-proxy"]
-	requireManifestPathString(t, gitProxy, "true", "spec", "tls", 0, "hosts", 0)
-	requireManifestPathString(t, gitProxy, "true", "spec", "tls", 0, "secretName")
-	requireManifestPathString(t, gitProxy, "true", "spec", "rules", 0, "host")
+	edge := uniqueObjects(t, renderChart(t, helm, chart, "edge.enabled=true", "edge.gitTLSSecretName=true"))
+	gateway := edge["gateway.networking.k8s.io/v1|Gateway|tetral-system|tetral-public-edge"]
+	requireManifestPathString(t, gateway, "true", "spec", "listeners", 2, "tls", "certificateRefs", 0, "name")
+
 }
 
 func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *testing.T) {
@@ -627,7 +625,7 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	// namespaces.create=true is intentionally covered only by the object-diff
 	// test: Namespace is outside the invariant suite's closed kind and file set.
 	skip := exactTestPattern([]string{
-		"TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary",
+		"TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary",
 		"TestKubernetesManifestQueueIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAPIIsComposedFromServiceLocalManifests",
 		"TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests",
@@ -653,10 +651,10 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	if err := os.MkdirAll(edgeDir, 0o755); err != nil {
 		t.Fatalf("create edge manifest root: %v", err)
 	}
-	copyTestFile(t, filepath.Join(edgeOutput, "edge.yaml"), filepath.Join(edgeDir, "ingress-nginx.yaml"))
+	copyTestFile(t, filepath.Join(edgeOutput, "edge.yaml"), filepath.Join(edgeDir, "envoy-gateway.yaml"))
 	runGoTest(t, root, []string{
 		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + edgeRoot,
-	}, "./deploy/kubernetes", "-run", "^TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary$")
+	}, "./deploy/kubernetes", "-run", "^TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary$")
 
 	runGoTest(t, root, []string{
 		"TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT=" + renderedRoot,

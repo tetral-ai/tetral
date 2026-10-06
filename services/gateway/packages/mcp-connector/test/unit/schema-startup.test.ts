@@ -94,6 +94,7 @@ describe("mcp-connector schema startup", () => {
     Object.assign(process.env, validEnv());
     const events: string[] = [];
     const logs: unknown[] = [];
+    let shutdownMetrics = "";
     const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & { close: () => Promise<void> });
     sql.close = async () => { events.push("sql.close"); };
 
@@ -124,11 +125,14 @@ describe("mcp-connector schema startup", () => {
         },
         shutdown: async () => { events.push("grpc.shutdown"); },
       }),
-      httpServerFactory: () => {
+      httpServerFactory: (_address, state) => {
         events.push("http.bind");
         return {
           url: new URL("http://127.0.0.1:8081"),
-          stop: async () => { events.push("http.stop"); },
+          stop: async () => {
+            shutdownMetrics = state.metricsText();
+            events.push("http.stop");
+          },
         };
       },
       registerSignalHandlers: () => { events.push("signals.register"); },
@@ -146,6 +150,7 @@ describe("mcp-connector schema startup", () => {
       "log:workload.started",
       "signals.register",
       "wait",
+      "log:workload.shutdown.phase_completed",
       "http.stop",
       "grpc.shutdown",
       "sql.close",
@@ -157,7 +162,21 @@ describe("mcp-connector schema startup", () => {
         operation: "workload.lifecycle",
         component: "workload",
       }),
+      {
+        event: "workload.shutdown.phase_completed",
+        component: "workload",
+        operation: "shutdown_drain",
+        outcome: "success",
+        "duration.seconds": expect.any(Number),
+        "metric.observation.count": 1,
+      },
     ]);
+    const duration = (logs[1] as { readonly "duration.seconds": number })["duration.seconds"];
+    expect(Number.isFinite(duration)).toBe(true);
+    expect(duration).toBeGreaterThanOrEqual(0);
+    const labels = 'service="mcp-connector",operation="shutdown_drain",outcome="success"';
+    expect(shutdownMetrics).toContain(`tetral_operation_duration_seconds_count{${labels}} 1\n`);
+    expect(shutdownMetrics).toContain(`tetral_operation_duration_seconds_sum{${labels}} ${duration}\n`);
   });
 });
 

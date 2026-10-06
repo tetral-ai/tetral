@@ -171,7 +171,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 			if err != nil {
 				return false
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			if response.StatusCode != http.StatusNoContent || response.TLS == nil || response.TLS.DidResume || response.TLS.Version != tls.VersionTLS13 || response.ProtoMajor != 2 {
 				t.Fatal("fresh protected handshake/protocol failed")
 			}
@@ -196,7 +196,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 			before := admitted.Load()
 			response, err := request(makeClient(bad.trust, bad.peer, bad.dns), "/protected")
 			if response != nil {
-				response.Body.Close()
+				_ = response.Body.Close()
 			}
 			if err == nil || admitted.Load() != before {
 				t.Fatalf("invalid %s admitted protected request", bad.name)
@@ -208,7 +208,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		beforeProtocol := admitted.Load()
 		oldResponse, oldErr := request(oldProtocol, "/protected")
 		if oldResponse != nil {
-			oldResponse.Body.Close()
+			_ = oldResponse.Body.Close()
 		}
 		if oldErr == nil || admitted.Load() != beforeProtocol {
 			t.Fatal("native mutual TLS accepted an older protocol")
@@ -216,9 +216,10 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		plain := &http.Client{Transport: &http.Transport{}, Timeout: time.Second}
 		defer plain.CloseIdleConnections()
 		before := admitted.Load()
-		response, err := plain.Get("http://" + business.address + "/protected")
+		// Plaintext can fail at transport or receive an HTTP error before admission.
+		response, _ := plain.Get("http://" + business.address + "/protected")
 		if response != nil {
-			response.Body.Close()
+			_ = response.Body.Close()
 			if response.StatusCode < 400 {
 				t.Fatal("native business accepted plaintext")
 			}
@@ -226,12 +227,12 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		if admitted.Load() != before {
 			t.Fatal("plaintext reached protected handler")
 		}
-		response, err = plain.Get("http://" + metric.address + "/metrics")
+		response, err := plain.Get("http://" + metric.address + "/metrics")
 		if err != nil {
 			t.Fatal(err)
 		}
 		body, err := io.ReadAll(response.Body)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil || response.StatusCode != 200 || string(body) != "fixture_requests 1\n" {
 			t.Fatal("internal metrics unavailable")
 		}
@@ -239,7 +240,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response.Body.Close()
+		_ = response.Body.Close()
 		if response.StatusCode != 404 || admitted.Load() != before {
 			t.Fatal("metrics admitted business request")
 		}
@@ -247,7 +248,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer held.Body.Close()
+		defer func() { _ = held.Body.Close() }()
 		reader := bufio.NewReader(held.Body)
 		first, err := reader.ReadString('\n')
 		if err != nil || first != "data: first\n" {
@@ -315,7 +316,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		for _, address := range []string{business.address, metric.address} {
 			connection, err := net.DialTimeout("tcp", address, time.Second)
 			if err == nil {
-				connection.Close()
+				_ = connection.Close()
 				t.Fatal("service listener remained open after join")
 			}
 		}
@@ -349,7 +350,7 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		before = admitted.Load()
 		response, err = request(makeClient(overlap, &caller, serverDNS), "/protected")
 		if response != nil {
-			response.Body.Close()
+			_ = response.Body.Close()
 		}
 		if err == nil || admitted.Load() != before {
 			t.Fatal("retired client trust admitted after drained restart")

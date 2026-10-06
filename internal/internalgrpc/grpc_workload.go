@@ -87,8 +87,8 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	if logger == nil {
 		logger = workload.ComponentLogger(params.ServiceName)
 	}
-	httpMetrics := workload.NewHTTPMetrics()
-	grpcMetrics := workload.NewGRPCMetrics()
+	httpMetrics := workload.NewHTTPMetrics(params.ServiceName)
+	grpcMetrics := workload.NewGRPCMetrics(params.ServiceName)
 
 	authConfig, err := grpcauth.LoadConfig(env)
 	if err != nil {
@@ -196,6 +196,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 		ListenAddress:         httpAddress,
 		ListenConfigKey:       params.HTTPListenEnvKey,
 		Listener:              httpListener,
+		Metrics:               httpMetrics.Operations,
 		Handler:               workload.HealthRouter(readiness, metricsOptions...),
 		Readiness:             readiness,
 		ShutdownTimeout:       shutdownTimeout,

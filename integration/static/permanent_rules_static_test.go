@@ -42,7 +42,7 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 		}
 		for _, imported := range file.Imports {
 			value := strings.Trim(imported.Path.Value, `"`)
-			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(rel) {
+			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(rel, value) {
 				violations = append(violations, rel+" imports "+value)
 			}
 		}
@@ -53,6 +53,27 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("gRPC/protobuf imports outside allowed internal surfaces:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestFinalArchitectureSecretHelperProtobufScope(t *testing.T) {
+	const helper = "integration/envoy-gateway-secret-helper/main.go"
+	for _, test := range []struct {
+		path       string
+		importPath string
+		allowed    bool
+	}{
+		{helper, "google.golang.org/protobuf/encoding/protojson", true},
+		{helper, "google.golang.org/protobuf/proto", true},
+		{helper, "google.golang.org/protobuf/types/known/anypb", true},
+		{helper, "google.golang.org/grpc", false},
+		{helper, "google.golang.org/protobuf/reflect/protoreflect", false},
+		{"integration/envoy-gateway-secret-helper/other.go", "google.golang.org/protobuf/proto", false},
+		{"integration/other-helper/main.go", "google.golang.org/protobuf/proto", false},
+	} {
+		if got := finalArchitectureAllowsGRPCOrProtobuf(test.path, test.importPath); got != test.allowed {
+			t.Errorf("%s importing %s: allowed=%v, want %v", test.path, test.importPath, got, test.allowed)
+		}
 	}
 }
 
@@ -731,7 +752,14 @@ func finalArchitectureIsGRPCOrProtobufImport(importPath string) bool {
 		strings.HasPrefix(importPath, "google.golang.org/protobuf")
 }
 
-func finalArchitectureAllowsGRPCOrProtobuf(rel string) bool {
+func finalArchitectureAllowsGRPCOrProtobuf(rel, importPath string) bool {
+	// This exact test-only entry point compares pinned upstream xDS resources
+	// and extracts omitted Secrets. It owns no Engine RPC or gRPC transport.
+	if rel == "integration/envoy-gateway-secret-helper/main.go" {
+		return importPath == "google.golang.org/protobuf/encoding/protojson" ||
+			importPath == "google.golang.org/protobuf/proto" ||
+			importPath == "google.golang.org/protobuf/types/known/anypb"
+	}
 	// The native credential owner implements gRPC handshakes without owning
 	// business RPCs. These exact local fixture files execute and measure the
 	// actual proxy boundary; they do not widen production adapter ownership.

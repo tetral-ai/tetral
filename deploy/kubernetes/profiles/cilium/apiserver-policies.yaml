@@ -1,0 +1,131 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agent-runtime-apiserver-egress
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: bridge-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: job-runner-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: job-runner
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: job-runner
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mcp-connector-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: mcp-connector
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-connector
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: provider-gateway-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: provider-gateway
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gateway
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: web-connector-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: web-connector
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: web-connector
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: '443'
+              protocol: TCP
+            - port: '6443'
+              protocol: TCP

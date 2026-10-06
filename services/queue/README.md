@@ -186,7 +186,15 @@ The retry policy is Queue-Service-owned; consumers carry no delay authority.
 gRPC on `:9090` serves `QueueService` and a gRPC health service; HTTP on `:8080`
 serves `/health` (liveness), `/ready` (readiness), and `/metrics`. Metrics are
 per kind: `queue_pending_jobs`, `queue_leased_jobs`, `queue_retry_pending_jobs`,
-`queue_dead_lettered_jobs`, and `queue_ready_lag_seconds`. The service account
+`queue_dead_lettered_jobs`, `queue_ready_jobs`, and `queue_ready_lag_seconds`.
+`queue_ready_jobs` counts pending rows with `available_at` at or before the
+observation time; `queue_pending_jobs` includes future Retry/Defer availability.
+`queue_ready_lag_seconds` is the oldest available pending age. These are
+availability gauges, not a claim that every available job is presently leaseable
+under Session/Thread ordering. Per-kind groups absent from the database have no
+series; a failed collector emits its error counter rather than invented zeros.
+The shared [operation histogram](../../internal/workload/README.md#operation-durations)
+records registered RPC outcomes and actual Queue drain/join boundaries. The service account
 mounts no Kubernetes API token; the network policy restricts egress to PostgreSQL
 and DNS, and ingress on both ports to `api`, `job-runner`, and
 `sandbox`.

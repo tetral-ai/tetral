@@ -40,7 +40,7 @@ func run(ctx context.Context, env tetralauth.Env) error {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
 	workload.ConfigureProcessShutdown(ctx, tetralauth.DefaultShutdownTimeout+5*time.Second, diagnosticOwner)
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("auth")
 	app, err := tetralauth.BuildApplication(ctx, cfg, nil, tetralauth.WithLogger(logger), tetralauth.WithRequestMetrics(httpMetrics))
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
@@ -62,28 +62,28 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	if httpCredentials != nil {
 		defer workload.ProcessCleanup(ctx, func() { _ = httpCredentials.Close() })
 	}
-	grpcServer, err := tetralauth.OpenExternalAuthorizationServer(ctx, cfg, app.ExternalAuthorization, logger)
+	grpcServer, err := tetralauth.OpenExternalAuthorizationServer(ctx, cfg, app.ExternalAuthorization, logger, httpMetrics.Operations)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
-	defer grpcServer.Close()
+	defer func() { _ = grpcServer.Close() }()
 	publicListener, err := net.Listen("tcp", cfg.HTTPAddress)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
-	defer publicListener.Close()
+	defer func() { _ = publicListener.Close() }()
 	metricsListener, err := net.Listen("tcp", cfg.MetricsAddress)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "auth", err)
 	}
-	defer metricsListener.Close()
+	defer func() { _ = metricsListener.Close() }()
 	readiness.MarkReady()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 2)
 	go func() { results <- grpcServer.Run(runCtx, readiness) }()
 	go func() {
-		results <- runPublicAndMetricsHTTP(runCtx, cfg, readiness, logger, handler, metricsHandler, boundHTTPListeners{publicListener, metricsListener, httpTLS})
+		results <- runPublicAndMetricsHTTP(runCtx, cfg, readiness, logger, handler, metricsHandler, boundHTTPListeners{public: publicListener, metrics: metricsListener, tls: httpTLS, operationMetrics: httpMetrics.Operations})
 	}()
 	var firstErr error
 	for range 2 {
@@ -96,8 +96,9 @@ func run(ctx context.Context, env tetralauth.Env) error {
 }
 
 type boundHTTPListeners struct {
-	public, metrics net.Listener
-	tls             *tls.Config
+	public, metrics  net.Listener
+	operationMetrics *workload.OperationMetrics
+	tls              *tls.Config
 }
 
 func runPublicAndMetricsHTTP(
@@ -120,6 +121,7 @@ func runPublicAndMetricsHTTP(
 		if len(listeners) == 1 {
 			publicConfig.Listener = listeners[0].public
 			publicConfig.TLSConfig = listeners[0].tls
+			publicConfig.Metrics = listeners[0].operationMetrics
 		}
 		results <- runWorkload(runCtx, publicConfig)
 	}()
@@ -137,6 +139,7 @@ func runPublicAndMetricsHTTP(
 		}
 		if len(listeners) == 1 {
 			metricsConfig.Listener = listeners[0].metrics
+			metricsConfig.Metrics = listeners[0].operationMetrics
 		}
 		results <- runWorkload(runCtx, metricsConfig)
 	}()

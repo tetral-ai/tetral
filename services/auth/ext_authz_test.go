@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -18,13 +19,14 @@ import (
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func externalTestHeader(key, value string) *corev3.HeaderValue {
@@ -100,17 +102,21 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := OpenExternalAuthorizationServer(ctx, Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "plaintext"}, adapter, nil)
+	metrics := workload.NewOperationMetrics("auth")
+	server, err := OpenExternalAuthorizationServer(ctx, Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "plaintext"}, adapter, diagnosticOwner.Logger, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runCtx, stop := context.WithCancel(ctx)
 	joined := make(chan error, 1)
+	runJoined := false
 	go func() { joined <- server.Run(runCtx, workload.NewReadiness()) }()
 	t.Cleanup(func() {
 		stop()
-		if err := <-joined; err != nil {
-			t.Errorf("gRPC shutdown: %v", err)
+		if !runJoined {
+			if err := <-joined; err != nil {
+				t.Errorf("gRPC shutdown: %v", err)
+			}
 		}
 		_ = server.Close()
 	})
@@ -118,16 +124,31 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	defer func() {
+		if err := connection.Close(); err != nil {
+			t.Error("Check client close failed")
+		}
+	}()
 	client := authv3.NewAuthorizationClient(connection)
 	check := func(t *testing.T, req *authv3.CheckRequest, want int) *authv3.CheckResponse {
 		t.Helper()
+		outcome := "success"
+		if want >= 400 {
+			outcome = "rejected"
+		}
+		if want >= 500 {
+			outcome = "error"
+		}
+		before := authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, outcome)
 		response, err := client.Check(ctx, req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if externalTestStatus(response) != want {
 			t.Fatalf("Check status=%d want=%d", externalTestStatus(response), want)
+		}
+		if count := authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, outcome); count != before+1 {
+			t.Fatalf("actual Check %d did not populate %s: %v -> %v", want, outcome, before, count)
 		}
 		if want != 200 {
 			if response.GetOkResponse() != nil || externalTestPrincipal(response) != "" {
@@ -234,7 +255,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		}
 	})
 	t.Run("FrozenBearerAndCredentialSelection", func(t *testing.T) {
-		bearer, issuerCalls := externalTestBearer(t, ctx, admin, runtime)
+		bearer, issuerCalls := externalTestBearer(ctx, t, admin, runtime)
 		before := issuerCalls()
 		key, err := authtest.SeedIndependentKey(ctx, runtime, "ws_auth_test", "selected")
 		if err != nil {
@@ -298,7 +319,11 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer held.Rollback()
+			defer func() {
+				if err := held.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+					t.Error("Check lock transaction rollback failed")
+				}
+			}()
 			var holder int
 			if err := held.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
 				t.Fatal(err)
@@ -321,14 +346,14 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 					result <- response
 				}
 			}()
-			waiter := externalAwaitBlock(t, ctx, admin, holder)
+			waiter := externalAwaitBlock(ctx, t, admin, holder)
 			revoked := make(chan error, 1)
 			if admissionFirst {
 				go func() {
 					_, err := admin.ExecContext(ctx, `UPDATE api_keys SET revoked_at=clock_timestamp() WHERE id=$1`, key.ID)
 					revoked <- err
 				}()
-				externalAwaitBlock(t, ctx, admin, waiter)
+				externalAwaitBlock(ctx, t, admin, waiter)
 			}
 			if err := held.Commit(); err != nil {
 				t.Fatal(err)
@@ -372,7 +397,11 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer held.Rollback()
+		defer func() {
+			if err := held.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				t.Error("Check lock transaction rollback failed")
+			}
+		}()
 		var holder int
 		if err := held.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
 			t.Fatal(err)
@@ -387,7 +416,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			response, _ := adapter.Check(cancelCtx, externalTestRequest("GET", "/v1/sessions", key.APIKey, nil))
 			result <- response
 		}()
-		externalAwaitBlock(t, ctx, admin, holder)
+		externalAwaitBlock(ctx, t, admin, holder)
 		stopCheck()
 		select {
 		case response := <-result:
@@ -435,7 +464,64 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		}
 	})
 
-	t.Run("NativeTLSGenerationAndPeerAdmission", func(t *testing.T) { externalTestNativeTLS(t, ctx, admin, workloadDB, runtime, adapter, signer) })
+	t.Run("CheckExposesClosedDatabaseFailureWithoutPrincipalOrUsage", func(t *testing.T) {
+		key, err := authtest.SeedIndependentKey(ctx, runtime, "ws_auth_test", "unavailable Check")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedDB := workloadDB.OpenWorkload(t, "auth", nil)
+		if err := closedDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		failedAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closedDB, "ws_auth_test")}, Signer: signer, Logger: diagnosticOwner.Logger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failedMetrics := workload.NewOperationMetrics("auth")
+		failedServer, err := OpenExternalAuthorizationServer(ctx, Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "plaintext"}, failedAdapter, diagnosticOwner.Logger, failedMetrics)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failedCtx, stopFailed := context.WithCancel(ctx)
+		failedJoined := make(chan error, 1)
+		go func() { failedJoined <- failedServer.Run(failedCtx, workload.NewReadiness()) }()
+		defer func() {
+			stopFailed()
+			if err := <-failedJoined; err != nil {
+				t.Error(err)
+			}
+			_ = failedServer.Close()
+		}()
+		conn, err := grpc.NewClient(failedServer.listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				t.Error("failed Check client close failed")
+			}
+		}()
+		response, err := authv3.NewAuthorizationClient(conn).Check(ctx, externalTestRequest("GET", "/v1/sessions", key.APIKey, nil))
+		if err != nil || externalTestStatus(response) != 500 || externalTestPrincipal(response) != "" {
+			t.Fatalf("closed owning DB Check=%v/%v", response, err)
+		}
+		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") != 0 {
+			t.Fatal("typed500 was counted as successful gRPC admission")
+		}
+		var used sql.NullTime
+		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&used); err != nil || used.Valid {
+			t.Fatal("unavailable Check committed credential usage")
+		}
+	})
+	t.Run("NativeTLSGenerationAndPeerAdmission", func(t *testing.T) { externalTestNativeTLS(ctx, t, admin, workloadDB, runtime, adapter, signer) })
+	stop()
+	if err := <-joined; err != nil {
+		t.Fatal(err)
+	}
+	runJoined = true
+	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 {
+		t.Fatal("Auth graceful owner did not populate its actual drain")
+	}
 	diagnosticOwner.CloseWithBudget()
 	classes := map[string]bool{}
 	provenance := false
@@ -466,7 +552,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 
 }
 
-func externalAwaitBlock(t *testing.T, ctx context.Context, admin *sql.DB, holder int) int {
+func externalAwaitBlock(ctx context.Context, t *testing.T, admin *sql.DB, holder int) int {
 	t.Helper()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
@@ -487,7 +573,7 @@ func externalAwaitBlock(t *testing.T, ctx context.Context, admin *sql.DB, holder
 	}
 }
 
-func externalTestBearer(t *testing.T, ctx context.Context, admin, runtime *sql.DB) (string, func() int64) {
+func externalTestBearer(ctx context.Context, t *testing.T, admin, runtime *sql.DB) (string, func() int64) {
 	t.Helper()
 	issuer, key, unavailable, calls := newTestFederationIssuer(t)
 	t.Cleanup(issuer.Close)

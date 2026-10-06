@@ -481,7 +481,9 @@ describe("Runtime Pod lifecycle", () => {
 
   test("shutdown active-run settlement rejection logs safe diagnostics without cleanup or unbind", async () => {
     const sink: string[] = [];
+    const phaseSamples: Array<{phase:string;outcome:string;durationMs:number}> = [];
     const lifecycle = new RuntimePodLifecycle({
+      observeShutdownPhase:(phase,durationMs,outcome)=>phaseSamples.push({phase,durationMs,outcome}),
       config: validConfig(),
       logger: createJsonLogger({ write: (line) => sink.push(line) }),
       bootstrap: successfulBootstrap(),
@@ -495,6 +497,8 @@ describe("Runtime Pod lifecycle", () => {
     await lifecycle.start();
 
     await lifecycle.shutdown();
+    expect(phaseSamples).toContainEqual(expect.objectContaining({phase:"shutdown_quiesce",outcome:"error"}));
+    expect(phaseSamples.every(sample=>Number.isFinite(sample.durationMs) && sample.durationMs>=0)).toBe(true);
 
     const output = sink.join("\n");
     expect(output).toContain("shutdown_active_run_settlement_failed");

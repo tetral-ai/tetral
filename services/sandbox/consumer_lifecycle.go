@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -52,23 +53,33 @@ func (q acquisitionQueue) Lease(work context.Context, request *queuev1.LeaseRequ
 	}
 	return &queuev1.LeaseResponse{}, errors.Join(append(transitionErrors, acquire.Err())...)
 }
-func JoinSandboxWorkers(done <-chan struct{}, cancel context.CancelFunc, drain, join time.Duration) error {
+func JoinSandboxWorkers(done <-chan struct{}, cancel context.CancelFunc, drain, join time.Duration, operationMetrics ...*workload.OperationMetrics) error {
+	var metrics *workload.OperationMetrics
+	if len(operationMetrics) != 0 {
+		metrics = operationMetrics[0]
+	}
+	started := time.Now()
 	timer := time.NewTimer(drain)
 	defer timer.Stop()
 	select {
 	case <-done:
+		metrics.ObserveShutdown(workload.ComponentLogger("sandbox"), "shutdown_workers_drain", "success", time.Since(started))
 		return nil
 	case <-timer.C:
+		metrics.ObserveShutdown(workload.ComponentLogger("sandbox"), "shutdown_workers_drain", "timeout", time.Since(started))
 		cancel()
 	}
+	joinStarted := time.Now()
 	timer.Reset(join)
 	select {
 	case <-done:
+		metrics.ObserveShutdown(workload.ComponentLogger("sandbox"), "shutdown_workers_cancel_join", "success", time.Since(joinStarted))
 		return nil
 	case <-timer.C:
 		// A pool cannot be closed while its owner still uses it. Record the failed
 		// bound, then finish joining; deployment process termination is the last fuse.
 		<-done
+		metrics.ObserveShutdown(workload.ComponentLogger("sandbox"), "shutdown_workers_cancel_join", "timeout", time.Since(joinStarted))
 		return errors.New("sandbox worker cancellation join exceeded its budget")
 	}
 }

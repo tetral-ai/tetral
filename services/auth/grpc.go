@@ -9,8 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/transportsecurity"
-	"github.com/tetral-ai/tetral/internal/workload"
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -18,6 +17,9 @@ import (
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+
+	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // ExternalAuthorizationServer owns a separately bound Check listener and its
@@ -28,9 +30,12 @@ type ExternalAuthorizationServer struct {
 	credentials *transportsecurity.Owner
 	health      *health.Server
 	logger      *slog.Logger
+	metrics     *workload.OperationMetrics
 }
 
-func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *ExternalAuthorization, logger *slog.Logger) (*ExternalAuthorizationServer, error) {
+const externalAuthorizationCheckMethod = "/envoy.service.auth.v3.Authorization/Check"
+
+func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *ExternalAuthorization, logger *slog.Logger, metrics ...*workload.OperationMetrics) (*ExternalAuthorizationServer, error) {
 	if adapter == nil {
 		return nil, workload.NewConfigError("external authorization adapter is required")
 	}
@@ -38,6 +43,13 @@ func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *E
 		logger = workload.ComponentLogger("auth")
 	}
 	owner := &ExternalAuthorizationServer{logger: logger, health: health.NewServer()}
+	if len(metrics) != 0 {
+		owner.metrics = metrics[0]
+	}
+	if owner.metrics == nil {
+		owner.metrics = workload.NewOperationMetrics("auth")
+	}
+	owner.metrics.SetOperations([]string{externalAuthorizationCheckMethod})
 	validatePeer := func(ctx context.Context) error {
 		if owner.credentials != nil {
 			if err := verifyExternalAuthorizationPeer(ctx, owner.credentials, cfg.GRPCTLSEdgeClientURI); err != nil {
@@ -46,7 +58,13 @@ func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *E
 		}
 		return nil
 	}
-	options := []grpc.ServerOption{grpc.MaxRecvMsgSize(128 << 10), grpc.WaitForHandlers(true), grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+	options := []grpc.ServerOption{grpc.MaxRecvMsgSize(128 << 10), grpc.WaitForHandlers(true), grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, next grpc.UnaryHandler) (response any, transportErr error) {
+		if info.FullMethod == externalAuthorizationCheckMethod {
+			started := time.Now()
+			defer func() {
+				owner.metrics.Observe(externalAuthorizationCheckMethod, externalAuthorizationOutcome(ctx, response, transportErr), time.Since(started))
+			}()
+		}
 		if err := validatePeer(ctx); err != nil {
 			return nil, err
 		}
@@ -152,15 +170,20 @@ func (s *ExternalAuthorizationServer) Run(ctx context.Context, readiness *worklo
 	}
 	s.health.Shutdown()
 	workload.BeginProcessShutdown(ctx)
+	drainStarted := time.Now()
 	drained := make(chan struct{})
 	go func() { s.server.GracefulStop(); close(drained) }()
 	timer := time.NewTimer(DefaultShutdownTimeout)
 	defer timer.Stop()
 	select {
 	case <-drained:
+		s.metrics.ObserveShutdown(s.logger, "shutdown_grpc_drain", "success", time.Since(drainStarted))
 	case <-timer.C:
+		s.metrics.ObserveShutdown(s.logger, "shutdown_grpc_drain", "timeout", time.Since(drainStarted))
+		joinStarted := time.Now()
 		s.server.Stop()
 		<-drained
+		s.metrics.ObserveShutdown(s.logger, "shutdown_grpc_cancel_join", "success", time.Since(joinStarted))
 	}
 	// Serve returns before admitted handlers have joined; GracefulStop/Stop joins
 	// them before the application's resolver, database, and signer owners close.
@@ -175,4 +198,31 @@ func (s *ExternalAuthorizationServer) Run(ctx context.Context, readiness *worklo
 		s.logger.Error("auth.grpc.failed", workload.StartupFailureAttrs(serveErr, "component", "auth", "listener.transport", "grpc")...)
 	}
 	return serveErr
+}
+
+// An authorization denial is a successful gRPC exchange containing a typed
+// DeniedHttpResponse. Transport status alone cannot identify that decision.
+func externalAuthorizationOutcome(ctx context.Context, response any, err error) string {
+	if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled || ctx.Err() == context.Canceled {
+		return "cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded || ctx.Err() == context.DeadlineExceeded {
+		return "timeout"
+	}
+	if err != nil {
+		return "error"
+	}
+	check, ok := response.(*authv3.CheckResponse)
+	if !ok || check == nil {
+		return "error"
+	}
+	if check.GetOkResponse() != nil && check.GetStatus() != nil && check.GetStatus().GetCode() == int32(codes.OK) {
+		return "success"
+	}
+	if denied := check.GetDeniedResponse(); denied != nil {
+		if code := int(denied.GetStatus().GetCode()); code >= 400 && code < 500 {
+			return "rejected"
+		}
+	}
+	return "error"
 }

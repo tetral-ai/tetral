@@ -363,6 +363,15 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			var reasons float64
 			for _, sample := range samples {
 				for _, label := range sample.Labels {
+					if sample.Family == "tetral_operation_duration_seconds" {
+						if label.Name != "service" && label.Name != "operation" && label.Name != "outcome" && label.Name != "le" {
+							t.Fatalf("unbounded histogram label=%+v", sample)
+						}
+						if strings.Contains(label.Value, "uid-") {
+							t.Fatalf("identity in histogram=%+v", sample)
+						}
+						continue
+					}
 					if label.Name != "outcome" || strings.Contains(label.Value, "uid-") {
 						t.Fatalf("unbounded metric label=%+v", sample)
 					}
@@ -379,6 +388,39 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			}
 			if reasons != float64(wantCount) {
 				t.Fatalf("distinguishing finite metric reason=%v want%d", reasons, wantCount)
+			}
+			probeCount, attemptCount := 0.0, 0.0
+			probeSeconds, attemptSeconds, legacyProbeSeconds, legacyAttemptSeconds := 0.0, 0.0, 0.0, 0.0
+			for _, sample := range samples {
+				labels := map[string]string{}
+				for _, label := range sample.Labels {
+					labels[label.Name] = label.Value
+				}
+				if sample.Name == "runtime_placement_probe_seconds_total" {
+					legacyProbeSeconds = sample.Value
+				}
+				if sample.Name == "runtime_placement_seconds_total" {
+					legacyAttemptSeconds = sample.Value
+				}
+				if sample.Name == "tetral_operation_duration_seconds_count" {
+					if labels["operation"] == "runtime_placement_probe" {
+						probeCount += sample.Value
+					}
+					if labels["operation"] == "runtime_placement" {
+						attemptCount += sample.Value
+					}
+				}
+				if sample.Name == "tetral_operation_duration_seconds_sum" {
+					if labels["operation"] == "runtime_placement_probe" {
+						probeSeconds += sample.Value
+					}
+					if labels["operation"] == "runtime_placement" {
+						attemptSeconds += sample.Value
+					}
+				}
+			}
+			if probeCount != float64(wantCount) || attemptCount != 1 || probeSeconds != legacyProbeSeconds || attemptSeconds != legacyAttemptSeconds || attemptSeconds <= 0 {
+				t.Fatalf("actual joined timing population count=%v/%v sum=%v/%v legacy=%v/%v", probeCount, attemptCount, probeSeconds, attemptSeconds, legacyProbeSeconds, legacyAttemptSeconds)
 			}
 		})
 	}

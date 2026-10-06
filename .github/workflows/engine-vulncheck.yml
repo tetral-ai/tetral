@@ -24,6 +24,9 @@ on:
     paths:
       - 'go.mod'
       - 'go.sum'
+      - 'integration/envoy-gateway-secret-helper/**'
+      - 'scripts/check-envoy-secret-helper.py'
+      - 'deploy/dependencies.lock.json'
       - '.github/workflows/engine-vulncheck.yml'
   schedule:
     - cron: '23 6 * * *'
@@ -95,3 +98,6 @@ jobs:
       - name: Module-level scan (covers the sandbox closure)
         working-directory: services/sandbox
         run: go tool govulncheck -scan module
+
+      - name: Separate upstream translator module and symbol scans
+        run: python3 scripts/check-envoy-secret-helper.py

@@ -82,6 +82,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// readiness layer observe the drain honestly: GracefulStop keeps accepting the
 		// already-open Watch streams, so a stale SERVING status would otherwise linger
 		// for the entire drain window.
+		drainStarted := time.Now()
 		healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 		stopped := make(chan struct{})
 		go func() {
@@ -97,7 +98,13 @@ func Run(ctx context.Context, cfg Config) error {
 		var joinErr error
 		select {
 		case <-stopped:
+			if cfg.Metrics != nil {
+				cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_drain", "success", time.Since(drainStarted))
+			}
 		case <-timer.C:
+			if cfg.Metrics != nil {
+				cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_drain", "timeout", time.Since(drainStarted))
+			}
 			joinErr = forceStopAndJoin(server, cfg)
 		}
 		<-stopped
@@ -123,6 +130,9 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 	defer timer.Stop()
 	select {
 	case <-stopped:
+		if cfg.Metrics != nil {
+			cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_cancel_join", "success", time.Since(started))
+		}
 		return nil
 	case <-timer.C:
 		cfg.Logger.Error("internal.grpc.cancellation_join_timeout",
@@ -130,6 +140,9 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 			"error.class", "shutdown_error", "error.code", "cancellation_join_timeout",
 			"duration.ms", time.Since(started).Milliseconds())
 		<-stopped
+		if cfg.Metrics != nil {
+			cfg.Metrics.Operations.ObserveShutdown(cfg.Logger, "shutdown_grpc_cancel_join", "timeout", time.Since(started))
+		}
 		return ErrCancelJoinTimeout
 	}
 }
@@ -172,6 +185,15 @@ func buildServer(cfg Config) (*grpc.Server, *health.Server, error) {
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	healthv1.RegisterHealthServer(server, healthServer)
 	cfg.Register(server)
+	if cfg.Metrics != nil {
+		var methods []string
+		for service, info := range server.GetServiceInfo() {
+			for _, method := range info.Methods {
+				methods = append(methods, "/"+service+"/"+method.Name)
+			}
+		}
+		cfg.Metrics.Operations.SetOperations(methods)
+	}
 	return server, healthServer, nil
 }
 

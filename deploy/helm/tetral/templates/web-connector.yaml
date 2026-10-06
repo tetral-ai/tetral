@@ -64,6 +64,7 @@ spec:
           command:
             - /usr/local/bin/web-connector
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" false "blob" true "bun" false) | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.webDrainMs | quote }}
@@ -246,7 +247,7 @@ spec:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.network.apiServerPort }}
     - to:
 {{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
       ports:

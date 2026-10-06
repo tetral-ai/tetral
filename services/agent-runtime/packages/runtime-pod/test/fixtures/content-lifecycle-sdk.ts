@@ -8,6 +8,7 @@ import { z } from "zod/v4";
 const bootstrap = z.strictObject({
 	baseURL: z.url(),
 	apiKey: z.string().min(1),
+	caPath: z.string().min(1).optional(),
 }).parse(JSON.parse(await readFile(process.argv[2]!, "utf8")) as unknown);
 const sdkRoot = process.env.TETRAL_ENGINE_SDK_ROOT;
 if (sdkRoot === undefined || sdkRoot.length === 0) throw new Error("SDK root required");
@@ -29,9 +30,12 @@ interface SDKClient {
 	};
 }
 const module = await import(pathToFileURL(join(sdkRoot, "src/index.ts")).href) as {
-	readonly default: new (options: { baseURL: string; apiKey: string; maxRetries: number; timeout: number }) => SDKClient;
+	readonly default: new (options: { baseURL: string; apiKey: string; maxRetries: number; timeout: number; fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> }) => SDKClient;
 };
-const client = new module.default({ ...bootstrap, maxRetries: 0, timeout: 30_000 });
+const ca = bootstrap.caPath === undefined ? undefined : await readFile(bootstrap.caPath, "utf8");
+const client = new module.default({ ...bootstrap, maxRetries: 0, timeout: 30_000,
+	...(ca === undefined ? {} : { fetch: (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Bun.fetch(input, { ...init, tls: { ca } }) }),
+});
 const identity = { id: z.string().min(1) };
 const session = { ...identity, sessionId: z.string().min(1) };
 const commandSchema = z.discriminatedUnion("operation", [

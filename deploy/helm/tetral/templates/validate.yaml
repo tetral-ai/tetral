@@ -106,3 +106,47 @@ that silently permits more than the default did.
 {{- if .Values.preview.enabled }}
 {{- if or (lt (float64 .Values.preview.gateway.queueBytes) (mul 2 (int .Values.preview.gateway.batchBytes) | float64)) (gt (float64 .Values.preview.gateway.batchFrames) (float64 .Values.preview.gateway.queueFrames)) }}{{ fail "preview.gateway batches must fit the bounded publisher queue" }}{{ end }}
 {{- end }}
+
+{{/* Public API and Git routing carry different credential contracts. */}}
+{{- if not (kindIs "bool" .Values.edge.enabled) }}{{ fail "edge.enabled must be a boolean" }}{{ end }}
+{{- if .Values.edge.enabled }}
+{{- range $entry := list (dict "key" "edge.apiHost" "value" .Values.edge.apiHost) (dict "key" "gitProxyHost" "value" .Values.gitProxyHost) }}
+{{- if or (not (kindIs "string" $entry.value)) (gt (len $entry.value) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $entry.value)) }}{{ fail (printf "%s must be a concrete lowercase DNS hostname without a wildcard or port" $entry.key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.edge.apiHost .Values.gitProxyHost }}{{ fail "edge.apiHost and gitProxyHost must differ to preserve API and Git credential boundaries" }}{{ end }}
+{{- range $key := list "gatewayClassName" "apiTLSSecretName" "gitTLSSecretName" }}
+{{- if not (get $.Values.edge $key) }}{{ fail (printf "edge.%s is required" $key) }}{{ end }}
+{{- end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $key := list "trustConfigMap" "clientLeafSecret" }}
+{{- if not (get $.Values.edge $key) }}{{ fail (printf "edge.%s is required for native edge TLS" $key) }}{{ end }}
+{{- end }}
+{{- range $role := list "auth" "api" "event-stream" "git-proxy" }}
+{{- if not (get $.Values.edge.serverLeafSecrets $role) }}{{ fail (printf "edge.serverLeafSecrets.%s is required for native edge TLS" $role) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if not (regexMatch "^([1-9][0-9]*)$" (toString .Values.network.apiServerPort)) }}{{ fail "network.apiServerPort must be a concrete TCP port" }}{{ end }}
+{{- if gt (int .Values.network.apiServerPort) 65535 }}{{ fail "network.apiServerPort must be at most 65535" }}{{ end }}
+{{- if not (kindIs "bool" .Values.authIssuerNetwork.enabled) }}{{ fail "authIssuerNetwork.enabled must be a boolean" }}{{ end }}
+{{- if .Values.authIssuerNetwork.enabled }}
+{{- if or (not (kindIs "slice" .Values.authIssuerNetwork.peers)) (not .Values.authIssuerNetwork.peers) }}{{ fail "authIssuerNetwork.peers must explicitly name issuer destinations" }}{{ end }}
+{{- range $peer := .Values.authIssuerNetwork.peers }}
+{{- if or (not (kindIs "map" $peer)) (not $peer) }}{{ fail "authIssuerNetwork.peers cannot contain an empty allow-all peer" }}{{ end }}
+{{- if hasKey $peer "ipBlock" }}
+{{- if or (not $peer.ipBlock.cidr) (has $peer.ipBlock.cidr (list "0.0.0.0/0" "::/0")) }}{{ fail "authIssuerNetwork.peers must use explicit destination CIDRs rather than universal egress" }}{{ end }}
+{{- else if or (not $peer.namespaceSelector) (not $peer.podSelector) }}{{ fail "private issuer peers must explicitly select both namespace and Pods" }}{{ end }}
+{{- end }}
+{{- if or (not (kindIs "slice" .Values.authIssuerNetwork.ports)) (not .Values.authIssuerNetwork.ports) }}{{ fail "authIssuerNetwork.ports must name explicit HTTPS ports" }}{{ end }}
+{{- range $port := .Values.authIssuerNetwork.ports }}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" (toString $port))) (gt (int $port) 65535) }}{{ fail "authIssuerNetwork.ports must be concrete TCP ports" }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.nativeCertificates.enabled) }}{{ fail "nativeCertificates.enabled must be a boolean" }}{{ end }}
+{{- if .Values.nativeCertificates.enabled }}
+{{- if eq .Values.transport.profile "standard-routed" }}{{ fail "nativeCertificates.enabled requires the hardened native-certificate profile" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" .Values.transport.runtimeServerName) }}{{ fail "transport.runtimeServerName must be a concrete DNS identity for native issuance" }}{{ end }}
+{{- if not .Values.nativeCertificates.issuerName }}{{ fail "nativeCertificates.issuerName must reference the operator-bound intermediate ClusterIssuer" }}{{ end }}
+{{- if or (ne .Values.nativeCertificates.duration "24h") (ne .Values.nativeCertificates.renewBefore "8h") }}{{ fail "native certificate duration and renewal must retain the validated 24h/8h lifecycle" }}{{ end }}
+{{- end }}

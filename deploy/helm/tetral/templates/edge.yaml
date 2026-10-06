@@ -1,144 +1,290 @@
 {{- if .Values.edge.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# Controller, GatewayClass and CRDs are separately installed dependencies.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tetral-public-edge
+  namespace: tetral-system
+spec:
+  gatewayClassName: {{ .Values.edge.gatewayClassName | quote }}
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: tetral-public-edge
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+    - name: api-https
+      hostname: {{ .Values.edge.apiHost | quote }}
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ .Values.edge.apiTLSSecretName | quote }}
+    - name: git-https
+      hostname: {{ .Values.gitProxyHost | quote }}
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ .Values.edge.gitTLSSecretName | quote }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: tetral-public-edge
+  namespace: tetral-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          image: {{ include "tetral.edgeProxyImage" . | quote }}
+      envoyServiceAccount:
+        name: tetral-public-edge
+  telemetry:
+    # Application outcomes carry bounded, sanitized correlation. In particular,
+    # Git tickets in paths/query parameters must never enter a proxy access log.
+    accessLog:
+      disable: true
+{{- if eq .Values.transport.profile "hardened" }}
+  backendTLS:
+    minVersion: "1.3"
+    maxVersion: "1.3"
+    clientCertificateRef:
+      name: {{ .Values.edge.clientLeafSecret | quote }}
+{{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tetral-public-redirect
+  namespace: tetral-system
+spec:
+  parentRefs:
+    - name: tetral-public-edge
+      sectionName: http
+  hostnames: [{{ .Values.edge.apiHost | quote }}, {{ .Values.gitProxyHost | quote }}]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# Only this exact method and path bypass API authorization. All other /v1
+# matches are covered by the protected route below.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tetral-token-exchange
+  namespace: tetral-system
+spec:
+  parentRefs:
+    - name: tetral-public-edge
+      sectionName: api-https
+  hostnames: [{{ .Values.edge.apiHost | quote }}]
+  rules:
+    - matches:
+        - method: POST
+          path:
+            type: Exact
+            value: /v1/oauth/token
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [Authorization, X-Api-Key]
+      backendRefs:
+        - name: auth
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: tetral-public-api
   namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: tetral-public-edge
-    app.kubernetes.io/part-of: tetral
-    tetral.ai/edge-adapter: ingress-nginx
-  annotations:
-    kubernetes.io/ingress.class: nginx
-    # The platform accepts a 500 MB file plus a 1 MB multipart envelope
-    # (internal/files/staging.go RouteMultipartBytes); without this the
-    # controller's 1 MB default rejects every upload at the edge.
-    nginx.ingress.kubernetes.io/proxy-body-size: "501m"
-    nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"
-    nginx.ingress.kubernetes.io/auth-method: "POST"
-    nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"
-    nginx.ingress.kubernetes.io/auth-snippet: |
-      proxy_set_header X-Original-Method $request_method;
-      proxy_set_header X-Original-Path $tetral_original_path;
-      proxy_set_header X-Request-Id $request_id;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Tetral-Internal-Principal "";
-      proxy_set_header X-Tetral-Internal-Workspace "";
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      set $tetral_original_path $uri;
-      more_clear_input_headers "X-Tetral-*";
-      proxy_set_header X-Api-Key "";
-      proxy_set_header Authorization "";
-      proxy_set_header X-Tetral-Internal-Principal $upstream_http_x_tetral_internal_principal;
-      proxy_set_header X-Tetral-Internal-Workspace "";
-      proxy_set_header X-Tetral-Workspace-Id "";
 spec:
-  ingressClassName: nginx
+  parentRefs:
+    - name: tetral-public-edge
+      sectionName: api-https
+  hostnames: [{{ .Values.edge.apiHost | quote }}]
   rules:
-    - http:
-        paths:
-          - path: /v1/api_keys
-            pathType: Prefix
-            backend:
-              service:
-                name: auth
-                port:
-                  name: http
-          - path: /v1
-            pathType: Prefix
-            backend:
-              service:
-                name: api
-                port:
-                  name: http
+    - matches:
+        - path:
+            type: RegularExpression
+            value: '^/v1/sessions/[^/]+/events/stream$'
+        - path:
+            type: RegularExpression
+            value: '^/v1/sessions/[^/]+/threads/[^/]+/stream$'
+      backendRefs:
+        - name: event-stream
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/api_keys
+      backendRefs:
+        - name: auth
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: api
+          port: 8080
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
-  name: tetral-event-stream
+  name: tetral-public-git
   namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: tetral-public-edge
-    app.kubernetes.io/part-of: tetral
-    tetral.ai/edge-adapter: ingress-nginx
-  annotations:
-    kubernetes.io/ingress.class: nginx
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
-    # The platform accepts a 500 MB file plus a 1 MB multipart envelope
-    # (internal/files/staging.go RouteMultipartBytes); without this the
-    # controller's 1 MB default rejects every upload at the edge.
-    nginx.ingress.kubernetes.io/proxy-body-size: "501m"
-    nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"
-    nginx.ingress.kubernetes.io/auth-method: "POST"
-    nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"
-    nginx.ingress.kubernetes.io/auth-snippet: |
-      proxy_set_header X-Original-Method $request_method;
-      proxy_set_header X-Original-Path $tetral_original_path;
-      proxy_set_header X-Request-Id $request_id;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Tetral-Internal-Principal "";
-      proxy_set_header X-Tetral-Internal-Workspace "";
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      set $tetral_original_path $uri;
-      more_clear_input_headers "X-Tetral-*";
-      proxy_set_header X-Api-Key "";
-      proxy_set_header Authorization "";
-      proxy_set_header X-Tetral-Internal-Principal $upstream_http_x_tetral_internal_principal;
-      proxy_set_header X-Tetral-Internal-Workspace "";
-      proxy_set_header X-Tetral-Workspace-Id "";
 spec:
-  ingressClassName: nginx
+  parentRefs:
+    - name: tetral-public-edge
+      sectionName: git-https
+  hostnames: [{{ .Values.gitProxyHost | quote }}]
   rules:
-    - http:
-        paths:
-          - path: /v1/sessions/[^/]+/events/stream$
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: event-stream
-                port:
-                  name: http
-          - path: /v1/sessions/[^/]+/threads/[^/]+/stream$
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: event-stream
-                port:
-                  name: http
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [Authorization, X-Api-Key]
+      backendRefs:
+        - name: git-proxy
+          port: 8080
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
 metadata:
-  name: git-proxy
+  name: tetral-public-api
   namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: git-proxy
-    app.kubernetes.io/part-of: tetral
-    tetral.ai/edge-adapter: ingress-nginx
-  annotations:
-    kubernetes.io/ingress.class: nginx
-    nginx.ingress.kubernetes.io/enable-access-log: "false"
-    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "1800"
 spec:
-  ingressClassName: nginx
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: tetral-public-api
+  extAuth:
+    grpc:
+      backendRefs:
+        - name: auth
+          port: 9095
+    timeout: 5s
+    failOpen: false
+    statusOnError: 503
+    recomputeRoute: false
+---
+{{- range $section := list "http" "api-https" "git-https" }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: tetral-public-{{ $section }}
+  namespace: tetral-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: tetral-public-edge
+      sectionName: {{ $section }}
+  headers:
+    requestID: Generate
+    earlyRequestHeaders:
+      remove:
+        - x-forwarded-for
+        - forwarded
+        - x-real-ip
+        - x-envoy-external-address
+      removeOnMatch:
+{{- if hasPrefix "git-" $section }}
+        # RE2 has no negative lookahead. This finite complement removes every
+        # X-Tetral-* name except the exact Git ticket, including all near matches.
+        - type: RegularExpression
+          value: {{ include "tetral.gitPrivateHeadersPattern" $ | quote }}
+{{- else }}
+        - type: Prefix
+          value: x-tetral-
+{{- end }}
+        - type: Prefix
+          value: x-original-
+  clientIPDetection:
+    directSourceIP: {}
+  path:
+    escapedSlashesAction: RejectRequest
+    disableMergeSlashes: false
+  timeout:
+    http:
+      requestReceivedTimeout: 0s
+      streamIdleTimeout: 1800s
   tls:
-    - hosts:
-        - {{ .Values.gitProxyHost | quote }}
-      secretName: {{ .Values.edge.tlsSecretName | quote }}
-  rules:
-    - host: {{ .Values.gitProxyHost | quote }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: git-proxy
-                port:
-                  name: http
+    minVersion: "1.3"
+---
+{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: tetral-public-edge
+  namespace: tetral-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: tetral-public-edge
+  timeout:
+    http:
+      requestTimeout: 0s
+      maxStreamDuration: 0s
+      streamIdleTimeout: 1800s
+---
+# The selected SecurityPolicy API does not expose encode_raw_headers. Match
+# the one generated API authorization filter by its full policy-owned name.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata:
+  name: tetral-auth-raw-headers
+  namespace: tetral-system
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: tetral-public-edge
+  type: JSONPatch
+  jsonPatches:
+{{- range $field := list "encode_raw_headers" "validate_mutations" }}
+    - type: type.googleapis.com/envoy.config.listener.v3.Listener
+      name: tetral-system/tetral-public-edge/api-https
+      operation:
+        op: add
+        jsonPath: "$..http_filters[?(@.name == 'envoy.filters.http.ext_authz/securitypolicy/tetral-system/tetral-public-api')].typed_config"
+        path: /{{ $field }}
+        value: true
+{{- end }}
+{{- if eq .Values.transport.profile "hardened" }}
+{{- range $name := list "auth" "api" "event-stream" "git-proxy" }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: {{ $name }}-edge
+  namespace: tetral-system
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ $name }}
+  validation:
+    hostname: {{ $name }}.tetral-system.svc.cluster.local
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: {{ $.Values.edge.trustConfigMap | quote }}
+{{- end }}
+{{- end }}
 {{- end }}

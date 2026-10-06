@@ -144,6 +144,9 @@ func TestSchedulerMetricsCollectorReportsSafeCounters(t *testing.T) {
 	got := map[string]float64{}
 	for _, sample := range samples {
 		got[sample.Name] = sample.Value
+		if sample.Family == "tetral_operation_duration_seconds" {
+			continue
+		}
 		if len(sample.Labels) != 0 {
 			t.Fatalf("cleanup scheduler metric %s has labels %#v; want no user/session labels", sample.Name, sample.Labels)
 		}

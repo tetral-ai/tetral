@@ -86,6 +86,7 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 12 }}
             - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.sandboxDrainMs | quote }}

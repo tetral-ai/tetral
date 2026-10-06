@@ -284,6 +284,7 @@ const (
 type MetricsSnapshot struct {
 	Kind             string
 	PendingJobs      int
+	ReadyJobs        int
 	LeasedJobs       int
 	RetryPendingJobs int
 	DeadLetteredJobs int

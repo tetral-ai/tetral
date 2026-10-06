@@ -192,6 +192,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 9095
     - from:
         - namespaceSelector:
             matchLabels:
@@ -1686,6 +1688,10 @@ spec:
   selector:
     app.kubernetes.io/name: auth
   ports:
+    - name: grpc-check
+      port: 9095
+      targetPort: grpc-check
+      appProtocol: kubernetes.io/h2c
     - name: http
       port: 8080
       targetPort: http
@@ -1948,6 +1954,14 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
@@ -2108,6 +2122,14 @@ spec:
           command:
             - /usr/local/bin/tetral-api
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2118,6 +2140,16 @@ spec:
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
               value: "tetral-object-store.tetral-system.svc.cluster.local"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_HTTP_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_HTTP_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_HTTP_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
             - name: TETRAL_API_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -2196,11 +2228,11 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           resources:
 
             limits:
@@ -2219,12 +2251,24 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: edge-trust
+              mountPath: /var/run/tetral/edge-trust
+              readOnly: true
+            - name: edge-leaf
+              mountPath: /var/run/tetral/edge-leaf
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
             - name: engine-data
               mountPath: /var/tetral
       volumes:
+        - name: edge-trust
+          configMap:
+            name: "tetral-edge-native-trust"
+        - name: edge-leaf
+          secret:
+            secretName: "tetral-api-edge-tls"
         - name: store-trust
           configMap:
             name: "tetral-store-trust"
@@ -2268,12 +2312,30 @@ spec:
           command:
             - /usr/local/bin/tetral-auth
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_HTTP_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_HTTP_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_HTTP_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
             - name: TETRAL_AUTH_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -2319,7 +2381,21 @@ spec:
                 secretKeyRef:
                   name: "auth-database"
                   key: url
+            - name: TETRAL_AUTH_GRPC_ADDR
+              value: ":9095"
+            - name: TETRAL_AUTH_GRPC_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_AUTH_GRPC_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_AUTH_GRPC_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_AUTH_GRPC_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
           ports:
+            - name: grpc-check
+              containerPort: 9095
             - name: http
               containerPort: 8080
             - name: metrics
@@ -2327,12 +2403,18 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           volumeMounts:
+            - name: edge-trust
+              mountPath: /var/run/tetral/edge-trust
+              readOnly: true
+            - name: edge-leaf
+              mountPath: /var/run/tetral/edge-leaf
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -2354,6 +2436,12 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: edge-trust
+          configMap:
+            name: "tetral-edge-native-trust"
+        - name: edge-leaf
+          secret:
+            secretName: "tetral-auth-edge-tls"
         - name: store-trust
           configMap:
             name: "tetral-store-trust"
@@ -2398,6 +2486,14 @@ spec:
           command:
             - /usr/local/bin/bridge-api
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2584,12 +2680,34 @@ spec:
           command:
             - /usr/local/bin/event-stream
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: "local"
+            - name: TETRAL_SERVICE_VERSION
+              value: "dev"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_HTTP_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_HTTP_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_HTTP_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
             - name: TETRAL_NATS_SERVERS
               value: "tls://tetral-nats.tetral-system.svc.cluster.local:4222"
             - name: TETRAL_NATS_USER_PATH
@@ -2654,12 +2772,18 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           volumeMounts:
+            - name: edge-trust
+              mountPath: /var/run/tetral/edge-trust
+              readOnly: true
+            - name: edge-leaf
+              mountPath: /var/run/tetral/edge-leaf
+              readOnly: true
             - name: nats-role
               mountPath: /var/run/tetral/nats-role
               readOnly: true
@@ -2690,6 +2814,12 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: edge-trust
+          configMap:
+            name: "tetral-edge-native-trust"
+        - name: edge-leaf
+          secret:
+            secretName: "tetral-event-stream-edge-tls"
         - name: nats-role
           secret:
             secretName: "tetral-nats-subscriber"
@@ -2749,12 +2879,30 @@ spec:
           command:
             - /usr/local/bin/git-proxy
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_HTTP_TRANSPORT
+              value: "native-mtls"
+            - name: TETRAL_HTTP_TLS_CA_PATH
+              value: /var/run/tetral/edge-trust/ca.crt
+            - name: TETRAL_HTTP_TLS_CERT_PATH
+              value: /var/run/tetral/edge-leaf/tls.crt
+            - name: TETRAL_HTTP_TLS_KEY_PATH
+              value: /var/run/tetral/edge-leaf/tls.key
+            - name: TETRAL_HTTP_TLS_EDGE_CLIENT_URI
+              value: "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
             - name: TETRAL_GIT_PROXY_HTTP_ADDR
               value: ":8080"
             - name: TETRAL_GIT_PROXY_METRICS_ADDR
@@ -2787,12 +2935,18 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           volumeMounts:
+            - name: edge-trust
+              mountPath: /var/run/tetral/edge-trust
+              readOnly: true
+            - name: edge-leaf
+              mountPath: /var/run/tetral/edge-leaf
+              readOnly: true
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
               readOnly: true
@@ -2814,6 +2968,12 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: edge-trust
+          configMap:
+            name: "tetral-edge-native-trust"
+        - name: edge-leaf
+          secret:
+            secretName: "tetral-git-proxy-edge-tls"
         - name: store-trust
           configMap:
             name: "tetral-store-trust"
@@ -2859,6 +3019,14 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -2903,13 +3071,13 @@ spec:
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
               value: bridge-job-runner
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
-              value: '30000'
+              value: "30000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
-              value: '10000'
+              value: "10000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
-              value: '8'
+              value: "8"
             - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
-              value: '1000'
+              value: "1000"
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
@@ -3071,6 +3239,14 @@ spec:
             - bun
             - /app/dist/mcp-connector/src-command.js
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3231,6 +3407,14 @@ spec:
             - bun
             - /app/dist/provider-gateway/src-command.js
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3445,6 +3629,14 @@ spec:
           command:
             - /usr/local/bin/tetral-queue
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3586,6 +3778,14 @@ spec:
           command:
             - /usr/local/bin/tetral-sandbox
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -3856,6 +4056,14 @@ spec:
           command:
             - /usr/local/bin/web-connector
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -4082,6 +4290,18 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
+                - name: TETRAL_LOG_BURST
+                  value: "1"
+                - name: TETRAL_LOG_LEVEL
+                  value: "info"
+                - name: TETRAL_LOG_MAX_RECORD_BYTES
+                  value: "16384"
+                - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+                  value: "30000"
+                - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+                  value: "local"
+                - name: TETRAL_SERVICE_VERSION
+                  value: "dev"
                 - name: TETRAL_DATABASE_TLS_CA_PATH
                   value: /var/run/tetral/store-trust/database-ca.crt
                 - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -4250,138 +4470,6 @@ spec:
     - to:
         - operation:
             notPorts: ["9092"]
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: agent-runtime-apiserver-egress
-  namespace: tetral-agent-runtime
-  labels:
-    app.kubernetes.io/name: agent-runtime
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: agent-runtime
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: bridge-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: bridge
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: bridge
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: job-runner-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: job-runner
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: job-runner
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: mcp-connector-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: mcp-connector
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: mcp-connector
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: provider-gateway-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: provider-gateway
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: provider-gateway
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: web-connector-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: web-connector
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: web-connector
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP
 ---
 apiVersion: networking.istio.io/v1
 kind: DestinationRule

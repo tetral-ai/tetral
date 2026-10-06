@@ -104,3 +104,37 @@ Runtime's real HTTP metrics test also exercises asynchronous stream failure.
 The owning service packages typecheck and bundle these file dependencies.
 Their selected command-failure tests exercise real Bun executable and signal
 exits, acquired-resource cleanup, and diagnostic backpressure.
+
+## Operation histograms
+
+`OperationMetricsRegistry` is the process-local histogram utility used by the
+owning Gateway/MCP/Runtime registries. It opens no listener. Each owner supplies
+its static operation domain; other operation input shares `unknown_method`.
+The service is a fixed workload name and outcomes are a closed union. IDs,
+configured MCP tool names and error messages are never labels. Nonfinite or
+negative duration observations are excluded rather than presented as zero.
+
+The public `tetral_operation_duration_seconds` family uses seconds and the
+[shared fixed bucket contract](../workload/README.md#operation-durations).
+Milliseconds at an owning hook are converted once at ingestion. Existing
+service-specific names and units are retained. `_count` describes completed
+local observations, with success and non-success populations separate; it does
+not stand in for admission or valid Agent-completion counters. Histogram
+rendering is read-only and observer failures remain business-independent.
+
+`observeShutdown` records a completed owning phase in that same public registry
+and emits `workload.shutdown.phase_completed` through the existing logger. Its
+closed `operation`/`outcome`, exact `duration.seconds` and per-operation/outcome
+`metric.observation.count` survive field filtering. Resource fields remain
+logger-owned, including `service.instance.id` and `process.pid`. The record is
+emitted at phase completion before command diagnostic cleanup; a drain cutoff
+and the later actual join remain separate observations.
+
+This provides a retrieval path after the metrics listener closes, with no new
+listener, network dependency or exit budget. Central log capture must bind the
+process and container incarnation and corroborate source phase/lifetime
+coverage. Info filtering, diagnostic backpressure/failure, missing records or a
+hard exit make evidence unavailable or partial. Count continuity can detect
+interior omissions; it does not prove that the last record was final. Stream
+sink `close()` does not wait for accepted asynchronous stderr delivery, and a
+phase record never proves that all process cleanup completed.

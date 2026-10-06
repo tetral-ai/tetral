@@ -14,8 +14,8 @@ import (
 // package/frontmatter parser or the single repository workflow parser. The
 // exact test/fixture exceptions perform object-level YAML parsing to validate
 // deployment equivalence, immutable Istiod/Core NATS rendering and the actual
-// rendered Runtime listener. Other Engine packages must continue to follow
-// engine/CLAUDE.md's stdlib-first dependency rule.
+// rendered Runtime listener and translated Envoy Gateway resources. Other
+// Engine packages must continue to follow the stdlib-first dependency rule.
 //
 // The test walks every Go source file under engine/ and asserts that
 // no file outside `internal/skill`, the exact workflow parser, or the exact
@@ -25,12 +25,15 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	const allowedDir = "internal/skill"
 	const allowedWorkflowParser = "internal/testinfra/workflow_yaml.go"
 	allowedDeploymentParsers := map[string]bool{
-		"deploy/helm/chart_test.go":             true,
-		"deploy/istio/render_test.go":           true,
-		"deploy/nats/render_test.go":            true,
-		"integration/transporttest/runtime.go":  true,
-		"internal/testinfra/nats.go":            true,
-		"services/sandbox/k8s_manifest_test.go": true,
+		"integration/envoy_gateway_translation_test.go": true,
+		"integration/envoy_gateway_tls_test.go":         true,
+		"integration/envoy_gateway_raw_headers_test.go": true,
+		"deploy/helm/chart_test.go":                     true,
+		"deploy/istio/render_test.go":                   true,
+		"deploy/nats/render_test.go":                    true,
+		"integration/transporttest/runtime.go":          true,
+		"internal/testinfra/nats.go":                    true,
+		"services/sandbox/k8s_manifest_test.go":         true,
 	}
 
 	engineRoot := engineRootDir(t)

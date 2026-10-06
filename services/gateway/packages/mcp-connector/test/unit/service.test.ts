@@ -22,19 +22,34 @@ const BindingTokenKey = "gateway-runtime-binding-token-test-key-32";
 
 describe("McpConnectorServiceShell", () => {
   test("shutdown rejects an unjoined list worker and keeps its completion owned", async () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: line => lines.push(line) });
     let release!: () => void;
     const held=new Promise<void>(resolve=>{release=resolve;});
     const client=new RecordingMcpClient();
     const original=client.listTools.bind(client);
     client.listTools=async (...args)=>{await held;return original(...args);};
-    const service=createService(client);
+    const service=createService(client,undefined,logger);
     const worker=service.listMcpTools(validListRequest(),new Metadata());
     await new Promise(resolve=>setTimeout(resolve,1));
     let completed=false;
     const shutdown=service.shutdown(new Date(Date.now()+30));
     const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
     await new Promise(resolve=>setTimeout(resolve,45));expect(completed).toBe(false);
-    release();expect(await observed).toBeInstanceOf(Error);await worker;
+    release();
+    // Metrics must not claim a worker joined before the held SDK operation returns.
+expect(await observed).toBeInstanceOf(Error);
+    expect(service.metricsText()).toContain('operation="shutdown_drain",outcome="timeout"} 1');
+    expect(service.metricsText()).toContain('operation="shutdown_cancel_join",outcome="timeout"} 1');await worker;
+    const phases = lines.map(line => JSON.parse(line)).filter(record => record.event === "workload.shutdown.phase_completed");
+    expect(phases.map(record => record.operation)).toEqual(["shutdown_drain", "shutdown_cancel_join"]);
+    for (const record of phases) {
+      expect(record["service.instance.id"]).toBeString();
+      expect(record["metric.observation.count"]).toBe(1);
+      expect(record["duration.seconds"]).toBeGreaterThan(0);
+      expect(service.metricsText()).toContain(`tetral_operation_duration_seconds_sum{service="mcp-connector",operation="${record.operation}",outcome="timeout"} ${record["duration.seconds"]}`);
+    }
+    logger.close();
     await service.shutdown(new Date(Date.now()+30));
   });
   test("surfaces configured-server resolution rejection from the client owner", async () => {
@@ -600,6 +615,7 @@ describe("McpConnectorServiceShell", () => {
     expect(logger.terminalRecords).toHaveLength(1);
     expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
+    expect(metrics.render()).toContain('tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
   });
 
   test("records exactly one terminal RunMcpTool outcome for every early exit", async () => {

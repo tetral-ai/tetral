@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/eventwire"
@@ -57,6 +58,7 @@ type publicProjectionOptions struct {
 	transform  func(eventwire.PreviewFrame, string, []byte) [][]byte
 	config     func(*eventstream.StreamConfig)
 	wrapWriter func(http.Handler) http.Handler
+	publicEdge func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string)
 }
 
 type publicProjectionRequest struct {
@@ -130,7 +132,14 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		t.Fatal(err)
 	}
 	t.Cleanup(hub.Close)
-	base, key := startContentSDKPublicEdgeWithEvents(t, pools, nil, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
+	edgeFactory := options.publicEdge
+	if edgeFactory == nil {
+		edgeFactory = func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, events func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
+			base, key := startContentSDKPublicEdgeWithEvents(t, pools, objects, events)
+			return base, key, ""
+		}
+	}
+	base, key, caPath := edgeFactory(t, pools, nil, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
 		f.baseReader = reader
 		if options.reader != nil {
 			reader = options.reader(reader)
@@ -143,7 +152,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		return handler
 	})
 	h.contentE2E = &contentE2E{db: admin, baseURL: base, apiKey: key}
-	provisioner := startContentSDKChildContext(ctx, t, base, key)
+	provisioner := startContentSDKChildContext(ctx, t, base, key, caPath)
 	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_projection")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "projection"})
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +184,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		return nil
 	})
 	f.bridge = endpoint.Client
-	h.client = startPublicStreamingSDK(t, base, key)
+	h.client = startPublicStreamingSDK(t, base, key, caPath)
 	t.Cleanup(func() { h.client.control(t, "close", nil) })
 	f.publisher = publicProjectionPublisher(t, broker)
 	return f

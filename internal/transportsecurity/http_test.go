@@ -52,7 +52,11 @@ func TestNativeHTTPListenerIdentityAndFreshGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer owner.Close()
+	defer func() {
+		if err := owner.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +90,7 @@ func TestNativeHTTPListenerIdentityAndFreshGeneration(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		if response.StatusCode != http.StatusNoContent || response.ProtoMajor != 2 || response.TLS.NegotiatedProtocol != "h2" || response.TLS.PeerCertificates[0].SerialNumber.String() != expectedSerial {
 			t.Fatalf("native HTTP protocol/generation mismatch: status=%d protocol=%s", response.StatusCode, response.Proto)
 		}
@@ -105,7 +109,7 @@ func TestNativeHTTPListenerIdentityAndFreshGeneration(t *testing.T) {
 	plain := &http.Client{Timeout: 2 * time.Second}
 	response, err := plain.Get("http://" + listener.Addr().String() + "/v1/protected")
 	if err == nil {
-		response.Body.Close()
+		_ = response.Body.Close()
 		if response.StatusCode < 400 {
 			t.Fatal("plaintext admitted")
 		}

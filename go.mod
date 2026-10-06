@@ -50,6 +50,7 @@ require (
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908 // indirect
+	github.com/envoyproxy/go-control-plane/ratelimit v0.1.1-0.20260729145720-a2d8c7492908 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect

@@ -5,6 +5,8 @@
  * normalized to finite non-negative numbers, snapshots copy mutable maps, and metrics remain a
  * read-only observability side channel that does not affect command or lifecycle decisions.
  */
+import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import type { ShutdownPhaseLogger } from "@tetral/ts-observability";
 import { readFileSync } from "node:fs";
 import type {
 	RuntimeApprovalSource,
@@ -68,6 +70,7 @@ interface Observation {
 export interface RuntimePodDomainMetricsSnapshot
 	extends RuntimeHotStateMetrics {
 	readonly activeToolFibers: number;
+ readonly operationDurationText?: string;
  readonly pendingContentEntries?:number;
  readonly pendingContentBytes?:number;
  readonly contentCommitLatencyMs?:ReadonlyMap<string,Observation>;
@@ -85,8 +88,11 @@ export interface RuntimePodDomainMetricsSnapshot
 	readonly closeoutEvents: ReadonlyMap<RuntimeCloseoutEvent["event"], number>;
 }
 
+export type RuntimeShutdownPhase = "shutdown_quiesce" | "shutdown_report" | "shutdown_release" | "shutdown_local_join" | "shutdown_clients" | "shutdown_listeners";
+
 /** Combines the Runtime Core metrics sink with snapshot access for HTTP exposition. */
 export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
+ readonly observeShutdownPhase?: (phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger) => void;
 	readonly recordCloseoutEvent: (event: RuntimeCloseoutEvent) => void;
 	readonly snapshot: () => RuntimePodDomainMetricsSnapshot;
 }
@@ -96,6 +102,15 @@ export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
  * Callers inject one registry into runtime services and HTTP composition instead of using global state.
  */
 export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
+ readonly operations = new OperationMetricsRegistry("agent-runtime", [
+  "agent_provider_request", "compaction_summary", "approval_reviewer", "approval_reviewer_compaction",
+  "append", "finish_idle", "write_request_end", "commit_runtime_termination",
+  "build_context", "build_thread_context", "load_pending_input", "commit_accepted_input",
+  "content_commit", "content_apply", "request_end_commit", "request_end_apply",
+  "member_barrier_wait", "permit_wait", "binding_refresh", "approval_wait", "tool_accept", "tool_settle", "context_reconstruct", "cleanup_join",
+  "shutdown_quiesce", "shutdown_report", "shutdown_release", "shutdown_local_join", "shutdown_clients", "shutdown_listeners",
+ ]);
+ observeShutdownPhase(phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout", logger?: ShutdownPhaseLogger): void { this.operations.observeShutdown(phase,outcome,durationMs/1000,logger); }
 	private hotState: RuntimeHotStateMetrics = {
 		activeSessions: 0,
 		activeThreads: 0,
@@ -127,10 +142,12 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   this.pendingContentBytes=nonNegative(this.pendingContentBytes+bytes);
  }
  observeContentCommitLatency(kind:RuntimeContentKind,phase:RuntimeContentCommitPhase,durationMs:number,outcome:RuntimeContentCommitOutcome,requestKind:RuntimeProviderStreamKind="agent_provider_request"):void {
+  this.operations.observe(phase,outcome,durationMs/1000);
   addObservation(this.contentCommitLatencyMs,labelledKey({kind,phase,outcome,request_kind:requestKind}),durationMs);
  }
 
  observeContinuationLatency(operation:RuntimeContinuationOperation,durationMs:number,outcome:RuntimeMetricOutcome,requestKind:RuntimeProviderStreamKind,approvalSource?:RuntimeApprovalSource):void {
+  this.operations.observe(operation,outcome,durationMs/1000);
   addObservation(this.continuationLatencyMs,labelledKey({operation,outcome,request_kind:requestKind,
     ...(approvalSource === undefined ? {} : { approval_source: approvalSource })}),durationMs);
  }
@@ -175,6 +192,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(kind,outcome,durationMs/1000);
 		addObservation(
 			this.providerStreamDurationMs,
 			labelledKey({ kind, outcome }),
@@ -188,6 +206,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(operation,outcome,durationMs/1000);
 		addObservation(
 			this.eventWriteLatencyMs,
 			labelledKey({ operation, outcome }),
@@ -201,6 +220,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		durationMs: number,
 		outcome: RuntimeMetricOutcome,
 	): void {
+		this.operations.observe(operation,outcome,durationMs/1000);
 		addObservation(
 			this.contextLoadLatencyMs,
 			labelledKey({ operation, outcome }),
@@ -231,6 +251,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
 		return {
 			...this.hotState,
 			activeToolFibers: this.activeToolFibers,
+   operationDurationText:this.operations.render(),
    pendingContentEntries:this.pendingContentEntries,
    pendingContentBytes:this.pendingContentBytes,
    contentCommitLatencyMs:new Map(this.contentCommitLatencyMs),
@@ -299,6 +320,7 @@ export function runtimePodMetricsText(
 		container.limitBytes > 0;
 	const capacity = lifecycle.sessionCapacity();
 	return [
+    runtimeSnapshot.operationDurationText ?? "",
 		...(capacity === undefined
 			? []
 			: [

@@ -807,6 +807,11 @@ func TestS3SDKImportConfinement(t *testing.T) {
 			return walkErr
 		}
 		if d.IsDir() {
+			// The root .test-results directory holds generated verification
+			// artifacts, not Engine source (see docs/testing.md and .gitignore).
+			if path == filepath.Join(root, ".test-results") {
+				return filepath.SkipDir
+			}
 			name := d.Name()
 			if name == "vendor" || name == "testdata" || name == ".git" {
 				return filepath.SkipDir

@@ -5,20 +5,22 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestAuthGRPCConfig(t *testing.T) {
@@ -62,7 +64,7 @@ func TestAuthGRPCConfig(t *testing.T) {
 
 // Called by the owning PostgreSQL root: held Check and its usage transaction
 // are real, while the existing certificate fixture changes mounted generations.
-func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, workloadDB *storagetest.WorkloadDB, runtime *sql.DB, adapter *ExternalAuthorization, signer *auth.InternalPrincipalSigner) {
+func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, workloadDB *storagetest.WorkloadDB, runtime *sql.DB, adapter *ExternalAuthorization, signer *auth.InternalPrincipalSigner) {
 	// This listener owns an actual independent Auth-role pool, so shutdown can
 	// prove its admitted users join before the pool/credential owners close.
 	nativeDB := workloadDB.OpenWorkload(t, "auth", nil)
@@ -87,7 +89,8 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 	}
 	project("initial", rootA.PEM, leafA)
 	cfg := Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "native-mtls", GRPCTLSCAPath: filepath.Join(dir, "ca.crt"), GRPCTLSCertPath: filepath.Join(dir, "tls.crt"), GRPCTLSKeyPath: filepath.Join(dir, "tls.key"), GRPCTLSEdgeClientURI: edgeURI}
-	server, err := OpenExternalAuthorizationServer(ctx, cfg, nativeAdapter, nil)
+	metrics := workload.NewOperationMetrics("auth")
+	server, err := OpenExternalAuthorizationServer(ctx, cfg, nativeAdapter, adapter.cfg.Logger, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +184,11 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Rollback()
+	defer func() {
+		if err := held.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			t.Error("native Check lock transaction rollback failed")
+		}
+	}()
 	var holder int
 	if err := held.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
 		t.Fatal(err)
@@ -199,7 +206,7 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 			result <- response
 		}
 	}()
-	externalAwaitBlock(t, ctx, admin, holder)
+	externalAwaitBlock(ctx, t, admin, holder)
 	overlap := append(append([]byte{}, rootA.PEM...), rootB.PEM...)
 	renewed := transporttest.Must(rootA.ValidLeaf(dns, "spiffe://tetral.local/ns/tetral-system/sa/auth"))
 	project("renewed-overlap", overlap, renewed)
@@ -287,7 +294,11 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer drainTx.Rollback()
+	defer func() {
+		if err := drainTx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			t.Error("native Check lock transaction rollback failed")
+		}
+	}()
 	var drainHolder int
 	if err := drainTx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&drainHolder); err != nil {
 		t.Fatal(err)
@@ -305,7 +316,7 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 			drainResult <- response
 		}
 	}()
-	externalAwaitBlock(t, ctx, admin, drainHolder)
+	externalAwaitBlock(ctx, t, admin, drainHolder)
 	stop()
 	withdrawal, withdrawCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer withdrawCancel()
@@ -348,6 +359,9 @@ func externalTestNativeTLS(t *testing.T, ctx context.Context, admin *sql.DB, wor
 		t.Fatal("Check listener did not join after admitted work")
 	}
 	var drainedTouch sql.NullTime
+	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 || authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") == 0 {
+		t.Fatal("real native Check and held-owner drain durations were not exposed")
+	}
 	if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, drainKey.ID).Scan(&drainedTouch); err != nil || !drainedTouch.Valid {
 		t.Fatal("drained Check lost committed usage")
 	}

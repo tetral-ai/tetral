@@ -1,3 +1,4 @@
+import type { RuntimeShutdownPhase } from "./metrics.js";
 /**
  * Coordinates Runtime Pod bootstrap, process registration, readiness, command admission and the
  * bounded checkpoint handoff at shutdown.
@@ -68,6 +69,7 @@ export interface RuntimeCommandLease {
  * configuration's lifecycle policy.
  */
 export interface RuntimePodLifecycleOptions {
+  readonly observeShutdownPhase?: (phase: RuntimeShutdownPhase, durationMs: number, outcome: "success" | "error" | "timeout") => void;
   readonly runtimeProcess: RuntimeProcessPort;
   readonly config: RuntimePodConfigResult;
   readonly logger: RuntimePodLogger;
@@ -466,6 +468,10 @@ export class RuntimePodLifecycle {
     );
   }
 
+  private recordShutdownPhase(phase: RuntimeShutdownPhase, started: number, outcome: "success" | "error" | "timeout"): void {
+    try { this.options.observeShutdownPhase?.(phase, performance.now()-started, outcome); } catch { /* Metrics cannot change shutdown ownership. */ }
+  }
+
   private async drain(): Promise<void> {
     // A lifecycle whose configuration failed never registered or admitted work; the typed defaults
     // still bound its shutdown.
@@ -487,6 +493,7 @@ export class RuntimePodLifecycle {
     // Attach before beginning report I/O; an idle Session may already be awaiting this ACK.
     void draining.catch(() => undefined);
     const operations = new Map<string, string>();
+    const quiesceStarted = performance.now();
     const coreDrain = this.options.shutdownHooks.quiesce({
       currentStepDeadline,
       settlementDeadline,
@@ -528,6 +535,8 @@ export class RuntimePodLifecycle {
           operationId = `rrelease_${crypto.randomUUID()}`;
           operations.set(key, operationId);
         }
+        const releaseStarted = performance.now();
+        let releaseOutcome: "success" | "error" = "error";
         try {
           await retryRuntimeProcessOperation(async () => {
             const receipt = await this.options.runtimeProcess.release(
@@ -554,21 +563,34 @@ export class RuntimePodLifecycle {
                   thread.disposition === 1 ? "idle" : "recover",
               });
           }, deadline);
+          releaseOutcome = "success";
         } catch (error) {
           // This Session keeps its binding; Job Runner's fenced loss repair settles it after exit.
           this.recordHandoffIncomplete(scope, operationId, error);
           throw error;
+        } finally {
+          this.recordShutdownPhase("shutdown_release", releaseStarted, releaseOutcome);
         }
       },
     });
-    void coreDrain.catch(() => undefined);
+    void coreDrain.then(
+      () => this.recordShutdownPhase("shutdown_quiesce", quiesceStarted, "success"),
+      () => this.recordShutdownPhase("shutdown_quiesce", quiesceStarted, "error"),
+    );
     try {
       this.heartbeatStop?.abort();
       await this.heartbeat;
-      await retryRuntimeProcessOperation(
-        () => this.options.runtimeProcess.report("draining", settlementDeadline),
-        settlementDeadline,
-      );
+      const reportStarted = performance.now();
+      let reportOutcome: "success" | "error" = "error";
+      try {
+        await retryRuntimeProcessOperation(
+          () => this.options.runtimeProcess.report("draining", settlementDeadline),
+          settlementDeadline,
+        );
+        reportOutcome = "success";
+      } finally {
+        this.recordShutdownPhase("shutdown_report", reportStarted, reportOutcome);
+      }
       this.lastReportAt = Date.now();
       this.armProcessFreshness();
       this.startHeartbeat();
@@ -600,6 +622,7 @@ export class RuntimePodLifecycle {
           );
         // Joining producer bodies follows cancellation; public promise rejection is not ownership transfer.
         const localDeadline = Date.now() + policy.localJoinTimeoutMs;
+        const joinStarted = performance.now();
         const joinWindow = new AbortController();
         try {
           await Promise.race([
@@ -610,6 +633,7 @@ export class RuntimePodLifecycle {
           joinWindow.abort();
         }
         await joined;
+        this.recordShutdownPhase("shutdown_local_join",joinStarted,Date.now() > localDeadline ? "timeout" : "success");
         try {
           this.options.logger.error(
             shutdownFailureLogRecord({

@@ -10,9 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/workload"
+	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 )
 
 func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
@@ -22,12 +28,16 @@ func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
 	opened := make(chan struct{})
 	var once sync.Once
 	count := 0
+	var rpcAddress string
 	var mu sync.Mutex
 	listen := func(network, address string) (net.Listener, error) {
 		listener, err := net.Listen(network, "127.0.0.1:0")
 		if err == nil {
 			mu.Lock()
 			count++
+			if count == 1 {
+				rpcAddress = listener.Addr().String()
+			}
 			if count == 2 {
 				once.Do(func() { close(opened) })
 			}
@@ -46,6 +56,17 @@ func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("listeners did not open")
 	}
+	conn, err := grpc.NewClient(rpcAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	callCtx, stopCall := context.WithTimeout(context.Background(), time.Second)
+	defer stopCall()
+	_, err = providergatewayv1.NewProviderGatewayServiceClient(conn).RunWeb(callCtx, &providergatewayv1.RunWebRequest{})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("owning RPC denial: %v", err)
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -54,6 +75,11 @@ func TestRunOpensSeparateListenersAndStopsCleanlyOnCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+	for _, sample := range []string{`operation="/tetral.provider_gateway.v1.ProviderGatewayService/RunWeb",outcome="rejected",service="web-connector"} 1`, `operation="shutdown_grpc_drain",outcome="success",service="web-connector"} 1`} {
+		if !strings.Contains(service.metrics.GRPC.Operations.Text(), sample) {
+			t.Fatalf("missing owning duration %s: %s", sample, service.metrics.GRPC.Operations.Text())
+		}
 	}
 	for _, field := range []string{
 		`"msg":"workload.started"`,

@@ -1,7 +1,7 @@
 # Tetral Helm chart
 
 This chart installs the same Tetral platform objects as the canonical
-manifests under `deploy/kubernetes`. Default values render those 115 objects
+manifests under `deploy/kubernetes`. Default values render those 109 objects
 without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
@@ -42,31 +42,24 @@ preparation and workspace seeding run independently before any service starts.
    comes from the DSN in the Secrets; the peer list only decides what the
    policy admits.
 
-3. **Install the Cilium CRDs or disable their objects.** Defaults preserve
-   six canonical `CiliumNetworkPolicy` objects, one API-server entity
-   allowance each for agent-runtime, bridge, job-runner, provider-gateway,
-   mcp-connector and web-connector. Cilium does not
-   match the Kubernetes API service through an `ipBlock` under the tested
-   policy mode, so the six entity rules admit both the service port 443 and
-   the node-direct port 6443. This behavior was verified on Cilium 1.19.6 with
-   kube-proxy replacement disabled.
+3. **Bind the API-server network path.** Portable defaults use standard
+   NetworkPolicies and `cilium.enabled=false`. Set `network.apiServerPeers`
+   and `network.apiServerPort` to the actual Kubernetes API destination and
+   port. The chart preserves projected API audiences, TokenReview grants and
+   Pod identity fences. Optional `cilium.enabled=true` adds the six
+   API-server entity policies; their CRDs and supported CNI behavior are
+   separate prerequisites. `cilium.gitProxyFQDNPolicy=true` additionally
+   requires working L7 DNS interception. The known Cilium 1.19.6/k3s legacy
+   host-routing limitation remains; do not enable that branch on an unverified
+   DNS interception path.
 
-   A non-Cilium cluster must set `cilium.enabled=false`. That removes the
-   six Cilium objects and leaves those workloads' API-server path to
-   `network.apiServerPeers`.
-
-   `cilium.gitProxyFQDNPolicy=true` is a separate opt-in network-layer GitHub
-   restriction and requires `cilium.enabled=true`. It requires a CNI whose L7
-   DNS interception works. That interception is measured broken on Cilium
-   1.19.6 with k3s, VXLAN, and legacy host routing (upstream
-   cilium/cilium#46284); enabling the flag there makes git-proxy unable to
-   resolve any name.
-
-4. **Install ingress-nginx before enabling the edge.** `edge.enabled=true`
-   renders three Ingresses with `ingressClassName: nginx`. Their nginx
-   `auth-url`, `auth-snippet`, and related annotations enforce the external
-   authentication boundary; they are security controls, not portable
-   decoration. Do not enable the edge with another ingress controller.
+4. **Install the public edge prerequisites separately.** Follow the
+   [locked Envoy Gateway installation](../../envoy-gateway/README.md), including
+   compatible Gateway API CRD ownership and the controller's patch-policy
+   enablement. `edge.enabled=true` renders the application Gateway, routes and
+   policies. Bind distinct concrete `edge.apiHost` and `gitProxyHost` values;
+   wildcard, empty and identical hosts are rejected. Controller and data-plane
+   ServiceAccounts are separate. Both routed profiles still require Istiod.
 
 5. **Create all in-cluster Secrets.** The chart creates no Secret values.
    Create the following 15 Secrets with the keys referenced by the canonical
@@ -90,19 +83,22 @@ preparation and workspace seeding run independently before any service starts.
    tetral-event-stream-database
    ```
 
-   When `edge.enabled=true`, also create the TLS Secret selected by
-   `edge.tlsSecretName` (`git-proxy-tls` by default).
+   When `edge.enabled=true`, supply separate public TLS Secrets selected by
+   `edge.apiTLSSecretName` and `edge.gitTLSSecretName`. Their public issuer,
+   DNS challenge credentials and renewal owner are operator-bound. Hardened
+   native role leaves and public CA bundles have separate purposes; see the
+   [native certificate prerequisite](../../cert-manager/README.md).
 
    Also create the `tetral-store-trust` ConfigMap selected by
    `transport.storeTrustConfigMap`, carrying the public `database-ca.crt` and
    `object-store-ca.crt`. Every PostgreSQL and object-store consumer mounts it;
    see [Internal routing and protected stores](#internal-routing-and-protected-stores).
 
-6. **Label the ingress-controller namespace.** The public NetworkPolicies are
-   always rendered and admit port 8080 only from namespaces carrying:
+6. **Label the public data-plane namespace.** The public NetworkPolicies are
+   always rendered and admit business HTTP 8080 and Auth Check 9095 from explicitly selected edge peers. The default namespace selector requires:
 
    ```bash
-   kubectl label namespace <ingress-controller-namespace> \
+   kubectl label namespace envoy-gateway-system \
      tetral.ai/network-role=public-ingress
    ```
 
@@ -198,7 +194,7 @@ The chart parameterizes only axes already present in the canonical manifests:
   exactly, and an empty list is refused at render time: Kubernetes reads an
   empty peer list as "match everything", so emptying one widens the policy
   instead of narrowing it.
-  - `apiServerPeers` — the kubeadm-style `10.96.0.1/32`, in six ordinary
+  - `apiServerPeers` and `apiServerPort` — the example `10.96.0.1/32`, in six ordinary
     NetworkPolicies. Runtime, Bridge, Provider Gateway, MCP and Web call
     TokenReview for inbound bearer authentication; Job Runner uses the API
     only for Runtime Pod and EndpointSlice visibility. Missing bearer
@@ -242,7 +238,7 @@ The chart parameterizes only axes already present in the canonical manifests:
 - `cilium.enabled` controls the six API-server Cilium objects.
   `cilium.gitProxyFQDNPolicy` adds the opt-in git-proxy Cilium policy and
   replaces its ordinary DNS and external-HTTPS NetworkPolicy branches with
-  the FQDN restriction. `edge.enabled`, `edge.tlsSecretName`, and
+  the FQDN restriction. `edge.enabled`, public TLS Secret references, and
   `namespaces.create` control the other explicitly enumerated optional
   objects.
 
@@ -545,3 +541,69 @@ reconnect supervisor and projected timeout settings remain independent.
 These operational limits do not change preview JSON or durable event identity.
 Set `preview.enabled=false` to omit all broker credentials, network grants and
 publisher policy variables; formal Event Stream bounds remain configured.
+
+
+## Public edge transport and issuer access
+
+The API edge calls the Auth-owned gRPC Check listener on 9095 before forwarding
+protected routes. Only exact `POST /v1/oauth/token` bypasses Check. Credential
+selection remains Auth's common API-key/Bearer domain; the proxy preserves raw
+duplicate headers, generates a new request ID, removes caller identity and
+forwarding metadata before authorization, and removes credentials afterward.
+Git uses its own hostname and backend ticket boundary. Every other `X-Tetral-`
+header and every `X-Original-` header is removed there; its exact Git ticket is
+preserved only for Git Proxy. Public HTTP redirects without a business backend;
+escaped slash/backslash requests are rejected before redirect or Check.
+
+Standard routing uses plaintext edge-to-service HTTP and gRPC inside the
+explicit network boundary. Hardened routing replaces those same business
+listeners with native TLS; it opens no additional plaintext business port.
+API/Auth/Event Stream/Git Proxy require `TETRAL_HTTP_TRANSPORT=native-mtls` and
+complete CA/leaf/key/exact edge URI configuration. Auth Check uses the separate
+`TETRAL_AUTH_GRPC_*` configuration. Health and metrics remain restricted separate
+listeners. The shared Go loader validates complete mounted generations and
+retains only valid prior material after a malformed replacement. New handshakes
+use fresh material; trust removal requires the owning connection-drain procedure.
+
+Federation policy is imported before Auth starts with `tetral-auth-policy`,
+including canonical issuer/endpoint URLs, public CA trust and any explicitly
+allowed private CIDRs. Its durable registry is the sole configuration source.
+The native verified HTTPS client ignores ambient HTTP proxy settings, rejects
+redirects and mixed unsafe DNS answers, and caps discovery/JWKS requests and
+cache refreshes. Enable `authIssuerNetwork` only with explicit destination CIDRs
+or both namespace and Pod selectors, plus exact HTTPS ports. Ordinary
+NetworkPolicy admits destinations and ports, not DNS names; imported rule trust
+and origin checks remain independent. Auth alone receives these network grants.
+Keycloak is a test dependency and is absent from the production application chart.
+
+`deploy/managed/resource-inventory.json` lists exact portable application/profile
+identities and independently owned prerequisites. Its removal entries require
+both exact resource identity and the historical owner labels recorded for each
+object. Retire all fourteen superseded Ingress, combined Gateway fleet and RBAC
+objects before opening the new edge; preserve unrelated
+controllers, CRD ownership, stores and applications. A fresh target starts with
+a dedicated empty database and object namespace; initialization never performs
+a predecessor migration or reverse data rewrite.
+
+
+## Operational configuration and diagnostics
+
+`observability` projects deployment environment, service version, log level,
+maximum record bytes, summary interval and burst into every application process.
+Defaults are Info, 16384 bytes, 30000 milliseconds and one record per failure
+window. Changes take effect on restart. `queue` exposes reclaim interval/batch and
+retry base/cap/attempts; `jobRunner` exposes lease duration, heartbeat, batch and
+poll interval. Retry cap must cover its base and heartbeat must be shorter than
+lease. The owning startup parsers also enforce transport and shutdown constraints.
+
+`deploy/managed/configuration-inventory.json` records each semantic family's
+owner, defaults, units, unset/zero policy, constraints and portable projection
+disposition. Domain protocol, cryptographic and durable policy constants remain
+with their owners. Database capacity is independently checked across replicas,
+HPA maxima, surge, scheduled processes and possible pool generations.
+
+`deploy/managed/logging-inventory.json` maps actual sanitized application fields
+and optional correlation to service, process and Session scopes. Proxy access
+logging is disabled, including Git ticket traffic. Kubernetes collection metadata
+is external custody information; it is not an application Session identity.
+Neither inventory prescribes a remote log backend or retention policy.

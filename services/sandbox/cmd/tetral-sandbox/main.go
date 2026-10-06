@@ -45,6 +45,8 @@ func main() {
 func run(ctx context.Context, env envReader) (runErr error) {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+	operations := tetralsandbox.NewOperationMetrics()
+	ctx = tetralsandbox.WithOperationMetrics(ctx, operations)
 	resourcesCtx, cancelResources := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelResources()
 	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
@@ -139,7 +141,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	}
 	go func() {
 		<-acquisitionCtx.Done()
-		shutdownJoined <- tetralsandbox.JoinSandboxWorkers(allWorkersDone, cancelWorkers, cfg.DrainTimeout, cfg.CancelJoinTimeout)
+		shutdownJoined <- tetralsandbox.JoinSandboxWorkers(allWorkersDone, cancelWorkers, cfg.DrainTimeout, cfg.CancelJoinTimeout, operations)
 	}()
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
@@ -151,6 +153,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 	readiness := workload.NewReadiness()
 	readiness.MarkReady()
 	return runWorkload(ctx, workload.Config{
+		Metrics:               operations,
 		ServiceName:           tetralsandbox.ServiceName,
 		DeploymentEnvironment: env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"),
 		ServiceVersion:        env.Getenv("TETRAL_SERVICE_VERSION"),
@@ -158,6 +161,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 		ListenConfigKey:       tetralsandbox.EnvHTTPAddress,
 		Listen:                listenTCP,
 		Handler: workload.HealthRouter(readiness,
+			workload.WithMetricsCollector("operations", operations.Collector()),
 			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 			workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", openResult.Client)),
 		),

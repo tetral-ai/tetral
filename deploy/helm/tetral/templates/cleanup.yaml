@@ -37,6 +37,11 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 16 }}
+                - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+                  value: {{ .Values.observability.deploymentEnvironment | quote }}
+                - name: TETRAL_SERVICE_VERSION
+                  value: {{ .Values.observability.serviceVersion | quote }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 16 }}
                 - name: TETRAL_DATABASE_URL
                   valueFrom:

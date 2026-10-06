@@ -50,7 +50,13 @@ spec:
           command:
             - /usr/local/bin/event-stream
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
+{{ include "tetral.edgeHTTPEnv" (dict "root" .) | trim | indent 12 }}
 {{ include "tetral.previewEnv" . | trim | indent 12 }}
 {{ include "tetral.eventStreamPolicy" . | trim | indent 12 }}
             - name: TETRAL_EVENT_STREAM_HTTP_ADDR
@@ -75,12 +81,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
+              port: metrics
           readinessProbe:
             httpGet:
               path: /ready
-              port: http
+              port: metrics
           volumeMounts:
+{{ include "tetral.edgeHTTPMounts" . | trim | indent 12 }}
 {{ include "tetral.previewMounts" . | trim | indent 12 }}
             - name: store-trust
               mountPath: /var/run/tetral/store-trust
@@ -95,6 +102,7 @@ spec:
               drop:
                 - ALL
       volumes:
+{{ include "tetral.edgeHTTPVolumes" (dict "root" . "name" "event-stream") | trim | indent 8 }}
 {{ include "tetral.previewVolumes" (dict "root" . "role" "subscriber") | trim | indent 8 }}
         - name: store-trust
           configMap:

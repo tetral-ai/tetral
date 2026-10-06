@@ -178,7 +178,7 @@ func publicPublisherConfig(b testinfra.NATSFixture) map[string]any {
 	}
 	return result
 }
-func startPublicStreamingSDK(t *testing.T, baseURL, key string) *contentSDKChild {
+func startPublicStreamingSDK(t *testing.T, baseURL, key string, caPaths ...string) *contentSDKChild {
 	t.Helper()
 	sdk := os.Getenv("TETRAL_ENGINE_SDK_ROOT")
 	if sdk == "" {
@@ -200,7 +200,11 @@ func startPublicStreamingSDK(t *testing.T, baseURL, key string) *contentSDKChild
 	if err = os.Symlink(sdk, filepath.Join(directory, "sdk")); err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err := json.Marshal(map[string]string{"baseURL": baseURL, "apiKey": key})
+	values := map[string]string{"baseURL": baseURL, "apiKey": key}
+	if len(caPaths) != 0 && caPaths[0] != "" {
+		values["caPath"] = caPaths[0]
+	}
+	bootstrap, err := json.Marshal(values)
 	if err != nil {
 		t.Fatal(err)
 	}

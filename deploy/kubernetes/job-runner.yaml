@@ -49,6 +49,14 @@ spec:
           command:
             - /usr/local/bin/job-runner
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -83,13 +91,13 @@ spec:
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
               value: bridge-job-runner
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
-              value: '30000'
+              value: "30000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
-              value: '10000'
+              value: "10000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
-              value: '8'
+              value: "8"
             - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
-              value: '1000'
+              value: "1000"
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
@@ -298,25 +306,3 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: job-runner-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: job-runner
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: job-runner
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP

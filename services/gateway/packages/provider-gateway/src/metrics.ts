@@ -1,3 +1,5 @@
+import { OperationMetricsRegistry } from "@tetral/ts-observability";
+import type { OperationOutcome } from "@tetral/ts-observability";
 import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 /**
  * @packageDocumentation
@@ -14,12 +16,19 @@ import type { ProviderAssemblyResources } from "./providers/block-assembler.js";
 
 /** Aggregates process-local admitted-turn observations for operations exposition. */
 export class ProviderGatewayMetricsRegistry {
+  readonly operations = new OperationMetricsRegistry("provider-gateway", ["StreamProviderRequest", "provider_first_fragment", "provider_first_complete", "complete_frame_write", "shutdown_drain", "shutdown_cancel_join"]);
+  #capacity = 0;
+  #admissionRejections = 0;
+  setCapacity(capacity: number): void { this.#capacity = Math.max(0, capacity); }
+  recordAdmissionRejection(): void { this.#admissionRejections++; }
+  observeRequest(outcome: OperationOutcome, durationSeconds: number): void { this.operations.observe("StreamProviderRequest", outcome, durationSeconds); }
   #activeProviderStreams = 0;
   #assemblyResources: ProviderAssemblyResources = {retainedBytes:0,cumulativeContentBytes:0,segments:0,openBlocks:0,identities:0};
   #stages = {provider_first_fragment:{count:0,sum:0},provider_first_complete:{count:0,sum:0},complete_frame_write:{count:0,sum:0}};
   #pendingFrameBytes = 0;
   #stageOutcomes: Record<ProviderStageOutcome, number> = { success: 0, error: 0, cancelled: 0 };
   observeProviderStage(sample: ProviderStageSample): void {
+    this.operations.observe(sample.stage, sample.outcome, sample.durationMs / 1000);
     const value = this.#stages[sample.stage];
     value.count++;
     value.sum += Math.max(0, sample.durationMs);
@@ -69,6 +78,9 @@ export class ProviderGatewayMetricsRegistry {
   render(input: { readonly ready: boolean }): string {
     const memory = process.memoryUsage();
     return [
+      this.operations.render(),
+      metric("providergateway_provider_stream_capacity", "Configured concurrent provider stream admission capacity.", "gauge", this.#capacity),
+      metric("providergateway_admission_rejections_total", "Provider streams rejected by concurrent admission capacity.", "counter", this.#admissionRejections),
       metric("providergateway_ready", "Provider Gateway readiness state.", "gauge", input.ready ? 1 : 0),
       metric("providergateway_provider_streams_active", "Active provider streams admitted by Provider Gateway.", "gauge", this.#activeProviderStreams),
       metric("providergateway_provider_streams_total", "Provider streams admitted by Provider Gateway.", "counter", this.#providerStreamsTotal),

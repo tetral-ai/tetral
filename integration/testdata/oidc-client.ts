@@ -20,7 +20,9 @@ assert(typeof bootstrap.identityID === 'string' && bootstrap.identityID.length >
 const expectedActor = fixtureName === 'oidc-sdk-service'
   ? { type: 'service_actor', service_id: bootstrap.identityID }
   : { type: 'user_actor', user_id: bootstrap.identityID };
+const ca = bootstrap.caPath === undefined ? undefined : await readFile(bootstrap.caPath, 'utf8');
 const client = new Tetral({
+  ...(ca === undefined ? {} : { fetch: (input: RequestInfo | URL, init?: RequestInit) => Bun.fetch(new Request(input, init), { tls: { ca } }) }),
   apiKey: null,
   authToken: null,
   baseURL: bootstrap.baseURL,

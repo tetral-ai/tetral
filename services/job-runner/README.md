@@ -406,6 +406,26 @@ atomic. Shared packages never import Bridge or Runner business code.
 
 ## Testing
 
+Placement's existing probe and attempt timers also populate fixed-bucket
+`tetral_operation_duration_seconds{service="job-runner",operation="runtime_placement_probe"|"runtime_placement",outcome=...}`.
+A probe covers the process registry proof and actual HTTP load query. An
+attempt covers bounded sampling through all started probes joining; it ends
+before transactional binding arbitration and command delivery. Eligible probes
+and selected attempts are `success`; timeout/cancellation retain those outcomes;
+capacity, not-accepting, no-candidate and exhausted sampling are `rejected`.
+Registry, transport, invalid-response, visibility, policy and randomness
+failures are `error`. An exhausted attempt means no eligible candidate was
+found; the original probe reason counters retain the exclusion/dependency cause.
+
+`runtime_placement_probe_total`, `runtime_placement_total`,
+`runtime_placement_probe_seconds_total` and `runtime_placement_seconds_total`
+retain their complete legacy values and units. The histogram uses the same
+owning elapsed samples and exported collector, with race-safe zero-value
+initialization. No pod, process, Session or request labels enter this family.
+`TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
+HTTP probe boundaries and compares completed populations and legacy durations;
+the concurrent collector test separately checks initialization and retention.
+
 Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
 their declared dependencies. The command tests enforce schema/capacity failure

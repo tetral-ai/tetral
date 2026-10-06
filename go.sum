@@ -61,6 +61,8 @@ github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908 h1:
 github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908/go.mod h1:rcDQvjX9fwNQvh7l9pxwfGBufBWU6xQ0zK5mcsH8/Lg=
 github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908 h1:yp1HVjmLFpwwN3Ik82LUTAZ6giMb6NAuhA3fralKvRQ=
 github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908/go.mod h1:rYoRI6N8FcjZVmmeKqH8/ykAhfro9Bg8+of2IpBseyQ=
+github.com/envoyproxy/go-control-plane/ratelimit v0.1.1-0.20260729145720-a2d8c7492908 h1:dNsOk1pDOqRl4SzUdAWDPXQ05VASaD5CYYaVpfZr7os=
+github.com/envoyproxy/go-control-plane/ratelimit v0.1.1-0.20260729145720-a2d8c7492908/go.mod h1:kFrXkz+a+gF/F56IcDXtBE0QfpZfFTyf92okqDzIBu0=
 github.com/envoyproxy/protoc-gen-validate v1.3.3 h1:MVQghNeW+LZcmXe7SY1V36Z+WFMDjpqGAGacLe2T0ds=
 github.com/envoyproxy/protoc-gen-validate v1.3.3/go.mod h1:TsndJ/ngyIdQRhMcVVGDDHINPLWB7C82oDArY51KfB0=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=

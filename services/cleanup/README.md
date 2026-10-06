@@ -231,3 +231,19 @@ The command follows the shared [Go process diagnostic contract](../../internal/w
 for the restart-only `TETRAL_LOG_*` controls, the default Info level, bounded
 suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
+
+## Operation measurement
+
+The existing optional exporter also carries the additive
+`tetral_operation_duration_seconds` histogram with `service="cleanup"`.
+`claim_due` records the existing successful per-workspace claim boundary;
+`claim_due_across_workspaces` records the whole job's enumeration and claims,
+including error, cancellation and deadline failure. Workspace IDs never
+become labels. The three existing counters preserve their population and
+units. The full job is observed once before the final export; a later export
+failure is separate from claim failure, and a CronJob registry does not persist
+across invocations. Deployment must collect each invocation's export rather
+than treating its reset counts as a resident counter.
+
+Fixed seconds buckets and replica percentile queries follow the
+[shared operation duration contract](../../internal/workload/README.md#operation-durations).

@@ -46,6 +46,7 @@ spec:
             - bun
             - /app/dist/command.js
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
             - name: TETRAL_RUNTIME_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.runtimeDrainMs | quote }}
             - name: TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS
@@ -262,7 +263,7 @@ spec:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.network.apiServerPort }}
     - to:
 {{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:

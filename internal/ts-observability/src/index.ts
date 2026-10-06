@@ -1,4 +1,6 @@
 import approvedFieldNames from "./fields.json";
+export { OperationMetricsRegistry, operationDurationBuckets } from "./operation-metrics.js";
+export type { OperationService, OperationOutcome, ShutdownPhaseLogRecord, ShutdownPhaseLogger } from "./operation-metrics.js";
 const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
 /**
  * @packageDocumentation
@@ -7,7 +9,7 @@ const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
  * Gateway, and MCP Connector service logger modules. Those callers specialize
  * the record type and supply a prompt-return sink. The logger bounds, filters,
  * redacts and limits records before serialization; sink failures are contained. Production callers currently select standard error, while tests may
- * inject an in-memory sink. This package does not collect metrics or open a
+ * inject an in-memory sink. This package provides in-memory metrics primitives and does not open a
  * listener.
  *
  * Accepted records emit one JSON object followed by a newline. Debug is off by

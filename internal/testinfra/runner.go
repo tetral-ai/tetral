@@ -355,6 +355,9 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 				commandSpec{Arguments: []string{"./scripts/run-bun-audit.sh", "services/gateway"}},
 			)
 		}
+		if helperVulnerabilityAuditNeeded(plan, dependencyAuditMode) {
+			commands = append(commands, commandSpec{Arguments: []string{"python3", "scripts/check-envoy-secret-helper.py"}})
+		}
 		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
 	case "sandbox-image":
 		return []commandSpec{
@@ -372,6 +375,21 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 	default:
 		return nil, fmt.Errorf("unknown evidence group %q", selection.Group)
 	}
+}
+
+func helperVulnerabilityAuditNeeded(plan Plan, mode DependencyAuditMode) bool {
+	if mode == DependencyAuditAlways {
+		return true
+	}
+	if mode == DependencyAuditNever {
+		return false
+	}
+	for _, path := range plan.Revision.ChangedPaths {
+		if strings.HasPrefix(path, "integration/envoy-gateway-secret-helper/") || path == "scripts/check-envoy-secret-helper.py" || path == "deploy/dependencies.lock.json" || path == "go.mod" || path == "go.sum" || path == ".github/workflows/engine-vulncheck.yml" || path == "internal/testinfra/runner.go" {
+			return true
+		}
+	}
+	return false
 }
 
 func runDependencyAudit(plan Plan, mode DependencyAuditMode) bool {

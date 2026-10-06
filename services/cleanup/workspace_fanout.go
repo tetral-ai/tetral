@@ -4,6 +4,7 @@ package tetralcleanup
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -17,7 +18,23 @@ type CleanupClaimer interface {
 	ClaimDue(context.Context, ClaimDueRequest) ([]ClaimedCleanupJob, error)
 }
 
-func ClaimDueAcrossWorkspaces(ctx context.Context, lister WorkspaceLister, claimer CleanupClaimer, limit int, observe func(workspace.ID, int, time.Duration)) error {
+func ClaimDueAcrossWorkspaces(ctx context.Context, lister WorkspaceLister, claimer CleanupClaimer, limit int, observe func(workspace.ID, int, time.Duration), metrics ...*SchedulerMetrics) (err error) {
+	started := time.Now()
+	defer func() {
+		if len(metrics) == 0 || metrics[0] == nil {
+			return
+		}
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+			if errors.Is(err, context.Canceled) {
+				outcome = "cancelled"
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				outcome = "timeout"
+			}
+		}
+		metrics[0].Operations.Observe("claim_due_across_workspaces", outcome, time.Since(started))
+	}()
 	workspaceIDs, err := lister.ListIDs(ctx)
 	if err != nil {
 		return err

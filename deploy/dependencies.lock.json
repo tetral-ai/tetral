@@ -72,5 +72,115 @@
         "linux_amd64_child_digest": "sha256:2a4c7a0656c29dacc11dc9f3584ca08a9bc08219eaa14b332abd6234e031e5f4"
       }
     ]
+  },
+  "gateway_api": {
+    "version": "1.6.1",
+    "standard_crds": {
+      "url": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml",
+      "sha256": "24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
+    }
+  },
+  "envoy_gateway": {
+    "version": "1.9.2",
+    "kubernetes_supported": [
+      "1.33",
+      "1.34",
+      "1.35",
+      "1.36"
+    ],
+    "charts": [
+      {
+        "name": "gateway-helm",
+        "version": "v1.9.2",
+        "url": "oci://docker.io/envoyproxy/gateway-helm",
+        "oci_digest": "sha256:be034275b55deeddd6b7bc1f4da6eeb02b8efc418a4a29e2b1977851b24b1e63",
+        "sha256": "1079cad009e0885f6e10e5f712257d8e5fdaf911d2ceb3fa1b78632c8f29bbf9"
+      }
+    ],
+    "egctl": [
+      {
+        "os": "linux",
+        "arch": "amd64",
+        "version": "1.9.2",
+        "url": "https://github.com/envoyproxy/gateway/releases/download/v1.9.2/egctl_v1.9.2_linux_amd64.tar.gz",
+        "sha256": "32983b14ee53eee59d1709e56330564142067f954be3567c523c691012f89e44"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "version": "1.9.2",
+        "url": "https://github.com/envoyproxy/gateway/releases/download/v1.9.2/egctl_v1.9.2_linux_arm64.tar.gz",
+        "sha256": "b4a43112b89851ed8b37873e9d0d7eb4982b5085ffbbdfe61a3d2ed994f38970"
+      }
+    ],
+    "images": [
+      {
+        "component": "controller",
+        "reference": "docker.io/envoyproxy/gateway:v1.9.2@sha256:9d67017c442a70e6ae9f1a358e6c80eb653c67c2e40823d9a991e0daf37ba926",
+        "top_level_digest": "sha256:9d67017c442a70e6ae9f1a358e6c80eb653c67c2e40823d9a991e0daf37ba926",
+        "linux_amd64_child_digest": "sha256:bd722213a8433252efb56a3f6ef752c1c4d82b15e5dd8748b25973b9752c12b8"
+      },
+      {
+        "component": "proxy",
+        "version": "1.39.2",
+        "reference": "docker.io/envoyproxy/envoy:distroless-v1.39.2@sha256:dced08cf7c472e1a1d067f906878266078eeeb63c110b4961882c039a622853a",
+        "top_level_digest": "sha256:dced08cf7c472e1a1d067f906878266078eeeb63c110b4961882c039a622853a",
+        "linux_amd64_child_digest": "sha256:bb26a0a1cdc60e11a548d929cbb70873c2f2195cfb3861055090bebd17d48e49"
+      }
+    ],
+    "crds": {
+      "url": "https://github.com/envoyproxy/gateway/releases/download/v1.9.2/envoy-gateway-crds.yaml",
+      "sha256": "b339119f8f3a4046688fc96837b4129553f42c9998976913ef9dff25694d85cc"
+    },
+    "secret_helper": {
+      "module_directory": "integration/envoy-gateway-secret-helper",
+      "upstream_module": "github.com/envoyproxy/gateway",
+      "upstream_version": "v1.9.2",
+      "go_toolchain": "go1.26.8"
+    }
+  },
+  "cert_manager": {
+    "version": "1.21.2",
+    "charts": [
+      {
+        "name": "cert-manager",
+        "version": "v1.21.2",
+        "url": "oci://quay.io/jetstack/charts/cert-manager",
+        "oci_digest": "sha256:634dce9c13b56677a2c05e2ab76c312d0be2664022d5dd05815da67e1fd5f610",
+        "sha256": "73a56e1728edd6c99f1f31082618c3259d279a76b7ebd3d4bdc5475c2442d34a"
+      }
+    ],
+    "images": [
+      {
+        "component": "controller",
+        "reference": "quay.io/jetstack/cert-manager-controller:v1.21.2@sha256:70f532fd9cfde0b09d55687200942399d89838bc2d5d5b45152eb799a15912b8",
+        "top_level_digest": "sha256:70f532fd9cfde0b09d55687200942399d89838bc2d5d5b45152eb799a15912b8",
+        "linux_amd64_child_digest": "sha256:57bb397c639e0e94184ba67848e5dad04284f24645e521e764a0ee5f5002f286"
+      },
+      {
+        "component": "webhook",
+        "reference": "quay.io/jetstack/cert-manager-webhook:v1.21.2@sha256:a60e2dac46dbb8a7f3df95c54ce941012f54c2fe022f0ee55aaa1ab40ed957ae",
+        "top_level_digest": "sha256:a60e2dac46dbb8a7f3df95c54ce941012f54c2fe022f0ee55aaa1ab40ed957ae",
+        "linux_amd64_child_digest": "sha256:b929259301ee75270ab4651d5e6bd4ba7b6624b1ce48ba767d064295a9312101"
+      },
+      {
+        "component": "cainjector",
+        "reference": "quay.io/jetstack/cert-manager-cainjector:v1.21.2@sha256:c85268c64f2e0e76684bf5fe8906caff34b82523561c6affe0fae3546bd87562",
+        "top_level_digest": "sha256:c85268c64f2e0e76684bf5fe8906caff34b82523561c6affe0fae3546bd87562",
+        "linux_amd64_child_digest": "sha256:aa2bc58725d92a643f5069dde58abc93b65566ded8951348873ac9ee7efef66c"
+      },
+      {
+        "component": "acmesolver",
+        "reference": "quay.io/jetstack/cert-manager-acmesolver:v1.21.2@sha256:699b40d622211ab7accad8a21b04c5fbaa1841ef7a12621e8de492dbe27b2503",
+        "top_level_digest": "sha256:699b40d622211ab7accad8a21b04c5fbaa1841ef7a12621e8de492dbe27b2503",
+        "linux_amd64_child_digest": "sha256:dc5c5b8456d1a50af47a240987e85afce352b5c1155a8a4698b7c91eac19f407"
+      },
+      {
+        "component": "startupapicheck",
+        "reference": "quay.io/jetstack/cert-manager-startupapicheck:v1.21.2@sha256:46e75b6866359ffb5d82624f41e3ed1c70b2994982702ced547ce5edb418a8f5",
+        "top_level_digest": "sha256:46e75b6866359ffb5d82624f41e3ed1c70b2994982702ced547ce5edb418a8f5",
+        "linux_amd64_child_digest": "sha256:ed347b0ab607058f139b83f41567109456b9776330b63da8086a120afb7f1729"
+      }
+    ]
   }
 }

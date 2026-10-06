@@ -1,0 +1,1337 @@
+{
+  "schema_version": 1,
+  "purpose": "Semantic configuration ownership and portable projection dispositions. Source parsers own behavior; the inventory is not a generator of credentials or identities.",
+  "verification": {
+    "portable_defaults": "deploy/helm/configuration_projection_test.go",
+    "raw_helm_equivalence": "deploy/helm/chart_test.go",
+    "streaming": "deploy/helm/public_streaming_test.go",
+    "lifecycle": "deploy/helm/transport_test.go",
+    "database_consumers": "deploy/helm/database_consumer_test.go",
+    "aggregate_database_budget": "deploy/helm/connection_budget_test.go"
+  },
+  "families": [
+    {
+      "id": "go-database-pool",
+      "owner": "internal/dbconnect",
+      "sources": [
+        "internal/dbconnect/pool_config.go",
+        "internal/dbconnect/plain_dsn.go"
+      ],
+      "environment_keys": [
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_DB_CONN_MAX_IDLE_TIME",
+        "TETRAL_DB_CONN_MAX_LIFETIME",
+        "TETRAL_DB_MAX_IDLE_CONNS",
+        "TETRAL_DB_MAX_OPEN_CONNS",
+        "TETRAL_DB_STATEMENT_TIMEOUT"
+      ],
+      "defaults": {
+        "max_open": 20,
+        "max_idle": 10,
+        "max_lifetime": "30m",
+        "max_idle_time": "5m",
+        "statement_timeout": "1m"
+      },
+      "units": "connection count and Go durations",
+      "unset_zero": "Exact empty selects defaults; positive open/idle counts and durations; zero invalid.",
+      "constraints": "Max idle above open is clamped by database/sql; protected DSN and TLS options owned here.",
+      "projection": "Helm goPoolMax; raw/default profiles checked by database_consumer_test and connection_budget_test. Remaining duration settings intentionally retain service defaults.",
+      "proofs": [
+        "internal/dbconnect/pool_config_test.go",
+        "deploy/helm/database_consumer_test.go",
+        "deploy/helm/connection_budget_test.go"
+      ]
+    },
+    {
+      "id": "bun-database-pool",
+      "owner": "internal/ts-dbconnect",
+      "sources": [
+        "internal/ts-dbconnect/src/index.ts"
+      ],
+      "environment_keys": [
+        "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_MAX",
+        "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
+        "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS"
+      ],
+      "defaults": {
+        "max": 10,
+        "idle_timeout": 30,
+        "max_lifetime": 1800,
+        "connect_timeout": 30,
+        "statement_timeout": 30000
+      },
+      "units": "connections; seconds except statement milliseconds",
+      "unset_zero": "Undefined defaults; Provider empty defaults; MCP empty rejects; zero invalid.",
+      "constraints": "Canonical positive safe integers; two possible pool generations per process.",
+      "projection": "Helm bunPoolMax; duration controls intentionally remain service defaults; actual SQL options proved by consumer tests.",
+      "proofs": [
+        "services/gateway/packages/provider-gateway/test/unit/config.test.ts",
+        "services/gateway/packages/mcp-connector/test/unit/config.test.ts",
+        "deploy/helm/database_consumer_test.go"
+      ]
+    },
+    {
+      "id": "resource-metadata",
+      "owner": "internal/workload and internal/ts-observability",
+      "sources": [
+        "internal/workload/resource_config.go",
+        "internal/ts-observability/src/resource-config.ts"
+      ],
+      "environment_keys": [
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "go_environment": "local",
+        "go_version": "unknown",
+        "portable_environment": "local",
+        "portable_version": "dev"
+      },
+      "units": "strings",
+      "unset_zero": "Go exact empty defaults, Git trims all metadata; TS requires nonempty metadata.",
+      "constraints": "Provider/Runtime config limit253; MCP4096; emitted resources253, bounded/sanitized. Process IDs are runtime-generated.",
+      "projection": "observability.deploymentEnvironment/serviceVersion; downward API identities, never generated inventory values.",
+      "proofs": [
+        "internal/workload/resource_config_test.go",
+        "deploy/helm/configuration_projection_test.go"
+      ]
+    },
+    {
+      "id": "diagnostics",
+      "owner": "internal/workload and internal/ts-observability",
+      "sources": [
+        "internal/workload/diagnostics.go",
+        "internal/ts-observability/src/config.ts"
+      ],
+      "environment_keys": [
+        "TETRAL_LOG_BURST",
+        "TETRAL_LOG_LEVEL",
+        "TETRAL_LOG_MAX_RECORD_BYTES",
+        "TETRAL_LOG_SUMMARY_INTERVAL_MS"
+      ],
+      "defaults": {
+        "level": "info",
+        "max_record_bytes": 16384,
+        "summary_interval_ms": 30000,
+        "burst": 1
+      },
+      "units": "severity, bytes, milliseconds, records per event/reason/window",
+      "unset_zero": "Empty/unset defaults; zero invalid.",
+      "constraints": "Canonical integers; bytes1024..65536, interval100..3600000, burst1..1000. Fixed64 Go queue/256 limiter states, TS65536 buffer remain implementation bounds.",
+      "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst; common helper projects every application container.",
+      "proofs": [
+        "internal/workload/diagnostics_test.go",
+        "deploy/helm/configuration_projection_test.go"
+      ]
+    },
+    {
+      "id": "auth-listeners-and-exchange",
+      "owner": "services/auth",
+      "sources": [
+        "services/auth/config.go",
+        "services/auth/cmd/tetral-auth/main.go",
+        "services/auth/cmd/tetral-auth-policy/main.go"
+      ],
+      "environment_keys": [
+        "ENGINE_API_KEY",
+        "ENGINE_BOOTSTRAP_WORKSPACE_ID",
+        "TETRAL_AUTH_EXCHANGE_BODY_BYTES",
+        "TETRAL_AUTH_EXCHANGE_BODY_READ_TIMEOUT_MS",
+        "TETRAL_AUTH_EXCHANGE_CONCURRENCY",
+        "TETRAL_AUTH_EXCHANGE_REQUESTS_PER_MINUTE",
+        "TETRAL_AUTH_GRPC_ADDR",
+        "TETRAL_AUTH_GRPC_TLS_CA_PATH",
+        "TETRAL_AUTH_GRPC_TLS_CERT_PATH",
+        "TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI",
+        "TETRAL_AUTH_GRPC_TLS_KEY_PATH",
+        "TETRAL_AUTH_GRPC_TRANSPORT",
+        "TETRAL_AUTH_HTTP_ADDR",
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64",
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS",
+        "TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS",
+        "TETRAL_AUTH_METRICS_ADDR",
+        "TETRAL_DATABASE_ADMIN_URL",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "principal_ttl_seconds": 60,
+        "jwks_cache_seconds": 600,
+        "http_address": ":8080",
+        "metrics_address": ":8081",
+        "grpc_address": ":9095",
+        "exchange_body_bytes": 32768,
+        "exchange_concurrency": 32,
+        "exchange_requests_per_minute": 60,
+        "exchange_body_read_ms": 5000
+      },
+      "units": "seconds, bytes, concurrent requests, requests/minute, milliseconds, addresses",
+      "unset_zero": "Empty uses bounded defaults; credentials required and never catalogued.",
+      "constraints": "Distinct listeners; principalTTL1..300, JWKS1..600; exchange body1024..65536, concurrency1..32, rate1..6000, read100..5000. Native TLS requires complete material/exact edge URI; plaintext rejects material.",
+      "projection": "Identity and TLS refs projected; exchange limits intentionally stay owning service defaults.",
+      "proofs": [
+        "services/auth/exchange_bounds_test.go",
+        "services/auth/ext_authz_test.go",
+        "services/auth/grpc_test.go"
+      ]
+    },
+    {
+      "id": "internal-authentication",
+      "owner": "internal/internalgrpc/auth",
+      "sources": [
+        "internal/internalgrpc/auth/config.go",
+        "internal/internalgrpc/auth/auth.go"
+      ],
+      "environment_keys": [
+        "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
+        "TETRAL_INTERNAL_GRPC_AUDIENCE"
+      ],
+      "defaults": {
+        "audience": "tetral-internal-grpc"
+      },
+      "units": "audience and receiver identity strings",
+      "unset_zero": "Missing trust/reviewer/receiver identity rejects startup.",
+      "constraints": "Audience, identity syntax, exact method authority, key/crypto limits are domain-owned constants.",
+      "projection": "Projected receiver allowlists, token/CA file references and mesh/native trust.",
+      "proofs": [
+        "internal/internalgrpc/auth/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "runtime-process-custody",
+      "owner": "internal/runtimecontrol",
+      "sources": [
+        "internal/runtimecontrol/process_policy.go"
+      ],
+      "environment_keys": [
+        "TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
+        "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS",
+        "TETRAL_RUNTIME_REPORT_INTERVAL_MS",
+        "TETRAL_RUNTIME_REPORT_TIMEOUT_MS"
+      ],
+      "defaults": {
+        "registration_ms": 5000,
+        "report_timeout_ms": 1000,
+        "report_interval_ms": 2000,
+        "freshness_ms": 10000
+      },
+      "units": "milliseconds",
+      "unset_zero": "Empty defaults; positive durations.",
+      "constraints": "Report timeout < report interval < freshness.",
+      "projection": "Portable mirrored process policy remains fixed; actual Runtime, Bridge and Runner defaults checked together.",
+      "proofs": [
+        "internal/runtimecontrol/process_policy_test.go",
+        "deploy/helm/configuration_projection_test.go"
+      ]
+    },
+    {
+      "id": "job-runner",
+      "owner": "services/job-runner",
+      "sources": [
+        "services/job-runner/config.go",
+        "services/job-runner/runtime_command_policy.go",
+        "services/job-runner/runtime_load.go",
+        "services/job-runner/cmd/job-runner/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_AGENT_RUNTIME_GRPC_PORT",
+        "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR",
+        "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH",
+        "TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS",
+        "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR",
+        "TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS",
+        "TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER",
+        "TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS",
+        "TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR",
+        "TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS",
+        "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH",
+        "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
+        "TETRAL_KUBERNETES_NAMESPACE",
+        "TETRAL_QUEUE_GRPC_ADDR",
+        "TETRAL_RUNTIME_DIRECT_TLS_PEER_URI",
+        "TETRAL_RUNTIME_DIRECT_TLS_SERVER_NAME",
+        "TETRAL_RUNTIME_LOAD_MAX_BYTES",
+        "TETRAL_RUNTIME_LOAD_PROBE_TIMEOUT_MS",
+        "TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF",
+        "TETRAL_RUNTIME_PLACEMENT_ROUNDS",
+        "TETRAL_RUNTIME_PLACEMENT_TIMEOUT_MS",
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_TRANSPORT_PROFILE"
+      ],
+      "defaults": {
+        "lease_ms": 30000,
+        "heartbeat_ms": 10000,
+        "max_jobs": 8,
+        "poll_ms": 1000,
+        "drain_ms": 30000,
+        "cancel_join_ms": 5000,
+        "runtime_command_timeout_ms": 30000,
+        "load_probe_ms": 1000,
+        "placement_budget_ms": 2000,
+        "placement_rounds": 2,
+        "load_response_bytes": 262144,
+        "memory_cutoff": 0.8
+      },
+      "units": "milliseconds, jobs",
+      "unset_zero": "Exact empty defaults; absent heartbeat derives lease/3; zero invalid.",
+      "constraints": "Heartbeat < lease; Queue Lease transport caps batch; pool>=2; drain+join<=35000; direct port matches transport profile. Runtime command method timeout names are derived from the eight fixed Runtime methods; placement uses bounded probes, rounds, response bytes and memory threshold, distinct from lease policy.",
+      "projection": "jobRunner operational values and lifecycle.runnerDrainMs/cancelJoinMs; fixed dependency addresses/identity refs remain domain/deployment policy. Runtime command and placement controls intentionally use owning defaults; process env overrides stay with their owner.",
+      "proofs": [
+        "services/job-runner/config_test.go",
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/helm/transport_test.go"
+      ],
+      "derived_environment_keys": [
+        "TETRAL_RUNTIME_ACCEPT_INPUT_TIMEOUT_MS",
+        "TETRAL_RUNTIME_RECOVER_THREAD_TIMEOUT_MS",
+        "TETRAL_RUNTIME_ACCEPT_AGENT_MAIL_TIMEOUT_MS",
+        "TETRAL_RUNTIME_ACCEPT_TASK_NOTIFICATION_TIMEOUT_MS",
+        "TETRAL_RUNTIME_INTERRUPT_TIMEOUT_MS",
+        "TETRAL_RUNTIME_RESOLVE_TOOL_CONFIRMATION_TIMEOUT_MS",
+        "TETRAL_RUNTIME_APPLY_RUNTIME_CONFIG_TIMEOUT_MS",
+        "TETRAL_RUNTIME_CLEANUP_SESSION_TIMEOUT_MS"
+      ]
+    },
+    {
+      "id": "bridge",
+      "owner": "services/bridge",
+      "sources": [
+        "services/bridge/config.go",
+        "services/bridge/lifecycle_policy.go",
+        "services/bridge/cmd/bridge-api/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_API_GRPC_ADDR",
+        "TETRAL_BRIDGE_API_HTTP_ADDR",
+        "TETRAL_BRIDGE_BACKGROUND_RESULT_WAIT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_GATEWAY_TOKEN_PATH",
+        "TETRAL_BRIDGE_MCP_CONNECTOR_GRPC_ADDR",
+        "TETRAL_BRIDGE_MEMORY_PROJECTION_WAIT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_OUTPUT_CAPTURE_WAIT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS",
+        "TETRAL_BRIDGE_SANDBOX_RESULT_WAIT_TIMEOUT_MS",
+        "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_COMPACTION_RESCHEDULE_BUDGET",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
+        "TETRAL_PROVIDER_RESCHEDULE_BUDGET",
+        "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "provider_reschedule_budget": 3,
+        "compaction_reschedule_budget": 2,
+        "drain_ms": 40000,
+        "cancel_join_ms": 5000,
+        "admission_ms": 3000,
+        "release_ms": 5000,
+        "result_phase_wait_ms": 30000
+      },
+      "units": "attempt counts, milliseconds",
+      "unset_zero": "Whitespace empty reschedule defaults; zero budget valid.",
+      "constraints": "Budgets0..10; pool>=2 reserves notification connection; lifecycle application allocation.",
+      "projection": "lifecycle.bridgeDrainMs; retry counts intentionally retain service defaults; HMAC/token refs only.",
+      "proofs": [
+        "services/bridge/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "queue",
+      "owner": "services/queue",
+      "sources": [
+        "services/queue/config.go",
+        "services/queue/cmd/tetral-queue/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_QUEUE_DRAIN_TIMEOUT_MS",
+        "TETRAL_QUEUE_GRPC_ADDR",
+        "TETRAL_QUEUE_HTTP_ADDR",
+        "TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS",
+        "TETRAL_QUEUE_LEASE_RECLAIM_LIMIT",
+        "TETRAL_QUEUE_RETRY_BASE_MS",
+        "TETRAL_QUEUE_RETRY_CAP_MS",
+        "TETRAL_QUEUE_RETRY_MAX_ATTEMPTS",
+        "TETRAL_ROUTING_PROXY_REQUIRED",
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_TRANSPORT_PROFILE"
+      ],
+      "defaults": {
+        "reclaim_interval_seconds": 30,
+        "reclaim_limit": 100,
+        "retry_base_ms": 1000,
+        "retry_cap_ms": 60000,
+        "retry_max_attempts": 10,
+        "drain_ms": 10000,
+        "cancel_join_ms": 5000
+      },
+      "units": "seconds, jobs, milliseconds, attempts",
+      "unset_zero": "Exact empty defaults; config zero retry invalid; durable per-job max_attempts=0 means unset.",
+      "constraints": "Retry cap>=base; drain+join within application grace less proxy allocation.",
+      "projection": "queue reclaim/retry values; lifecycle.queueDrainMs/cancelJoinMs; fixed Queue singleton/dependency identities remain deployment-owned.",
+      "proofs": [
+        "services/queue/config_test.go",
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "cleanup",
+      "owner": "services/cleanup",
+      "sources": [
+        "services/cleanup/config.go",
+        "services/cleanup/cmd/tetral-cleanup/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_CLEANUP_CLAIM_LIMIT",
+        "TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT",
+        "TETRAL_CLEANUP_METRICS_EXPORT_URL",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "claim_limit": 100,
+        "metrics_export_timeout": "2s"
+      },
+      "units": "jobs, Go duration",
+      "unset_zero": "Whitespace empty defaults; metrics export unset disables export; zero invalid.",
+      "constraints": "Positive count/timeout; optional HTTP(S) export URL must omit credentials.",
+      "projection": "Fixed CronJob claim100/schedule1minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed.",
+      "proofs": [
+        "deploy/helm/database_consumer_test.go",
+        "deploy/helm/configuration_projection_test.go"
+      ]
+    },
+    {
+      "id": "sandbox",
+      "owner": "services/sandbox",
+      "sources": [
+        "services/sandbox/config.go",
+        "services/sandbox/cmd/tetral-sandbox/main.go",
+        "internal/sandbox/helper/internal/task/supervisor_auth.go"
+      ],
+      "environment_keys": [
+        "DAYTONA_API_KEY",
+        "DAYTONA_API_URL",
+        "DAYTONA_TARGET",
+        "TETRAL_BLOB_ACCESS_KEY",
+        "TETRAL_BLOB_BUCKET",
+        "TETRAL_BLOB_ENDPOINT",
+        "TETRAL_BLOB_REGION",
+        "TETRAL_BLOB_SECRET_KEY",
+        "TETRAL_BLOB_TLS_CA_PATH",
+        "TETRAL_BLOB_TLS_SERVER_NAME",
+        "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
+        "TETRAL_GIT_PROXY_HOST",
+        "TETRAL_LOG_LEVEL",
+        "TETRAL_POSTGRES_DSN",
+        "TETRAL_QUEUE_GRPC_ADDR",
+        "TETRAL_R2_ACCOUNT_ID",
+        "TETRAL_R2_PARENT_ACCESS_KEY",
+        "TETRAL_R2_PARENT_API_TOKEN",
+        "TETRAL_RCLONE_VFS_CACHE_MAX_SIZE",
+        "TETRAL_RCLONE_VFS_MIN_FREE",
+        "TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
+        "TETRAL_RESOURCE_CRED_TTL",
+        "TETRAL_SANDBOX_AUTO_ARCHIVE_INTERVAL",
+        "TETRAL_SANDBOX_AUTO_DELETE_INTERVAL",
+        "TETRAL_SANDBOX_AUTO_STOP_INTERVAL",
+        "TETRAL_SANDBOX_BASE_IMAGE",
+        "TETRAL_SANDBOX_DAYTONA_STOP_TIMEOUT",
+        "TETRAL_SANDBOX_DEBUG_LOGGING",
+        "TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY",
+        "TETRAL_SANDBOX_ENVIRONMENT_BUILD_TIMEOUT",
+        "TETRAL_SANDBOX_ENVIRONMENT_BUILD_WARN_AFTER",
+        "TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY",
+        "TETRAL_SANDBOX_HTTP_ADDR",
+        "TETRAL_SANDBOX_JOB_LEASE_DURATION",
+        "TETRAL_SANDBOX_JOB_POLL_INTERVAL",
+        "TETRAL_SANDBOX_LATE_COMMAND_MARGIN",
+        "TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL",
+        "TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT",
+        "TETRAL_SANDBOX_WORKER_CONCURRENCY",
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_SUPERVISOR_AUTH_FD"
+      ],
+      "defaults": {
+        "heartbeat": "15s",
+        "lease": "120s",
+        "provider_command": "45s",
+        "late_margin": "30s",
+        "poll": "1s",
+        "build_warn": "10m",
+        "build_timeout": "30m",
+        "build_concurrency": 1,
+        "ready_fanout": 1,
+        "worker_concurrency": 1,
+        "provider_stop": "30s",
+        "auto_stop": "30m",
+        "auto_archive": "24h",
+        "auto_delete": "720h",
+        "resource_credential_ttl": "24h",
+        "resource_credential_refresh_margin": "30m"
+      },
+      "units": "Go durations, concurrency counts, provider retention periods",
+      "unset_zero": "Empty uses owner defaults; legacy debug only explicit true; zero concurrency invalid.",
+      "constraints": "Lease fences command+late margin/heartbeat; transport caps concurrency; auto-delete>=30days; credential refresh margin<TTL; provider lifecycle distinct from Runtime residency.",
+      "projection": "Build warn/timeout/debug values supported; remaining provider/job/retention controls intentionally portable fixed/service defaults.",
+      "proofs": [
+        "services/sandbox/config_test.go",
+        "deploy/helm/chart_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "blob-transport",
+      "owner": "internal/blob",
+      "sources": [
+        "internal/blob/config.go"
+      ],
+      "environment_keys": [
+        "TETRAL_BLOB_ACCESS_KEY",
+        "TETRAL_BLOB_ALLOW_INSECURE",
+        "TETRAL_BLOB_BUCKET",
+        "TETRAL_BLOB_ENDPOINT",
+        "TETRAL_BLOB_LOCAL_TEST_MODE",
+        "TETRAL_BLOB_REGION",
+        "TETRAL_BLOB_SECRET_KEY",
+        "TETRAL_BLOB_TLS_CA_PATH",
+        "TETRAL_BLOB_TLS_SERVER_NAME"
+      ],
+      "defaults": {},
+      "units": "URLs, DNS, secret/file references",
+      "unset_zero": "Credentials and endpoint required; insecure mode explicit local-test only.",
+      "constraints": "Production HTTPS trust; never generate access keys, URLs with credentials or dynamic identities into inventory.",
+      "projection": "Secret/ConfigMap references and transport blob TLS options; prerequisite refs supplied by operator.",
+      "proofs": [
+        "internal/blob/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "provider-gateway",
+      "owner": "services/gateway/packages/provider-gateway",
+      "sources": [
+        "services/gateway/packages/provider-gateway/src/config.ts"
+      ],
+      "environment_keys": [
+        "ENGINE_VAULT_KEY",
+        "TETRAL_BRIDGE_API_GRPC_ADDR",
+        "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_MAX",
+        "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
+        "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_GATEWAY_MAX_CONCURRENT_TURNS",
+        "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
+        "TETRAL_INTERNAL_GRPC_AUDIENCE",
+        "TETRAL_LOG_BURST",
+        "TETRAL_LOG_LEVEL",
+        "TETRAL_LOG_MAX_RECORD_BYTES",
+        "TETRAL_LOG_SUMMARY_INTERVAL_MS",
+        "TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH",
+        "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
+        "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
+        "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
+        "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "drain_ms": 30000,
+        "cancel_join_ms": 5000,
+        "max_concurrent_turns": 8
+      },
+      "units": "milliseconds, concurrent turns",
+      "unset_zero": "Undefined/empty according to named parser; positive bounds.",
+      "constraints": "Application join and native transport/database config pairs; caller scopes fixed. Model/provider lowering rails belong provider contract.",
+      "projection": "lifecycle.providerDrainMs/providerCancelJoinMs and pool/metadata/preview controls; admission limit remains owner default.",
+      "proofs": [
+        "services/gateway/packages/provider-gateway/test/unit/config.test.ts",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "mcp-connector",
+      "owner": "services/gateway/packages/mcp-connector",
+      "sources": [
+        "services/gateway/packages/mcp-connector/src/config.ts",
+        "services/gateway/packages/mcp-connector/src/phase-budgets.ts"
+      ],
+      "environment_keys": [
+        "ENGINE_VAULT_KEY",
+        "TETRAL_BRIDGE_API_GRPC_ADDR",
+        "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_MCP_MANIFEST_CHANGED_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_DATABASE_POOL_CONNECTION_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
+        "TETRAL_DATABASE_POOL_MAX",
+        "TETRAL_DATABASE_POOL_MAX_LIFETIME_SECONDS",
+        "TETRAL_DATABASE_STATEMENT_TIMEOUT_MS",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
+        "TETRAL_INTERNAL_GRPC_AUDIENCE",
+        "TETRAL_MCP_CALL_TIMEOUT_MS",
+        "TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS",
+        "TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH",
+        "TETRAL_MCP_CONNECTOR_GRPC_ADDR",
+        "TETRAL_MCP_CONNECTOR_HTTP_ADDR",
+        "TETRAL_MCP_CONNECT_TIMEOUT_MS",
+        "TETRAL_MCP_CREDENTIAL_TIMEOUT_MS",
+        "TETRAL_MCP_DISCOVERY_TIMEOUT_MS",
+        "TETRAL_MCP_EXECUTION_TIMEOUT_MS",
+        "TETRAL_MCP_SESSION_IDLE_TIMEOUT_MS",
+        "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
+        "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "claim_lease_seconds": 180,
+        "execution_ms": 170000,
+        "first_commit_reserve_ms": 10000,
+        "credential_ms": 15000,
+        "connect_ms": 10000,
+        "call_ms": 120000,
+        "discovery_ms": 120000,
+        "idle_ms": 1800000,
+        "drain_ms": 30000,
+        "cancel_join_ms": 5000
+      },
+      "units": "seconds, milliseconds",
+      "unset_zero": "Undefined policy defaults; explicit empty numeric values reject; positive integer phase bounds.",
+      "constraints": "Execution<=170000; first commit<=10000; execution+first commit<=180000. Phases clip shared deadline; reconnect never renews it.",
+      "projection": "lifecycle.mcpDrainMs/mcpCancelJoinMs; phase ceilings intentionally owner defaults, lease fixed durable domain contract.",
+      "proofs": [
+        "services/gateway/packages/mcp-connector/test/unit/config.test.ts",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "runtime-pod",
+      "owner": "services/agent-runtime/packages/runtime-pod",
+      "sources": [
+        "services/agent-runtime/packages/runtime-pod/src/config.ts"
+      ],
+      "environment_keys": [
+        "TETRAL_BRIDGE_API_GRPC_ADDR",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_GATEWAY_GRPC_ADDR",
+        "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
+        "TETRAL_LOG_BURST",
+        "TETRAL_LOG_LEVEL",
+        "TETRAL_LOG_MAX_RECORD_BYTES",
+        "TETRAL_LOG_SUMMARY_INTERVAL_MS",
+        "TETRAL_MCP_CONNECTOR_GRPC_ADDR",
+        "TETRAL_ROUTING_PROXY_REQUIRED",
+        "TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL",
+        "TETRAL_RUNTIME_DRAIN_TIMEOUT_MS",
+        "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS",
+        "TETRAL_RUNTIME_MAX_CONCURRENT_TOOLS",
+        "TETRAL_RUNTIME_MAX_LOCAL_SESSIONS",
+        "TETRAL_RUNTIME_POD_GRPC_AUDIENCE",
+        "TETRAL_RUNTIME_POD_GRPC_PORT",
+        "TETRAL_RUNTIME_POD_HTTP_ADDR",
+        "TETRAL_RUNTIME_POD_IP",
+        "TETRAL_RUNTIME_POD_NAME",
+        "TETRAL_RUNTIME_POD_NAMESPACE",
+        "TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH",
+        "TETRAL_RUNTIME_POD_UID",
+        "TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
+        "TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS",
+        "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS",
+        "TETRAL_RUNTIME_REPORT_INTERVAL_MS",
+        "TETRAL_RUNTIME_REPORT_TIMEOUT_MS",
+        "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS",
+        "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS",
+        "TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES",
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_TRANSPORT_PROFILE",
+        "TETRAL_WEB_CONNECTOR_GRPC_ADDR"
+      ],
+      "defaults": {
+        "provider_stream_ms": 1800000,
+        "max_local_sessions": 256,
+        "max_concurrent_tools": 8,
+        "drain_ms": 60000,
+        "settlement_ms": 15000,
+        "settlement_attempt_ms": 5000,
+        "local_join_ms": 5000,
+        "proxy_join_ms": 5000
+      },
+      "units": "milliseconds, session/tool counts",
+      "unset_zero": "Undefined schema defaults; identity required; zero invalid.",
+      "constraints": "Port/profile match, report interval<freshness; four phase shutdown sum+5000margin<=Pod grace; settlement attempt clips remaining phase.",
+      "projection": "lifecycle Runtime phase/grace values, shared diagnostics/metadata; session/tool/provider caps intentionally owner defaults.",
+      "proofs": [
+        "services/agent-runtime/packages/runtime-pod/test/unit/lifecycle.test.ts",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "runtime-bridge-rpc-deadlines",
+      "owner": "services/agent-runtime/packages/runtime-pod/src/bridge-policy.ts",
+      "sources": [
+        "services/agent-runtime/packages/runtime-pod/src/bridge-policy.ts",
+        "services/agent-runtime/packages/core/src/contracts/runtime.ts"
+      ],
+      "environment_keys": [
+        "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS",
+        "TETRAL_RUNTIME_REPORT_TIMEOUT_MS"
+      ],
+      "derived_environment_keys": [
+        "TETRAL_BRIDGE_ACCEPT_SANDBOX_EXECUTION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_APPROVAL_REVIEW_INPUT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_CHILD_INTERRUPT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_AUTHORIZE_WEB_TOOL_EXECUTION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_AWAIT_CHILD_INTERRUPT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CANCEL_COMMAND_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CLOSE_APPROVAL_REVIEWER_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CLOSE_CHILD_CONTROL_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_INPUTS_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_INTERNAL_TOOL_REPAIR_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_RUNTIME_TERMINATION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_COMMIT_TASK_NOTIFICATION_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CREATE_SUBAGENT_THREAD_TIMEOUT_MS",
+        "TETRAL_BRIDGE_DELIVER_INTER_AGENT_MAIL_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ENSURE_APPROVAL_REVIEWER_SIDECAR_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ENSURE_APPROVAL_REVIEWER_TRUNK_TIMEOUT_MS",
+        "TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS",
+        "TETRAL_BRIDGE_LIST_CHILD_THREADS_TIMEOUT_MS",
+        "TETRAL_BRIDGE_LOAD_CONTEXT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_MARK_CHILD_THREAD_ACTIVE_TIMEOUT_MS",
+        "TETRAL_BRIDGE_MCP_MANIFEST_CHANGED_TIMEOUT_MS",
+        "TETRAL_BRIDGE_READ_AGENT_MAIL_TIMEOUT_MS",
+        "TETRAL_BRIDGE_READ_COMMAND_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_READ_FILE_ATTACHMENT_CHUNK_TIMEOUT_MS",
+        "TETRAL_BRIDGE_REFRESH_RUNTIME_BINDING_TOKEN_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RESOLVE_CHILD_THREAD_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RESOLVE_FILE_ATTACHMENT_METADATA_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RESOLVE_TRANSIENT_ATTACHMENT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_RUN_MEMORY_TIMEOUT_MS",
+        "TETRAL_BRIDGE_SEND_COMMAND_INPUT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_SETTLE_TOOL_RESULT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_WRITE_REQUEST_END_TIMEOUT_MS",
+        "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS",
+        "TETRAL_RUNTIME_REPORT_TIMEOUT_MS"
+      ],
+      "defaults": {
+        "loadContext": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_LOAD_CONTEXT_TIMEOUT_MS",
+          "timeout_ms": 30000
+        },
+        "refreshRuntimeBindingToken": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_REFRESH_RUNTIME_BINDING_TOKEN_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "commitInputs": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_COMMIT_INPUTS_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "commitTaskNotificationResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_COMMIT_TASK_NOTIFICATION_RESULT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "writeEvent": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "settleToolResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_SETTLE_TOOL_RESULT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "writeRequestEnd": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_WRITE_REQUEST_END_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "finishIdle": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "createSubagentThread": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CREATE_SUBAGENT_THREAD_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "ensureApprovalReviewerTrunk": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ENSURE_APPROVAL_REVIEWER_TRUNK_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "ensureApprovalReviewerSidecar": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ENSURE_APPROVAL_REVIEWER_SIDECAR_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "admitApprovalReviewInput": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_APPROVAL_REVIEW_INPUT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "resolveChildThread": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_RESOLVE_CHILD_THREAD_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "listChildThreads": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_LIST_CHILD_THREADS_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "deliverInterAgentMail": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_DELIVER_INTER_AGENT_MAIL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "readAgentMail": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_READ_AGENT_MAIL_TIMEOUT_MS",
+          "timeout_ms": 30000
+        },
+        "admitChildInterrupt": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_CHILD_INTERRUPT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "awaitChildInterrupt": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_AWAIT_CHILD_INTERRUPT_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "closeChildControl": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CLOSE_CHILD_CONTROL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "closeApprovalReviewer": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CLOSE_APPROVAL_REVIEWER_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "markChildThreadActive": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_MARK_CHILD_THREAD_ACTIVE_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "acceptSandboxExecution": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ACCEPT_SANDBOX_EXECUTION_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "awaitSandboxExecution": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "readCommandResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_READ_COMMAND_RESULT_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "sendCommandInput": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_SEND_COMMAND_INPUT_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "cancelCommand": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CANCEL_COMMAND_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "authorizeWebToolExecution": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_AUTHORIZE_WEB_TOOL_EXECUTION_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "runMemory": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_RUN_MEMORY_TIMEOUT_MS",
+          "timeout_ms": 35000
+        },
+        "resolveTransientAttachment": {
+          "kind": "remaining_provider_budget",
+          "environment_key": "TETRAL_BRIDGE_RESOLVE_TRANSIENT_ATTACHMENT_TIMEOUT_MS"
+        },
+        "resolveFileAttachmentMetadata": {
+          "kind": "remaining_provider_budget",
+          "environment_key": "TETRAL_BRIDGE_RESOLVE_FILE_ATTACHMENT_METADATA_TIMEOUT_MS"
+        },
+        "readFileAttachmentChunk": {
+          "kind": "remaining_provider_budget",
+          "environment_key": "TETRAL_BRIDGE_READ_FILE_ATTACHMENT_CHUNK_TIMEOUT_MS"
+        },
+        "mcpManifestChanged": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_MCP_MANIFEST_CHANGED_TIMEOUT_MS",
+          "timeout_ms": 5000
+        },
+        "claimMcpToolResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
+          "timeout_ms": 10000
+        },
+        "commitMcpToolResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_COMMIT_MCP_TOOL_RESULT_TIMEOUT_MS",
+          "timeout_ms": 10000
+        },
+        "relinquishMcpToolResult": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_RELINQUISH_MCP_TOOL_RESULT_TIMEOUT_MS",
+          "timeout_ms": 10000
+        },
+        "commitInternalToolRepair": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_COMMIT_INTERNAL_TOOL_REPAIR_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "commitRuntimeTermination": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_COMMIT_RUNTIME_TERMINATION_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "registerRuntimeProcess": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS",
+          "timeout_ms": 5000
+        },
+        "reportRuntimeProcess": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_RUNTIME_REPORT_TIMEOUT_MS",
+          "timeout_ms": 1000
+        },
+        "releaseRuntimeBinding": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_RELEASE_RUNTIME_BINDING_TIMEOUT_MS",
+          "timeout_ms": 5000
+        }
+      },
+      "units": "Milliseconds per RPC attempt; remaining Provider deadlines are absolute milliseconds supplied by the caller.",
+      "unset_zero": "Only undefined selects each method default. Fixed overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget method rejects.",
+      "constraints": "Exactly37 fixed and3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate3 attempts and100/300ms backoffs retain their existing retry authority. Method policies authorize no retries. Fixed deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
+      "projection": "Runtime startup parses these supported application env overrides. No dedicated Helm per-method override knobs: service/raw/Helm Runtime defaults retain the owner policies. The checked bridge-method-policy.json mirror enumerates RPC routes; internal-routing.yaml disables proxy timeout and retries for every Bridge method, so the proxy cannot shorten application overrides. Existing transport tests check the descriptor mirror and proxy disposition; configuration_projection_test.go checks this complete catalog against actual owner exports/key derivation.",
+      "proofs": [
+        "services/agent-runtime/packages/runtime-pod/test/unit/bridge-policy.test.ts",
+        "services/agent-runtime/packages/runtime-pod/test/unit/lifecycle.test.ts",
+        "deploy/helm/transport_test.go",
+        "deploy/helm/configuration_projection_test.go",
+        "deploy/helm/testdata/configuration-parsers.ts"
+      ]
+    },
+    {
+      "id": "event-stream",
+      "owner": "services/event-stream",
+      "sources": [
+        "services/event-stream/config.go",
+        "services/event-stream/cmd/event-stream/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_EVENT_STREAM_ACTIVE_REQUESTS",
+        "TETRAL_EVENT_STREAM_DATABASE_URL",
+        "TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS",
+        "TETRAL_EVENT_STREAM_HTTP_ADDR",
+        "TETRAL_EVENT_STREAM_HUB_MAX_BYTES",
+        "TETRAL_EVENT_STREAM_HUB_MAX_FRAMES",
+        "TETRAL_EVENT_STREAM_METRICS_ADDR",
+        "TETRAL_EVENT_STREAM_POLL_INTERVAL_MS",
+        "TETRAL_EVENT_STREAM_PREVIEW_SETUP_TIMEOUT_MS",
+        "TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES",
+        "TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_FRAMES",
+        "TETRAL_EVENT_STREAM_VIEWER_MAX_BYTES",
+        "TETRAL_EVENT_STREAM_VIEWER_MAX_FRAMES",
+        "TETRAL_EVENT_STREAM_WRITE_TIMEOUT_MS",
+        "TETRAL_SERVICE_VERSION"
+      ],
+      "defaults": {
+        "poll_ms": 1000,
+        "heartbeat_ms": 1000,
+        "write_ms": 10000,
+        "setup_ms": 1000,
+        "hub_bytes": 8388608,
+        "hub_frames": 2048,
+        "viewer_bytes": 262144,
+        "viewer_frames": 128,
+        "subscription_bytes": 8388608,
+        "subscription_frames": 2048,
+        "active_requests": 32
+      },
+      "units": "milliseconds, bytes, frames, requests",
+      "unset_zero": "Exact empty defaults; zero invalid.",
+      "constraints": "Timers<=60000/setup<=10000; bounded queues; viewer<=hub. Formal SSE framing/pagination constants stay domain-owned.",
+      "projection": "eventStream values and preview subscriber fields; existing actual parser proof retained.",
+      "proofs": [
+        "services/event-stream/config_test.go",
+        "deploy/helm/public_streaming_test.go"
+      ]
+    },
+    {
+      "id": "git-proxy",
+      "owner": "services/git-proxy",
+      "sources": [
+        "services/git-proxy/config.go",
+        "services/git-proxy/cmd/git-proxy/main.go"
+      ],
+      "environment_keys": [
+        "ENGINE_VAULT_KEY",
+        "TETRAL_DATABASE_TLS_CA_PATH",
+        "TETRAL_DATABASE_TLS_SERVER_NAME",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS",
+        "TETRAL_GIT_PROXY_HTTP_ADDR",
+        "TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER",
+        "TETRAL_GIT_PROXY_METRICS_ADDR",
+        "TETRAL_GIT_PROXY_PUBLIC_BASE_URL"
+      ],
+      "defaults": {
+        "drain_grace_seconds": 1800,
+        "http_address": ":8080",
+        "metrics_address": ":8081"
+      },
+      "units": "seconds, listener addresses",
+      "unset_zero": "Whitespace empty defaults; positive grace; legacy cutover explicit boolean.",
+      "constraints": "Drain grace also ticket rotation accept window; distinct listener/TLS config; ticket body/query never logged.",
+      "projection": "Fixed portable drain1800/Pod grace1805, secret refs/nativeHTTP trust; keep Git retention/relay policies independent.",
+      "proofs": [
+        "services/git-proxy/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "web-connector",
+      "owner": "services/web-connector",
+      "sources": [
+        "services/web-connector/config.go",
+        "services/web-connector/cmd/web-connector/main.go"
+      ],
+      "environment_keys": [
+        "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
+        "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
+        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+        "TETRAL_SERVICE_VERSION",
+        "TETRAL_WEB_API_KEYS",
+        "TETRAL_WEB_CONNECTOR_GRPC_ADDR",
+        "TETRAL_WEB_CONNECTOR_METRICS_ADDR",
+        "TETRAL_WEB_READER_ENDPOINT",
+        "TETRAL_WEB_SEARCH_ENDPOINT"
+      ],
+      "defaults": {
+        "ops_header_seconds": 5,
+        "listener_shutdown_seconds": 10,
+        "search_endpoint": "https://s.jina.ai/",
+        "reader_endpoint": "https://r.jina.ai/",
+        "cancel_join_ms": 5000
+      },
+      "units": "seconds, milliseconds, HTTPS URLs",
+      "unset_zero": "Whitespace empty endpoints default; API key JSON array/HMAC required.",
+      "constraints": "HTTPS endpoint no user/query/fragment; drain1..20000; drain+join<=25000. Backend/cache/tool-visible caps stay independent.",
+      "projection": "web endpoints and lifecycle.webDrainMs/cancelJoinMs; credentials secret refs only.",
+      "proofs": [
+        "services/web-connector/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "api-and-bootstrap",
+      "owner": "services/api",
+      "sources": [
+        "services/api/config.go",
+        "services/api/tetralapi.go",
+        "services/api/bootstrap.go",
+        "services/api/cmd/tetral-api/main.go"
+      ],
+      "environment_keys": [
+        "ENGINE_DATA_DIR",
+        "ENGINE_PORT",
+        "ENGINE_VAULT_KEY",
+        "TETRAL_API_HTTP_ADDR",
+        "TETRAL_API_METRICS_ADDR",
+        "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64",
+        "TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF",
+        "TETRAL_SESSION_EVENT_BODY_BYTE_CAP",
+        "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST"
+      ],
+      "defaults": {},
+      "units": "listener addresses, filesystem paths, workspace identities",
+      "unset_zero": "Owning startup parser supplies paths/listeners; boot workspace/key references required.",
+      "constraints": "Trusted HTTP transport complete and role-scope boot authority; schema/role versions are storage contract, CLI results are deliberate output.",
+      "projection": "API ConfigMap/Secret refs and nativeHTTP trust; database preparation remains explicit operator command.",
+      "proofs": [
+        "services/api/config_validators_test.go",
+        "services/api/startup_config_surface_test.go"
+      ]
+    },
+    {
+      "id": "kubernetes-visibility",
+      "owner": "internal/kubernetes",
+      "sources": [
+        "internal/kubernetes/config.go"
+      ],
+      "environment_keys": [
+        "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR",
+        "TETRAL_AGENT_RUNTIME_SERVICE_NAME",
+        "TETRAL_KUBERNETES_NAMESPACE"
+      ],
+      "defaults": {},
+      "units": "namespaces, selectors, workload identities",
+      "unset_zero": "Required namespace/selector validation; identities never generated in catalog.",
+      "constraints": "Namespace/name/selector syntax, bounded visibility state and reconnect policy stay domain-owned.",
+      "projection": "Downward API and explicit deployment namespaces/selectors, checked exact receiver/network composition.",
+      "proofs": [
+        "internal/kubernetes/config_test.go",
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "runtime-installed-configuration",
+      "owner": "internal/runtimeconfig",
+      "sources": [
+        "internal/runtimeconfig/config.go"
+      ],
+      "environment_keys": [],
+      "defaults": {},
+      "units": "installed session/model/tool policy",
+      "unset_zero": "Installed durable data snapshot, no ambient process env.",
+      "constraints": "Core/model/schema/reviewer/content/attachment bounds remain runtime semantic constants; retries and byte rails not unified by equal literals.",
+      "projection": "No Helm/raw process mirror for durable session policy.",
+      "proofs": [
+        "internal/runtimeconfig/config_test.go"
+      ]
+    },
+    {
+      "id": "domain-protocol-storage",
+      "owner": "domain owners",
+      "sources": [
+        "internal/queue/queue.go",
+        "internal/storage/postgresql_database.go"
+      ],
+      "environment_keys": [
+        "ENGINE_DATA_DIR",
+        "TETRAL_DATABASE_URL"
+      ],
+      "defaults": {},
+      "units": "owner-specific",
+      "unset_zero": "IDs, SQL/status enums, schemas, protobuf/header/route/crypto constants remain domain-local; no operational override or generated secret.",
+      "constraints": "IDs, SQL/status enums, schemas, protobuf/header/route/crypto constants remain domain-local; no operational override or generated secret.",
+      "projection": "Intentionally local; no process setting consolidation.",
+      "proofs": [
+        "internal/queue/queue_test.go"
+      ]
+    },
+    {
+      "id": "deployment-policy",
+      "owner": "deploy",
+      "sources": [
+        "deploy/helm/tetral/values.yaml"
+      ],
+      "environment_keys": [],
+      "defaults": {},
+      "units": "owner-specific",
+      "unset_zero": "Resource/probe/replica/HPA/rollout/ports/network/trust policy remains deployment-owned. Pool ledger includes HPA maxima, surge, CronJob and all generations; unresolved deployment capacity/reserve is not invented.",
+      "constraints": "Resource/probe/replica/HPA/rollout/ports/network/trust policy remains deployment-owned. Pool ledger includes HPA maxima, surge, CronJob and all generations; unresolved deployment capacity/reserve is not invented.",
+      "projection": "Intentionally local; no process setting consolidation.",
+      "proofs": [
+        "deploy/helm/chart_test.go",
+        "deploy/helm/connection_budget_test.go"
+      ]
+    },
+    {
+      "id": "build-release-verification",
+      "owner": "build and test owners",
+      "sources": [
+        "Makefile",
+        "services/gateway/scripts/platform-key.ts",
+        "internal/testinfra/runner.go",
+        "internal/testinfra/cmd/tetral-ci-gate/main.go",
+        "internal/testinfra/cmd/tetral-ci-health/main.go",
+        "internal/testinfra/keycloak.go",
+        "internal/testinfra/nats.go",
+        "internal/testinfra/dependencies.go",
+        "internal/storage/storagetest/storagetest.go",
+        "internal/sandbox/helper/internal/testfixture/runtime.go"
+      ],
+      "environment_keys": [
+        "ENGINE_VAULT_KEY",
+        "TETRAL_CI_EVENT_BASE_SHA",
+        "TETRAL_CI_EVENT_HEAD_SHA",
+        "TETRAL_CI_JOB",
+        "TETRAL_CI_NEEDS",
+        "TETRAL_CI_PRODUCER",
+        "TETRAL_CI_PULL_REQUEST",
+        "TETRAL_CI_REPOSITORY",
+        "TETRAL_CI_REQUIRED_CHECK_SHA",
+        "TETRAL_CI_RUN_ATTEMPT",
+        "TETRAL_CI_RUN_ID",
+        "TETRAL_CI_TEST_MERGE_SHA",
+        "TETRAL_CI_WORKFLOW",
+        "TETRAL_CI_WORKFLOW_SOURCE_SHA",
+        "TETRAL_DATABASE_URL",
+        "TETRAL_ENGINE_SDK_ROOT",
+        "TETRAL_HELPER_TEST_RUNTIME_ROOT",
+        "TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD",
+        "TETRAL_RUN_GO_BUN_GRPC_INTEROP",
+        "TETRAL_TEST_DATABASE_URL",
+        "TETRAL_TEST_DESCENDANT_REGISTRY",
+        "TETRAL_TEST_DOCKER_AVAILABLE",
+        "TETRAL_TEST_KEYCLOAK_CONFIG",
+        "TETRAL_TEST_MINIO_ACCESS_KEY",
+        "TETRAL_TEST_MINIO_ENDPOINT",
+        "TETRAL_TEST_MINIO_REGION",
+        "TETRAL_TEST_MINIO_SECRET_KEY",
+        "TETRAL_TEST_NATS_CONFIG",
+        "TETRAL_TEST_POSTGRES_PROVENANCE",
+        "TETRAL_TEST_RUN_ID"
+      ],
+      "defaults": {},
+      "units": "owner-specific",
+      "unset_zero": "Build/CI/release command budgets and dependency pins are verification policy, not production timers. Official code/locks are generated projections; test fixture clocks/literal expectations stay independent.",
+      "constraints": "Build/CI/release command budgets and dependency pins are verification policy, not production timers. Official code/locks are generated projections; test fixture clocks/literal expectations stay independent.",
+      "projection": "Intentionally local; no process setting consolidation.",
+      "proofs": [
+        "deploy/helm/transport_test.go"
+      ]
+    },
+    {
+      "id": "documentation-workflow",
+      "owner": "owning service and contributor docs",
+      "sources": [
+        "CONTRIBUTING.md"
+      ],
+      "environment_keys": [],
+      "defaults": {},
+      "units": "owner-specific",
+      "unset_zero": "Documentation and skill/workflow defaults are contributor policy; maintain docs with owning behavior, never publish private acceptance apparatus.",
+      "constraints": "Documentation and skill/workflow defaults are contributor policy; maintain docs with owning behavior, never publish private acceptance apparatus.",
+      "projection": "Intentionally local; no process setting consolidation.",
+      "proofs": []
+    },
+    {
+      "id": "preview-broker",
+      "owner": "Provider preview publisher and Event Stream subscriber",
+      "sources": [
+        "services/gateway/packages/provider-gateway/src/providers/preview-config.ts",
+        "services/event-stream/preview_nats.go"
+      ],
+      "defaults": {
+        "publisher_queue_bytes": 4194304,
+        "publisher_queue_frames": 1024,
+        "publisher_batch_bytes": 262144,
+        "publisher_batch_frames": 64,
+        "publisher_connect_ms": 1000,
+        "publisher_flush_ms": 1000,
+        "publisher_retry_max_ms": 5000,
+        "publisher_credential_poll_ms": 250,
+        "publisher_ping_ms": 1000,
+        "publisher_max_ping_out": 1,
+        "subscriber_connect_ms": 1000,
+        "subscriber_reconnect_ms": 1000,
+        "subscriber_ping_ms": 120000,
+        "subscriber_max_ping_out": 2
+      },
+      "units": "bytes, frames, milliseconds, outstanding pings",
+      "unset_zero": "Unset uses owning defaults; subscriber no server is disabled; credentials remain mounted refs; positive enabled transport bounds.",
+      "constraints": "Publisher batch<=queue; bounded broker loss/admission; subscriber reconnect policy and pinned-client heartbeat defaults remain distinct.",
+      "projection": "preview.gateway and preview.subscriber values; preview.enabled=false removes broker refs/network/publisher env, retains formal stream policy.",
+      "proofs": [
+        "deploy/helm/public_streaming_test.go"
+      ],
+      "environment_keys": [
+        "TETRAL_GATEWAY_PREVIEW_BATCH_BYTES",
+        "TETRAL_GATEWAY_PREVIEW_BATCH_FRAMES",
+        "TETRAL_GATEWAY_PREVIEW_FLUSH_TIMEOUT_MS",
+        "TETRAL_GATEWAY_PREVIEW_QUEUE_BYTES",
+        "TETRAL_GATEWAY_PREVIEW_QUEUE_FRAMES",
+        "TETRAL_NATS_CONNECT_TIMEOUT_MS",
+        "TETRAL_NATS_CREDENTIAL_POLL_MS",
+        "TETRAL_NATS_MAX_PING_OUT",
+        "TETRAL_NATS_PASSWORD_PATH",
+        "TETRAL_NATS_PING_INTERVAL_MS",
+        "TETRAL_NATS_RECONNECT_WAIT_MS",
+        "TETRAL_NATS_RETRY_MAX_MS",
+        "TETRAL_NATS_SERVERS",
+        "TETRAL_NATS_TLS_CA_PATH",
+        "TETRAL_NATS_TLS_CERT_PATH",
+        "TETRAL_NATS_TLS_KEY_PATH",
+        "TETRAL_NATS_USER_PATH"
+      ]
+    },
+    {
+      "id": "transport-security",
+      "owner": "internal/transportsecurity and internal/internalgrpc",
+      "sources": [
+        "internal/transportsecurity/http.go",
+        "internal/transportsecurity/credentials.go",
+        "internal/internalgrpc/grpc_workload.go"
+      ],
+      "defaults": {
+        "http_mode": "plaintext",
+        "credential_poll_ms": 250
+      },
+      "units": "transport modes, exact DNS/SPIFFE identities, mounted file references, milliseconds",
+      "unset_zero": "Empty HTTP mode is plaintext; mounted trust/complete optional leaf pair required; invalid profiles/material combinations reject.",
+      "constraints": "Native HTTP exact trusted edge URI; complete projected generation; retain valid prior material after malformed replacement; DNS/peer verification and profile-specific listeners remain semantic constraints.",
+      "projection": "Checked profiles/native HTTP helper/trust and leaf refs; credential observer250ms intentionally fixed, not a workload lease or business timer.",
+      "proofs": [
+        "internal/transportsecurity/http_test.go",
+        "internal/transportsecurity/credentials_test.go",
+        "deploy/helm/transport_test.go"
+      ],
+      "environment_keys": [
+        "TETRAL_HTTP_TLS_CA_PATH",
+        "TETRAL_HTTP_TLS_CERT_PATH",
+        "TETRAL_HTTP_TLS_EDGE_CLIENT_URI",
+        "TETRAL_HTTP_TLS_KEY_PATH",
+        "TETRAL_HTTP_TRANSPORT"
+      ]
+    }
+  ]
+}

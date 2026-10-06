@@ -80,6 +80,7 @@ func (s *PostgreSQLQueueStore) Metrics(ctx context.Context, now time.Time) ([]Me
 		rows, err := tx.Query(ctx,
 			`SELECT kind,
 			        COUNT(*) FILTER (WHERE status = 'pending') AS pending_jobs,
+			        COUNT(*) FILTER (WHERE status = 'pending' AND available_at <= $1) AS ready_jobs,
 			        COUNT(*) FILTER (WHERE status = 'leased') AS leased_jobs,
 			        COUNT(*) FILTER (WHERE status = 'pending' AND attempt_count > 0) AS retry_pending_jobs,
 			        COUNT(*) FILTER (WHERE status = 'dead_lettered') AS dead_lettered_jobs,
@@ -105,6 +106,7 @@ func (s *PostgreSQLQueueStore) Metrics(ctx context.Context, now time.Time) ([]Me
 			if err := rows.Scan(
 				&snapshot.Kind,
 				&snapshot.PendingJobs,
+				&snapshot.ReadyJobs,
 				&snapshot.LeasedJobs,
 				&snapshot.RetryPendingJobs,
 				&snapshot.DeadLetteredJobs,

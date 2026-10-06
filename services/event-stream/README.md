@@ -129,10 +129,13 @@ silent stream. The heartbeat and poll intervals are deployment tuning; the
 heartbeat's existence is not.
 
 The heartbeat only survives an intermediary that does not buffer. The SSE
-ingress must carry the same long-read / no-proxy-buffering annotations the
-git-proxy ingress already carries: without no-proxy-buffering at the ingress an
-intermediary buffers SSE frames and the stream is broken regardless of the
-heartbeat.
+Envoy Gateway routes both SDK stream URLs to Event Stream with no total request
+or stream-duration timeout and no response buffering filter. Its 30-minute idle
+window permits the service's configured heartbeats. The exact Session route is
+`/v1/sessions/{session_id}/events/stream`; Thread streams use
+`/v1/sessions/{session_id}/threads/{thread_id}/stream`. Near-matching child paths
+remain API-owned. The [public edge contract](../../deploy/envoy-gateway/README.md)
+owns translation and actual proxy protocol checks.
 
 Generated text remains immediately readable in history lists after commit. Its
 SSE publication waits for the corresponding durable End on both preview and

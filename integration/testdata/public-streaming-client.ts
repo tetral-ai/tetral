@@ -31,6 +31,7 @@ function text(value: unknown): string {
 	return value;
 }
 const config = object(bootstrap);
+const ca = config.caPath === undefined ? undefined : await readFile(text(config.caPath), "utf8");
 const viewers = new Map<string, Viewer>();
 const requests: { path: string; query: [string, string][] }[] = [];
 let opening: Viewer | undefined;
@@ -72,7 +73,7 @@ const client = new Tetral({
 		const url = new URL(request.url);
 		requests.push({ path: url.pathname, query: [...url.searchParams] });
 		const viewer = opening;
-		const response = await fetch(request);
+		const response = ca === undefined ? await fetch(request) : await Bun.fetch(request, { tls: { ca } });
 		if (viewer === undefined || response.body === null || !url.pathname.endsWith("/stream")) return response;
 		return new Response(response.body.pipeThrough(observeFields(viewer)), {
 			status: response.status,

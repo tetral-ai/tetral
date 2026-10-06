@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -90,7 +91,7 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		document := auth.PolicyDocument{FederationRules: []auth.FederationRule{{ID: "managed_rule", OrganizationID: "managed_org", Issuer: "https://issuer.managed.test", Audience: "tetral-engine", JWKSURL: "https://issuer.managed.test/keys", Algorithm: "RS256", Enabled: true}}, Identities: []auth.IdentityBinding{{ID: "managed_identity", OrganizationID: "managed_org", Issuer: "https://issuer.managed.test", Subject: "managed_subject", Kind: auth.IdentityHuman, Enabled: true}}, WorkspaceGrants: []auth.WorkspaceGrant{{ID: "managed_grant", IdentityID: "managed_identity", WorkspaceID: workspace.ID("managed_workspace"), Role: auth.WorkspaceFullAccess, Enabled: true}}}
 		policyInput := managedInitializationJSON(t, document)
 		run := func(name string, environment map[string]string, input []byte, wantOK bool, args ...string) []byte {
-			return managedInitializationCommand(t, ctx, binaries[name], environment, input, wantOK, args...)
+			return managedInitializationCommand(ctx, t, binaries[name], environment, input, wantOK, args...)
 		}
 		run("prepare", base, []byte(`{"roles":{}}`), false)
 		managedInitializationClosed(t, processEnv)
@@ -139,38 +140,38 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 				t.Fatal("preparation installed a privileged serving/migration role")
 			}
 		}
-		process := managedInitializationStartAuth(t, ctx, binaries["auth"], processEnv)
-		managedInitializationProbes(t, ctx, process, processEnv["ENGINE_API_KEY"])
+		process := managedInitializationStartAuth(ctx, t, binaries["auth"], processEnv)
+		managedInitializationProbes(ctx, t, process, processEnv["ENGINE_API_KEY"])
 		process.stop(t)
-		before := managedInitializationRows(t, ctx, admin)
+		before := managedInitializationRows(ctx, t, admin)
 		run("prepare", base, roleInput, true)
 		run("bootstrap", bootstrapEnv, nil, true, "--workspace-id", "managed_workspace", "--name", "Must Not Overwrite")
 		managedInitializationChanges(t, run("policy", base, policyInput, true), 0)
-		if after := managedInitializationRows(t, ctx, admin); after != before {
+		if after := managedInitializationRows(ctx, t, admin); after != before {
 			t.Fatal("repeat initialization changed workspace/grant/key identities or existing data")
 		}
-		process = managedInitializationStartAuth(t, ctx, binaries["auth"], processEnv)
+		process = managedInitializationStartAuth(ctx, t, binaries["auth"], processEnv)
 		// Restart's matching bootstrap refresh is a no-op, before any touch probe.
-		if after := managedInitializationRows(t, ctx, admin); after != before {
+		if after := managedInitializationRows(ctx, t, admin); after != before {
 			t.Fatal("repeat Auth startup changed existing bootstrap identity or data")
 		}
-		managedInitializationProbes(t, ctx, process, processEnv["ENGINE_API_KEY"])
+		managedInitializationProbes(ctx, t, process, processEnv["ENGINE_API_KEY"])
 		process.stop(t)
-		before = managedInitializationRows(t, ctx, admin)
+		before = managedInitializationRows(ctx, t, admin)
 		run("prepare", base, []byte(`{"roles":{}}`), false)
 		failed := document
 		failed.FederationRules = append(append([]auth.FederationRule{}, document.FederationRules...), auth.FederationRule{ID: "failed_rule", OrganizationID: "managed_org", Issuer: "https://issuer.failure.test", Audience: "tetral-engine", JWKSURL: "https://issuer.failure.test/keys", Algorithm: "RS256", Enabled: true})
 		failed.WorkspaceGrants = []auth.WorkspaceGrant{{ID: "failed_grant", IdentityID: "managed_identity", WorkspaceID: workspace.ID("missing_workspace"), Role: auth.WorkspaceFullAccess, Enabled: true}}
 		run("policy", base, managedInitializationJSON(t, failed), false)
 		managedInitializationClosed(t, processEnv)
-		if after := managedInitializationRows(t, ctx, admin); after != before {
+		if after := managedInitializationRows(ctx, t, admin); after != before {
 			t.Fatal("failed preparation/import destroyed or partially changed seeded data")
 		}
 		// Repair the failed release gate explicitly; the old policy remains valid.
 		run("prepare", base, roleInput, true)
 		managedInitializationChanges(t, run("policy", base, policyInput, true), 0)
-		process = managedInitializationStartAuth(t, ctx, binaries["auth"], processEnv)
-		managedInitializationProbes(t, ctx, process, processEnv["ENGINE_API_KEY"])
+		process = managedInitializationStartAuth(ctx, t, binaries["auth"], processEnv)
+		managedInitializationProbes(ctx, t, process, processEnv["ENGINE_API_KEY"])
 		process.stop(t)
 		t.Log("managed_initialization_assertion=commands_order_repeat_failure_closed")
 	})
@@ -207,7 +208,7 @@ func managedInitializationEnvironment(values map[string]string) []string {
 	}
 	return environment
 }
-func managedInitializationCommand(t *testing.T, ctx context.Context, binary string, values map[string]string, input []byte, wantOK bool, args ...string) []byte {
+func managedInitializationCommand(ctx context.Context, t *testing.T, binary string, values map[string]string, input []byte, wantOK bool, args ...string) []byte {
 	t.Helper()
 	commandCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -246,12 +247,12 @@ func managedInitializationClosed(t *testing.T, values map[string]string) {
 	for _, key := range []string{"TETRAL_AUTH_HTTP_ADDR", "TETRAL_AUTH_METRICS_ADDR", "TETRAL_AUTH_GRPC_ADDR"} {
 		connection, err := net.DialTimeout("tcp", values[key], time.Second)
 		if err == nil {
-			connection.Close()
+			_ = connection.Close()
 			t.Fatal("release admitted a listener before initialization succeeded")
 		}
 	}
 }
-func managedInitializationRows(t *testing.T, ctx context.Context, admin *sql.DB) string {
+func managedInitializationRows(ctx context.Context, t *testing.T, admin *sql.DB) string {
 	t.Helper()
 	var rows string
 	if err := admin.QueryRowContext(ctx, `SELECT jsonb_build_object('schema',(SELECT jsonb_agg(to_jsonb(s) ORDER BY version) FROM tetral_schema_migrations s),'workspaces',(SELECT jsonb_agg(to_jsonb(w) ORDER BY id) FROM workspaces w),'rules',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM auth_federation_rules r),'identities',(SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM auth_identities i),'grants',(SELECT jsonb_agg(to_jsonb(g) ORDER BY id) FROM auth_workspace_grants g),'keys',(SELECT jsonb_agg(to_jsonb(k) ORDER BY id) FROM api_keys k))::text`).Scan(&rows); err != nil {
@@ -259,7 +260,7 @@ func managedInitializationRows(t *testing.T, ctx context.Context, admin *sql.DB)
 	}
 	return rows
 }
-func managedInitializationStartAuth(t *testing.T, ctx context.Context, binary string, values map[string]string) *oidcAuthProcess {
+func managedInitializationStartAuth(ctx context.Context, t *testing.T, binary string, values map[string]string) *oidcAuthProcess {
 	t.Helper()
 	process := &oidcAuthProcess{joined: make(chan error, 1), URL: "http://" + values["TETRAL_AUTH_HTTP_ADDR"], MetricsURL: "http://" + values["TETRAL_AUTH_METRICS_ADDR"], GRPCAddress: values["TETRAL_AUTH_GRPC_ADDR"]}
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(values["TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64"])
@@ -288,7 +289,9 @@ func managedInitializationStartAuth(t *testing.T, ctx context.Context, binary st
 		}
 		response, err := client.Do(request)
 		if err == nil {
-			response.Body.Close()
+			if err := response.Body.Close(); err != nil {
+				t.Fatal("initialization readiness response close failed")
+			}
 			if response.StatusCode == 200 {
 				return process
 			}
@@ -303,7 +306,7 @@ func managedInitializationStartAuth(t *testing.T, ctx context.Context, binary st
 		}
 	}
 }
-func managedInitializationProbes(t *testing.T, ctx context.Context, process *oidcAuthProcess, key string) {
+func managedInitializationProbes(ctx context.Context, t *testing.T, process *oidcAuthProcess, key string) {
 	t.Helper()
 	for _, test := range []struct {
 		credential string

@@ -98,10 +98,19 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 
 	exportCleanupMetrics(context.Background(), nil, exporter, metrics, time.Second)
 
-	if len(exporter.samples) != 3 {
+	legacy := 0
+	for _, sample := range exporter.samples {
+		if sample.Family != "tetral_operation_duration_seconds" {
+			legacy++
+		}
+	}
+	if legacy != 3 {
 		t.Fatalf("exported samples = %#v; want three scheduler series", exporter.samples)
 	}
 	for _, sample := range exporter.samples {
+		if sample.Family == "tetral_operation_duration_seconds" {
+			continue
+		}
 		if len(sample.Labels) != 0 {
 			t.Fatalf("sample %s labels = %#v; want no workspace/session labels", sample.Name, sample.Labels)
 		}

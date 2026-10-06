@@ -81,25 +81,3 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: job-runner-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: job-runner
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: job-runner
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP

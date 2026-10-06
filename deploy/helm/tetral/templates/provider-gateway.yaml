@@ -50,6 +50,7 @@ spec:
             - bun
             - /app/dist/provider-gateway/src-command.js
           env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 12 }}
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" true) | trim | indent 12 }}
 {{ include "tetral.previewEnv" . | trim | indent 12 }}
 {{ include "tetral.previewGatewayPolicy" . | trim | indent 12 }}
@@ -233,7 +234,7 @@ spec:
 {{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 443
+          port: {{ .Values.network.apiServerPort }}
     - to:
 {{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
       ports:

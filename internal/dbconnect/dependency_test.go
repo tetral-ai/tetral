@@ -355,9 +355,11 @@ func isAllowedExistingRuntimeBoundaryImport(relativePath string, importPath stri
 }
 
 func allowedExistingLogImportFilesForDBConnectTest() map[string]bool {
-	// No production file imports plain "log" today; the allowlist stays as the
-	// mechanism so a future file with a justified plain-log need can be added here.
-	return map[string]bool{}
+	// net/http requires *log.Logger for ErrorLog. This listener constructs it
+	// only around httpServerDiagnostics, which discards raw addresses/panic/TLS
+	// text and emits bounded, classified records through the shared slog owner.
+	// TestHTTPServerDiagnosticsClassifyAndBoundWithoutRawText pins that boundary.
+	return map[string]bool{"internal/workload/workload.go": true}
 }
 
 func dbconnectPackageDir(t *testing.T) string {

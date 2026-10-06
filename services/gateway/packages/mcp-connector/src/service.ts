@@ -245,9 +245,25 @@ export class McpConnectorServiceShell {
     metadata: Metadata,
     options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<ListMcpToolsResponse> {
+    if (this.stopping) {
+      const started = performance.now();
+      try { this.#metrics.operations.observe("ListMcpTools", "rejected", (performance.now()-started)/1000); } catch { /* Metrics cannot change admission. */ }
+    }
     return this.track(
-      (signal) =>
-        this.listMcpToolsCore(request, metadata, { ...options, signal }),
+      async (signal) => {
+        const started = performance.now();
+        let outcome: "success" | "error" | "cancelled" | "timeout" | "rejected" = "error";
+        try {
+          const result = await this.listMcpToolsCore(request, metadata, { ...options, signal });
+          outcome = "success";
+          return result;
+        } catch (error) {
+          outcome = mcpOperationFailureOutcome(error);
+          throw error;
+        } finally {
+          try { this.#metrics.operations.observe("ListMcpTools", outcome !== "success" && signal.aborted ? "cancelled" : outcome, (performance.now()-started)/1000); } catch { /* Metrics are best effort. */ }
+        }
+      },
       options?.signal,
     );
   }
@@ -273,6 +289,10 @@ export class McpConnectorServiceShell {
     metadata: Metadata,
     options?: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly executionObservation?: () => McpExecutionObservation },
   ): Promise<RunMcpToolResponse> {
+    if (this.stopping) {
+      const started = performance.now();
+      try { this.#metrics.operations.observe("RunMcpTool", "rejected", (performance.now()-started)/1000); } catch { /* Metrics cannot change admission. */ }
+    }
     const callerDeadline = options?.timeoutMs === undefined ? Infinity : (this.options.monotonicNow ?? (() => performance.now()))() + options.timeoutMs;
     return this.track((signal) =>
       this.runMcpToolTracked(request, metadata, signal, callerDeadline), options?.signal,
@@ -283,6 +303,7 @@ export class McpConnectorServiceShell {
     drainDeadline: Date = deadline,
   ): Promise<void> {
     this.stopping = true;
+    const drainStarted = performance.now();
     this.shutdownDeadline = drainDeadline.getTime();
     const joined = Promise.allSettled([...this.workers.values()]);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -294,7 +315,9 @@ export class McpConnectorServiceShell {
     });
     const result = await Promise.race([joined, cutoff]);
     if (timer !== undefined) clearTimeout(timer);
+    try { this.#metrics.operations.observeShutdown("shutdown_drain", result === "cutoff" ? "timeout" : "success", (performance.now()-drainStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
     if (result === "cutoff") {
+      const joinStarted = performance.now();
       for (const controller of this.workers.keys())
         controller.abort(new Error("MCP process draining"));
       const end = new Promise<"expired">((resolve) => {
@@ -316,8 +339,10 @@ export class McpConnectorServiceShell {
       // Commands may close required clients only after this promise has joined.
       if (expired) {
         await joined;
+        try { this.#metrics.operations.observeShutdown("shutdown_cancel_join", "timeout", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
         throw new Error("MCP workers did not join before shutdown deadline");
       }
+      try { this.#metrics.operations.observeShutdown("shutdown_cancel_join", "success", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
     }
   }
 
@@ -526,8 +551,9 @@ export class McpConnectorServiceShell {
   ): Promise<RunMcpToolResponse> {
     const started = performance.now();
     const claimId = this.#claimIdFactory();
+    let outcome: "success" | "error" | "cancelled" | "timeout" | "rejected" = "error";
     try {
-      return await this.runMcpToolCore(
+      const response = await this.runMcpToolCore(
         request,
         metadata,
         started,
@@ -535,9 +561,15 @@ export class McpConnectorServiceShell {
         signal,
         callerDeadline,
       );
+      outcome = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED ? "success"
+        : response.errorKind === McpErrorKind.MCP_ERROR_KIND_TIMEOUT ? "timeout" : "error";
+      return response;
     } catch (error) {
       this.recordRunToolFailure(resolvedMcpRequest(request, claimId), runMcpToolThrownErrorKind(error), started);
+      outcome = mcpOperationFailureOutcome(error);
       throw error;
+    } finally {
+      try { this.#metrics.operations.observe("RunMcpTool", outcome !== "success" && signal.aborted ? "cancelled" : outcome, (performance.now()-started)/1000); } catch { /* Metrics cannot replace Tool settlement. */ }
     }
   }
 
@@ -1163,4 +1195,18 @@ function metricErrorKind(errorKind: McpErrorKind | undefined): string {
     return "mcp_internal_error";
   }
   return mcpErrorKindName(errorKind);
+}
+
+/** Classifies the owning failure, without deriving labels from exception text. */
+function mcpOperationFailureOutcome(error: unknown): "error" | "cancelled" | "timeout" | "rejected" {
+  if (error instanceof GrpcStatusError) {
+    if (error.code === status.CANCELLED) return "cancelled";
+    if (error.code === status.DEADLINE_EXCEEDED) return "timeout";
+    if ([status.UNAUTHENTICATED, status.PERMISSION_DENIED, status.INVALID_ARGUMENT, status.FAILED_PRECONDITION].includes(error.code)) return "rejected";
+  }
+  if (error instanceof McpConnectorError) {
+    if (error.code === "mcp_timeout") return "timeout";
+    if (error.code === "mcp_invalid_input") return "rejected";
+  }
+  return "error";
 }

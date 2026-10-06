@@ -3,6 +3,7 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,8 +59,9 @@ func TestSandboxConsumerAcquisitionAndJoinedDrain(t *testing.T) {
 			if work.Err() != nil {
 				t.Fatal("quiesce cancelled admitted worker")
 			}
+			metrics := NewOperationMetrics()
 			joined := make(chan error, 1)
-			go func() { joined <- JoinSandboxWorkers(finished, cancel, 60*time.Millisecond, time.Second) }()
+			go func() { joined <- JoinSandboxWorkers(finished, cancel, 60*time.Millisecond, time.Second, metrics) }()
 			if !force {
 				close(released)
 			}
@@ -70,6 +72,13 @@ func TestSandboxConsumerAcquisitionAndJoinedDrain(t *testing.T) {
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("consumer owner did not join")
+			}
+			outcome := "success"
+			if force {
+				outcome = "timeout"
+			}
+			if !strings.Contains(metrics.Text(), `operation="shutdown_workers_drain",outcome="`+outcome+`",service="sandbox"} 1`) {
+				t.Fatalf("missing joined owner metrics: %s", metrics.Text())
 			}
 			if calls.Load() != 1 {
 				t.Fatalf("consumer acquired after quiesce: %d", calls.Load())

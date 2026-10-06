@@ -41,6 +41,7 @@ func TestOpenMetricsHTTPExporterPushesSchedulerSeriesWithoutScopeLabels(t *testi
 		"tetral_cleanup_claim_due_runs_total 1",
 		"tetral_cleanup_jobs_claimed_total 2",
 		"tetral_cleanup_claim_due_duration_ms_total 25",
+		`tetral_operation_duration_seconds_count{operation="claim_due",outcome="success",service="cleanup"} 1`,
 		"# EOF\n",
 	} {
 		if !strings.Contains(body, want) {

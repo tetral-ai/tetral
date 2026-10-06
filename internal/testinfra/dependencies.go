@@ -48,6 +48,7 @@ type dependencyStarters struct {
 	docker     func(context.Context) error
 	sdk        func(context.Context, *dependencyManager) error
 	image      func(context.Context, *dependencyManager, string) error
+	tool       func(context.Context, *dependencyManager) error
 }
 
 var productionDependencyStarters = dependencyStarters{
@@ -57,6 +58,7 @@ var productionDependencyStarters = dependencyStarters{
 	keycloak:   func(ctx context.Context, manager *dependencyManager) error { return manager.startKeycloak(ctx) },
 	docker:     dockerAvailable,
 	sdk:        func(ctx context.Context, manager *dependencyManager) error { return manager.startSDK(ctx) },
+	tool:       func(ctx context.Context, manager *dependencyManager) error { return manager.prepareEGCTL(ctx) },
 	image: func(ctx context.Context, manager *dependencyManager, name string) error {
 		return manager.preparePinnedImage(ctx, name)
 	},
@@ -158,7 +160,16 @@ func startDependenciesWithRoot(ctx context.Context, dependencies, environment []
 				_ = manager.stopBounded()
 				return nil, err
 			}
-		case "envoy", "bun-image":
+		case "egctl":
+			if starters.tool == nil {
+				_ = manager.stopBounded()
+				return nil, fmt.Errorf("egctl dependency starter is unavailable")
+			}
+			if err := starters.tool(ctx, manager); err != nil {
+				_ = manager.stopBounded()
+				return nil, err
+			}
+		case "envoy", "edge-envoy", "bun-image":
 			if starters.image == nil {
 				_ = manager.stopBounded()
 				return nil, fmt.Errorf("pinned image dependency starter is unavailable")

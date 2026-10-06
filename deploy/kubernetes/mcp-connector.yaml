@@ -49,6 +49,14 @@ spec:
             - bun
             - /app/dist/mcp-connector/src-command.js
           env:
+            - name: TETRAL_LOG_BURST
+              value: "1"
+            - name: TETRAL_LOG_LEVEL
+              value: "info"
+            - name: TETRAL_LOG_MAX_RECORD_BYTES
+              value: "16384"
+            - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+              value: "30000"
             - name: TETRAL_DATABASE_TLS_CA_PATH
               value: /var/run/tetral/store-trust/database-ca.crt
             - name: TETRAL_DATABASE_TLS_SERVER_NAME
@@ -267,25 +275,3 @@ spec:
       ports:
         - protocol: TCP
           port: 443
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: mcp-connector-apiserver-egress
-  namespace: tetral-system
-  labels:
-    app.kubernetes.io/name: mcp-connector
-    app.kubernetes.io/part-of: tetral
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: mcp-connector
-  egress:
-    - toEntities:
-        - kube-apiserver
-      toPorts:
-        - ports:
-            - port: '443'
-              protocol: TCP
-            - port: '6443'
-              protocol: TCP

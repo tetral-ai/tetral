@@ -64,7 +64,7 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 	if runHTTP == nil {
 		runHTTP = workload.Run
 	}
-	return runHTTPPair(ctx, runHTTP, runtime.Listen, logger, readiness, cfg, proxyHandler, metricsHandler)
+	return runHTTPPair(ctx, runHTTP, runtime.Listen, logger, readiness, cfg, proxyHandler, metricsHandler, metrics.Operations)
 }
 
 func runHTTPPair(
@@ -76,7 +76,12 @@ func runHTTPPair(
 	cfg Config,
 	proxyHandler http.Handler,
 	metricsHandler http.Handler,
+	operationMetrics ...*workload.OperationMetrics,
 ) error {
+	var operations *workload.OperationMetrics
+	if len(operationMetrics) != 0 {
+		operations = operationMetrics[0]
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -93,6 +98,7 @@ func runHTTPPair(
 	results := make(chan error, 2)
 	go func() {
 		results <- runHTTP(runCtx, workload.Config{
+			Metrics:               operations,
 			ServiceName:           ServiceName,
 			DeploymentEnvironment: cfg.DeploymentEnvironment,
 			ServiceVersion:        cfg.ServiceVersion,
@@ -109,6 +115,7 @@ func runHTTPPair(
 	}()
 	go func() {
 		results <- runHTTP(runCtx, workload.Config{
+			Metrics:               operations,
 			ServiceName:           ServiceName,
 			DeploymentEnvironment: cfg.DeploymentEnvironment,
 			ServiceVersion:        cfg.ServiceVersion,

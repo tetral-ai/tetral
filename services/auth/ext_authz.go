@@ -14,11 +14,12 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-	"github.com/tetral-ai/tetral/internal/auth"
-	"github.com/tetral-ai/tetral/internal/workload"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+
+	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const ExternalAuthorizationTimeout = 5 * time.Second
@@ -158,7 +159,7 @@ func visibleMetadata(value string, spaces bool) bool {
 		return false
 	}
 	for _, c := range value {
-		if c > 126 || c < 33 && !(spaces && c == 32) {
+		if c > 126 || c < 33 && (!spaces || c != 32) {
 			return false
 		}
 	}
@@ -170,7 +171,7 @@ func httpToken(value string) bool {
 		return false
 	}
 	for _, c := range value {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c)) {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && !strings.ContainsRune("!#$%&'*+-.^_`|~", c) {
 			return false
 		}
 	}

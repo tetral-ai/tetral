@@ -116,3 +116,66 @@ restoration function so construction and tests do not leak global ownership.
 The package tests check literal controls, bounded retained samples, field
 projection, severity/recovery transitions and an actual paused OS pipe. Selected
 service tests cover real Queue poll/heartbeat and authenticated gRPC caller noise.
+
+## Operation durations
+
+HTTP and internal gRPC metrics retain their existing count/sum series and add
+`tetral_operation_duration_seconds{service,operation,outcome}` as a histogram.
+HTTP operations are the nine standard verbs, with `http_unknown_method` for
+other input. gRPC operations are exact full methods from the registered service
+and health descriptors; other methods share `unknown_method`. Service names are
+the closed workload domain. Request paths, tools, tenant and request IDs never
+become labels in this family. Existing legacy labels retain their prior contract.
+
+Upper bucket bounds in seconds are `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, +Inf`. Exact bounds are inclusive;
+`_count` equals the `+Inf` population and `_sum` contains real elapsed seconds.
+The checked TypeScript projection uses the same bounds. Aggregate bucket counts
+across eligible replicas before computing a percentile; histogram interpolation
+cannot supply an exact raw-sample maximum or whole-turn end-to-end percentile.
+For example:
+
+```promql
+histogram_quantile(0.95, sum by (le, service, operation) (
+  rate(tetral_operation_duration_seconds_bucket{namespace="$namespace",outcome="success"}[5m])
+))
+```
+
+HTTP statuses below 400 record `success`, 4xx `rejected`, and 5xx `error`.
+gRPC OK records `success`, Canceled `cancelled`, DeadlineExceeded `timeout`, and
+InvalidArgument/Unauthenticated/PermissionDenied/ResourceExhausted/Unimplemented
+`rejected`; other codes record `error`. These are transport/handler outcomes,
+not proof of a valid Agent turn. Existing owning admission/completion ledgers
+retain unfinished operations independently.
+
+Shutdown samples bracket actual `shutdown_http_drain`, `shutdown_http_join`,
+`shutdown_grpc_drain`, `shutdown_grpc_cancel_join`, `shutdown_queue_drain` and
+`shutdown_queue_cancel_join` operations. A drain sample measures the actual
+graceful wait and records `timeout` when its cutoff expires. A join sample is
+recorded only after the actual owner joins, including a join that outlives its
+budget. HTTP drain and join share the same absolute `ShutdownTimeout` deadline;
+a join's `timeout` can inherit the exhausted drain budget even when the final
+join is brief. Instrumentation changes no admission, deadline or dependency
+closure order. `ObserveShutdown` also sends the same completed observation to
+the existing process logger as `workload.shutdown.phase_completed`, with closed
+`operation`/`outcome`, exact `duration.seconds` and `metric.observation.count`
+for that registry's operation/outcome. This can retain a phase sample after the
+metrics listener closes; it does not assert a final scrape or complete process
+cleanup. Logger-owned `service.instance.id`/`process.pid` plus the central pod,
+container incarnation and log stream identify the producing process. Count
+continuity helps detect omitted records; the last observed count alone cannot
+prove that no later phase occurred.
+
+Phase logging uses the existing bounded, nonblocking `ProcessLogger` producer
+before command diagnostics close. No network exporter or shutdown budget is
+added. Info filtering, backpressure, sink failure, missing central records or
+process termination before a join leave phase evidence unavailable or partial;
+they never manufacture zero duration. A blocked arbitrary synchronous logger
+is outside `ProcessLogger`'s producer contract. The owning held-gRPC test closes
+its actual metrics listener before completion and tests both a throwing and
+blocked production diagnostic writer without transferring join ownership.
+
+Pool waits retain `db_pool_wait_count_total` and
+`db_pool_wait_duration_seconds_total`; `db_pool_open_connections`,
+`db_pool_in_use_connections` and `db_pool_idle_connections` describe actual Go
+SQL pools. They do not measure query execution time.

@@ -9,6 +9,7 @@ import (
 )
 
 type SchedulerMetrics struct {
+	Operations       *workload.OperationMetrics
 	mu               sync.Mutex
 	claimDueRuns     int64
 	claimDueJobs     int64
@@ -16,13 +17,14 @@ type SchedulerMetrics struct {
 }
 
 func NewSchedulerMetrics() *SchedulerMetrics {
-	return &SchedulerMetrics{}
+	return &SchedulerMetrics{Operations: workload.NewOperationMetrics("cleanup", "claim_due", "claim_due_across_workspaces")}
 }
 
 func (m *SchedulerMetrics) ObserveClaimDue(claimedJobs int, duration time.Duration) {
 	if m == nil {
 		return
 	}
+	m.Operations.Observe("claim_due", "success", duration)
 	if claimedJobs < 0 {
 		claimedJobs = 0
 	}
@@ -45,7 +47,7 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 		jobs := m.claimDueJobs
 		durationMS := m.claimDueDuration.Milliseconds()
 		m.mu.Unlock()
-		return []workload.Metric{
+		samples := []workload.Metric{
 			{
 				Name:  "tetral_cleanup_claim_due_runs_total",
 				Help:  "Cleanup scheduler claim_due runs.",
@@ -64,6 +66,8 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 				Type:  "counter",
 				Value: float64(durationMS),
 			},
-		}, nil
+		}
+		observations, _ := m.Operations.Collector()(context.Background())
+		return append(samples, observations...), nil
 	}
 }

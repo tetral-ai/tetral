@@ -1,0 +1,452 @@
+{
+  "schema_version": 1,
+  "purpose": "Safe structured diagnostic field and query scope contract. Presence means emitted by the owning context, never inferred from pod names or fabricated for a join.",
+  "canonical_scalar_vocabulary": {
+    "source": "internal/ts-observability/src/fields.json",
+    "checked_go_mirror": "internal/workload/diagnostic_fields.go",
+    "proof": "internal/workload/diagnostics_test.go"
+  },
+  "application_record": {
+    "required": [
+      "time",
+      "level",
+      "event",
+      "service.name",
+      "service.version",
+      "deployment.environment",
+      "service.instance.id",
+      "process.pid"
+    ],
+    "time": "UTC RFC3339 timestamp (Go nanosecond precision; TS Date ISO precision).",
+    "level": "Go uppercase DEBUG/INFO/WARN/ERROR; TS lowercase debug/info/warn/error. Normalize casing in queries.",
+    "go_only_alias": "msg repeats stable event; TS does not require msg.",
+    "scope": "service.instance.id is generated once per process; process.pid alone is not globally unique."
+  },
+  "query_scopes": {
+    "service": {
+      "join_keys": [
+        "deployment.environment",
+        "service.name",
+        "service.version"
+      ],
+      "presence": "Required on shared application records; filter environment before grouping."
+    },
+    "process": {
+      "join_keys": [
+        "deployment.environment",
+        "service.name",
+        "service.instance.id"
+      ],
+      "presence": "Required on shared application records; process.pid is a supplemental local identifier."
+    },
+    "session": {
+      "join_keys": [
+        "workspace.id",
+        "session.id"
+      ],
+      "presence": "Optional, only where trusted Session/workspace context is available. Never assume every process/Auth/TLS record has Session context."
+    },
+    "request": {
+      "join_keys": [
+        "request.id"
+      ],
+      "presence": "Optional; trusted edge-generated request ID for protected Check/backend requests. Correlation is scoped to the observed deployment and request lifetime."
+    }
+  },
+  "external_collection_custody": {
+    "fields": [
+      "namespace",
+      "pod",
+      "pod_uid",
+      "container",
+      "restart_count"
+    ],
+    "presence": "Attached by the collector, separate from application record fields. Prior-container custody must remain distinguishable; Pod UID is not a Session ID.",
+    "backend": "No remote backend, retention or storage budget is prescribed."
+  },
+  "proxy": {
+    "owner": "public edge and routing proxy deployment",
+    "sources": [
+      "deploy/helm/tetral/templates/edge.yaml",
+      "deploy/kubernetes/edge-gateway/envoy-gateway.yaml"
+    ],
+    "access_logs": "Disabled for the public edge, including Git. There is no public proxy access-field or Session join contract.",
+    "structured_fields": [],
+    "failure_mapping": "Auth Check and native application TLS classify edge failures in application records. Proxy startup/control diagnostics are separate vendor output; never parse raw vendor prose as an application error tuple or publish credentials/request headers/query/body."
+  },
+  "excluded_data": [
+    "raw credentials, API keys, tickets or signed assertions",
+    "authorization and other request headers",
+    "query strings, bodies, prompts, tool arguments/results or provider response content",
+    "raw exceptions, stack traces, SQL or arbitrary SDK error objects"
+  ],
+  "families": [
+    {
+      "id": "shared-process",
+      "owner": "internal/workload and internal/ts-observability",
+      "sources": [
+        "internal/workload/diagnostics.go",
+        "internal/ts-observability/src/index.ts"
+      ],
+      "optional_fields": [
+        "operation",
+        "phase",
+        "component",
+        "error.class",
+        "error.code",
+        "error.message_safe",
+        "event.original",
+        "suppressed.count",
+        "first_seen",
+        "last_seen"
+      ],
+      "emission_policy": "Boot-configured threshold defaults Info. Stable owner events and approved scalar fields only. Failure tuple is semantic, independent of severity. Bounded failure windows and fail-open diagnostic sink; healthy high-frequency work quiet.",
+      "proofs": [
+        "internal/workload/diagnostics_test.go",
+        "services/gateway/packages/provider-gateway/test/unit/shared-observability.test.ts"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "http-and-grpc",
+      "owner": "HTTP and internal RPC boundaries",
+      "sources": [
+        "internal/workload/http_server_diagnostics.go",
+        "internal/httpapi/middleware.go",
+        "internal/internalgrpc/server.go"
+      ],
+      "optional_fields": [
+        "request.id",
+        "http.request.method",
+        "http.response.status_code",
+        "duration.ms",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Slow/failing HTTP summary, fast healthy path quiet. RPC normal success/cancel Debug, ordinary rejection Info; classified transport/dependency faults elevated by owning boundary. URLs/query/body/headers/errors are not log data.",
+      "proofs": [
+        "internal/workload/http_server_diagnostics_test.go",
+        "internal/httpapi/router_logger_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "auth-edge-check",
+      "owner": "services/auth",
+      "sources": [
+        "services/auth/ext_authz.go",
+        "services/auth/grpc.go"
+      ],
+      "optional_fields": [
+        "request.id",
+        "auth.stage",
+        "auth.result",
+        "auth.identity.kind",
+        "auth.rule.revision",
+        "auth.identity.revision",
+        "auth.grant.revision",
+        "component",
+        "operation",
+        "listener.transport",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Successful Check stages Debug; current non-success Check recorder Warn and bounded by shared failure limiter. Auth diagnostics carry fixed safe classifications and applicable trusted positive revisions, never incoming headers/credentials/assertions. Listener lifecycle Info, panic/internal failure Error.",
+      "proofs": [
+        "services/auth/ext_authz_test.go",
+        "services/auth/auth_diagnostics_test.go",
+        "services/auth/grpc_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "tls-credential-reload",
+      "owner": "internal/transportsecurity",
+      "sources": [
+        "internal/transportsecurity/credentials.go"
+      ],
+      "optional_fields": [
+        "component",
+        "transport.stage",
+        "transport.outcome",
+        "failed.count"
+      ],
+      "emission_policy": "Invalid projected generation emits fixed Warn outcome, retains valid prior credential; successful replacement recovery Info. Certificate/key/CA bytes, filenames and raw parse errors excluded. Observer failure does not change credential acceptance.",
+      "proofs": [
+        "internal/transportsecurity/credentials_test.go",
+        "internal/transportsecurity/http_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "queue-and-notifications",
+      "owner": "Queue custody and wakeup owners",
+      "sources": [
+        "services/queue/config.go",
+        "internal/queue/wakeup.go",
+        "services/queue/maintenance.go",
+        "services/queue/server.go"
+      ],
+      "optional_fields": [
+        "consumer.class",
+        "queue.job.id",
+        "queue.jobs.reclaimed",
+        "recovery.event",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Successful Lease Debug and Heartbeat quiet. Positive maintenance outcomes Info. Initial classified listener failure and bounded summaries; recovery follows owning reconnect callback, does not modify wake/retry authority.",
+      "proofs": [
+        "internal/queue/wakeup_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "kubernetes-visibility",
+      "owner": "internal/kubernetes",
+      "sources": [
+        "internal/kubernetes/config.go",
+        "internal/kubernetes/watcher_cache.go"
+      ],
+      "optional_fields": [
+        "kubernetes.resource",
+        "kubernetes.namespace",
+        "kubernetes.name",
+        "kubernetes.uid",
+        "kubernetes.status",
+        "recovery.event",
+        "recovery.resource"
+      ],
+      "emission_policy": "Classified pods/endpointslices failures and bounded per-resource storm windows. Recovery clears only its resource diagnostic window; readiness remains actual cache state.",
+      "proofs": [
+        "internal/kubernetes/cache_test.go",
+        "internal/kubernetes/visibility_client_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "bridge-runner-runtimecontrol-cleanup",
+      "owner": "owning durable control plane services",
+      "sources": [
+        "internal/runtimecontrol/logging.go",
+        "services/cleanup/config.go",
+        "services/cleanup/cmd/tetral-cleanup/main.go",
+        "services/job-runner/runtime_delivery.go",
+        "services/job-runner/runtime_pod_loss_repair.go",
+        "services/bridge/runtime_declaration.go",
+        "services/bridge/runtime_handoff.go",
+        "services/bridge/bridge_api_context.go"
+      ],
+      "optional_fields": [
+        "workspace.id",
+        "session.id",
+        "thread.id",
+        "job.id",
+        "binding.id",
+        "binding.generation",
+        "runtime.process.id",
+        "attempt",
+        "cleanup.jobs.claimed",
+        "outcome",
+        "input.count",
+        "cleanup.claim.limit"
+      ],
+      "emission_policy": "Durable admission/receipt/settlement/custody facts and classified failures at owning boundaries; identities optional only where actual context exists. No inference of committed outcome from severity alone.",
+      "proofs": [
+        "services/job-runner/config_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "sandbox",
+      "owner": "services/sandbox",
+      "sources": [
+        "services/sandbox/provider_observability.go",
+        "services/sandbox/lifecycle_observability.go"
+      ],
+      "optional_fields": [
+        "session.id",
+        "sandbox.id",
+        "environment.id",
+        "provider.operation",
+        "provider.state",
+        "provider.status_code",
+        "duration.ms",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Safe fixed provider/lifecycle classification and bounded outcome/duration. Legacy explicit debug opt-in; raw SDK/body/command output/mount URLs/credentials excluded.",
+      "proofs": [
+        "services/sandbox/config_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "provider-gateway",
+      "owner": "services/gateway/packages/provider-gateway",
+      "sources": [
+        "services/gateway/packages/provider-gateway/src/logger.ts",
+        "services/gateway/packages/provider-gateway/src/service.ts"
+      ],
+      "optional_fields": [
+        "session.id",
+        "thread.id",
+        "model_request.id",
+        "provider.id",
+        "provider.status_code",
+        "stream.terminal_category",
+        "timeout.kind",
+        "timeout.elapsed_ms"
+      ],
+      "emission_policy": "Substantive normalized stream terminal/timeout/fuse/quarantine outcomes; no token/provider response serialization. Cancellation/validation remain owning taxonomy; telemetry never changes stream or retry behavior.",
+      "proofs": [
+        "services/gateway/packages/provider-gateway/test/unit/logger.test.ts"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "mcp-connector",
+      "owner": "services/gateway/packages/mcp-connector",
+      "sources": [
+        "services/gateway/packages/mcp-connector/src/logger.ts",
+        "services/gateway/packages/mcp-connector/src/service.ts"
+      ],
+      "optional_fields": [
+        "session.id",
+        "thread.id",
+        "mcp.server.name",
+        "mcp.manifest_etag",
+        "mcp.failure.kind",
+        "durable_write.disposition",
+        "timeout.remaining_ms",
+        "mcp.tool_count",
+        "mcp.notification_attempts"
+      ],
+      "emission_policy": "Discovery/reconnect/readiness/phase failure and durable claim/commit classifications. Fixed manifest/credential identities and generation facts only; no credential value/tool arguments/result content.",
+      "proofs": [
+        "services/gateway/packages/mcp-connector/test/unit/logger.test.ts"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "runtime-core-and-pod",
+      "owner": "services/agent-runtime",
+      "sources": [
+        "services/agent-runtime/packages/runtime-pod/src/logger.ts",
+        "services/agent-runtime/packages/runtime-pod/src/lifecycle.ts",
+        "services/agent-runtime/packages/runtime-pod/src/runtime-service.ts"
+      ],
+      "optional_fields": [
+        "workspace.id",
+        "session.id",
+        "thread.id",
+        "runtime.process.id",
+        "runtime_input.id",
+        "runtime_input.kind",
+        "closeout.active_count",
+        "terminal.disposition",
+        "settlement.outcome"
+      ],
+      "emission_policy": "Admission/provider/reviewer/closeout/settlement facts with safe optional context. Completed business disposition comes from owning durable boundary; diagnostic sink is contained.",
+      "proofs": [
+        "services/agent-runtime/packages/runtime-pod/test/unit/logger.test.ts"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "event-stream",
+      "owner": "services/event-stream",
+      "sources": [
+        "services/event-stream/preview_hub.go",
+        "services/event-stream/eventstream.go",
+        "services/event-stream/preview_writer.go"
+      ],
+      "optional_fields": [
+        "session.id",
+        "reason",
+        "workspace.id",
+        "model_request.id",
+        "outcome"
+      ],
+      "emission_policy": "Healthy preview/formal-delivery quiet. Bounded overflow/loss/recovery/writer classification; SSE frames/content are response protocol data, never operational logs.",
+      "proofs": [
+        "services/event-stream/preview_hub_test.go",
+        "services/event-stream/logger_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "git-application-access",
+      "owner": "services/git-proxy",
+      "sources": [
+        "services/git-proxy/observability.go"
+      ],
+      "optional_fields": [
+        "request.id",
+        "workspace.id",
+        "session.id",
+        "operation",
+        "event.kind",
+        "component",
+        "ticket_id",
+        "owner_repo",
+        "decision",
+        "upstream_status",
+        "bytes_in",
+        "bytes_out",
+        "duration.ms"
+      ],
+      "emission_policy": "Application approved access record Info. ticket_id is durable row identity, never a raw ticket token. Owning request-ID/path/ticket builders sanitize inputs before shared sink; Git smart HTTP bytes are protocol output.",
+      "proofs": [
+        "services/git-proxy/relay_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "web-connector",
+      "owner": "services/web-connector",
+      "sources": [
+        "services/web-connector/config.go",
+        "services/web-connector/service.go",
+        "services/web-connector/backend.go"
+      ],
+      "optional_fields": [
+        "backend.api",
+        "backend.error.name",
+        "backend.error.status",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Normalized backend taxonomy and fixed safe text only; no full URLs/key material/raw backend JSON/errors. Tool-visible page text/references are tool results, never stderr.",
+      "proofs": [
+        "services/web-connector/metrics_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    },
+    {
+      "id": "storage-cli-and-protocol-output",
+      "owner": "owning storage and command boundaries",
+      "sources": [
+        "internal/storage/postgresql_migration_logging.go"
+      ],
+      "optional_fields": [
+        "schema.step",
+        "schema.version",
+        "db.sqlstate",
+        "error.class",
+        "error.code",
+        "error.message_safe"
+      ],
+      "emission_policy": "Migration/command phase facts use process owner. Explicit CLI reports, metrics and protocol response serialization are intentional result output and excluded from operational-field queries.",
+      "proofs": [
+        "internal/storage/postgresql_migration_logging_test.go"
+      ],
+      "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
+    }
+  ]
+}

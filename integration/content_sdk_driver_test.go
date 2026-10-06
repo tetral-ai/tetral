@@ -95,13 +95,17 @@ type contentSDKChild struct {
 	stopped   bool
 }
 
-func startContentSDKChildContext(ctx context.Context, t *testing.T, baseURL, key string) *contentSDKChild {
+func startContentSDKChildContext(ctx context.Context, t *testing.T, baseURL, key string, caPaths ...string) *contentSDKChild {
 	t.Helper()
 	if os.Getenv("TETRAL_ENGINE_SDK_ROOT") == "" {
 		t.Fatal("content E2E requires the declared pinned SDK checkout")
 	}
 	directory := t.TempDir()
-	bootstrap, err := json.Marshal(map[string]string{"baseURL": baseURL, "apiKey": key})
+	config := map[string]string{"baseURL": baseURL, "apiKey": key}
+	if len(caPaths) != 0 && caPaths[0] != "" {
+		config["caPath"] = caPaths[0]
+	}
+	bootstrap, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}

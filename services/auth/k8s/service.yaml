@@ -15,6 +15,10 @@ spec:
   selector:
     app.kubernetes.io/name: auth
   ports:
+    - name: grpc-check
+      port: 9095
+      targetPort: grpc-check
+      appProtocol: kubernetes.io/h2c
     - name: http
       port: 8080
       targetPort: http

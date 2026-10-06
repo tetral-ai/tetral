@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -2516,6 +2517,12 @@ func TestPostgreSQLStoreMetricsSummarizesQueueState(t *testing.T) {
 		t.Fatalf("Retry dead metrics job = (%v,%v); want true,nil", ok, err)
 	}
 
+	for index, offset := range []time.Duration{0, time.Second} {
+		sessionID := fmt.Sprintf("sesn_available_%d", index)
+		mustEnqueue(t, store, EnqueueRequest{ID: fmt.Sprintf("qjob_available_%d", index), WorkspaceID: ws, Kind: KindRuntimeInput,
+			PartitionKey: FormatSessionPartitionKey(ws, sessionID), DedupeKey: FormatRuntimeInputDedupeKey(ws, sessionID, "input_available"),
+			PayloadJSON: runtimeInputPayload(t, ws, sessionID, "thrd_metrics_available", "input_available", "messages", 1, 1), AvailableAt: now.Add(offset), Now: now})
+	}
 	snapshots, err := store.Metrics(ctx, now)
 	if err != nil {
 		t.Fatalf("Metrics: %v", err)
@@ -2525,7 +2532,7 @@ func TestPostgreSQLStoreMetricsSummarizesQueueState(t *testing.T) {
 		byKind[snapshot.Kind] = snapshot
 	}
 	runtimeInput := byKind[KindRuntimeInput]
-	if runtimeInput.PendingJobs != 2 || runtimeInput.RetryPendingJobs != 1 || runtimeInput.LeasedJobs != 0 || runtimeInput.DeadLetteredJobs != 0 {
+	if runtimeInput.PendingJobs != 4 || runtimeInput.ReadyJobs != 3 || runtimeInput.RetryPendingJobs != 1 || runtimeInput.LeasedJobs != 0 || runtimeInput.DeadLetteredJobs != 0 {
 		t.Fatalf("runtime_input metrics = %+v", runtimeInput)
 	}
 	if runtimeInput.ReadyLagSeconds < 29.9 || runtimeInput.ReadyLagSeconds > 30.1 {

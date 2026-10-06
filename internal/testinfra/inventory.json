@@ -8,6 +8,36 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLEnvoyGatewayTLSLifecycle",
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLEnvoyGatewayAuthority",
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestEnvoyGatewayTranslatedProtocol",
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl"]
+    },
+
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestPostgreSQLEnvoyGatewayPublicParity",
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces", "keycloak"]
+    },    {
+      "package": "github.com/tetral-ai/tetral/deploy/helm",
+      "name": "TestConfigurationOperationalProjectionUsesOwningParsers",
+      "dependencies": ["bun-workspaces"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/internal/testinfra",
+      "name": "TestPinnedEdgeEnvoyRuntimeAndTranslator",
+      "dependencies": ["docker", "edge-envoy", "egctl"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLManagedInitialization",
       "dependencies": ["postgresql", "docker"]
     },
@@ -697,7 +727,7 @@
       "owner": "deploy",
       "kind": "deployment",
       "profiles": ["affected", "full"],
-      "dependencies": [],
+      "dependencies": ["bun-workspaces"],
       "paths": ["deploy/**", "services/*/k8s/**"]
     },
     {
@@ -714,7 +744,7 @@
       "kind": "dependency-security",
       "profiles": ["full"],
       "dependencies": [],
-      "paths": ["go.mod", "go.sum", "**/package.json", "**/bun.lock", "integration/static/**"]
+      "paths": ["go.mod", "go.sum", "**/package.json", "**/bun.lock", "integration/static/**", "integration/envoy-gateway-secret-helper/**", "scripts/check-envoy-secret-helper.py"]
     }
   ],
   "full_fallback_paths": [

@@ -1106,6 +1106,9 @@ func TestProxyMetricsExposeContractSeries(t *testing.T) {
 			t.Fatalf("metrics body missing contract alert condition %s:\n%s", alert, body)
 		}
 	}
+	if !strings.Contains(body, `tetral_operation_duration_seconds_count{operation="refs-upload",outcome="success",service="git-proxy"} 1`) {
+		t.Fatalf("missing owning duration: %s", body)
+	}
 	if !strings.Contains(body, `gitproxy_requests_total{endpoint="refs-upload",decision="injected",upstream_status="200"} 1`) {
 		t.Fatalf("metrics body missing injected request row:\n%s", body)
 	}

@@ -110,7 +110,9 @@ func (r *Readiness) message() string {
 // metrics collector. Names, types, and labels are internal constants; values
 // must not contain request bodies, credentials, prompts, or other user data.
 type Metric struct {
-	Name   string
+	Name string
+	// Family is the header name for histogram bucket/count/sum samples.
+	Family string
 	Help   string
 	Type   string
 	Labels []MetricLabel
@@ -155,8 +157,9 @@ type DBStatsProvider interface {
 }
 
 type HTTPMetrics struct {
-	mu      sync.Mutex
-	records map[httpMetricsKey]durationMetricsRecord
+	Operations *OperationMetrics
+	mu         sync.Mutex
+	records    map[httpMetricsKey]durationMetricsRecord
 }
 
 type httpMetricsKey struct {
@@ -165,8 +168,9 @@ type httpMetricsKey struct {
 }
 
 type GRPCMetrics struct {
-	mu      sync.Mutex
-	records map[grpcMetricsKey]durationMetricsRecord
+	Operations *OperationMetrics
+	mu         sync.Mutex
+	records    map[grpcMetricsKey]durationMetricsRecord
 }
 
 type grpcMetricsKey struct {
@@ -179,14 +183,31 @@ type durationMetricsRecord struct {
 	sumSeconds float64
 }
 
-func NewHTTPMetrics() *HTTPMetrics {
-	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}}
+func NewHTTPMetrics(service ...string) *HTTPMetrics {
+	name := "unknown"
+	if len(service) != 0 {
+		name = service[0]
+	}
+	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(name, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "http_unknown_method")}
 }
 
 func (m *HTTPMetrics) ObserveHTTPRequest(method string, statusCode int, duration time.Duration) {
 	if m == nil {
 		return
 	}
+	outcome := "success"
+	if statusCode >= 500 {
+		outcome = "error"
+	} else if statusCode >= 400 {
+		outcome = "rejected"
+	}
+	operation := method
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+	default:
+		operation = "http_unknown_method"
+	}
+	m.Operations.Observe(operation, outcome, duration)
 	key := httpMetricsKey{
 		method:     defaultString(method, "UNKNOWN"),
 		statusCode: fmt.Sprintf("%d", statusCode),
@@ -225,18 +246,24 @@ func (m *HTTPMetrics) Collector() MetricsCollector {
 				Metric{Name: "http_request_duration_seconds_sum", Help: "Observed HTTP request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
 			)
 		}
-		return metrics, nil
+		observations, _ := m.Operations.Collector()(context.Background())
+		return append(metrics, observations...), nil
 	}
 }
 
-func NewGRPCMetrics() *GRPCMetrics {
-	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}}
+func NewGRPCMetrics(service ...string) *GRPCMetrics {
+	name := "unknown"
+	if len(service) != 0 {
+		name = service[0]
+	}
+	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(name)}
 }
 
 func (m *GRPCMetrics) ObserveGRPCRequest(method string, code string, duration time.Duration) {
 	if m == nil {
 		return
 	}
+	m.Operations.Observe(method, grpcMetricOutcome(code), duration)
 	key := grpcMetricsKey{
 		method: defaultString(method, "unknown"),
 		code:   defaultString(code, "Unknown"),
@@ -275,7 +302,8 @@ func (m *GRPCMetrics) Collector() MetricsCollector {
 				Metric{Name: "grpc_request_duration_seconds_sum", Help: "Observed gRPC request duration seconds.", Type: "counter", Labels: labels, Value: record.sumSeconds},
 			)
 		}
-		return metrics, nil
+		observations, _ := m.Operations.Collector()(context.Background())
+		return append(metrics, observations...), nil
 	}
 }
 
@@ -425,9 +453,10 @@ func writeMetric(builder *strings.Builder, emittedHeaders map[string]bool, metri
 		return
 	}
 	metricType := defaultString(metric.Type, "gauge")
-	if !emittedHeaders[metric.Name] {
-		_, _ = fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s %s\n", metric.Name, defaultString(metric.Help, metric.Name), metric.Name, metricType)
-		emittedHeaders[metric.Name] = true
+	family := defaultString(metric.Family, metric.Name)
+	if !emittedHeaders[family] {
+		_, _ = fmt.Fprintf(builder, "# HELP %s %s\n# TYPE %s %s\n", family, defaultString(metric.Help, family), family, metricType)
+		emittedHeaders[family] = true
 	}
 	_, _ = fmt.Fprintf(builder, "%s%s %g\n", metric.Name, metricLabels(metric.Labels), metric.Value)
 }
@@ -482,6 +511,7 @@ type Config struct {
 	ReadHeaderTimeout     time.Duration
 	ShutdownTimeout       time.Duration
 	Logger                *slog.Logger
+	Metrics               *OperationMetrics
 }
 
 // Run validates config, serves HTTP, and gracefully drains on ctx cancellation.
@@ -600,7 +630,14 @@ func Run(ctx context.Context, cfg Config) error {
 	users.stopAdmission()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	drainStarted := time.Now()
 	shutdownErr := server.Shutdown(shutdownCtx)
+	outcome := "success"
+	if shutdownErr != nil {
+		outcome = "timeout"
+	}
+	cfg.Metrics.ObserveShutdown(cfg.Logger, "shutdown_http_drain", outcome, time.Since(drainStarted))
+	joinStarted := time.Now()
 	if shutdownErr != nil {
 		cancelWork()
 		_ = server.Close()
@@ -620,6 +657,10 @@ func Run(ctx context.Context, cfg Config) error {
 		<-handlersDone
 	}
 	<-serverErr
+	if shutdownErr != nil {
+		outcome = "timeout"
+	}
+	cfg.Metrics.ObserveShutdown(cfg.Logger, "shutdown_http_join", outcome, time.Since(joinStarted))
 	if serveErr != nil {
 		cfg.Logger.Error("workload.server.failed", StartupFailureAttrs(serveErr,
 			slog.String("component", "workload"),

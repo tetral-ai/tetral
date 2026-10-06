@@ -3,11 +3,6 @@ package integration
 import (
 	"context"
 	"database/sql"
-	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-	"github.com/tetral-ai/tetral/internal/auth"
-	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralauth "github.com/tetral-ai/tetral/services/auth"
-	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"io"
 	"net"
 	"net/http"
@@ -17,8 +12,14 @@ import (
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/workspace"
+	tetralauth "github.com/tetral-ai/tetral/services/auth"
 )
 
 // directEdgeCheck is the owning integration migration seam for direct Auth
@@ -28,7 +29,7 @@ func directEdgeCheck(ctx context.Context, address, method, target, requestID str
 	if err != nil {
 		return nil, err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	raw := &corev3.HeaderMap{}
 	for name, values := range headers {
 		for _, value := range values {
@@ -125,5 +126,6 @@ func forwardFixtureCheckDenial(w http.ResponseWriter, response *authv3.CheckResp
 		}
 	}
 	w.WriteHeader(int(denied.GetStatus().GetCode()))
+	//nolint:gosec // G705: the fixture forwards the owning Auth adapter's typed JSON denial and application/json header, never HTML.
 	_, _ = io.WriteString(w, denied.GetBody())
 }

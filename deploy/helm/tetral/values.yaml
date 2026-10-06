@@ -18,6 +18,7 @@ network:
   apiServerPeers:
     - ipBlock:
         cidr: 10.96.0.1/32
+  apiServerPort: 443
   databasePeers:
     - podSelector:
         matchLabels:
@@ -63,7 +64,7 @@ network:
     - 443
 
 cilium:
-  enabled: true
+  enabled: false
   # Opt-in network-layer GitHub restriction for git-proxy. This requires a CNI
   # whose L7 DNS interception works. It is measured broken on Cilium 1.19.6
   # with k3s, VXLAN, and legacy host routing (cilium/cilium#46284); enabling it
@@ -80,7 +81,17 @@ sandbox:
 
 edge:
   enabled: false
-  tlsSecretName: git-proxy-tls
+  gatewayClassName: tetral-envoy-gateway
+  apiHost: api.tetral.example
+  apiTLSSecretName: tetral-api-public-tls
+  gitTLSSecretName: tetral-git-public-tls
+  trustConfigMap: tetral-edge-native-trust
+  clientLeafSecret: tetral-edge-client-tls
+  serverLeafSecrets:
+    auth: tetral-auth-edge-tls
+    api: tetral-api-edge-tls
+    event-stream: tetral-event-stream-edge-tls
+    git-proxy: tetral-git-proxy-edge-tls
 
 image:
   registry: ghcr.io/tetral-ai
@@ -134,6 +145,24 @@ bootstrapWorkspaceID: existing-workspace-id
 observability:
   deploymentEnvironment: local
   serviceVersion: dev
+  # Restart-required controls shared by every application process.
+  logLevel: info
+  logMaxRecordBytes: 16384
+  logSummaryIntervalMs: 30000
+  logBurst: 1
+
+queue:
+  leaseReclaimIntervalSeconds: 30
+  leaseReclaimLimit: 100
+  retryBaseMs: 1000
+  retryCapMs: 60000
+  retryMaxAttempts: 10
+
+jobRunner:
+  leaseDurationMs: 30000
+  heartbeatIntervalMs: 10000
+  maxJobs: 8
+  pollIntervalMs: 1000
 
 resources:
   agentRuntime:
@@ -359,3 +388,20 @@ lifecycle:
   mcpJoinMs: 5000
   webDrainMs: 10000
   queueDrainMs: 10000
+
+# Optional native leaf automation. The issuer is an operator-installed,
+# separately scoped intermediate; signing material never enters this chart.
+nativeCertificates:
+  enabled: false
+  issuerName: tetral-native
+  duration: 24h
+  renewBefore: 8h
+
+# Federation URLs, CA trust and private CIDRs are imported by tetral-auth-policy
+# into Auth's durable registry. Only Auth may make the corresponding native
+# HTTPS requests. Supply exact public CIDRs or private namespace/Pod peers.
+authIssuerNetwork:
+  enabled: false
+  peers: []
+  ports:
+    - 443

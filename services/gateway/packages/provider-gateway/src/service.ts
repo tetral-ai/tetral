@@ -135,6 +135,7 @@ export class ProviderGatewayServiceShell {
     this.providerStreamer = options.providerStreamer ?? new CatalogGatedProviderStreamer();
     this.admission = new TurnAdmissionGate(options.maxConcurrentTurns ?? 8);
     this.metrics = options.metrics ?? new ProviderGatewayMetricsRegistry();
+    try { this.metrics.setCapacity(options.maxConcurrentTurns ?? 8); } catch { /* Metrics are best effort. */ }
   }
 
   /**
@@ -186,6 +187,7 @@ export class ProviderGatewayServiceShell {
     );
     const started = performance.now();
     let requestOutcome: "ok" | "failed" = "failed";
+    let capacityRejected = false;
     let errorClass = "runtime_error";
     let errorCode = "stream_incomplete";
     let providerStatusCode: number | undefined;
@@ -225,6 +227,8 @@ export class ProviderGatewayServiceShell {
       }
       const release = this.admission.tryAcquire();
       if (release === undefined) {
+        capacityRejected = true;
+        try { this.metrics.recordAdmissionRejection(); } catch { /* Metrics cannot reject work. */ }
         errorClass = "provider_error";
         errorCode = "provider_unavailable";
         yield* assembler.accept(providerErrorEvent({
@@ -318,6 +322,13 @@ export class ProviderGatewayServiceShell {
       assembler.release();
       try { assemblyMetrics?.close(); } catch { /* Fail-open metrics. */ }
       this.workers.delete(processController);
+      try {
+        const outcome = requestOutcome === "ok" ? "success"
+          : abortSignal?.aborted === true ? "cancelled"
+          : errorCode === "provider_timeout" ? "timeout"
+          : errorClass === "request_validation" || (errorClass === "grpc_status" && ["3", "7", "16"].includes(errorCode)) || capacityRejected ? "rejected" : "error";
+        this.metrics.observeRequest(outcome, (performance.now() - started) / 1000);
+      } catch { /* Metrics cannot replace the request outcome. */ }
       const record = {
         event: "provider_request_streamed",
         "event.kind": "provider_request_streamed",
@@ -366,6 +377,7 @@ export class ProviderGatewayServiceShell {
     closeStreams?: () => void,
   ): Promise<void> {
     this.stopping = true;
+    const drainStarted = performance.now();
     const joined = Promise.all([...this.workers.values()]);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const cutoff = new Promise<"cutoff">((resolve) => {
@@ -376,7 +388,9 @@ export class ProviderGatewayServiceShell {
     });
     const result = await Promise.race([joined, cutoff]);
     if (timer !== undefined) clearTimeout(timer);
+    try { this.metrics.operations.observeShutdown("shutdown_drain", result === "cutoff" ? "timeout" : "success", (performance.now()-drainStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
     if (result === "cutoff") {
+      const joinStarted = performance.now();
       for (const controller of this.workers.keys())
         controller.abort(new Error("Provider process draining"));
       const end = new Promise<"expired">((resolve) => {
@@ -399,10 +413,12 @@ export class ProviderGatewayServiceShell {
       if (expired) {
         closeStreams?.();
         await joined;
+        try { this.metrics.operations.observeShutdown("shutdown_cancel_join", "timeout", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
         throw new Error(
           "Provider workers did not join before shutdown deadline",
         );
       }
+      try { this.metrics.operations.observeShutdown("shutdown_cancel_join", "success", (performance.now()-joinStarted)/1000, this.options.logger); } catch { /* Metrics are best effort. */ }
     }
   }
 
