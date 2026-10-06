@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -36,18 +35,6 @@ type publicStreamProcess struct {
 	stopOnce         sync.Once
 }
 
-func publicFreeAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	if err = listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return address
-}
 func buildPublicStreamCommand(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "event-stream")
@@ -63,8 +50,9 @@ func buildPublicStreamCommand(t *testing.T) string {
 func startPublicStreamProcess(t *testing.T, binary string, database *sql.DB, publicKey string, postgres *transporttest.PostgreSQL, broker testinfra.NATSFixture, overrides map[string]string) *publicStreamProcess {
 	t.Helper()
 	p := &publicStreamProcess{joined: make(chan error, 1)}
-	p.address = "http://" + publicFreeAddress(t)
-	p.metrics = "http://" + publicFreeAddress(t)
+	addresses, release := publicReserveAddresses(t, 2)
+	p.address = "http://" + addresses[0]
+	p.metrics = "http://" + addresses[1]
 	values := map[string]string{
 		"TETRAL_EVENT_STREAM_HTTP_ADDR":                 strings.TrimPrefix(p.address, "http://"),
 		"TETRAL_EVENT_STREAM_METRICS_ADDR":              strings.TrimPrefix(p.metrics, "http://"),
@@ -101,6 +89,7 @@ func startPublicStreamProcess(t *testing.T, binary string, database *sql.DB, pub
 	p.command.Env = environment
 	p.command.Stderr = &p.output
 	p.command.Stdout = &p.output
+	release()
 	if err := p.command.Start(); err != nil {
 		t.Fatal(err)
 	}
