@@ -157,7 +157,12 @@ func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
 			reading := make(chan struct{})
 			client.Transport = observedLoadTransport{delegate: client.Transport, closed: closed, reading: reading}
 			policy := DefaultRuntimePlacementPolicy()
-			policy.ProbeTimeout = 100 * time.Millisecond
+			// Size acceptance and caller cancellation use the actual production
+			// policy. Only the deliberately unfinished body accelerates the
+			// timeout fault; a 100ms completion premise is not a byte-limit rule.
+			if scenario == "slow body" {
+				policy.ProbeTimeout = 100 * time.Millisecond
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -190,6 +195,13 @@ func TestRuntimeLoadProbeProductionBodyBoundary(t *testing.T) {
 				}
 				if scenario == "slow body" && runtimeLoadFailureReason(err) != "timeout" {
 					t.Fatalf("slow body reason=%v", err)
+				}
+				if scenario == "slow body" {
+					select {
+					case <-reading:
+					default:
+						t.Fatal("timeout occurred before the probe owned its body read")
+					}
 				}
 				if scenario == "caller cancellation" && runtimeLoadFailureReason(err) != "cancelled" {
 					t.Fatalf("parent cancellation=%v", err)

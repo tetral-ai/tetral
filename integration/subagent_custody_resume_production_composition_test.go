@@ -2142,8 +2142,36 @@ func closeChildThroughProductionInterrupt(
 	}
 	captureContext, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
 	captureSettled := make(chan captureResult, 1)
+	captureDone := make(chan struct{})
+	stopCapture := make(chan struct{})
+	var stopCaptureOnce sync.Once
+	stopObservation := func() { stopCaptureOnce.Do(func() { close(stopCapture) }) }
+	var capture captureResult
+	captureJoined := false
+	joinCapture := func() captureResult {
+		if !captureJoined {
+			capture = <-captureSettled
+			<-captureDone
+			captureJoined = true
+		}
+		return capture
+	}
+	// Stop polling at a SQL boundary, then join before releasing its query context.
+	// Canceling an in-flight pgx write can report a raw socket timeout rather than
+	// context.Canceled; that is not a failed child-close capture. Real query and
+	// staging errors still fail. The original 10s query and 5s staging guards apply.
+	t.Cleanup(func() {
+		stopObservation()
+		wasJoined := captureJoined
+		result := joinCapture()
+		cancelCapture()
+		if !wasJoined && result.err != nil {
+			t.Errorf("join child-close output capture: %v", result.err)
+		}
+	})
 	go func() {
-		settled, settleErr := settleNextSubagentOutputCaptureForTest(captureContext, admin, sessionID)
+		defer close(captureDone)
+		settled, settleErr := settleNextSubagentOutputCaptureForTest(captureContext, admin, sessionID, stopCapture)
 		captureSettled <- captureResult{settled: settled, err: settleErr}
 	}()
 	runSubagentRuntimeQueueOnce(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
@@ -2158,14 +2186,14 @@ func closeChildThroughProductionInterrupt(
 		t.Fatalf("read child-close Queue custody: %v", err)
 	}
 	if queueStatus == queue.StatusPending {
-		capture := <-captureSettled
+		capture := joinCapture()
 		if capture.err != nil || !capture.settled {
 			t.Fatalf("settle child-close output capture = settled:%t err:%v", capture.settled, capture.err)
 		}
 		runQueueUntilInterruptSettled(t, runtimeDB, admin, interruptRuntime.port, sessionID, podUID)
 	} else {
-		cancelCapture()
-		if capture := <-captureSettled; capture.err != nil {
+		stopObservation()
+		if capture := joinCapture(); capture.err != nil {
 			t.Fatalf("observe child-close output capture: %v", capture.err)
 		}
 	}
@@ -2599,10 +2627,15 @@ func runSubagentOutputCaptureOnce(t *testing.T, runtimeDB *sql.DB) {
 	t.Fatal("Subagent Runtime did not enqueue output capture")
 }
 
-func settleNextSubagentOutputCaptureForTest(ctx context.Context, db *sql.DB, sessionID string) (bool, error) {
+func settleNextSubagentOutputCaptureForTest(ctx context.Context, db *sql.DB, sessionID string, stop <-chan struct{}) (bool, error) {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		select {
+		case <-stop:
+			return false, nil
+		default:
+		}
 		var writeID string
 		var generation int
 		err := db.QueryRowContext(ctx, `SELECT finish_idle_write_id,capture_generation
@@ -2619,6 +2652,8 @@ func settleNextSubagentOutputCaptureForTest(ctx context.Context, db *sql.DB, ses
 			return false, err
 		}
 		select {
+		case <-stop:
+			return false, nil
 		case <-ctx.Done():
 			return false, nil
 		case <-ticker.C:
