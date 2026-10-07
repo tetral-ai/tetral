@@ -258,7 +258,6 @@ export class McpConnectorServiceShell {
       readonly mcpServerName: string;
     },
     signal?: AbortSignal,
-    completeTools?: readonly McpClientTool[],
   ): Promise<{
     readonly status: "notified" | "exhausted";
     readonly manifestEtag: string;

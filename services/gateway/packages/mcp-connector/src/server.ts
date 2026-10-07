@@ -22,18 +22,13 @@ import {
 } from "@grpc/grpc-js";
 import type {
   sendUnaryData,
-  ServerUnaryCall,
   ServiceError,
 } from "@grpc/grpc-js";
 import {
   McpConnectorServiceService,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
-  ListMcpToolsRequest,
-  ListMcpToolsResponse,
   McpConnectorServiceServer,
-  RunMcpToolRequest,
-  RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MCP_BLOB_MAX_BYTES } from "./formatter.js";
 import { mcpGrpcServerKeepaliveOptions } from "./transport.js";
@@ -125,20 +120,6 @@ export function createMcpConnectorGrpcServer(service: McpConnectorServiceShell):
           resolve();
         });
       }),
-  };
-}
-
-function unaryHandler<
-  Request extends RunMcpToolRequest | ListMcpToolsRequest,
-  Response extends RunMcpToolResponse | ListMcpToolsResponse,
->(
-  handler: (request: Request, metadata: Metadata) => Promise<Response>,
-): (
-  call: ServerUnaryCall<Request, Response>,
-  callback: sendUnaryData<Response>,
-) => void {
-  return (call, callback) => {
-    void unary(() => handler(call.request, call.metadata), callback);
   };
 }
 
