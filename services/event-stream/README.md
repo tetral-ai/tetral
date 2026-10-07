@@ -523,8 +523,9 @@ Mount the complete CA/certificate/key directories read-only without `subPath`.
 The shared validated loader activates valid generations for fresh TLS handshakes,
 preserves established requests during leaf renewal, and retains valid last-known-good
 material after malformed replacement. Its observer closes only after the public
-listener and admitted requests join. CA replacement requires old+new trust first,
-new leaves and successful fresh peer probes, then bounded service drain/join
-before old trust removal and restart. Removing trust alone does not retire an
-established connection. The [deployment guide](../../deploy/helm/tetral/README.md)
-owns Secret projections, native role issuance and profile prerequisites.
+listener and admitted requests join. CA replacement follows the
+[native CA rotation order](../../deploy/cert-manager/README.md); at this
+receiver, old connections drain through the service's bounded drain/join and
+restart, because removing trust alone does not retire an established connection.
+The [deployment guide](../../deploy/helm/tetral/README.md) owns Secret
+projections, native role issuance and profile prerequisites.
