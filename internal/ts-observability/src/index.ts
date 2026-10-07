@@ -12,9 +12,11 @@ const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
  *
  * Accepted records emit one JSON object followed by a newline. Debug is off by
  * default; repeated event/reason pairs emit an initial record and bounded summaries. The
- * logger-supplied `level` and the configured or defaulted `service.name`,
- * UTC `time`, `service.version`, and `deployment.environment` fields overwrite fields with
- * the same names in the caller's record. Missing optional resource options use
+ * logger-supplied `level`, UTC `time`, and the configured or defaulted
+ * `service.name`, `service.version`, `deployment.environment`,
+ * `service.instance.id`, and `process.pid` fields overwrite fields with the
+ * same names in the caller's record. A missing `instanceId` option defaults to
+ * one random UUID per process, and missing version and environment options use
  * `"unknown"`; record fields whose value is `undefined` are omitted.
  *
  * Redaction is a syntactic, field-level safeguard: matching sensitive key names

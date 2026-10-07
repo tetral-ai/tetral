@@ -33,6 +33,14 @@ only sanitized bounded scalar values; severity alone does not mark a failure. Se
 a recovery marked with `recovery.event` flushes that event's summary before the
 recovery record and resets its window.
 
+Info records bypass the limiter unless they mark a semantic failure or opt in
+with the control-only boolean `diagnostic.repeat: true`. The marker selects
+limiter admission and is never written, because it is outside `fields.json`.
+Limiter windows are keyed by event and reason (`error.code`, otherwise `reason`,
+otherwise `outcome`), so each distinct outcome emits its first record and later
+repeats within the window are summarized. A suppressed Info record still counts
+in its suppression summary.
+
 The shared boundary normalizes event names and protects resource metadata. It
 admits the scalar field vocabulary in
 [`fields.json`](src/fields.json), bounds strings to 1024 Go bytes or TypeScript UTF-16 code units
