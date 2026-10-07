@@ -65,7 +65,10 @@ when the changed fixture has no Go import edge.
 Service-owned `k8s/` changes select deployment evidence, including the raw
 manifest invariants, Helm rendering tests and Helm lint. Helm chart changes
 under `deploy/helm/tetral/` also select the integration package, because its
-direct Runtime TLS composition renders that chart. Unknown ownership
+direct Runtime TLS composition renders that chart. Changes to
+`deploy/nats/values.yaml` or `values-hardened.yaml` select the integration and
+`internal/testinfra` packages, because the runner's broker and the integration
+TLS cluster project their client policy from those values. Unknown ownership
 continues to select Full. Service-owned `proto/` changes also select protocol
 generation and compatibility checks.
 
@@ -79,9 +82,10 @@ networks, including after partial fixture startup.
 The runner's NATS broker is shared across concurrent package consumers; tests
 may publish and subscribe but must not stop, restart or reconfigure its lifetime.
 Destructive broker cases use `testinfra.NewNATSFixture` with the same pinned image
-and role permissions. Register its cleanup before clients so they join first;
-cleanup removes even a stopped broker and its private credential files, including
-after partial startup, without changing the shared descriptor or environment.
+and the role permissions projected from the NATS release values. Register its
+cleanup before clients so they join first; cleanup removes even a stopped broker
+and its private credential files, including after partial startup, without
+changing the shared descriptor or environment.
 
 Each invocation prints its Selection Plan and writes structured evidence below
 `.test-results/`. Native package commands remain appropriate while developing

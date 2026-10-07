@@ -21,6 +21,10 @@ may publish only `preview.v1.>` and explicitly denies all subscriptions; the
 subscriber may subscribe only `preview.v1.>` and explicitly denies all publishes.
 Empty permission lists are unrestricted in NATS, so the forbidden direction uses
 `deny: [">"]`, as described in the [NATS authorization documentation](https://docs.nats.io/learn/security/authorization).
+The test runner's local broker and the integration TLS cluster project their
+client authorization and `max_payload` from `values.yaml` and their listener
+and route TLS options from `values-hardened.yaml`, so the local ACL and TLS
+tests exercise this policy.
 
 ## Prerequisites and local rendering
 

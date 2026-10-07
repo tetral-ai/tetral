@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -371,6 +372,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 		}
 	}
 	integrationInput := integrationInputChange(revision.ChangedPaths)
+	brokerPolicy := slices.ContainsFunc(revision.ChangedPaths, natsBrokerPolicyInput)
 	if integrationInput {
 		group, ok := inventory.Group("go")
 		if !ok {
@@ -392,6 +394,10 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			} else if integrationInput {
 				paths = append(paths, "integration")
 			}
+			if brokerPolicy {
+				// The runner's broker and its ACL proof project the same values.
+				paths = append(paths, "internal/testinfra")
+			}
 			packages, err := affectedGoPackages(root, paths)
 			if err != nil || len(packages) == 0 {
 				revision.FullFallbackCause = "Go dependency closure unavailable"
@@ -402,7 +408,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			if serviceContract {
 				selections[index].Reason = "shared service contract, Go owners, Bun fixture consumers, cross-service compositions and reverse dependencies"
 			} else if integrationInput {
-				selections[index].Reason = "rendered deployment or driver input consumed by integration compositions"
+				selections[index].Reason = "rendered or projected deployment input consumed by integration and broker fixture compositions"
 			}
 		}
 	}
@@ -450,7 +456,8 @@ func separatedServiceContractChange(paths []string) bool {
 
 // integrationInputChange reports non-Go inputs that integration compositions
 // render or execute, which Go import traversal cannot see: the direct Runtime
-// TLS fixture renders deploy/helm/tetral.
+// TLS fixture renders deploy/helm/tetral, and every local NATS broker projects
+// its client policy from the NATS release values.
 func integrationInputChange(paths []string) bool {
 	for _, path := range paths {
 		for _, prefix := range []string{"deploy/helm/tetral/"} {
@@ -458,8 +465,17 @@ func integrationInputChange(paths []string) bool {
 				return true
 			}
 		}
+		if natsBrokerPolicyInput(path) {
+			return true
+		}
 	}
 	return false
+}
+
+// natsBrokerPolicyInput reports the NATS release values that testinfra
+// projects into the runner's broker and the integration TLS cluster.
+func natsBrokerPolicyInput(path string) bool {
+	return path == "deploy/nats/values.yaml" || path == "deploy/nats/values-hardened.yaml"
 }
 
 func selectionsForGroups(groups []Group, reason string) []Selection {

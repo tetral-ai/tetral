@@ -29,6 +29,7 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 		"deploy/istio/render_test.go":           true,
 		"deploy/nats/render_test.go":            true,
 		"integration/transporttest/runtime.go":  true,
+		"internal/testinfra/nats.go":            true,
 		"services/sandbox/k8s_manifest_test.go": true,
 	}
 

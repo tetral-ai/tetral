@@ -1,10 +1,12 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"gopkg.in/yaml.v3"
 )
 
 // EnvNATSFixture names a run-owned descriptor. Credentials stay in files rather
@@ -138,6 +141,143 @@ func PinnedNATSImage(root string) (string, error) {
 	return image, nil
 }
 
+// NATSPolicy is the broker policy that local fixtures share with the production
+// NATS release: the client roles' subject permissions, the payload ceiling and
+// the hardened listener and route TLS options. Fixtures keep their own
+// credentials, certificate files, listeners and routes.
+type NATSPolicy struct {
+	PublisherPermissions  map[string]any
+	SubscriberPermissions map[string]any
+	MaxPayload            int
+	ClientTLS             map[string]any
+	RouteTLS              map[string]any
+}
+
+// natsReleaseRoles maps each release user placeholder to its fixture role and
+// the password placeholder that must accompany it.
+var natsReleaseRoles = map[string]struct{ role, password string }{
+	"<< $NATS_PUBLISHER_USER >>":  {role: "publisher", password: "<< $NATS_PUBLISHER_PASSWORD >>"},   //nolint:gosec // G101: release placeholder name, not a credential.
+	"<< $NATS_SUBSCRIBER_USER >>": {role: "subscriber", password: "<< $NATS_SUBSCRIBER_PASSWORD >>"}, //nolint:gosec // G101: release placeholder name, not a credential.
+}
+
+type natsReleaseTLS struct {
+	Enabled bool           `yaml:"enabled"`
+	Merge   map[string]any `yaml:"merge"`
+}
+
+// NATSBrokerPolicy projects the policy from the release values under
+// deploy/nats: values.yaml supplies the client users' permissions and
+// max_payload, and values-hardened.yaml the client and route TLS options. The
+// live ACL and TLS tests therefore run the deployed policy rather than a copy.
+// A missing, renamed, duplicated or additional client user, or an absent
+// setting, fails the projection instead of starting a broker with another
+// policy.
+func NATSBrokerPolicy(root string) (NATSPolicy, error) {
+	var policy NATSPolicy
+	var base struct {
+		Config struct {
+			Merge struct {
+				MaxPayload    int            `yaml:"max_payload"`
+				Authorization map[string]any `yaml:"authorization"`
+			} `yaml:"merge"`
+		} `yaml:"config"`
+	}
+	if err := readNATSReleaseValues(root, "values.yaml", &base); err != nil {
+		return policy, err
+	}
+	users, ok := base.Config.Merge.Authorization["users"].([]any)
+	if !ok || len(base.Config.Merge.Authorization) != 1 || len(users) != len(natsReleaseRoles) {
+		return policy, errors.New("NATS release authorization must declare exactly the publisher and subscriber users")
+	}
+	permissions := map[string]map[string]any{}
+	for _, entry := range users {
+		user, _ := entry.(map[string]any)
+		placeholder, _ := user["user"].(string)
+		role, known := natsReleaseRoles[placeholder]
+		grants, _ := user["permissions"].(map[string]any)
+		if !known || len(user) != 3 || user["password"] != role.password || len(grants) == 0 || permissions[role.role] != nil {
+			return policy, errors.New("NATS release user must pair one role's user and password placeholders with its permissions")
+		}
+		permissions[role.role] = grants
+	}
+	policy.PublisherPermissions, policy.SubscriberPermissions = permissions["publisher"], permissions["subscriber"]
+	if policy.MaxPayload = base.Config.Merge.MaxPayload; policy.MaxPayload <= 0 {
+		return policy, errors.New("NATS release max_payload must be a positive byte count")
+	}
+	var hardened struct {
+		Config struct {
+			NATS struct {
+				TLS natsReleaseTLS `yaml:"tls"`
+			} `yaml:"nats"`
+			Cluster struct {
+				TLS natsReleaseTLS `yaml:"tls"`
+			} `yaml:"cluster"`
+		} `yaml:"config"`
+	}
+	if err := readNATSReleaseValues(root, "values-hardened.yaml", &hardened); err != nil {
+		return policy, err
+	}
+	client, route := hardened.Config.NATS.TLS, hardened.Config.Cluster.TLS
+	if !client.Enabled || len(client.Merge) == 0 || !route.Enabled || len(route.Merge) == 0 {
+		return policy, errors.New("NATS hardened release must enable client and route TLS with explicit options")
+	}
+	policy.ClientTLS, policy.RouteTLS = client.Merge, route.Merge
+	return policy, nil
+}
+
+func readNATSReleaseValues(root, name string, destination any) error {
+	//nolint:gosec // root is the repository-owned source checkout.
+	data, err := os.ReadFile(filepath.Join(root, "deploy", "nats", name))
+	if err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(data, destination); err != nil {
+		return fmt.Errorf("NATS release %s is invalid: %w", name, err)
+	}
+	return nil
+}
+
+// AuthorizationBlock returns the broker authorization value that grants the
+// fixture's role credentials the release's subject permissions.
+func (p NATSPolicy) AuthorizationBlock(publisherUser, publisherPassword, subscriberUser, subscriberPassword string) (string, error) {
+	return natsConfigValue(map[string]any{"users": []any{
+		map[string]any{"user": publisherUser, "password": publisherPassword, "permissions": p.PublisherPermissions},
+		map[string]any{"user": subscriberUser, "password": subscriberPassword, "permissions": p.SubscriberPermissions},
+	}})
+}
+
+// ClientTLSBlock returns the client listener TLS value: the release's options
+// with the fixture's mounted trust and certificate files.
+func (p NATSPolicy) ClientTLSBlock(files NATSFiles) (string, error) {
+	return natsTLSBlock(p.ClientTLS, files)
+}
+
+// RouteTLSBlock returns the route TLS value: the release's options with the
+// fixture's mounted trust and certificate files.
+func (p NATSPolicy) RouteTLSBlock(files NATSFiles) (string, error) {
+	return natsTLSBlock(p.RouteTLS, files)
+}
+
+func natsTLSBlock(options map[string]any, files NATSFiles) (string, error) {
+	block := make(map[string]any, len(options)+3)
+	maps.Copy(block, options)
+	block["ca_file"], block["cert_file"], block["key_file"] = files.CAPath, files.CertPath, files.KeyPath
+	return natsConfigValue(block)
+}
+
+// natsConfigValue encodes a value as JSON, which NATS configuration accepts.
+// Go's default HTML escaping would replace the subject wildcard ">" with a JSON
+// \u escape, so it is disabled to keep wildcards literal for the NATS parser.
+func natsConfigValue(value any) (string, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(encoded.String()), nil
+}
+
 func (m *dependencyManager) startNATS(ctx context.Context) error {
 	if err := dockerAvailable(ctx); err != nil {
 		return err
@@ -171,9 +311,18 @@ func (m *dependencyManager) startNATS(ctx context.Context) error {
 			return err
 		}
 	}
-	// Separate roles cannot subscribe/publish respectively. No JetStream state
-	// or implicit reply permission is needed for best-effort preview fan-out.
-	configuration := fmt.Sprintf("port: 4222\nhttp: 8222\njetstream: false\nmax_payload: 1048576\nauthorization {users:[{user:%q,password:%q,permissions:{publish:[\"preview.v1.>\"],subscribe:{deny:[\">\"]}}},{user:%q,password:%q,permissions:{publish:{deny:[\">\"]},subscribe:[\"preview.v1.>\"]}}]}\n", credentials[0], credentials[1], credentials[2], credentials[3])
+	// The role permissions and payload ceiling come from the production
+	// release values, so the ACL proofs run the deployed policy. No JetStream
+	// state is needed for best-effort preview fan-out.
+	policy, err := NATSBrokerPolicy(m.root)
+	if err != nil {
+		return err
+	}
+	authorization, err := policy.AuthorizationBlock(credentials[0], credentials[1], credentials[2], credentials[3])
+	if err != nil {
+		return err
+	}
+	configuration := fmt.Sprintf("port: 4222\nhttp: 8222\njetstream: false\nmax_payload: %d\nauthorization: %s\n", policy.MaxPayload, authorization)
 	if err := os.WriteFile(filepath.Join(directory, "nats.conf"), []byte(configuration), 0600); err != nil {
 		return err
 	}

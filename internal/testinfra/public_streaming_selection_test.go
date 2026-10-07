@@ -1,6 +1,8 @@
 package testinfra
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -68,5 +70,46 @@ func TestNATSDependencyRejectsMissingStarterAndFixture(t *testing.T) {
 	}
 	if _, err := startDependenciesWith(t.Context(), []string{"nats"}, nil, dependencyStarters{}); err == nil {
 		t.Fatal("missing broker starter accepted")
+	}
+}
+
+// Local brokers project their client policy from the NATS release values, an
+// input that Go import traversal cannot see. A values-only change must still
+// run the live ACL proof and the broker-backed integration compositions,
+// alongside the rendered release checks.
+func TestNATSReleaseValuesSelectProjectedBrokerCompositions(t *testing.T) {
+	root := serviceSelectionFixture(t)
+	directory := filepath.Join(root, "internal", "testinfra")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, directory, "owner.go", "package owner\n")
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []string{"deploy/nats/values.yaml", "deploy/nats/values-hardened.yaml"} {
+		t.Run(changed, func(t *testing.T) {
+			revision := Revision{ChangedPaths: []string{changed}}
+			selections, err := affectedSelections(root, inventory, &revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if revision.FullFallbackCause != "" {
+				t.Fatalf("NATS release values unexpectedly fell back to Full: %s", revision.FullFallbackCause)
+			}
+			groups := map[string]Selection{}
+			for _, selection := range selections {
+				groups[selection.Group] = selection
+			}
+			for _, owner := range []string{"internal/testinfra", "integration"} {
+				if !slices.Contains(groups["go"].Packages, "github.com/tetral-ai/tetral/"+owner) {
+					t.Errorf("%s omitted %s: %v", changed, owner, groups["go"].Packages)
+				}
+			}
+			if _, ok := groups["deployment"]; !ok {
+				t.Errorf("%s omitted the rendered release checks", changed)
+			}
+		})
 	}
 }

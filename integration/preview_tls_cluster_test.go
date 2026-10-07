@@ -40,6 +40,7 @@ type previewTLSCluster struct {
 	Resources                     *testinfra.DockerResources
 	Brokers                       []*previewTLSBroker
 	Fixture                       testinfra.NATSFixture
+	Policy                        testinfra.NATSPolicy
 	PublisherLeaf, SubscriberLeaf transporttest.Leaf
 	RouteUser, RoutePassword      string
 }
@@ -65,8 +66,12 @@ func newPreviewTLSCluster(t *testing.T) *previewTLSCluster {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image, err := testinfra.PinnedNATSImage(transporttest.RepositoryRoot(t))
+	root := transporttest.RepositoryRoot(t)
+	image, err := testinfra.PinnedNATSImage(root)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Policy, err = testinfra.NATSBrokerPolicy(root); err != nil {
 		t.Fatal(err)
 	}
 	c.Fixture.Image = image
@@ -222,7 +227,22 @@ func (c *previewTLSCluster) writeConfiguration(t *testing.T, b *previewTLSBroker
 	if advertise == "" {
 		t.Fatal("broker must reserve its final advertised endpoint before startup")
 	}
-	config := fmt.Sprintf("server_name:%q\nport:4222\nhttp:8222\njetstream:false\nclient_advertise:%q\nmax_payload:1048576\ntls {cert_file:\"/fixture/tls/client.crt\",key_file:\"/fixture/tls/client.key\",ca_file:\"/fixture/tls/ca.crt\",verify:true,handshake_first:true,min_version:\"1.2\"}\nauthorization {users:[{user:%q,password:%q,permissions:{publish:[\"preview.v1.>\"],subscribe:{deny:[\">\"]}}},{user:%q,password:%q,permissions:{publish:{deny:[\">\"]},subscribe:[\"preview.v1.>\"]}}]}\ncluster {name:\"preview-tls\",port:6222,no_advertise:false,pool_size:-1,authorization:{user:%q,password:%q},routes:[%s],tls:{cert_file:\"/fixture/tls/route.crt\",key_file:\"/fixture/tls/route.key\",ca_file:\"/fixture/tls/ca.crt\",verify:true,min_version:\"1.2\"}}\n", b.Name, advertise, user(c.Fixture.Publisher.UserPath), user(c.Fixture.Publisher.PasswordPath), user(c.Fixture.Subscriber.UserPath), user(c.Fixture.Subscriber.PasswordPath), c.RouteUser, c.RoutePassword, strings.Join(routes, ","))
+	// Client authorization, max_payload and the listener and route TLS options
+	// are projected from the production release values. Broker names,
+	// listeners, routes, credentials and certificate files stay fixture-owned.
+	authorization, err := c.Policy.AuthorizationBlock(user(c.Fixture.Publisher.UserPath), user(c.Fixture.Publisher.PasswordPath), user(c.Fixture.Subscriber.UserPath), user(c.Fixture.Subscriber.PasswordPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientTLS, err := c.Policy.ClientTLSBlock(testinfra.NATSFiles{CAPath: "/fixture/tls/ca.crt", CertPath: "/fixture/tls/client.crt", KeyPath: "/fixture/tls/client.key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeTLS, err := c.Policy.RouteTLSBlock(testinfra.NATSFiles{CAPath: "/fixture/tls/ca.crt", CertPath: "/fixture/tls/route.crt", KeyPath: "/fixture/tls/route.key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := fmt.Sprintf("server_name:%q\nport:4222\nhttp:8222\njetstream:false\nclient_advertise:%q\nmax_payload:%d\ntls:%s\nauthorization:%s\ncluster {name:\"preview-tls\",port:6222,no_advertise:false,pool_size:-1,authorization:{user:%q,password:%q},routes:[%s],tls:%s}\n", b.Name, advertise, c.Policy.MaxPayload, clientTLS, authorization, c.RouteUser, c.RoutePassword, strings.Join(routes, ","), routeTLS)
 	if err := os.WriteFile(filepath.Join(b.Directory, "nats.conf"), []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
