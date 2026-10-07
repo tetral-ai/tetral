@@ -156,7 +156,7 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8, "poll_ms": 1000}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.pollIntervalMs=250", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.pollIntervalMs=250", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
 					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3, "poll_ms": 250}
 					dwant.Level = 4
@@ -265,6 +265,7 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		DatabasePool                          map[string]int
 		Lifecycle                             map[string]int
 		BridgePolicy                          bridgePolicyEvidence
+		DrainTimeoutMs, CancelJoinTimeoutMs   int
 	}
 	if err := json.Unmarshal(output, &results); err != nil {
 		t.Fatalf("parser output: %v", err)
@@ -297,6 +298,17 @@ func checkTypeScriptProjection(t *testing.T, envs map[string]projectionEnv, conf
 		if result.Role != "agent-runtime" {
 			if err := requireProjection(result.DatabasePool, map[string]int{"max": 10, "idleTimeout": 30, "maxLifetime": 1800, "connectionTimeout": 30, "statementTimeoutMs": 30000}); err != nil {
 				t.Fatalf("%s: %v", result.Role, err)
+			}
+			// The rendered drain and join reach the owning parser, including
+			// distinct non-default values for each Gateway service.
+			drain, join := 30000, 5000
+			if configured && result.Role == "provider-gateway" {
+				drain, join = 200, 1000
+			} else if configured {
+				drain, join = 250, 1200
+			}
+			if result.DrainTimeoutMs != drain || result.CancelJoinTimeoutMs != join {
+				t.Fatalf("%s parsed drain/join=%d/%d want %d/%d", result.Role, result.DrainTimeoutMs, result.CancelJoinTimeoutMs, drain, join)
 			}
 		} else {
 			if result.Lifecycle["reportIntervalMs"] != 2000 || result.Lifecycle["processFreshnessMs"] != 10000 {

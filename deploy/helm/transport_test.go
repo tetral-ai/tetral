@@ -300,7 +300,7 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 		env := transportEnv(t, objects["apps/v1|Deployment|tetral-system|"+role])
 		for k, v := range settings {
 			if env[k] != v {
-				t.Fatalf("%s actualparser env%s=%s want%s", role, k, env[k], v)
+				t.Fatalf("%s rendered env %s=%s want %s", role, k, env[k], v)
 			}
 		}
 	}
@@ -311,15 +311,8 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 	for _, owner := range []string{"provider", "mcp"} {
 		renderChart(t, helm, chart, "lifecycle."+owner+"DrainMs=49999")
 	}
-	changed := uniqueObjects(t, renderChart(t, helm, chart, "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200"))
-	for role, expected := range map[string]map[string]string{"provider-gateway": {"TETRAL_DRAIN_TIMEOUT_MS": "200", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1000"}, "mcp-connector": {"TETRAL_DRAIN_TIMEOUT_MS": "250", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1200"}} {
-		env := transportEnv(t, changed["apps/v1|Deployment|tetral-system|"+role])
-		for key, value := range expected {
-			if env[key] != value {
-				t.Fatalf("%s configured%s=%s want%s", role, key, env[key], value)
-			}
-		}
-	}
+	// Non-default Provider Gateway and MCP drain/join values are checked through
+	// their owning TypeScript parsers in TestConfigurationOperationalProjectionUsesOwningParsers.
 	renderChart(t, helm, chart, "lifecycle.queueDrainMs=20000")
 	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=20000")
 }

@@ -362,7 +362,7 @@
       "environment_keys": [
         "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
-        "TETRAL_QUEUE_DRAIN_TIMEOUT_MS",
+        "TETRAL_DRAIN_TIMEOUT_MS",
         "TETRAL_QUEUE_GRPC_ADDR",
         "TETRAL_QUEUE_HTTP_ADDR",
         "TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS",
@@ -370,7 +370,6 @@
         "TETRAL_QUEUE_RETRY_BASE_MS",
         "TETRAL_QUEUE_RETRY_CAP_MS",
         "TETRAL_QUEUE_RETRY_MAX_ATTEMPTS",
-        "TETRAL_ROUTING_PROXY_REQUIRED",
         "TETRAL_SERVICE_VERSION",
         "TETRAL_TRANSPORT_PROFILE"
       ],
@@ -385,7 +384,7 @@
       },
       "units": "seconds, jobs, milliseconds, attempts",
       "unset_zero": "Exact empty defaults; config zero retry invalid; durable per-job max_attempts=0 means unset.",
-      "constraints": "Retry cap>=base; drain+join within application grace less proxy allocation.",
+      "constraints": "Retry cap>=base; drain 1..25000 and drain+join<=25000 in both profiles, keeping five seconds of the 30-second Pod grace.",
       "projection": "queue reclaim/retry values; lifecycle.queueDrainMs/cancelJoinMs; fixed Queue singleton/dependency identities remain deployment-owned.",
       "proofs": [
         "services/queue/config_test.go",
@@ -548,6 +547,7 @@
         "TETRAL_DATABASE_TLS_SERVER_NAME",
         "TETRAL_DATABASE_URL",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
         "TETRAL_GATEWAY_MAX_CONCURRENT_TURNS",
         "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
         "TETRAL_INTERNAL_GRPC_AUDIENCE",
@@ -560,7 +560,6 @@
         "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR",
         "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
         "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
-        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
         "TETRAL_SERVICE_VERSION"
       ],
       "defaults": {
@@ -574,6 +573,7 @@
       "projection": "lifecycle.providerDrainMs/providerCancelJoinMs and pool/metadata/preview controls; admission limit remains owner default.",
       "proofs": [
         "services/gateway/packages/provider-gateway/test/unit/config.test.ts",
+        "deploy/helm/configuration_projection_test.go",
         "deploy/helm/transport_test.go"
       ]
     },
@@ -600,6 +600,7 @@
         "TETRAL_DATABASE_TLS_SERVER_NAME",
         "TETRAL_DATABASE_URL",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
         "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
         "TETRAL_INTERNAL_GRPC_AUDIENCE",
         "TETRAL_MCP_CALL_TIMEOUT_MS",
@@ -614,7 +615,6 @@
         "TETRAL_MCP_SESSION_IDLE_TIMEOUT_MS",
         "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
         "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
-        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
         "TETRAL_SERVICE_VERSION"
       ],
       "defaults": {
@@ -635,6 +635,7 @@
       "projection": "lifecycle.mcpDrainMs/mcpCancelJoinMs; phase ceilings intentionally owner defaults, lease fixed durable domain contract.",
       "proofs": [
         "services/gateway/packages/mcp-connector/test/unit/config.test.ts",
+        "deploy/helm/configuration_projection_test.go",
         "deploy/helm/transport_test.go"
       ]
     },
@@ -1054,8 +1055,8 @@
       "environment_keys": [
         "TETRAL_CANCEL_JOIN_TIMEOUT_MS",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
+        "TETRAL_DRAIN_TIMEOUT_MS",
         "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
-        "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
         "TETRAL_SERVICE_VERSION",
         "TETRAL_WEB_API_KEYS",
         "TETRAL_WEB_CONNECTOR_GRPC_ADDR",
