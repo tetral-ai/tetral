@@ -1,9 +1,11 @@
 package eventstream
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/eventwire"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -113,9 +116,11 @@ func TestPreviewWriterDeliversOnlyContinuousPrefixes(t *testing.T) {
 }
 
 func TestPreviewWriterDatabaseEligibilityAndOpeningMark(t *testing.T) {
-	for _, name := range []string{"ended", "child", "private", "compaction", "not_primary", "before_mark", "lookup_missing"} {
+	for _, name := range []string{"ended", "child", "private", "compaction", "not_primary", "before_mark", "lookup_missing", "lookup_unavailable"} {
 		t.Run(name, func(t *testing.T) {
 			h, writer, response, state, reader := previewSequenceFixture(t)
+			var logs bytes.Buffer
+			h.options.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 			switch name {
 			case "ended":
 				reader.descriptor.Ended = true
@@ -130,7 +135,9 @@ func TestPreviewWriterDatabaseEligibilityAndOpeningMark(t *testing.T) {
 			case "before_mark":
 				state.watermark = 10
 			case "lookup_missing":
-				reader.err = errors.New("not found")
+				reader.err = &httpapi.NotFoundError{Message: "model request start not found"}
+			case "lookup_unavailable":
+				reader.err = errors.New("database unavailable")
 			}
 			applyPreview(t, h, writer, state, fixtureFrame("request_open", "", 0, ""), fixtureFrame("event_start", "evt_message", 0, ""), fixtureFrame("event_delta", "evt_message", 1, "secret"))
 			if response.Body.Len() != 0 {
@@ -138,6 +145,34 @@ func TestPreviewWriterDatabaseEligibilityAndOpeningMark(t *testing.T) {
 			}
 			if reader.reads != 1 {
 				t.Fatal("request admission did not consult database")
+			}
+			// Ineligibility stays silent; only an unavailable admission read is a
+			// classified preview stop with formal delivery still active.
+			wantStops := 0
+			if name == "lookup_unavailable" {
+				wantStops = 1
+			}
+			if got := h.options.previewMetrics.stoppedRequests.Load(); got != uint64(wantStops) {
+				t.Fatalf("stopped requests=%d want %d", got, wantStops)
+			}
+			stops := 0
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				if line == "" {
+					continue
+				}
+				var record map[string]any
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record["msg"] == "preview_stopped" {
+					if record["reason"] != "admission_unavailable" || record["outcome"] != "formal_active" || record["model_request.id"] != "mreq_preview" {
+						t.Fatalf("preview stop record=%v", record)
+					}
+					stops++
+				}
+			}
+			if stops != wantStops {
+				t.Fatalf("preview_stopped records=%d want %d", stops, wantStops)
 			}
 		})
 	}

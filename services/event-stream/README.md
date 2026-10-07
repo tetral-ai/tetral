@@ -355,7 +355,7 @@ request bodies and path parameters never supply identity.
 | `TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads` | `services/event-stream/preview_shutdown_test.go` | live TCP Session/Thread/opt-in SSE: opened-header/read barriers, process-context reader cancellation, writer/callback joins and zero ownership gauges |
 | `TestSSEWriter*` | `services/event-stream/preview_sse_writer_test.go` | held response body Write borrows the exact reserved slice; one deadline/flush, exact SSE framing and partial/error sent-byte accounting |
 | `TestPreviewMetrics*` | `services/event-stream/preview_metrics_test.go` | balanced ownership gauges, fixed latency bucket observations and labels, End/cancel/reset sequencer cleanup |
-| `TestPreviewHub*` / `TestPreviewWriter*` / `TestStreamQuery*` | `services/event-stream/preview_*_test.go` | transport component: fan-out/refcounts, last-unsubscribe race, queued/in-flight accounting, sequence prefixes, exact closure, eligible identity and bounded state |
+| `TestPreviewHub*` / `TestPreviewWriter*` / `TestStreamQuery*` | `services/event-stream/preview_*_test.go` | transport component: fan-out/refcounts, last-unsubscribe race, queued/in-flight accounting, sequence prefixes, exact closure, eligible identity, classified unavailable admission and bounded state |
 | `TestPreviewProtocol*` / `TestPreviewDecoder*` / `TestPreviewEncodedFrameByteBound` | `internal/eventwire/preview_event_test.go` | shared private/public fixtures, scope/vocabulary rejection, Unicode safety and encoded-size boundary |
 | `TestMarshalPublicEvent*` | `internal/eventwire/public_event_test.go` | wire projection: flattened union, authoritative row metadata, internal-field redaction, child-variant lineage |
 | `TestEventStreamProductionCodeKeepsReadOnlyRuntimeBoundary` / `TestEventStreamProductionCodeDoesNotImportExecutionOwners` | `services/event-stream/static_test.go` | static guard: this service imports no execution/writer package and stays read-only |
@@ -474,8 +474,11 @@ suppression summaries, diagnostic drop and sink-failure metrics, and the
 diagnostic close after listeners and business resources.
 
 Preview diagnostics report the first unavailable/disconnect/recovery transition
-and classified sequence/capacity/write loss. Records identify the operation,
-scoped request where known, bounded reason and `formal_active` outcome; they
+and classified sequence/capacity/write loss, and an admission read that fails
+for a reason other than a missing or invalid request identity
+(`admission_unavailable`; missing or ineligible identity stays silent).
+Records identify the operation, scoped request where known, bounded reason and
+`formal_active` outcome; they
 contain no text, tool inputs, credentials, provider metadata or raw errors.
 Routine previews and polls do not produce per-fragment records. The process
 logger bounds repeated diagnostics and emits suppression summaries independently

@@ -94,7 +94,7 @@ func (m *PreviewMetrics) Collector() workload.MetricsCollector {
 			{"event_stream_preview_viewer_drops_total", "Viewer preview invalidations.", "counter", float64(m.viewerDrops.Load())},
 			{"event_stream_preview_invalid_frames_total", "Rejected private frames.", "counter", float64(m.invalidFrames.Load())},
 			{"event_stream_preview_sequence_stops_total", "Detected preview sequence failures.", "counter", float64(m.sequenceStops.Load())},
-			{"event_stream_preview_stopped_requests_total", "Requests stopped for preview loss or capacity.", "counter", float64(m.stoppedRequests.Load())},
+			{"event_stream_preview_stopped_requests_total", "Requests stopped for preview loss, capacity or unavailable admission.", "counter", float64(m.stoppedRequests.Load())},
 			{"event_stream_slow_writers_total", "Response writes that exceeded their deadline.", "counter", float64(m.slowWriters.Load())},
 			{"event_stream_preview_events_total", "Successfully written preview events.", "counter", float64(m.previewEvents.Load())},
 			{"event_stream_formal_events_total", "Successfully written formal events.", "counter", float64(m.formalEvents.Load())},

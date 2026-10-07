@@ -368,6 +368,15 @@ func (h *handler) previewFrame(ctx context.Context, writer *sseWriter, scope Rea
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// Missing or invalid identity is silent ineligibility. Any other
+			// failure is an unavailable admission read: record the preview stop
+			// while formal delivery continues.
+			var notFound *httpapi.NotFoundError
+			var invalid *httpapi.ValidationError
+			if !errors.As(err, &notFound) && !errors.As(err, &invalid) {
+				h.options.previewMetrics.stoppedRequests.Add(1)
+				h.logPreviewStop(scope, frame.ModelRequestID, "admission_unavailable")
+			}
 			return nil
 		}
 		if descriptor.Ended || !descriptor.IsPrimaryThread || descriptor.ThreadRole != "main" || descriptor.ThreadVisibility != "public" || descriptor.RequestKind != "agent_provider_request" || descriptor.StartStreamPosition <= state.watermark {
