@@ -321,27 +321,6 @@ export async function buildProviderGatewayCommandDependencies(input: {
   };
 }
 
-async function closeSQLAfterStartupFailure(
-	sql: { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> },
-): Promise<void> {
-	try {
-		await sql.close?.({ timeout: 1 });
-	} catch {
-		// The verified public-safe startup error remains authoritative.
-	}
-}
-
-function databasePoolOptions(config: ProviderGatewayConfig): Bun.SQL.PostgresOrMySQLOptions {
-  return {
-    url: config.databaseUrl,
-    max: config.databasePool.max,
-    idleTimeout: config.databasePool.idleTimeout,
-    maxLifetime: config.databasePool.maxLifetime,
-    connectionTimeout: config.databasePool.connectionTimeout,
-    connection: { statement_timeout: config.databasePool.statementTimeoutMs },
-  };
-}
-
 async function waitForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
 }

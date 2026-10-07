@@ -980,8 +980,11 @@ The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
 30-second `connectionTimeout` and `statementTimeoutMs` 30000 milliseconds. All
 five controls accept canonical positive
 safe integers. Missing values use defaults; Provider Gateway also treats explicit
-empty values as defaults, while MCP Connector rejects explicit empties. These
-values configure each owned SQL generation. Explicit database TLS requires both
+empty values as defaults, while MCP Connector rejects explicit empties.
+`TETRAL_SERVICE_DRAIN_TIMEOUT_MS` and `TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`
+follow the same per-process rule: Provider Gateway treats an empty value as
+omitted, and MCP Connector rejects it. The pool values configure each owned SQL
+generation. Explicit database TLS requires both
 `TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`, hostname
 verification, and a complete verified initial generation before readiness.
 Every actual awaited store operation, including transaction commit, stays inside

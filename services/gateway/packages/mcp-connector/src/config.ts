@@ -210,7 +210,6 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
     !validServiceLifecycle(drainTimeoutMs, cancelJoinTimeoutMs) ||
     (caPath === undefined) !== (serverName === undefined) ||
     (caPath !== undefined && (!nonEmpty(caPath) || !nonEmpty(serverName))) ||
-    drainTimeoutMs === undefined ||
     !Number.isSafeInteger(drainTimeoutMs)
   )
     return {

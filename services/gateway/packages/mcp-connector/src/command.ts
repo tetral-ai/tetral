@@ -339,17 +339,6 @@ export async function runMcpConnectorCommand(options: {
   }
 }
 
-function databasePoolOptions(config: Extract<ReturnType<typeof loadMcpConnectorConfigFromProcessEnv>, { readonly ok: true }>["config"]): Bun.SQL.PostgresOrMySQLOptions {
-  return {
-    url: config.databaseUrl,
-    max: config.databasePool.max,
-    idleTimeout: config.databasePool.idleTimeout,
-    maxLifetime: config.databasePool.maxLifetime,
-    connectionTimeout: config.databasePool.connectionTimeout,
-    connection: { statement_timeout: config.databasePool.statementTimeoutMs },
-  };
-}
-
 async function waitForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
 }

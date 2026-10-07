@@ -162,8 +162,7 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
     cancelJoinTimeoutMs === undefined ||
     drainTimeoutMs === undefined ||
     !validServiceLifecycle(drainTimeoutMs, cancelJoinTimeoutMs) ||
-    (caPath === undefined) !== (serverName === undefined) ||
-    drainTimeoutMs === undefined
+    (caPath === undefined) !== (serverName === undefined)
   )
     return {
       ok: false,
