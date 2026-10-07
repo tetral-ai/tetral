@@ -14,8 +14,8 @@ RPC acceptance, receipts and durable context reads.
 
 `cmd/job-runner` owns its database pool, Queue client, Kubernetes visibility
 watches, Queue wake listener, polling workers and outbound Runtime/MCP clients.
-Startup validates configuration, schema, runtime role and inbox capacities
-before opening listeners or business clients. Shutdown closes acquisition first.
+Startup validates configuration, schema and runtime role before opening
+listeners or business clients. Shutdown closes acquisition first.
 Already running jobs keep their Queue heartbeats and settlement clients through
 `TETRAL_DRAIN_TIMEOUT_MS` (30000 by default). At expiry their work contexts are
 cancelled, then workers and Queue notifications join before native channels,

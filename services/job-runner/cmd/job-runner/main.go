@@ -74,9 +74,6 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	workspaceStore := workspace.NewStore(database.RawDatabaseForExcludedStores)
-	if err := jobrunner.ValidateRuntimeInboxEventRefBounds(ctx, database.Client, workspaceStore); err != nil {
-		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
-	}
 	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
 		return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
 	}
