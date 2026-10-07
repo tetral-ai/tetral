@@ -109,6 +109,39 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 	}
 }
 
+// Integration compositions render the Helm chart, an input that Go import
+// traversal cannot see, so a chart-only change also selects the integration
+// package alongside the deployment checks.
+func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
+	root := serviceSelectionFixture(t)
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []string{"deploy/helm/tetral/values.yaml"} {
+		t.Run(changed, func(t *testing.T) {
+			revision := Revision{ChangedPaths: []string{changed}}
+			selections, err := affectedSelections(root, inventory, &revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if revision.FullFallbackCause != "" {
+				t.Fatalf("integration input unexpectedly fell back to Full: %s", revision.FullFallbackCause)
+			}
+			groups := map[string]Selection{}
+			for _, selection := range selections {
+				groups[selection.Group] = selection
+			}
+			if !slices.Contains(groups["go"].Packages, "github.com/tetral-ai/tetral/integration") {
+				t.Errorf("%s omitted the integration package: %v", changed, groups["go"].Packages)
+			}
+			if _, ok := groups["deployment"]; !ok {
+				t.Errorf("%s omitted deployment evidence", changed)
+			}
+		})
+	}
+}
+
 func TestSeparatedServiceManifestSelectionExecutesRawAndHelmInvariants(t *testing.T) {
 	inventory, err := LoadInventory()
 	if err != nil {

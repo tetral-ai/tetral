@@ -51,7 +51,9 @@ durable-control packages form one verification boundary. Affected selection
 includes both Go owners, cross-service integration tests and Runtime/Gateway
 consumers; Go imports alone cannot describe their RPC and Bun test dependencies.
 Service-owned `k8s/` changes select deployment evidence, including the raw
-manifest invariants, Helm rendering tests and Helm lint. Unknown ownership
+manifest invariants, Helm rendering tests and Helm lint. Helm chart changes
+under `deploy/helm/tetral/` also select the integration package, because its
+direct Runtime TLS composition renders that chart. Unknown ownership
 continues to select Full. Service-owned `proto/` changes also select protocol
 generation and compatibility checks.
 

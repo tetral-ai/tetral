@@ -118,6 +118,11 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestTransportSecurityRPCBounds",
+      "dependencies": ["docker", "envoy"]
+    },
+    {
+      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLReplicaWorkerDrain",
       "dependencies": ["postgresql", "bun-workspaces"]
     },

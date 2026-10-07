@@ -209,6 +209,11 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 	return classifyGoTests(pkg, inventory.GoTests)
 }
 
+// transportDockerConstructors start containers through testinfra Docker
+// resources, so a test calling one cannot run in the infrastructure-free
+// profile even when its inventory declaration is missing.
+var transportDockerConstructors = map[string]bool{"NewProxyPair": true, "NewRuntimePair": true, "NewRuntimeWithoutInitialCredentials": true, "NewMinIO": true, "NewPostgreSQL": true}
+
 func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusion, error) {
 	declared := map[string][]string{}
 	for _, contract := range contracts {
@@ -232,6 +237,7 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 		}
 		infrastructureImports := map[string]string{}
 		commandImports := map[string]bool{}
+		transportImports := map[string]bool{}
 		for _, spec := range file.Imports {
 			importPath, _ := strconv.Unquote(spec.Path.Value)
 			if importPath == "github.com/tetral-ai/tetral/internal/storage/storagetest" {
@@ -240,6 +246,13 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 					name = spec.Name.Name
 				}
 				infrastructureImports[name] = "postgresql"
+			}
+			if importPath == "github.com/tetral-ai/tetral/integration/transporttest" {
+				name := "transporttest"
+				if spec.Name != nil {
+					name = spec.Name.Name
+				}
+				transportImports[name] = true
 			}
 			if importPath == "os/exec" {
 				name := "exec"
@@ -283,6 +296,9 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 					if identifier, ok := selector.X.(*ast.Ident); ok {
 						if capability := infrastructureImports[identifier.Name]; capability != "" {
 							item.requireCapability(capability, "calls the repository PostgreSQL test helper")
+						}
+						if transportImports[identifier.Name] && transportDockerConstructors[selector.Sel.Name] {
+							item.requireCapability("docker", "starts a transporttest Docker fixture")
 						}
 						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext") {
 							argument := 0

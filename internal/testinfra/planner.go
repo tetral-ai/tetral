@@ -370,6 +370,14 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			selected[id] = group
 		}
 	}
+	integrationInput := integrationInputChange(revision.ChangedPaths)
+	if integrationInput {
+		group, ok := inventory.Group("go")
+		if !ok {
+			return nil, fmt.Errorf("integration input evidence group %q is missing", "go")
+		}
+		selected["go"] = group
+	}
 	var groups []Group
 	for _, group := range selected {
 		groups = append(groups, group)
@@ -381,6 +389,8 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			paths := append([]string(nil), revision.ChangedPaths...)
 			if serviceContract {
 				paths = append(paths, "services/bridge", "services/job-runner", "integration")
+			} else if integrationInput {
+				paths = append(paths, "integration")
 			}
 			packages, err := affectedGoPackages(root, paths)
 			if err != nil || len(packages) == 0 {
@@ -391,6 +401,8 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			selections[index].Reason = "changed Go owners and repository-local reverse dependencies"
 			if serviceContract {
 				selections[index].Reason = "shared service contract, both Go owners, cross-service compositions and reverse dependencies"
+			} else if integrationInput {
+				selections[index].Reason = "rendered deployment or driver input consumed by integration compositions"
 			}
 		}
 	}
@@ -426,6 +438,20 @@ func separatedServiceContractChange(paths []string) bool {
 			path == "internal/storage/postgresql_runtime_schema.go" ||
 			path == "deploy/dependencies.lock.json" {
 			return true
+		}
+	}
+	return false
+}
+
+// integrationInputChange reports non-Go inputs that integration compositions
+// render or execute, which Go import traversal cannot see: the direct Runtime
+// TLS fixture renders deploy/helm/tetral.
+func integrationInputChange(paths []string) bool {
+	for _, path := range paths {
+		for _, prefix := range []string{"deploy/helm/tetral/"} {
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
 		}
 	}
 	return false
