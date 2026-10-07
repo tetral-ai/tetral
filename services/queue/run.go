@@ -142,7 +142,8 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	case errOut = <-httpErr:
 	case errOut = <-grpcErr:
 	case <-serverCtx.Done():
-		errOut = serverCtx.Err()
+		// A signal or parent cancellation is a planned shutdown: a drain that joins every
+		// user within its budget returns success; only the forced path below reports an error.
 	}
 	workload.BeginProcessShutdown(ctx)
 	readiness.BeginShutdown()

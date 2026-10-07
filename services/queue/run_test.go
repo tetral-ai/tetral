@@ -102,7 +102,7 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 				if force && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("forced drain outcome=%v", err)
 				}
-				if !force && !errors.Is(err, context.Canceled) {
+				if !force && err != nil {
 					t.Fatalf("completed drain outcome=%v", err)
 				}
 			case <-watchdog.Done():

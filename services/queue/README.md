@@ -145,6 +145,9 @@ even before the main shutdown path is scheduled. A cycle already admitted may
 finish during the same drain window as existing RPCs. At the deadline the service
 cancels maintenance and HTTP database work and force-stops RPC transport, then joins every admitted
 user before returning. Only then does the command close its database pool.
+A signal or parent cancellation is a planned shutdown: a drain that joins every
+user within `TETRAL_DRAIN_TIMEOUT_MS` returns success and the process exits 0,
+while a forced cancellation returns a deadline error and a nonzero exit.
 A cancelled reclaim transaction rolls back as a whole; another replica can
 reclaim the remaining expired leases. Shutdown never implies reclamation
 succeeded. Queue replicas share only PostgreSQL authority: Lease, Heartbeat,

@@ -86,8 +86,8 @@ func TestPostgreSQLReplicaQueueMaintenanceShutdown(t *testing.T) {
 			awaitReplicaQueueBarrier(watchdog, t, barrier.exited, "SQL barrier exited")
 			select {
 			case err := <-done:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("shutdown outcome=%v", err)
+				if !force && err != nil {
+					t.Fatalf("completed shutdown outcome=%v", err)
 				}
 				if force && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("missing forced-drain outcome: %v", err)
