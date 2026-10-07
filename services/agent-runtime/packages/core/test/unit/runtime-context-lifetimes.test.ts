@@ -93,7 +93,6 @@ describe("Runtime context lifetimes", () => {
 			],
 		};
 		const applied = applyAssistantAppendResult({
-			modelRequestId: "request_open",
 			append,
 			result: {
 				messageSequence: 2,
@@ -102,7 +101,7 @@ describe("Runtime context lifetimes", () => {
 		});
 		let eligible=false;
  const context=new ContextManager("session",[userEntry],()=>({assistantMessageSequence:2}),message=>message.messageSequence!==2||eligible);
- context.installAssistantMessage(applied.draft);
+ context.installAssistantMessage(applied.message);
 
 		expect(context.providerEntries()).toEqual([userEntry]);
 		expect(toGatewayProviderContext(context.providerEntries())).toEqual({
@@ -120,9 +119,9 @@ describe("Runtime context lifetimes", () => {
 		expect(sealed).toEqual({
 			messageSequence: 2,
 			contextKind: "assistant",
-			parts: applied.draft.parts,
+			parts: applied.message.parts,
 		});
-		expect(context.currentAssistantMessage()).toEqual(applied.draft);
+		expect(context.currentAssistantMessage()).toEqual(applied.message);
 		const projected = toGatewayProviderContext(context.providerEntries());
 		expect(projected).toMatchObject({
 			ok: true,

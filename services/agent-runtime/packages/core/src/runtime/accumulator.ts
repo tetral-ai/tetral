@@ -723,15 +723,14 @@ export class RequestContentProcessor {
 				canonicalInput: existing.state.input.value,
 				error: failure,
 			});
-			const draft = applyInternalToolRepairResult({
-				modelRequestId,
-				existingDraft: this.options.contextOwner.currentAssistantMessage(),
+			const message = applyInternalToolRepairResult({
+				existingMessage: this.options.contextOwner.currentAssistantMessage(),
 				assignedMessageSequence: commit.assignedMessageSequence,
 				context,
 				reasoningPrefixContextDelta,
 			});
-			this.options.contextOwner.installAssistantMessage(draft);
-			this.options.onAssistantMessageCommitted({ modelRequestId: this.options.modelRequestId, assistantMessageSequence: draft.messageSequence });
+			this.options.contextOwner.installAssistantMessage(message);
+			this.options.onAssistantMessageCommitted({ modelRequestId: this.options.modelRequestId, assistantMessageSequence: message.messageSequence });
 			this.options.onInternalToolRepairCommitted?.({
 				eventId: commit.repairEventId, modelRequestId, modelToolCallId: toolCallId,
 				toolName: existing.toolName,
@@ -912,13 +911,12 @@ export class RequestContentProcessor {
 		const assistant = result.assistant;
 		try {
 			const application = applyAssistantAppendResult({
-				modelRequestId: this.options.modelRequestId,
 				append,
-				existingDraft: this.options.contextOwner.currentAssistantMessage(),
+				existingMessage: this.options.contextOwner.currentAssistantMessage(),
 				result: assistant,
 			});
-			this.options.contextOwner.installAssistantMessage(application.draft);
-			this.options.onAssistantMessageCommitted({ modelRequestId: this.options.modelRequestId, assistantMessageSequence: application.draft.messageSequence });
+			this.options.contextOwner.installAssistantMessage(application.message);
+			this.options.onAssistantMessageCommitted({ modelRequestId: this.options.modelRequestId, assistantMessageSequence: application.message.messageSequence });
 			return true;
 		}
 		catch {

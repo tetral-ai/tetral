@@ -132,12 +132,11 @@ describe("Runtime context declaration applicators", () => {
 			},
 		]);
 		const applied = applyAssistantAppendResult({
-			modelRequestId: "req_1",
 			append,
 			result: { messageSequence: 8, createdToolUseEventIds: ["evt_tool_1"] },
 		});
 
-		expect(applied.draft).toEqual({
+		expect(applied.message).toEqual({
  contextKind:"assistant",
 			messageSequence: 8,
 			parts: [
@@ -346,7 +345,6 @@ describe("Runtime context declaration applicators", () => {
 			},
 		});
 		const repairOnly = applyInternalToolRepairResult({
-			modelRequestId: "mreq_1",
 			assignedMessageSequence: 8,
 			context: repair,
 		});
@@ -360,9 +358,8 @@ describe("Runtime context declaration applicators", () => {
 		});
 
 		const mixed = applyInternalToolRepairResult({
-			modelRequestId: "mreq_1",
 			assignedMessageSequence: 8,
-			existingDraft: {
+			existingMessage: {
  contextKind:"assistant",
 				messageSequence: 8,
 				parts: [{ type: "text", text: "before repair" }],
@@ -376,9 +373,8 @@ describe("Runtime context declaration applicators", () => {
 		]);
 		expect(() =>
 			applyInternalToolRepairResult({
-				modelRequestId: "mreq_1",
 				assignedMessageSequence: 9,
-				existingDraft: repairOnly,
+				existingMessage: repairOnly,
 				context: repair,
 			}),
 		).toThrow("changed the committed message identity");

@@ -148,21 +148,25 @@ export function assistantAppendFromDraftParts(
 	return RuntimeAssistantContextAppendSchema.parse({ parts });
 }
 
+/**
+ * Applies an acknowledged Assistant append to the committed Assistant message.
+ * It checks only the committed message sequence; ThreadState's
+ * associateCurrentRequestMessage owns the model-request identity of that message.
+ */
 export function applyAssistantAppendResult(input: {
-	readonly modelRequestId: string;
 	readonly append: RuntimeAssistantContextAppend;
-	readonly existingDraft?: RuntimeContextEntry | undefined;
+	readonly existingMessage?: RuntimeContextEntry | undefined;
 	readonly result: AssistantAppendResult;
 }): {
-	readonly draft: RuntimeContextEntry;
+	readonly message: RuntimeContextEntry;
 	readonly activeToolParts: readonly Extract<
 		RuntimeAssistantDraftPart,
 		{ readonly type: "tool" }
 	>[];
 } {
 	if (
-		input.existingDraft !== undefined &&
-		(input.existingDraft.messageSequence !== input.result.messageSequence)
+		input.existingMessage !== undefined &&
+		(input.existingMessage.messageSequence !== input.result.messageSequence)
 	) {
 		throw new Error("Assistant append changed the committed message identity");
 	}
@@ -209,12 +213,12 @@ export function applyAssistantAppendResult(input: {
 			canonicalInput: part.state.input.value,
 		};
 	});
-	const draft = RuntimeContextEntrySchema.parse({
+	const message = RuntimeContextEntrySchema.parse({
 		contextKind: "assistant",
 		messageSequence: input.result.messageSequence,
-		parts: [...(input.existingDraft?.parts ?? []), ...contextParts],
+		parts: [...(input.existingMessage?.parts ?? []), ...contextParts],
 	});
-	return { draft, activeToolParts };
+	return { message, activeToolParts };
 }
 
 
@@ -352,9 +356,13 @@ export function internalToolRepairContext(input: {
 	};
 }
 
+/**
+ * Applies an acknowledged internal Tool repair to the committed Assistant
+ * message. It checks only the committed message sequence; ThreadState's
+ * associateCurrentRequestMessage owns the model-request identity of that message.
+ */
 export function applyInternalToolRepairResult(input: {
-	readonly modelRequestId: string;
-	readonly existingDraft?: RuntimeContextEntry | undefined;
+	readonly existingMessage?: RuntimeContextEntry | undefined;
 	readonly assignedMessageSequence: number;
 	readonly context: RuntimeContextDraft;
 	readonly reasoningPrefixContextDelta?: RuntimeAssistantContextAppend | undefined;
@@ -363,8 +371,8 @@ export function applyInternalToolRepairResult(input: {
 		throw new Error("internal Tool repair context must be Assistant context");
 	}
 	if (
-		input.existingDraft !== undefined &&
-		(input.existingDraft.messageSequence !== input.assignedMessageSequence)
+		input.existingMessage !== undefined &&
+		(input.existingMessage.messageSequence !== input.assignedMessageSequence)
 	) {
 		throw new Error(
 			"internal Tool repair changed the committed message identity",
@@ -373,7 +381,7 @@ export function applyInternalToolRepairResult(input: {
 	return RuntimeContextEntrySchema.parse({
 		contextKind: "assistant",
 		messageSequence: input.assignedMessageSequence,
-		parts: [...(input.existingDraft?.parts ?? []), ...(input.reasoningPrefixContextDelta?.parts.map((part): RuntimeContextPart => {
+		parts: [...(input.existingMessage?.parts ?? []), ...(input.reasoningPrefixContextDelta?.parts.map((part): RuntimeContextPart => {
       if (part.type !== "reasoning") throw new Error("internal repair prefix must contain reasoning only");
       return {type:"reasoning",text:part.text,...(part.providerMetadata === undefined ? {} : {providerMetadata:part.providerMetadata})};
     }) ?? []), ...input.context.parts],

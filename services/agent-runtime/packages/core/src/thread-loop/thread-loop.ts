@@ -7604,14 +7604,13 @@ async function appendModelRequestEndEvent(
 				throw new Error("trailing reasoning ACK has no Assistant sequence");
 			}
 			const applied = applyAssistantAppendResult({
-				modelRequestId,
 				append: trailingContextAppend,
-				existingDraft: current,
+				existingMessage: current,
 				result: {
 					messageSequence: sequence, createdToolUseEventIds: []
 				},
 			});
-			session.state.contextManager.installAssistantMessage(applied.draft);
+			session.state.contextManager.installAssistantMessage(applied.message);
 			session.state.associateCurrentRequestMessage({
 				modelRequestId,
 				assistantMessageSequence: sequence,
