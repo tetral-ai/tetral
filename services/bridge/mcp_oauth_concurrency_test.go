@@ -11,11 +11,13 @@ import (
 type mcpAsyncActionResult struct {
 	output json.RawMessage
 	err    error
+	kind   any
 }
 
 func (h *mcpDurableComposition) startAction(action map[string]any) <-chan mcpAsyncActionResult {
 	result := make(chan mcpAsyncActionResult, 1)
-	go func() { output, err := h.tryAction(action); result <- mcpAsyncActionResult{output, err} }()
+	kind := action["kind"]
+	go func() { output, err := h.tryAction(action); result <- mcpAsyncActionResult{output, err, kind} }()
 	return result
 }
 func (h *mcpDurableComposition) joinAction(result <-chan mcpAsyncActionResult) json.RawMessage {
@@ -25,13 +27,31 @@ func (h *mcpDurableComposition) joinAction(result <-chan mcpAsyncActionResult) j
 		if joined.err != nil {
 			h.t.Fatal(joined.err)
 		}
+		// Barriers are recorded on the test goroutine, after the join.
+		h.reachedAction(map[string]any{"kind": joined.kind})
 		return joined.output
 	case <-h.ctx.Done():
 		h.t.Fatal(h.ctx.Err())
 		return nil
 	}
 }
-func (h *mcpDurableComposition) assertOAuthCounts(adapter string, f, i, l, c, e int) json.RawMessage {
+
+// mcpOAuthCounts holds the values assertOAuthCounts compared: issuer calls (F),
+// origin-execution initialize, tools/list and tools/call requests (I, L, C),
+// bridge-verification tools/list requests and accepted effects.
+type mcpOAuthCounts struct {
+	F, I, L, C, VerificationL, Effects int
+}
+
+// facts adds the compared counts to an evidence record under the keys the
+// OAuth refresh table records use.
+func (o mcpOAuthCounts) facts(record map[string]any) map[string]any {
+	record["origin_F"], record["origin_I"], record["origin_L"], record["origin_C"] = o.F, o.I, o.L, o.C
+	record["verification_L"], record["accepted_effects"] = o.VerificationL, o.Effects
+	return record
+}
+
+func (h *mcpDurableComposition) assertOAuthCounts(adapter string, f, i, l, c, e int) (json.RawMessage, mcpOAuthCounts) {
 	h.t.Helper()
 	output := h.action(map[string]any{"kind": "observe", "adapter": adapter})
 	h.assertNoMCPOAuthSecrets(adapter, string(output))
@@ -72,7 +92,7 @@ func (h *mcpDurableComposition) assertOAuthCounts(adapter string, f, i, l, c, e 
 			h.t.Fatalf("unreached fault %q remaining %d", key, n)
 		}
 	}
-	return output
+	return output, mcpOAuthCounts{F: observed.IssuerCalls, I: oi, L: ol, C: oc, VerificationL: vl, Effects: observed.Counts.Effects}
 }
 func testMCPOAuthConcurrentOwners(t *testing.T) {
 	for _, adapter := range []string{"github", "slack"} {
@@ -99,13 +119,13 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 					defer deadline.Stop()
 					ticker := time.NewTicker(time.Millisecond)
 					defer ticker.Stop()
-					waiting := false
+					waiting, lockWaiters := false, 0
 					for !waiting {
 						var count int
 						if err := h.admin.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename=$1 AND wait_event_type='Lock' AND query ILIKE '%FOR UPDATE%' AND query ILIKE '%credentials%'`, h.gatewayUser).Scan(&count); err != nil {
 							t.Fatal(err)
 						}
-						waiting = count == 1
+						waiting, lockWaiters = count == 1, count
 						if !waiting {
 							select {
 							case <-ticker.C:
@@ -114,13 +134,15 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 							}
 						}
 					}
+					h.reached("installed-role-row-lock-waiter-before-issuer-release")
 					h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "issuer"})
+					settlements := make([]mcpSettlementObservation, 0, 2)
 					for n, result := range []<-chan mcpAsyncActionResult{first, second} {
 						output := h.joinAction(result)
-						h.assertMCPOriginalSettlement(events[n], output, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[n]))
+						settlements = append(settlements, h.assertMCPOriginalSettlement(events[n], output, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[n])))
 					}
-					output := h.assertOAuthCounts(adapter, 1, 2, 2, 2, 2)
-					h.assertMCPOAuthRotation(adapter, before, 1)
+					output, counts := h.assertOAuthCounts(adapter, 1, 2, 2, 2, 2)
+					lifetime := h.assertMCPOAuthRotation(adapter, before, 1)
 					var proof struct {
 						Records  []struct{ Event, Outcome, DurableWrite string }
 						Requests []struct{ CredentialLabel string }
@@ -147,7 +169,7 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 							t.Fatal("manager used pre-rotation bearer")
 						}
 					}
-					h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"installed_role_row_lock_waiter": 1, "independent_managers": 2, "committed_rotations": 1, "concurrent_winner_reused": 1, "original_receipts": 2, "origin_F": 1, "origin_I": 2, "origin_L": 2, "origin_C": 2, "accepted_effects": 2})
+					h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"installed_role_row_lock_waiters": lockWaiters, "committed_rotations": winner, "concurrent_winner_reused": reused, "original_settlements": settlements, "rotated_credential_lifetime_s": int(lifetime.Seconds())}))
 					return
 				}
 				h.action(map[string]any{"kind": "configure", "adapter": adapter, "faultMethod": "tools/list", "faultOrigin": "origin-execution", "faults": []int{401, 0}})
@@ -171,7 +193,7 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 					h.action(map[string]any{"kind": "wait-held", "adapter": adapter, "holdPhase": "initialize"})
 				}
 				second := h.startAction(action(1, 0))
-				h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 2})
+				joinedWaiters := h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 2})
 				if variant != "exact-two-late-waiters" {
 					h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "initialize"})
 					h.action(map[string]any{"kind": "wait-held", "adapter": adapter, "holdPhase": "tools/list"})
@@ -180,7 +202,8 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 					for _, event := range events {
 						h.action(map[string]any{"kind": "cancel", "eventId": event})
 					}
-					h.action(map[string]any{"kind": "wait-resources-closed", "adapter": adapter})
+					closed := h.action(map[string]any{"kind": "wait-resources-closed", "adapter": adapter})
+					cancelledOwners, settledReceipts := 0, 0
 					for n, result := range []<-chan mcpAsyncActionResult{first, second} {
 						output := h.joinAction(result)
 						var proof struct{ Result struct{ Type string } }
@@ -190,6 +213,7 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 						if proof.Result.Type != "cancelled" {
 							t.Fatalf("cancelled owner returned %s", output)
 						}
+						cancelledOwners++
 						var receipts int
 						if err := h.admin.QueryRow(`SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_mcp_durable' AND operation='settle_tool_result' AND idempotency_key=$1 AND ack_status='committed'`, events[n]).Scan(&receipts); err != nil {
 							t.Fatal(err)
@@ -197,11 +221,12 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 						if receipts != 1 {
 							t.Fatal("cancelled original Tool Use did not settle once")
 						}
+						settledReceipts += receipts
 					}
-					output := h.assertOAuthCounts(adapter, 1, 2, 2, 0, 0)
-					h.assertMCPOAuthRotation(adapter, before, 1)
+					output, counts := h.assertOAuthCounts(adapter, 1, 2, 2, 0, 0)
+					lifetime := h.assertMCPOAuthRotation(adapter, before, 1)
 					h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "tools/list"})
-					h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"cancelled_owners": 2, "original_settlement_receipts": 2, "owned_openings": 0, "owned_connections": 0, "notification_streams": 0, "origin_F": 1, "origin_I": 2, "origin_L": 2, "origin_C": 0, "accepted_effects": 0})
+					h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"cancelled_owners": cancelledOwners, "original_settlement_receipts": settledReceipts, "resources_after_cancellation": closed, "joined_waiters_observation": joinedWaiters, "rotated_credential_lifetime_s": int(lifetime.Seconds())}))
 					return
 				}
 				if variant == "cancel-one-survivor-and-independent" {
@@ -210,12 +235,12 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 				}
 				h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "tools/list"})
 				outputs := []json.RawMessage{h.joinAction(first), h.joinAction(second)}
-				h.assertMCPOriginalSettlement(events[0], outputs[0], 3, 4, "MCP authentication failed after refresh.")
+				survivor := h.assertMCPOriginalSettlement(events[0], outputs[0], 3, 4, "MCP authentication failed after refresh.")
 				if variant != "cancel-one-survivor-and-independent" {
-					h.assertMCPOriginalSettlement(events[1], outputs[1], 3, 4, "MCP authentication failed after refresh.")
-					output := h.assertOAuthCounts(adapter, 1, 2, 2, 2, 0)
-					h.assertMCPOAuthRotation(adapter, before, 1)
-					h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"original_authentication_error_receipts": 2, "joined_waiters": 2, "origin_F": 1, "origin_I": 2, "origin_L": 2, "origin_C": 2, "accepted_effects": 0})
+					settlements := []mcpSettlementObservation{survivor, h.assertMCPOriginalSettlement(events[1], outputs[1], 3, 4, "MCP authentication failed after refresh.")}
+					output, counts := h.assertOAuthCounts(adapter, 1, 2, 2, 2, 0)
+					lifetime := h.assertMCPOAuthRotation(adapter, before, 1)
+					h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"original_settlements": settlements, "joined_waiters_observation": joinedWaiters, "rotated_credential_lifetime_s": int(lifetime.Seconds())}))
 					return
 				}
 				// The cancelled owner dispatches nothing. The survivor cannot reclaim
@@ -227,15 +252,15 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 				if cancelled.Result.Type != "cancelled" {
 					t.Fatalf("cancelled Runtime owner=%s", outputs[1])
 				}
-				baseline := h.assertOAuthCounts(adapter, 1, 2, 2, 1, 0)
+				baseline, _ := h.assertOAuthCounts(adapter, 1, 2, 2, 1, 0)
 				h.action(map[string]any{"kind": "configure", "adapter": adapter, "faultMethod": "tools/call", "faultOrigin": "origin-execution", "faults": []int{401, 0}})
 				nonce := "later-independent-" + adapter
 				event, call := h.declare("work-"+adapter, nonce, "allow")
 				output := h.action(map[string]any{"kind": "execute", "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce})
-				h.assertMCPOriginalSettlement(event, output, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonce))
-				output = h.assertOAuthCounts(adapter, 2, 3, 3, 3, 1)
-				h.assertMCPOAuthRotation(adapter, before, 2)
-				h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"cancelled_owner_dispatched": false, "survivor_authentication_receipt": 1, "later_independent_success_receipt": 1, "before_independent": json.RawMessage(baseline), "origin_F": 2, "origin_I": 3, "origin_L": 3, "origin_C": 3, "accepted_effects": 1})
+				independent := h.assertMCPOriginalSettlement(event, output, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonce))
+				output, counts := h.assertOAuthCounts(adapter, 2, 3, 3, 3, 1)
+				lifetime := h.assertMCPOAuthRotation(adapter, before, 2)
+				h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"cancelled_owner_result": cancelled.Result.Type, "survivor_settlement": survivor, "later_independent_settlement": independent, "before_independent": json.RawMessage(baseline), "joined_waiters_observation": joinedWaiters, "rotated_credential_lifetime_s": int(lifetime.Seconds())}))
 			})
 		}
 	}
@@ -256,7 +281,7 @@ func testMCPOAuthIssuerRollback(t *testing.T) {
 				nonce := "issuer-rollback-" + adapter + "-" + failure
 				event, call := h.declare("work-"+adapter, nonce, "allow")
 				output := h.action(map[string]any{"kind": "execute", "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce})
-				h.assertMCPOriginalSettlement(event, output, 3, 3, "MCP credential refresh is temporarily unavailable.")
+				original := h.assertMCPOriginalSettlement(event, output, 3, 3, "MCP credential refresh is temporarily unavailable.")
 				var after []byte
 				if err := h.admin.QueryRow(`SELECT encrypted_auth FROM credentials WHERE workspace_id='default' AND id=$1`, "cred_mcp_"+adapter).Scan(&after); err != nil {
 					t.Fatal(err)
@@ -264,7 +289,7 @@ func testMCPOAuthIssuerRollback(t *testing.T) {
 				if !bytes.Equal(before, after) {
 					t.Fatal("failed refresh overwrote encrypted credential")
 				}
-				observed := h.assertOAuthCounts(adapter, 1, 0, 0, 0, 0)
+				observed, _ := h.assertOAuthCounts(adapter, 1, 0, 0, 0, 0)
 				var proof struct {
 					Records     []struct{ Event, Outcome, FailureKind, DurableWrite string }
 					IssuerCalls int
@@ -273,12 +298,14 @@ func testMCPOAuthIssuerRollback(t *testing.T) {
 					t.Fatal(err)
 				}
 				found := false
+				var failedRefresh map[string]string
 				for _, r := range proof.Records {
 					if r.Event == "oauth_refresh_completed" && r.Outcome == "failed" {
 						found = true
 						if failure == "write-back" && (r.FailureKind != "write_back" || r.DurableWrite != "failed") {
 							t.Fatalf("issuer-side rotation not distinguished from failed write: %+v", r)
 						}
+						failedRefresh = map[string]string{"failure_kind": r.FailureKind, "durable_write": r.DurableWrite}
 					}
 				}
 				if !found {
@@ -286,9 +313,16 @@ func testMCPOAuthIssuerRollback(t *testing.T) {
 				}
 				h.assertNoMCPOAuthSecrets(adapter, string(observed))
 				replay := h.action(map[string]any{"kind": "execute", "replica": 1, "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce})
-				h.assertMCPOriginalSettlement(event, replay, 3, 3, "MCP credential refresh is temporarily unavailable.")
-				h.assertOAuthCounts(adapter, 1, 0, 0, 0, 0)
-				h.evidence("oauth-refresh", adapter+"/"+failure, observed, map[string]any{"encrypted_row_preserved": true, "committed_rotations": 0, "issuer_side_rotation_not_rolled_back": failure == "write-back", "original_error_receipt": 1, "replay_external_calls": 0})
+				replayed := h.assertMCPOriginalSettlement(event, replay, 3, 3, "MCP credential refresh is temporarily unavailable.")
+				afterReplay, _ := h.assertOAuthCounts(adapter, 1, 0, 0, 0, 0)
+				var replayCounts struct {
+					IssuerCalls int
+					Counts      struct{ Call, Effects int }
+				}
+				if err := json.Unmarshal(afterReplay, &replayCounts); err != nil {
+					t.Fatal(err)
+				}
+				h.evidence("oauth-refresh", adapter+"/"+failure, observed, map[string]any{"encrypted_row_preserved": bytes.Equal(before, after), "failed_refresh_record": failedRefresh, "original_settlement": original, "replay_settlement": replayed, "replay_issuer_calls": replayCounts.IssuerCalls, "replay_calls": replayCounts.Counts.Call, "replay_effects": replayCounts.Counts.Effects})
 			})
 		}
 	}
@@ -317,14 +351,14 @@ func testMCPOAuthWaiterDeadlinesAndRetry(t *testing.T) {
 					first := h.startAction(action(0))
 					h.action(map[string]any{"kind": "wait-held", "adapter": adapter, "holdPhase": "initialize"})
 					second := h.startAction(action(1))
-					h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 2})
+					joinedWaiters := h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 2})
 					h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "initialize"})
 					firstOutput, secondOutput := h.joinAction(first), h.joinAction(second)
-					h.assertMCPOriginalSettlement(events[0], firstOutput, 3, 4, "MCP authentication failed after refresh.")
-					h.assertMCPOriginalSettlement(events[1], secondOutput, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[1]))
-					output := h.assertOAuthCounts(adapter, 2, 2, 2, 2, 1)
-					h.assertMCPOAuthRotation(adapter, before, 2)
-					h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"already_retrying_authentication_receipt": 1, "eligible_independent_success_receipt": 1, "joined_waiters": 2, "origin_F": 2, "origin_I": 2, "origin_L": 2, "origin_C": 2, "accepted_effects": 1})
+					retrying := h.assertMCPOriginalSettlement(events[0], firstOutput, 3, 4, "MCP authentication failed after refresh.")
+					eligible := h.assertMCPOriginalSettlement(events[1], secondOutput, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[1]))
+					output, counts := h.assertOAuthCounts(adapter, 2, 2, 2, 2, 1)
+					lifetime := h.assertMCPOAuthRotation(adapter, before, 2)
+					h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"already_retrying_settlement": retrying, "eligible_independent_settlement": eligible, "joined_waiters_observation": joinedWaiters, "rotated_credential_lifetime_s": int(lifetime.Seconds())}))
 					return
 				}
 				phase := "initialize"
@@ -341,23 +375,26 @@ func testMCPOAuthWaiterDeadlinesAndRetry(t *testing.T) {
 				h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 2})
 				shortOutput := h.joinAction(first)
 				h.action(map[string]any{"kind": "wait-waiters", "expectedWaiters": 1})
+				survivorPending := false
 				select {
 				case premature := <-second:
 					t.Fatalf("longer deadline waiter completed before held phase release: %s/%v", premature.output, premature.err)
 				default:
+					survivorPending = true
 				}
+				h.reached("long-readiness-owner-pending-before-release")
 				h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": phase})
 				longOutput := h.joinAction(second)
-				h.assertMCPOriginalSettlement(events[1], longOutput, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[1]))
+				survivor := h.assertMCPOriginalSettlement(events[1], longOutput, 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonces[1]))
 				// The transport deadline loses its original ACK. The subsequent receipt
 				// replay must expose the stored timeout, without a second dispatch.
 				h.awaitMCPStoredResult(events[0])
 				replay := action(0)
 				replay["replica"] = 1
 				replayed := h.action(replay)
-				h.assertMCPOriginalSettlement(events[0], replayed, 2, 5, "MCP tool call timed out.")
-				output := h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
-				h.evidence("oauth-refresh", adapter+"/"+variant, output, map[string]any{"short_caller_deadline_ms": 1500, "long_caller_deadline_ms": 5000, "short_caller_observation": json.RawMessage(shortOutput), "short_stored_timeout_receipt": 1, "long_success_receipt": 1, "pending_survivor_before_release": true, "origin_F": 0, "origin_I": 1, "origin_L": 1, "origin_C": 1, "accepted_effects": 1})
+				shortReplay := h.assertMCPOriginalSettlement(events[0], replayed, 2, 5, "MCP tool call timed out.")
+				output, counts := h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
+				h.evidence("oauth-refresh", adapter+"/"+variant, output, counts.facts(map[string]any{"configuration": map[string]any{"short_caller_deadline_ms": short["callerDeadlineMs"], "long_caller_deadline_ms": long["callerDeadlineMs"]}, "short_caller_observation": json.RawMessage(shortOutput), "short_stored_timeout_settlement": shortReplay, "long_success_settlement": survivor, "survivor_pending_before_release": survivorPending}))
 			})
 		}
 	}
@@ -387,8 +424,10 @@ func (h *mcpDurableComposition) awaitMCPStoredResult(event string) {
 
 func (h *mcpDurableComposition) awaitMCPHeld(adapter, phase string) {
 	h.t.Helper()
-	if _, err := h.tryAction(map[string]any{"kind": "wait-held", "adapter": adapter, "holdPhase": phase}); err != nil {
+	action := map[string]any{"kind": "wait-held", "adapter": adapter, "holdPhase": phase}
+	if _, err := h.tryAction(action); err != nil {
 		observed, _ := h.tryAction(map[string]any{"kind": "observe", "adapter": adapter})
 		h.t.Fatalf("actual phase %s not reached: %v; safe observations=%s", phase, err, observed)
 	}
+	h.reachedAction(action)
 }

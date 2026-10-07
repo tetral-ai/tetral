@@ -114,6 +114,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 			if rejected.OK || rejected.Error != want {
 				t.Fatalf("%s resolution=%s; want %s", variant, output, want)
 			}
+			h.reached("installed-snapshot-workspace-rls")
 			h.action(map[string]any{"kind": "reset"})
 			discovery := map[string]any{}
 			for key, value := range action {
@@ -137,6 +138,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 					t.Fatalf("%s reached %s external endpoint: %s", variant, endpoint, actual)
 				}
 			}
+			h.evidence("credential-scope", variant, actual, map[string]any{"negative": rejected.Error, "grpc_code": negative.Code})
 			execution := map[string]any{"kind": "execute", "adapter": "github", "eventId": event, "callId": call, "nonce": nonce}
 			if variant == "session-vault-isolation" {
 				execution["sessionId"] = otherScope.SessionId
@@ -148,6 +150,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				execution["settle"] = false
 			}
 			actualExecution := h.action(execution)
+			executionFacts := map[string]any{"tool_use_id": event}
 			if variant == "cross-workspace" {
 				var fenced struct{ Result struct{ Type string } }
 				if err := json.Unmarshal(actualExecution, &fenced); err != nil {
@@ -163,6 +166,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				if rows != 0 {
 					t.Fatal("cross-workspace fence created a durable execution/result")
 				}
+				executionFacts["result_type"], executionFacts["result_rows"] = fenced.Result.Type, rows
 			} else {
 				status, kind, text := 3, 9, "MCP server requires a configured credential."
 				if variant == "ambiguous" {
@@ -171,10 +175,10 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				if variant == "unsupported-installed-endpoint" {
 					status, kind, text = 2, 2, "Configured MCP server is unavailable or unsupported."
 				}
-				h.assertMCPOriginalSettlement(event, actualExecution, status, kind, text)
+				executionFacts["original_settlement"] = h.assertMCPOriginalSettlement(event, actualExecution, status, kind, text)
 				execution["replica"] = 1
 				replay := h.action(execution)
-				h.assertMCPOriginalSettlement(event, replay, status, kind, text)
+				executionFacts["replay_settlement"] = h.assertMCPOriginalSettlement(event, replay, status, kind, text)
 				var a, b struct{ Result json.RawMessage }
 				if err := json.Unmarshal(actualExecution, &a); err != nil {
 					t.Fatal(err)
@@ -186,6 +190,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 					t.Fatal("invalid selector durable replay changed Runtime result")
 				}
 			}
+			externalCounts := map[string]any{}
 			for _, adapter := range []string{"github", "slack"} {
 				observed := h.action(map[string]any{"kind": "observe", "adapter": adapter})
 				var proof struct {
@@ -197,14 +202,17 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				if proof.Counts.Initialize != 0 || proof.Counts.List != 0 || proof.Counts.Call != 0 || proof.Counts.Effects != 0 {
 					t.Fatalf("invalid selector execution reached %s endpoint: %s", adapter, observed)
 				}
+				externalCounts[adapter] = proof.Counts
 			}
-			h.evidence("credential-scope", variant+"/execution", actualExecution, map[string]any{"tool_use_id": event, "custody_fenced_before_claim": variant == "cross-workspace", "original_error_receipt": variant != "cross-workspace", "external_I": 0, "external_L": 0, "external_C": 0, "accepted_effects": 0, "legitimate_session_custody": variant == "session-vault-isolation"})
 			immediate := mcpCredentialCiphertexts(t, h)
 			for id, encrypted := range before {
 				if !bytes.Equal(immediate[id], encrypted) {
 					t.Fatalf("negative %s changed encrypted row %s before fixture restoration", variant, id)
 				}
 			}
+			h.reached("encrypted-row-observe-before-fixture-restoration")
+			executionFacts["external_counts"], executionFacts["encrypted_rows_compared"] = externalCounts, len(before)
+			h.evidence("credential-scope", variant+"/execution", actualExecution, executionFacts)
 			// Restore only the independently seeded selector/liveness fault. Neither
 			// operation rewrites encrypted material.
 			h.seedFault(`UPDATE credentials SET revoked_at=NULL,archived_at=NULL WHERE workspace_id='default' AND id='cred_mcp_github'`)
@@ -223,6 +231,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				if !accepted.OK || accepted.CredentialID != "cred_mcp_"+adapter || accepted.VaultID != "vlt_mcp_durable" {
 					t.Fatalf("%s positive control=%s", adapter, positive)
 				}
+				h.reached("installed-snapshot-workspace-rls")
 				positiveDiscovery := h.action(map[string]any{"kind": "discover", "adapter": adapter, "serverName": "work-" + adapter})
 				var actualPositive struct {
 					OK bool `json:"ok"`
@@ -233,7 +242,7 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 				if !actualPositive.OK {
 					t.Fatalf("actual %s discovery positive=%s", adapter, positiveDiscovery)
 				}
-				h.evidence("credential-scope", variant+"/positive-"+adapter, positiveDiscovery, map[string]any{"credential_id": accepted.CredentialID, "vault_id": accepted.VaultID, "positive_discovery": true})
+				h.evidence("credential-scope", variant+"/positive-"+adapter, positiveDiscovery, map[string]any{"credential_id": accepted.CredentialID, "vault_id": accepted.VaultID, "positive_discovery": actualPositive.OK})
 			}
 			after := mcpCredentialCiphertexts(t, h)
 			for id, encrypted := range before {
@@ -241,8 +250,6 @@ func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 					t.Fatalf("%s changed encrypted row %s", variant, id)
 				}
 			}
-			t.Logf("case=credential-scope variant=%s boundary=actual-list-mcp-tools,installed-gateway-sql negative=%s grpc_code=%d external_I/L/C=0/0/0 positive=both-adapters encrypted_rows=unchanged-before-restoration", variant, want, negative.Code)
-			h.evidence("credential-scope", variant, actual, map[string]any{"negative": want, "grpc_code": negative.Code, "positive_controls": "both-adapters", "encrypted_rows": "unchanged-before-restoration", "workspace_session_vault_controls": true})
 		})
 	}
 	// Shared Go discovery retains the installed configured names. Unsupported

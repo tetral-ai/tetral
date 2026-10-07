@@ -47,6 +47,9 @@ type mcpDurableComposition struct {
 	versions          map[string]string
 	executionBudgetMS int
 	gatewayUser       string
+	// reachedBarriers holds the barriers this case proved since the previous
+	// evidence record. Only the test goroutine records them.
+	reachedBarriers []string
 }
 
 func newMCPDurableComposition(t *testing.T) *mcpDurableComposition {
@@ -268,6 +271,7 @@ func (h *mcpDurableComposition) declareTool(server, toolName, nonce, permission 
 	if err != nil || response.GetCommitted() == nil {
 		h.t.Fatalf("declare exact MCP Tool Use: %+v/%v", response, err)
 	}
+	h.reached("durable-declaration-ack-before-route")
 	return response.GetCommitted().EventId, callID
 }
 func (h *mcpDurableComposition) tryAction(action map[string]any) (json.RawMessage, error) {
@@ -301,52 +305,64 @@ func (h *mcpDurableComposition) action(action map[string]any) json.RawMessage {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	h.reachedAction(action)
 	return result
 }
 
+// reached records a barrier that the case has just proved by a completed wait
+// or assertion. Callers record a barrier only after that proof.
+func (h *mcpDurableComposition) reached(barrier string) {
+	for _, existing := range h.reachedBarriers {
+		if existing == barrier {
+			return
+		}
+	}
+	h.reachedBarriers = append(h.reachedBarriers, barrier)
+}
+
+// reachedAction records the barrier proved by a completed child action: an
+// actual RPC callback or a fixture wait that returned only after its phase.
+func (h *mcpDurableComposition) reachedAction(action map[string]any) {
+	switch action["kind"] {
+	case "execute":
+		h.reached("actual-rpc-callback-before-sql-observe")
+	case "discover":
+		h.reached("actual-discovery-rpc-callback-before-observe")
+	case "wait-held":
+		phase, _ := action["holdPhase"].(string)
+		h.reached("actual-held-" + strings.ReplaceAll(phase, "/", "-") + "-request-before-release")
+	case "wait-issuer-cancelled":
+		h.reached("actual-held-issuer-request-abort-before-release")
+	case "wait-call-cancelled":
+		h.reached("actual-http-abort-before-release")
+	case "wait-waiters":
+		h.reached(fmt.Sprintf("%v-readiness-waiters-joined", action["expectedWaiters"]))
+	case "wait-resources-closed":
+		h.reached("owned-resources-closed-after-all-waiters-gone")
+	}
+}
+
+// evidence logs one structured case record. Its barriers are those recorded
+// since the previous record, so a harness shared across subtests never
+// attributes an earlier case's barriers to a later one. Facts must be measured
+// values or the values an assertion compared; configured inputs go under the
+// "configuration" key.
 func (h *mcpDurableComposition) evidence(caseID, variant string, output json.RawMessage, sqlFacts map[string]any) {
 	h.t.Helper()
 	var result map[string]json.RawMessage
 	if err := json.Unmarshal(output, &result); err != nil {
 		h.t.Fatal(err)
 	}
-	barriers := []string{"durable-declaration-ack-before-route", "actual-rpc-callback-before-sql-observe"}
-	if caseID == "credential-scope" {
-		barriers = []string{"installed-snapshot-workspace-rls", "actual-discovery-rpc-callback-before-observe", "encrypted-row-observe-before-fixture-restoration"}
-	}
-	if caseID == "manifest-notification" {
-		barriers = []string{"two-actual-sdk-sse-notifications-before-bridge-acceptance", "actual-owner-callbacks-before-sql-observe"}
-		if strings.HasSuffix(variant, "/unready-restore") {
-			barriers = append(barriers, "retained-etag-tools-restored-under-acceptance-lock")
-		} else {
-			barriers = append(barriers, "two-actual-verification-rpc-responses-held-before-acceptance")
-		}
-		if strings.HasSuffix(variant, "/committed-ack-loss") {
-			barriers = append(barriers, "actual-sql-commit-before-controlled-ack-loss")
-		}
-	}
-	if caseID == "client-recreation" {
-		barriers = append(barriers, "old-endpoint-handlers-disconnected-before-new-sdk-owner", "execution-readiness-published-before-bridge-verification")
-	}
-	if caseID == "oauth-refresh" {
-		barriers = []string{"configured-server-resolver-before-credential-row-selection", "owned-operation-exit-before-sql-observe"}
-		var issuerCalls int
-		_ = json.Unmarshal(result["issuerCalls"], &issuerCalls)
-		if issuerCalls > 0 {
-			barriers = append(barriers, "actual-oauth-http-form-observed-before-sql-observe")
-		}
-		if !strings.Contains(variant, "discovery") {
-			barriers = append(barriers, "original-durable-declaration-ack-before-execution", "original-runtime-settlement-receipt-before-observe")
-		}
-		if strings.HasSuffix(variant, "refresh-response-deadline") {
-			barriers = append(barriers, "actual-held-issuer-request-abort-before-release")
-		}
-	}
+	barriers := append([]string{}, h.reachedBarriers...)
+	h.reachedBarriers = nil
 	substitutions := []string{"controlled-mcp-http-peer", "workload-token-review-fixture"}
 	if h.executionBudgetMS != 170000 {
 		substitutions = append(substitutions, "shortened-execution-budget")
 	}
 	record := map[string]any{"case_id": caseID, "variant": variant, "versions": h.versions, "substitutions": substitutions, "execution_budget_ms": h.executionBudgetMS, "barriers": barriers, "endpoint_counts": result["counts"], "endpoint_trace": result["requests"], "runtime_observation": result["result"], "runtime_settlement": result["settlement"], "sql_assertions": sqlFacts, "cleanup": "case-owner-joins-emitted-separately"}
+	if issuerCalls, ok := result["issuerCalls"]; ok {
+		record["issuer_calls"] = issuerCalls
+	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		h.t.Fatal(err)

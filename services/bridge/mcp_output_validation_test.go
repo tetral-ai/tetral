@@ -187,8 +187,7 @@ func TestPostgreSQLMCPOutputValidationSettlesRejectedResults(t *testing.T) {
 					if public.ToolUseID != event || public.IsError != (wantStatus != 1) || len(public.Content) != 1 || public.Content[0].Type != "text" || public.Content[0].Text != publicText {
 						t.Fatalf("public terminal payload does not match original Tool Use and literal Runtime outcome: %s", publicJSON)
 					}
-					t.Logf("case=output-validation variant=%s/%s/%s boundary=actual-sdk-http,durable-bridge origin_F/I/L/C=0/%d/%d/1 verification_L=%d effects=1 durable_status=%d error_kind=%d replay=identical row_state=%s public_terminal_results=1 settlement_receipts=1", adapter, temperature, variant, originI, originL, verifyL, wantStatus, wantKind, wantState)
-					h.evidence("output-validation", adapter+"/"+temperature+"/"+variant, replay, map[string]any{"tool_use_event_id": event, "model_tool_call_id": call, "tool_name": toolName, "status": wantStatus, "error_kind": wantKind, "stored_result_text": wantText, "state": wantState, "public_terminal_results": 1, "settlement_receipts": 1, "public_payload": json.RawMessage(publicJSON), "origin_I": originI, "origin_L": originL, "origin_C": originC, "verification_L": verifyL, "refresh_triggered": false, "replay_equals_literal": true})
+					h.evidence("output-validation", adapter+"/"+temperature+"/"+variant, replay, map[string]any{"tool_use_event_id": event, "model_tool_call_id": call, "tool_name": toolName, "status": stored.Response.Status, "error_kind": stored.Response.ErrorKind, "stored_result_text": stored.Response.ResultText, "state": settled, "public_terminal_results": resultEvents, "settlement_receipts": receipts, "public_payload": json.RawMessage(publicJSON), "origin_I": originI, "origin_L": originL, "origin_C": originC, "verification_L": verifyL, "refresh_triggered": stored.RefreshTriggered, "original_runtime_observation": proof.Result})
 				})
 			}
 		}

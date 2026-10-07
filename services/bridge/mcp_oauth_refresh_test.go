@@ -64,6 +64,7 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 					action = map[string]any{"kind": "execute", "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce}
 				}
 				output := h.action(action)
+				h.reached("owned-operation-exit-before-sql-observe")
 				var proof struct {
 					OK     bool
 					Code   string
@@ -161,6 +162,10 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 						t.Fatalf("actual OAuth form/Basic mismatch: %+v", issuer)
 					}
 				}
+				if len(proof.IssuerRecords) > 0 {
+					h.reached("actual-oauth-http-form-observed-before-sql-observe")
+				}
+				facts := map[string]any{"origin_F": proof.IssuerCalls, "origin_I": originI, "origin_L": originL, "origin_C": originC, "verification_L": verificationL, "accepted_effects": proof.Counts.Effects, "issuer_observations": proof.IssuerRecords, "configuration": map[string]any{"workspace_id": "default", "vault_id": "vlt_mcp_durable", "credential_id": "cred_mcp_" + adapter}}
 				remaining := h.action(map[string]any{"kind": "observe", "adapter": adapter})
 				var triggers struct{ RemainingFaults map[string]int }
 				if err := json.Unmarshal(remaining, &triggers); err != nil {
@@ -181,9 +186,10 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 					if !bytes.Equal(before, after) {
 						t.Fatal("deadline-aborted issuer changed encrypted credential")
 					}
+					facts["encrypted_row_unchanged"] = bytes.Equal(before, after)
 					h.action(map[string]any{"kind": "release", "adapter": adapter, "holdPhase": "issuer"})
 				} else {
-					h.assertMCPOAuthRotation(adapter, before, row.f)
+					facts["rotated_credential_lifetime_s"] = int(h.assertMCPOAuthRotation(adapter, before, row.f).Seconds())
 				}
 				logs, _ := json.Marshal(proof.Records)
 				issuerLogs, _ := json.Marshal(proof.IssuerRecords)
@@ -196,7 +202,8 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 					if row.success {
 						wantStatus, wantKind, wantText = 1, 0, fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonce)
 					}
-					h.assertMCPOriginalSettlement(event, output, wantStatus, wantKind, wantText)
+					facts["durable_tool_use"] = event
+					facts["original_settlement"] = h.assertMCPOriginalSettlement(event, output, wantStatus, wantKind, wantText)
 					action["replica"] = 1
 					replay := h.action(action)
 					var a, b struct {
@@ -213,8 +220,10 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 					if string(a.Result) != string(b.Result) || b.IssuerCalls != row.f || b.Counts.Call != row.c || b.Counts.Effects != effects {
 						t.Fatalf("OAuth durable replay repeated issuer/call: %s", replay)
 					}
+					facts["replay_runtime_observation"] = b.Result
+					facts["replay_issuer_calls"], facts["replay_calls"], facts["replay_effects"] = b.IssuerCalls, b.Counts.Call, b.Counts.Effects
 				}
-				h.evidence("oauth-refresh", adapter+"/"+row.name, output, map[string]any{"origin_F": row.f, "origin_I": row.i, "origin_L": row.l, "origin_C": row.c, "verification_L": verificationL, "accepted_effects": effects, "credential_id": "cred_mcp_" + adapter, "selected_workspace": "default", "selected_vault": "vlt_mcp_durable", "encrypted_rotation_observed": !row.deadline, "issuer_form_verified": true, "issuer_observations": proof.IssuerRecords, "durable_tool_use": event, "manager_instances": 2})
+				h.evidence("oauth-refresh", adapter+"/"+row.name, output, facts)
 			})
 		}
 	}
@@ -250,7 +259,10 @@ func (h *mcpDurableComposition) seedMCPOAuth(adapter string, expired bool) []byt
 	}
 	return sealed
 }
-func (h *mcpDurableComposition) assertMCPOAuthRotation(adapter string, before []byte, refreshes int) {
+
+// assertMCPOAuthRotation verifies the latest encrypted rotation and returns its
+// observed remaining lifetime, a non-secret fact for case evidence.
+func (h *mcpDurableComposition) assertMCPOAuthRotation(adapter string, before []byte, refreshes int) time.Duration {
 	h.t.Helper()
 	var sealed []byte
 	var public string
@@ -293,6 +305,7 @@ func (h *mcpDurableComposition) assertMCPOAuthRotation(adapter string, before []
 	if auth.AccessToken != fmt.Sprintf("fixture-%s-rotated-%d", adapter, refreshes) || auth.Refresh.RefreshToken != fmt.Sprintf("fixture-%s-refresh-%d", adapter, refreshes) {
 		h.t.Fatal("encrypted credential did not retain literal latest issuer rotation")
 	}
+	return remaining
 }
 
 func (h *mcpDurableComposition) assertNoMCPOAuthSecrets(adapter, value string) {
@@ -303,7 +316,19 @@ func (h *mcpDurableComposition) assertNoMCPOAuthSecrets(adapter, value string) {
 		}
 	}
 }
-func (h *mcpDurableComposition) assertMCPOriginalSettlement(event string, output json.RawMessage, status, kind int, text string) {
+
+// mcpSettlementObservation is the durable settlement an assertion compared,
+// reported in case evidence.
+type mcpSettlementObservation struct {
+	Status         int    `json:"status"`
+	ErrorKind      int    `json:"error_kind"`
+	ResultText     string `json:"result_text"`
+	State          string `json:"state"`
+	PublicResults  int    `json:"public_results"`
+	SettleReceipts int    `json:"settlement_receipts"`
+}
+
+func (h *mcpDurableComposition) assertMCPOriginalSettlement(event string, output json.RawMessage, status, kind int, text string) mcpSettlementObservation {
 	h.t.Helper()
 	var visible struct {
 		Result struct {
@@ -362,4 +387,6 @@ func (h *mcpDurableComposition) assertMCPOriginalSettlement(event string, output
 	if public.ToolUseID != event || public.IsError != (status != 1) || len(public.Content) != 1 || public.Content[0].Type != "text" || public.Content[0].Text != publicText {
 		h.t.Fatalf("original public literal payload=%s", payload)
 	}
+	h.reached("original-runtime-settlement-receipt-before-observe")
+	return mcpSettlementObservation{Status: storedStatus, ErrorKind: storedKind, ResultText: storedText, State: state, PublicResults: events, SettleReceipts: receipts}
 }

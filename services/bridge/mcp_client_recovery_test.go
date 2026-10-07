@@ -49,6 +49,7 @@ func TestPostgreSQLMCPClientRecreationReconcilesManifest(t *testing.T) {
 				if !retired.Recreated || retired.OwnerGeneration != 2 || retired.OldConnections != 0 || retired.NewConnections != 0 || retired.RetiredConnections != 1 || retired.PendingAfterDisconnect != 0 {
 					t.Fatalf("old SDK resources did not disconnect before new owner: %s", recreation)
 				}
+				h.reached("old-endpoint-handlers-disconnected-before-new-sdk-owner")
 				h.action(map[string]any{"kind": "configure", "adapter": adapter, "version": version, "result": "valid"})
 				h.action(map[string]any{"kind": "reset"})
 				var removedProof json.RawMessage
@@ -134,7 +135,12 @@ func TestPostgreSQLMCPClientRecreationReconcilesManifest(t *testing.T) {
 				if originI != 1 || originL != 1 || originC != wantCalls || verificationL != wantJobs || proof.Counts.List != 1+wantJobs {
 					t.Fatalf("recreation readiness/verification counts=%d/%d/%d/%d total L %d: %s", originI, originL, originC, verificationL, proof.Counts.List, execution)
 				}
-				h.assertManifest(server, wantTools, wantETag, wantGeneration, "ready", wantJobs)
+				if verificationL > 0 {
+					// Bridge verification listed without another initialization, so it
+					// reused the client that execution readiness had already published.
+					h.reached("execution-readiness-published-before-bridge-verification")
+				}
+				executionManifest := h.assertManifest(server, wantTools, wantETag, wantGeneration, "ready", wantJobs)
 				// A second, independent new client reports the same snapshot through its
 				// actual readiness notifier. Bridge accepts it as a duplicate.
 				h.action(map[string]any{"kind": "recreate"})
@@ -153,8 +159,8 @@ func TestPostgreSQLMCPClientRecreationReconcilesManifest(t *testing.T) {
 				if version == "output-only" {
 					h.assertRejectedMCPResult(event, duplicate)
 				}
-				h.assertManifest(server, wantTools, wantETag, wantGeneration, "ready", wantJobs)
-				h.evidence("client-recreation", adapter+"/"+version, duplicate, map[string]any{"initial_generation": 7, "generation": wantGeneration, "runtime_config_jobs": wantJobs, "tools_json": json.RawMessage(wantTools), "etag": wantETag, "old_endpoint_handlers_disconnected_before_new_owner": retired.PendingAfterDisconnect == 0, "retirement": json.RawMessage(recreation), "first_runtime_observation": json.RawMessage(execution), "duplicate_preserves_generation": true, "origin_I": originI, "origin_L": originL, "origin_C": originC, "verification_L": verificationL, "removed_original_outcome": removedProof})
+				duplicateManifest := h.assertManifest(server, wantTools, wantETag, wantGeneration, "ready", wantJobs)
+				h.evidence("client-recreation", adapter+"/"+version, duplicate, map[string]any{"configuration": map[string]any{"initial_generation": 7}, "manifest_after_execution": executionManifest, "manifest_after_duplicate": duplicateManifest, "pending_after_disconnect": retired.PendingAfterDisconnect, "retirement": json.RawMessage(recreation), "first_runtime_observation": json.RawMessage(execution), "origin_I": originI, "origin_L": originL, "origin_C": originC, "verification_L": verificationL, "removed_original_outcome": removedProof})
 			})
 		}
 	}
@@ -191,7 +197,17 @@ func mcpDurableExpectedManifest(t *testing.T, version string) (string, string) {
 	return durable, hex.EncodeToString(digest[:])
 }
 
-func (h *mcpDurableComposition) assertManifest(server, tools, etag string, generation int64, readiness string, jobs int) {
+// mcpManifestObservation is the durable manifest row and update-job count an
+// assertion compared, reported in case evidence.
+type mcpManifestObservation struct {
+	ToolsJSON         json.RawMessage `json:"tools_json"`
+	ETag              string          `json:"etag"`
+	Generation        int64           `json:"generation"`
+	Readiness         string          `json:"readiness"`
+	RuntimeConfigJobs int             `json:"runtime_config_jobs"`
+}
+
+func (h *mcpDurableComposition) assertManifest(server, tools, etag string, generation int64, readiness string, jobs int) mcpManifestObservation {
 	h.t.Helper()
 	var actualTools, actualETag, actualReady string
 	var actualGeneration int64
@@ -202,9 +218,21 @@ func (h *mcpDurableComposition) assertManifest(server, tools, etag string, gener
 	if actualTools != tools || actualETag != etag || actualGeneration != generation || actualReady != readiness || actualJobs != jobs {
 		h.t.Fatalf("manifest %s actual=(%s,%s,%d,%s,%d) want=(%s,%s,%d,%s,%d)", server, actualTools, actualETag, actualGeneration, actualReady, actualJobs, tools, etag, generation, readiness, jobs)
 	}
+	return mcpManifestObservation{ToolsJSON: json.RawMessage(actualTools), ETag: actualETag, Generation: actualGeneration, Readiness: actualReady, RuntimeConfigJobs: actualJobs}
 }
 
-func (h *mcpDurableComposition) assertRejectedMCPResult(event string, output json.RawMessage) {
+// mcpRejectedResultObservation is the durable rejected settlement an assertion
+// compared, reported in case evidence.
+type mcpRejectedResultObservation struct {
+	Status         int    `json:"status"`
+	ErrorKind      int    `json:"error_kind"`
+	State          string `json:"state"`
+	ToolName       string `json:"tool_name"`
+	PublicResults  int    `json:"public_results"`
+	SettleReceipts int    `json:"settlement_receipts"`
+}
+
+func (h *mcpDurableComposition) assertRejectedMCPResult(event string, output json.RawMessage) mcpRejectedResultObservation {
 	h.t.Helper()
 	var visible struct {
 		Result struct {
@@ -229,4 +257,6 @@ func (h *mcpDurableComposition) assertRejectedMCPResult(event string, output jso
 	if status != 2 || kind != 2 || state != "stored" || publicEvents != 1 || receipts != 1 {
 		h.t.Fatalf("rejected durable result=(%d,%d,%s,%s,%d,%d)", status, kind, state, toolName, publicEvents, receipts)
 	}
+	h.reached("original-runtime-settlement-receipt-before-observe")
+	return mcpRejectedResultObservation{Status: status, ErrorKind: kind, State: state, ToolName: toolName, PublicResults: publicEvents, SettleReceipts: receipts}
 }

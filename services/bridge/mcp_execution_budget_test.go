@@ -52,9 +52,10 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 					if state != "stored" || results != 1 || publicResults != 0 {
 						t.Fatalf("actual SQL before lost ACK=(%s,%d,%d)", state, results, publicResults)
 					}
+					h.reached("actual-sql-commit-before-controlled-ack-loss")
 					output := h.joinAction(pending)
 					want := fmt.Sprintf(`{"ok":true,"source":%q,"nonce":%q}`, adapter+"-fixture", nonce)
-					h.assertMCPOriginalSettlement(event, output, 1, 0, want)
+					original := h.assertMCPOriginalSettlement(event, output, 1, 0, want)
 					h.bridge.mu.Lock()
 					firstRequests := append([]*bridgev1.CommitMcpToolResultRequest(nil), h.bridge.commitRequests...)
 					firstTimes := append([]time.Time(nil), h.bridge.commitTimes...)
@@ -69,9 +70,9 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 					h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
 					action["replica"] = 1
 					replay := h.action(action)
-					h.assertMCPOriginalSettlement(event, replay, 1, 0, want)
+					replayed := h.assertMCPOriginalSettlement(event, replay, 1, 0, want)
 					h.assertOAuthCounts(adapter, 0, 1, 1, 1, 1)
-					h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, output, map[string]any{"execution_budget_ms": 170000, "first_commit_reserve_ms": 10000, "actual_sql_stored_before_ack_drop": true, "first_bridge_commits": 1, "second_bridge_commits": 1, "recovery_after_first_commit_ms": secondTimes[0].Sub(firstTimes[0]).Milliseconds(), "frozen_commit_request_equal": true, "stored_results": 1, "original_public_result": 1, "original_settlement_receipt": 1, "external_calls": 1, "accepted_effects": 1})
+					h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, output, map[string]any{"configuration": map[string]any{"first_commit_reserve_ms": 10000}, "sql_state_before_ack_loss": state, "stored_results_before_ack_loss": results, "public_results_before_ack_loss": publicResults, "first_bridge_commits": len(firstRequests), "second_bridge_commits": len(secondRequests), "recovery_after_first_commit_ms": secondTimes[0].Sub(firstTimes[0]).Milliseconds(), "frozen_commit_request_equal": proto.Equal(firstRequests[0], secondRequests[0]), "original_settlement": original, "replay_settlement": replayed})
 					return
 				}
 				originInitialize, originList := 1, 1
@@ -117,7 +118,7 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				// Local completion and storage do not acknowledge the peer's HTTP abort.
 				// Observe that event while its accepted response remains held.
 				h.action(map[string]any{"kind": "wait-call-cancelled", "adapter": adapter})
-				observed := h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
+				observed, _ := h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
 				var proof struct {
 					Counts  struct{ CancelledCalls int }
 					Records []map[string]any
@@ -136,8 +137,8 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				}
 				replayAction := map[string]any{"kind": "execute", "replica": 1, "adapter": adapter, "eventId": event, "callId": call, "nonce": nonce}
 				replay := h.action(replayAction)
-				h.assertMCPOriginalSettlement(event, replay, 2, 5, "MCP tool call timed out.")
-				h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
+				replayed := h.assertMCPOriginalSettlement(event, replay, 2, 5, "MCP tool call timed out.")
+				afterReplay, _ := h.assertOAuthCounts(adapter, 0, originInitialize, originList, 1, 1)
 				remaining, elapsed, lastRemaining, lastElapsed := 0, 0, 1000.0, 0.0
 				for _, record := range proof.Records {
 					r, rok := record["timeout.remaining_ms"].(float64)
@@ -160,12 +161,11 @@ func TestPostgreSQLMCPExecutionBudgetPreservesCommitRecovery(t *testing.T) {
 				if remaining < 3 || elapsed < 3 {
 					t.Fatal("actual shared execution phase budget observations are missing")
 				}
-				h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, replay, map[string]any{"original_caller_observation": json.RawMessage(output), "readiness_setup": readinessSetup, "origin_initialize": originInitialize, "origin_list": originList, "injected_execution_budget_ms": 1000, "grpc_caller_deadline_ms": func() int {
-					if variant == "shorter-grpc-caller-deadline" {
-						return 500
-					}
-					return 180000
-				}(), "remaining_budget_observations": remaining, "elapsed_budget_observations": elapsed, "actual_http_abort_before_release": true, "effect_accepted_before_held_response": true, "stored_status": 2, "stored_error_kind": 5, "stored_results": 1, "original_public_error": 1, "original_settlement_receipt": 1, "replay_external_calls": 0})
+				configuration := map[string]any{}
+				if deadline, ok := action["callerDeadlineMs"]; ok {
+					configuration["grpc_caller_deadline_ms"] = deadline
+				}
+				h.evidence("execution-deadline-and-commit-recovery", adapter+"/"+variant, replay, map[string]any{"configuration": configuration, "original_caller_observation": json.RawMessage(output), "readiness_setup": readinessSetup, "origin_initialize": originInitialize, "origin_list": originList, "remaining_budget_observations": remaining, "elapsed_budget_observations": elapsed, "cancelled_calls_before_release": proof.Counts.CancelledCalls, "observation_before_release": json.RawMessage(observed), "replay_settlement": replayed, "observation_after_replay": json.RawMessage(afterReplay)})
 			})
 		}
 	}

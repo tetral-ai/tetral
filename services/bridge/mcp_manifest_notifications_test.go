@@ -85,9 +85,11 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 				h.action(map[string]any{"kind": "configure", "adapter": adapter, "version": version})
 				h.action(map[string]any{"kind": "reset"})
 				h.action(map[string]any{"kind": "notify", "adapter": adapter, "expectedStreams": 2})
+				barrierEntries := 0
 				for i := 0; i < 2; i++ {
 					select {
 					case <-entered:
+						barrierEntries++
 					case <-h.ctx.Done():
 						t.Fatal(h.ctx.Err())
 					case <-time.After(5 * time.Second):
@@ -95,7 +97,8 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 					}
 				}
 				// No SQL acceptance or ACK substitution occurs before the actual owner.
-				h.assertManifest(server, baseTools, baseETag, 7, readiness, 0)
+				beforeAcceptance := h.assertManifest(server, baseTools, baseETag, 7, readiness, 0)
+				h.reached("two-actual-sdk-sse-notifications-before-bridge-acceptance")
 				if variant == "etag-mismatch" {
 					h.action(map[string]any{"kind": "configure", "adapter": adapter, "version": "removed"})
 				}
@@ -112,6 +115,7 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 						}
 					}
 					h.assertManifest(server, baseTools, baseETag, 7, readiness, 0)
+					h.reached("two-actual-verification-rpc-responses-held-before-acceptance")
 				}
 				close(verificationBarrier)
 				verificationReleased = true
@@ -120,6 +124,7 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 					wantOutcomes = 3
 				}
 				h.awaitManifestOutcomes(wantOutcomes)
+				h.reached("actual-owner-callbacks-before-sql-observe")
 				outcomes := h.bridge.manifestResults()
 				wantTools, wantETag := mcpDurableExpectedManifest(t, version)
 				wantGen, wantJobs := int64(8), 1
@@ -146,8 +151,16 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 					if committed != 1 || duplicate != wantOutcomes-1 {
 						t.Fatalf("notification outcomes=%+v", outcomes)
 					}
+					if variant == "committed-ack-loss" {
+						// The dropped ACK followed the one committed outcome; its retry
+						// observed that commit as a duplicate.
+						h.reached("actual-sql-commit-before-controlled-ack-loss")
+					}
 				}
-				h.assertManifest(server, wantTools, wantETag, wantGen, "ready", wantJobs)
+				accepted := h.assertManifest(server, wantTools, wantETag, wantGen, "ready", wantJobs)
+				if variant == "unready-restore" {
+					h.reached("retained-etag-tools-restored-under-acceptance-lock")
+				}
 				observed := h.action(map[string]any{"kind": "observe", "adapter": adapter})
 				var proof struct {
 					Counts   struct{ Initialize, List, Call, Effects, Notifications int }
@@ -176,7 +189,7 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 				if proof.Counts.Initialize != 0 || proof.Counts.Call != 0 || proof.Counts.Effects != 0 || proof.Counts.Notifications != 1 || origins != 2 || proof.Counts.List != origins+verification || verification != wantVerification {
 					t.Fatalf("notification phase/count oracle=%s", observed)
 				}
-				h.evidence("manifest-notification", adapter+"/"+variant, observed, map[string]any{"actual_sdk_notifications": 2, "before_acceptance_generation": 7, "generation": wantGen, "runtime_config_jobs": wantJobs, "tools_json": json.RawMessage(wantTools), "etag": wantETag, "bridge_outcomes": outcomes, "origin_L": origins, "verification_L": verification, "committed_ack_dropped_after_sql": variant == "committed-ack-loss"})
+				h.evidence("manifest-notification", adapter+"/"+variant, observed, map[string]any{"configuration": map[string]any{"initial_generation": 7, "initial_readiness": readiness}, "fixture_notifications": proof.Counts.Notifications, "bridge_barrier_entries": barrierEntries, "manifest_before_acceptance": beforeAcceptance, "manifest_after_acceptance": accepted, "bridge_outcomes": outcomes, "origin_L": origins, "verification_L": verification})
 				if variant == "concurrent" || variant == "committed-ack-loss" {
 					h.action(map[string]any{"kind": "configure", "adapter": adapter, "result": "wrong-type"})
 					h.action(map[string]any{"kind": "reset"})
@@ -184,7 +197,7 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 						nonce := fmt.Sprintf("notification-metadata-%s-%s-%d", adapter, variant, replica)
 						event, call := h.declareTool(server, "read_extra", nonce, "allow")
 						actual := h.action(map[string]any{"kind": "execute", "adapter": adapter, "replica": replica, "eventId": event, "callId": call, "nonce": nonce, "toolName": "read_extra"})
-						h.assertRejectedMCPResult(event, actual)
+						rejected := h.assertRejectedMCPResult(event, actual)
 						var metadataProof struct {
 							Counts   struct{ Initialize, List, Call, Effects int }
 							Requests []struct{ Method, Tool, Origin string }
@@ -200,7 +213,7 @@ func TestPostgreSQLMCPManifestNotificationsCommitOneGeneration(t *testing.T) {
 								t.Fatalf("metadata proof trace=%s", actual)
 							}
 						}
-						h.evidence("notification-sdk-metadata", fmt.Sprintf("%s/%s/replica%d", adapter, variant, replica), actual, map[string]any{"tool_use_event_id": event, "sdk_rejected_new_tool_malformed_output": true, "public_error": 1, "settlement_receipt": 1, "status": 2, "error_kind": 2, "no_refresh": true})
+						h.evidence("notification-sdk-metadata", fmt.Sprintf("%s/%s/replica%d", adapter, variant, replica), actual, map[string]any{"tool_use_event_id": event, "rejected_settlement": rejected})
 					}
 				}
 

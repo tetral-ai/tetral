@@ -88,6 +88,7 @@ func TestPostgreSQLMCPAdaptersExecuteThroughDurableClaims(t *testing.T) {
 			if stored.Response.Status != 1 || stored.Response.ResultText != expected || stored.Response.ErrorKind != 0 || stored.RefreshTriggered || toolName != server+"/read_echo" || inputJSON != fmt.Sprintf(`{"nonce":%q}`, nonce) || projection.MCPServerName != server || projection.ModelToolCallID != callID || projection.ToolName != "read_echo" {
 				t.Fatalf("independent durable identity/result mismatch: result=%s tool=%s input=%s projection=%s", result, toolName, inputJSON, projectionJSON)
 			}
+			h.evidence("mixed-adapters", adapter, replay, map[string]any{"rows": rows, "state": state, "tool_name": toolName, "tool_use_event_id": eventID, "model_tool_call_id": callID, "canonical_input": inputJSON, "stored_result_text": stored.Response.ResultText, "expected_result_text": expected, "replay_result_text": replayProof.Result.Output.Text})
 			for _, variant := range []string{"invalid-binding-token", "undeclared", "denied-declaration"} {
 				event, call := eventID, callID
 				if variant == "undeclared" {
@@ -114,6 +115,7 @@ func TestPostgreSQLMCPAdaptersExecuteThroughDurableClaims(t *testing.T) {
 				if rejection.Result.Type == "completed" || rejection.Counts.Call != 1 || rejection.Counts.Effects != 1 {
 					t.Fatalf("%s crossed admission fence: %s", variant, output)
 				}
+				facts := map[string]any{"tool_use_event_id": event, "result_type": rejection.Result.Type, "new_external_calls": rejection.Counts.Call - proof.Counts.Call}
 				if variant != "invalid-binding-token" {
 					var rejectedRows int
 					if err := h.admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id='sesn_mcp_durable' AND tool_use_event_id=$1`, event).Scan(&rejectedRows); err != nil {
@@ -122,12 +124,10 @@ func TestPostgreSQLMCPAdaptersExecuteThroughDurableClaims(t *testing.T) {
 					if rejectedRows != 0 {
 						t.Fatalf("%s persisted a claim", variant)
 					}
+					facts["claim_rows"] = rejectedRows
 				}
-				t.Logf("case=mixed-adapters variant=%s/%s external_calls=1 effects=1 new_traffic=0", adapter, variant)
-				h.evidence("mixed-adapters", adapter+"/"+variant, output, map[string]any{"new_external_calls": 0, "admission_rejected": true, "tool_use_event_id": event, "new_claim_persisted": false})
+				h.evidence("mixed-adapters", adapter+"/"+variant, output, facts)
 			}
-			t.Logf("case=mixed-adapters variant=%s protocol=actual-sdk-http boundaries=runtime-runner,connector-grpc,bridge-claim-commit sql_rows=1 sql_state=consumed external_calls=1 effects=1 replay_replica=2", adapter)
-			h.evidence("mixed-adapters", adapter, replay, map[string]any{"rows": 1, "state": "consumed", "tool_name": toolName, "tool_use_event_id": eventID, "model_tool_call_id": callID, "canonical_input": inputJSON, "stored_result_text": stored.Response.ResultText, "replay_equals_literal": true})
 		})
 	}
 	staleEvent, staleCall := h.declare("work-github", "stale", "allow")
@@ -147,5 +147,5 @@ func TestPostgreSQLMCPAdaptersExecuteThroughDurableClaims(t *testing.T) {
 	if staleProof.Result.Type != "stale_custody" || staleProof.Counts.Call != 1 || staleProof.Counts.Effects != 1 {
 		t.Fatalf("stale binding crossed durable fence: %s", stale)
 	}
-	h.evidence("mixed-adapters", "stale-binding", stale, map[string]any{"binding_generation": 2, "old_generation_rejected": true, "new_external_calls": 0})
+	h.evidence("mixed-adapters", "stale-binding", stale, map[string]any{"configuration": map[string]any{"binding_generation": 2}, "result_type": staleProof.Result.Type})
 }

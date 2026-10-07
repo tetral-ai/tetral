@@ -136,10 +136,13 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 					return len(observation.ProviderRequests) >= expected
 				}, "actual provider request")
 			}
+			// barriers lists, in order, the wait points this case actually passed.
+			barriers := []string{}
 			if busy {
 				seedProvider(1, true, 1)
 				first := runtime.observe()
 				assertDeliveryProvider(t, first.ProviderRequests[0], false, 7)
+				barriers = append(barriers, "provider snapshot before update")
 			}
 			mcp.action(map[string]any{"kind": "reset"})
 			mcp.action(map[string]any{"kind": "configure", "adapter": adapter, "version": "v2"})
@@ -149,6 +152,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 				_ = admin.QueryRow(`SELECT manifest_generation FROM session_mcp_manifests WHERE session_id=$1 AND mcp_server_name=$2`, session, "work-"+adapter).Scan(&generation)
 				return generation == 8
 			})
+			barriers = append(barriers, "actual SDK notification before Bridge acceptance")
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueDB))
 			delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runnerDB), runtime.startup.RuntimePort, jobrunner.KubernetesRuntimeTargetResolver{GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
 				return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: pod, IP: "127.0.0.1", Running: true, Ready: true}, nil
@@ -171,6 +175,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 				return jobs[0]
 			}
 			leased := lease(time.Now())
+			barriers = append(barriers, "actual Queue issued lease before Runner delivery")
 			job, err := jobrunner.DecodeRuntimeJob(queueJobProto(leased))
 			if err != nil {
 				t.Fatal(err)
@@ -207,6 +212,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			if observed.result.Status != jobrunner.RuntimeDeliveryAccepted {
 				t.Fatalf("actual Runtime application=%+v", observed.result)
 			}
+			barriers = append(barriers, "actual Runtime apply response before Queue ACK")
 			applied := runtime.observe()
 			assertDeliveryGeneration(t, applied, 8)
 			duplicate, err := sender.ApplyRuntimeConfig(ctx, plan.Target, plan.RuntimeConfig)
@@ -233,11 +239,14 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			runtime.action(map[string]any{"kind": "wait-idle"})
 			warm := runtime.observe()
 			assertDeliveryProvider(t, warm.ProviderRequests[next-1], true, 8)
+			barriers = append(barriers, "provider snapshot after update")
 			endpointObservation := mcp.action(map[string]any{"kind": "observe", "adapter": adapter})
 			assertDeliveryEndpointCounts(t, endpointObservation)
 			assertDeliveryEvents(t, warm, adapter)
 			mcp.close()
+			barriers = append(barriers, "both Connector owners joined before replacement Bridge cold load")
 			runtime.close()
+			barriers = append(barriers, "entire old Runtime joined before replacement Bridge cold load")
 			replacement := startMCPDeliveryChild(ctx, t, "../services/agent-runtime", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", runtimeInput, nil)
 			fresh := replacement.observe()
 			assertDeliveryGeneration(t, fresh, 8)
@@ -270,7 +279,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			if generation != 8 || otherGeneration != 7 || jobs != 1 || status != queue.StatusAcknowledged {
 				t.Fatalf("durable custody/catalog=%d/%d jobs %d status %s", generation, otherGeneration, jobs, status)
 			}
-			evidence, _ := json.Marshal(map[string]any{"case_id": "runtime-manifest-delivery", "variant": adapter, "versions": mcp.startup.Versions, "substitutions": []string{"local MCP HTTP peer", "controlled provider stream", "verified service-account identity", "controlled Kubernetes ready target snapshot", "empty successful Sandbox capture provider", "fixture Blob store"}, "barriers": []string{"actual SDK notification before Bridge acceptance", "actual Queue issued lease before Runner delivery", "actual Runtime apply response before Queue ACK", "provider snapshot before and after update", "both Connector owners joined before replacement Bridge cold load", "entire old Runtime joined before replacement Bridge cold load"}, "endpoint": json.RawMessage(endpointObservation), "warm": warm, "replacement": fresh, "sql": map[string]any{"generation": generation, "other_server_generation": otherGeneration, "jobs": jobs, "queue_status": status}, "busy": busy})
+			evidence, _ := json.Marshal(map[string]any{"case_id": "runtime-manifest-delivery", "variant": adapter, "versions": mcp.startup.Versions, "substitutions": []string{"local MCP HTTP peer", "controlled provider stream", "verified service-account identity", "controlled Kubernetes ready target snapshot", "empty successful Sandbox capture provider", "fixture Blob store"}, "barriers": barriers, "endpoint": json.RawMessage(endpointObservation), "warm": warm, "replacement": fresh, "sql": map[string]any{"generation": generation, "other_server_generation": otherGeneration, "jobs": jobs, "queue_status": status}, "busy": busy})
 			t.Logf("case_evidence=%s", evidence)
 		})
 	}
