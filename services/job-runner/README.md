@@ -169,11 +169,15 @@ Sandbox rows. Job Runner never performs the provider call.
   transfer that identity only while attempts remain. At exhaustion, the exact
   live Queue lease owner replays a receipt or terminalizes the target Thread;
   only main-Thread exhaustion terminalizes the Session. Neither path sends the
-  interrupt to a replacement Runtime. Initial MCP manifest listing similarly
-  uses a fixed 180-second per-call deadline. This accommodates the connector's
-  credential, reconnect, and list budgets while bounding one concurrent
-  JobRunner worker slot per stalled call; it abandons the Runner wait but does
-  not cancel connector work.
+  interrupt to a replacement Runtime. For inputs other than queued user
+  messages, initial MCP manifest capture gives each list call a fixed
+  180-second deadline; a queued user message instead spends its per-input
+  discovery budget (see [Manifest discovery](#manifest-discovery)), where each
+  list call receives only the remainder of one shared 120-second deadline.
+  Either bound limits one Job Runner worker slot per stalled call. Expiry ends
+  the Runner wait and reaches the connector as the gRPC deadline;
+  connector-side cancellation follows the
+  [Gateway discovery contract](../gateway/README.md#discovery-and-manifest-delivery).
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,
@@ -241,8 +245,7 @@ workload; no provider gateway business package is imported.
 ### Kubernetes pod visibility (engine-root `internal/kubernetes`)
 
 - **Contract.** `internal/kubernetes` and `internal/internalgrpc/auth` are
-  engine-root shared packages — they live at the repository root, not under
-  `services/bridge/`; Job Runner consumes them but does not own them.
+  engine-root shared packages; Job Runner consumes them but does not own them.
   `internal/kubernetes` owns Pod and EndpointSlice visibility clients
   (`VisibilityClient`: list/watch) and a `WatcherCache` that the Job Runner
   consumes via `BindingVisibilitySnapshot`. It holds no control-plane
@@ -256,9 +259,8 @@ workload; no provider gateway business package is imported.
   mutates pods or bindings; proven-gone must be distinguishable from merely-
   unavailable, because only the former is allowed to replace a binding; a
   not-ready snapshot must retry, never finalize.
-- **Conformance.** Bridge-owned durable event visibility:
-  [bridge_visibility_test.go](../bridge/bridge_visibility_test.go). Cross-owner
-  loss recovery: [runtime_pod_lost_store_test.go](../../integration/runtime_pod_lost_store_test.go).
+- **Conformance.** Cross-owner loss recovery:
+  [runtime_pod_lost_store_test.go](../../integration/runtime_pod_lost_store_test.go).
   Engine-root (under
   `internal/kubernetes/`): `visibility_client_test.go`, `cache_test.go`
   (covering the `WatcherCache` type in `watcher_cache.go`),

@@ -311,7 +311,7 @@ never rewrites.
 ## Release
 
 Release is a durable lifecycle operation. Its only producers are Session
-deletion and displacement of a recorded provider handle. API and Bridge may
+deletion and displacement of a recorded provider handle. API and Job Runner may
 declare Session-deletion release through the provider-neutral internal release
 boundary; only Sandbox Service inspects or mutates the provider resource.
 Runtime Pod loss and ordinary idle cleanup do not release a Sandbox.

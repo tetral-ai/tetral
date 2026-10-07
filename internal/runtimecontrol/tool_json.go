@@ -10,7 +10,7 @@ import (
 
 const runToolCanonicalJSONMaxDepth = 256
 
-// canonicalRunToolInput implements the same raw-token algorithm as Runtime's
+// CanonicalRunToolInput implements the same raw-token algorithm as Runtime's
 // canonicalRunToolJSON. It never decodes JSON strings or numbers: insignificant
 // whitespace is removed, arrays retain order, and object members are ordered
 // by the UTF-8 bytes of their raw key token. This preserves every scalar byte

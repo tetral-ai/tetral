@@ -1,7 +1,7 @@
 /**
  * Parses Runtime Pod boot settings into one immutable configuration object. The process command
  * calls this module once, then passes the result into dependency construction and lifecycle startup.
- * Zod and Node IP validation guard pod identity, one exact Bridge service account, fixed internal
+ * Zod and Node IP validation guard pod identity, one exact Job Runner service account, fixed internal
  * audience, bounded address strings, a valid Runtime gRPC port, positive bounded numeric settings, and
  * provider/model syntax. It centralizes this process's environment read and returns validated
  * configuration to the composition root.

@@ -8,9 +8,9 @@
  */
 const RunToolCanonicalJSONMaxDepth = 256;
 
-// Keep mechanically identical to Bridge's run_tool_canonical_json.go. Scalar
-// tokens are never decoded: only insignificant whitespace and object-member
-// order change.
+// Keep mechanically identical to internal/runtimecontrol/tool_json.go
+// (CanonicalRunToolJSON). Scalar tokens are never decoded: only insignificant
+// whitespace and object-member order change.
 /** Produces the compact canonical representation of one JSON document. */
 export function canonicalRunToolJSON(raw: string): string {
   JSON.parse(raw);

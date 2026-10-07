@@ -42,7 +42,8 @@ const (
 	KindSandboxBackgroundCommand    = "sandbox_background_command"
 	KindSandboxBackgroundReconcile  = "sandbox_background_reconcile"
 
-	// MaxMcpManifestBytes is owned by Bridge manifest acceptance. Queue jobs
+	// MaxMcpManifestBytes is owned by shared mcpmanifest acceptance (Bridge
+	// connector-change and Job Runner initial discovery). Queue jobs
 	// carry only the manifest row identity; delivery rebuilds read the bounded
 	// content from that durable row.
 	MaxMcpManifestBytes = 256 * 1024
@@ -63,7 +64,7 @@ const (
 	// a successor with a new durable identity.
 	SandboxOutputCaptureMaxAttempts        = 5
 	SandboxOutputCaptureCleanupMaxAttempts = 5
-	// Bridge/Sandbox startup knobs own lease_owner; Lease admission rechecks
+	// Job Runner/Sandbox startup knobs own lease_owner; Lease admission rechecks
 	// it, and deployed service identifiers are below 32 bytes.
 	MaxQueueLeaseOwnerBytes = 256
 	// Queue-owned formatters compose bounded workspace/session/resource ids;

@@ -36,8 +36,9 @@ type RuntimeTerminationResult struct {
 	CloseoutEventID string `json:"closeout_event_id"`
 }
 
-// settleRuntimeTerminationTx is the Session termination owner shared by a
-// Runtime-declared terminal failure and Bridge's exhausted interrupt fence.
+// SettleRuntimeTerminationTx is the Session termination owner shared by
+// Bridge's Runtime-declared terminal failure and Job Runner's exhausted
+// interrupt fence and delivery exhaustion.
 // Main-session termination also cancels queued and parked input: retaining the
 // binding for closeout replay must not leave delivery authority for a terminal
 // Session. Child termination remains scoped to active custody for that Thread.

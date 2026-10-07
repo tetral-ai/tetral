@@ -117,10 +117,10 @@ export function sessionEventForDurableWrite(
 // retry_status (publicRetryStatus): ThreadLoop stamps exhausted on RuntimeFailure
 // values when its retry lifecycle spends the budget; this mapper preserves that
 // stamp, recognizes real termination as terminal, and otherwise defaults to
-// retrying because it has no settlement-disposition input. Bridge-owned exhaustion
+// retrying because it has no settlement-disposition input. Job Runner exhaustion
 // paths emit their public errors independently.
-// UPDATE-WITH: services/bridge/runtime_pod_lost.go,
-//              services/bridge/runtime_termination.go
+// UPDATE-WITH: services/job-runner/runtime_pod_lost.go,
+//              internal/runtimecontrol/termination.go
 function publicSessionError(failure: RuntimeFailure): {
 	readonly type:
 		| "model_overloaded_error"

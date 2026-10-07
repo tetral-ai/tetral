@@ -13,7 +13,7 @@
  * general tool callback plus the separate Sandbox acceptance and result-wait
  * callbacks into ThreadLoop. The runner calls Agent Runtime Bridge for durable
  * sandbox handoff, memory, command, event, and child-thread operations;
- * Provider Gateway for web tools; MCP Connector for MCP tools; and
+ * Web Connector for web tools; MCP Connector for MCP tools; and
  * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
 import { createHash } from "node:crypto";
@@ -266,8 +266,8 @@ interface ChildTaskOperationQueueState {
 }
 
 /**
- * Implements the ThreadLoop tool callback across Bridge, Gateway Pod, and
- * in-process child-thread boundaries.
+ * Implements the ThreadLoop tool callback across Bridge, Web Connector, MCP
+ * Connector and in-process child-thread boundaries.
  *
  * Each instance owns its outbound clients and the ephemeral ordering state for
  * same-task child-agent sends and lifecycle controls. Durable idempotency
@@ -347,9 +347,9 @@ export class RuntimePodToolRunner {
 	 * Executes one ThreadLoop tool request through the route declared by its tool
 	 * entry and returns the normalized completed, error, or cancelled outcome.
 	 *
-	 * Sandbox and memory routes call Bridge, web and MCP routes call Gateway Pod
-	 * services, and sub-agent routes coordinate durable Bridge state with the
-	 * local child-thread host.
+	 * Sandbox and memory routes call Bridge, web routes call Web Connector and
+	 * MCP routes call MCP Connector, and sub-agent routes coordinate durable
+	 * Bridge state with the local child-thread host.
 	 */
 	async runTool(
 		request: RuntimeToolExecutionRequest,

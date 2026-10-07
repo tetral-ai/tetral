@@ -1,5 +1,5 @@
 /**
- * Method-specific bounds for the authenticated Bridge-to-Runtime Pod ingress.
+ * Method-specific bounds for the authenticated Job Runner-to-Runtime Pod ingress.
  *
  * Each validator accepts only the fields owned by its RPC. The gRPC method is
  * the command discriminator; no universal command envelope, Event range, or

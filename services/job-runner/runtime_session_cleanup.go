@@ -229,10 +229,10 @@ type sessionDeleteCleanupState struct {
 }
 
 // Session deletion clears live Runtime custody before it ensures the durable
-// Sandbox release operation. The release worker, not Bridge, inspects and
-// releases the provider handle. Private Sandbox rows and Blob prefixes become
-// eligible for deletion only after release completes and every Sandbox Queue
-// job for the Session is closed.
+// Sandbox release operation. The Sandbox release worker, not Job Runner,
+// inspects and releases the provider handle. Private Sandbox rows and Blob
+// prefixes become eligible for deletion only after release completes and every
+// Sandbox Queue job for the Session is closed.
 func (s *PostgreSQLRuntimeDeliveryStore) prepareSessionDeleteCleanupCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
 	state, stale, err := loadSessionDeleteCleanupStateTx(ctx, tx, job, true)
 	if err != nil || stale {

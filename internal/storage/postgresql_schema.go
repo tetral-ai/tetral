@@ -54,7 +54,7 @@ const (
 	// UPDATE-WITH: internal/session sessionSelectSQL (read projection);
 	// services/bridge bridge_api_events.go (running/idle/
 	// rescheduling/terminated status writes); internal/session service.go and
-	// postgresql_store.go plus services/bridge
+	// postgresql_store.go plus services/job-runner
 	// runtime_session_cleanup.go (lifecycle_state branches).
 	createPostgreSQLSessionsTable = `CREATE TABLE IF NOT EXISTS sessions (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,

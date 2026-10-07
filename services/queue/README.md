@@ -162,7 +162,7 @@ serves `/health` (liveness), `/ready` (readiness), and `/metrics`. Metrics are
 per kind: `queue_pending_jobs`, `queue_leased_jobs`, `queue_retry_pending_jobs`,
 `queue_dead_lettered_jobs`, and `queue_ready_lag_seconds`. The service account
 mounts no Kubernetes API token; the network policy restricts egress to PostgreSQL
-and DNS, and ingress on both ports to `api`, `bridge`, and
+and DNS, and ingress on both ports to `api`, `job-runner`, and
 `sandbox`.
 
 Each successful lease logs `duration.ms` for the database Lease call and

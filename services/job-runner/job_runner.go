@@ -148,7 +148,7 @@ type RuntimeDeliveryResult struct {
 	QueueLeaseSettled bool
 	CleanupBusy       bool
 	// The command plan carries the binding that actually owned this attempt.
-	// These process-local fields fence Bridge finalization after a Pod-loss
+	// These process-local fields fence Job Runner finalization after a Pod-loss
 	// handoff; they are not Queue payload, RPC result, or durable state.
 	AttemptedBindingID         string
 	AttemptedBindingGeneration int64

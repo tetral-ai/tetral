@@ -402,7 +402,8 @@ the same `RunMcpTool` pipeline as any other MCP tool.
 
 `McpConnectorServiceShell` drives one tool call as an ordered pipeline, with a
 Bridge-backed durable reservation bracketing the external side effect. The
-`RunMcpTool` caller is the Runtime pod; `ListMcpTools` is called by Bridge. Both
+`RunMcpTool` caller is the Runtime pod; `ListMcpTools` is called by Bridge
+(connector-change discovery) and Job Runner (initial discovery). All caller
 identities are TokenReview-authenticated (`KubernetesTokenReviewClient`,
 `packages/mcp-connector/src/auth.ts`); `RunMcpTool` additionally verifies the
 per-thread runtime binding token.
@@ -494,7 +495,8 @@ index performs the eviction; without it the dead client would stay cached.
 
 The connector owns no replay store; records live in the Bridge-owned
 `session_runtime_tool_results` table (`tool_kind = mcp`) reached through three
-TokenReview-authenticated Bridge RPCs the gateway ServiceAccount may call
+TokenReview-authenticated Bridge RPCs the `tetral-system/mcp-connector`
+ServiceAccount may call
 (`BridgeAPIMcpToolResultIdempotencyStore`, `packages/mcp-connector/src/bridge-client.ts`).
 `CommitMcpToolResult` persists the refs-only result and, in the same Bridge
 transaction, creates the transient-attachment rows from a bounded inline-media
@@ -566,8 +568,8 @@ UTF-8 JSON bytes are counted while accumulating tools, including SDK-only
 metadata. This limits retained definitions; it is not a hard limit on the HTTP
 body being parsed. Bridge separately limits its canonical projection to 256 KiB.
 The shared 120-second discovery deadline includes credential resolution,
-connection, all pages and bounded authentication refresh. A Bridge gRPC deadline
-can shorten it; cancellation stops further page requests without closing the
+connection, all pages and bounded authentication refresh. A caller's (Bridge or
+Job Runner) gRPC deadline can shorten it; cancellation stops further page requests without closing the
 shared client or canceling unrelated calls. Authentication restart begins again
 without a cursor, within the same deadline.
 

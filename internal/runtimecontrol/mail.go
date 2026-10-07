@@ -221,7 +221,7 @@ func PublicAgentMailMessageJSON(content string) (string, error) {
 	})
 }
 
-// agentMailContentFromPublicMessage isolates the target-owned mail body from
+// AgentMailContentFromPublicMessage isolates the target-owned mail body from
 // the frozen public Event projection. Runtime delivery and cold load carry
 // this text only; the broad public Message representation never crosses the
 // private target boundary.

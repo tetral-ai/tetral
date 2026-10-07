@@ -224,11 +224,11 @@ export type RuntimeFinishReason = z.infer<typeof RuntimeFinishReasonSchema>;
 //                             invalid/empty compaction summary); the failure site
 //                             carries its own discriminator so it is never conflated
 //                             with a stream-event rejection.
-// The Bridge runtime-repair path stamps one further value the pod never stamps —
+// The Job Runner runtime-repair path stamps one further value the pod never stamps —
 // runtime_pod_lost — when it closes a request left open by a dead pod, reusing the
 // original model_request_id; that value is intentionally absent from this pod enum.
 // UPDATE-WITH: services/agent-runtime/packages/core/src/runtime/session-event-writer.ts,
-//              services/bridge/runtime_pod_lost.go
+//              services/job-runner/runtime_pod_lost.go
 export const RuntimeRequestErrorKindSchema = z.enum([
 	"provider_error",
 	"gateway_stream_error",

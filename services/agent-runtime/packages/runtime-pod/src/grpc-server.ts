@@ -28,7 +28,7 @@ export interface RuntimeGrpcServer {
 
 /**
  * Creates the internal Runtime Pod command server without binding it to an address.
- * The returned server registers every supported Bridge command and uses insecure transport because
+ * The returned server registers every supported Job Runner command and uses insecure transport because
  * caller authentication is enforced from service-account metadata by the control service.
  */
 export function createRuntimeGrpcServer(service: RuntimeControlService): RuntimeGrpcServer {

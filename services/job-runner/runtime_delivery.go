@@ -127,6 +127,9 @@ type RuntimeRecoveryCommandSender interface {
 }
 
 const (
+	// initialMCPManifestListTimeout is the per-call deadline for initial manifest
+	// capture outside queued user messages; a queued user message uses
+	// min(this, mcpInputDiscoveryBudget) as its whole-discovery deadline.
 	initialMCPManifestListTimeout = 180 * time.Second
 	// The production closeout proof measures command admission, Tool Fiber
 	// cancellation/join, durable-operation drain, Tool Result and Request End

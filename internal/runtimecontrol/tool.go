@@ -87,7 +87,7 @@ func LoadDurableToolExecutionTx(
 	}, nil
 }
 
-// stableRuntimeID derives deterministic identities for durable replay keys.
+// StableRuntimeID derives deterministic identities for durable replay keys.
 func StableRuntimeID(parts ...string) string {
 	hasher := sha256.New()
 	var length [4]byte

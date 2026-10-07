@@ -174,7 +174,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) discoverUserInputMCP(ctx context.Contex
 				return ctx.Err()
 			}
 			if err == nil {
-				// Bridge owns final acceptance after its family-specific filtering.
+				// Job Runner accepts through mcpmanifest.CaptureInitialAcceptanceTx after
+				// family-specific filtering.
 				filtered, _ := mcpmanifest.FilterCollisions(toolset.BuiltinFamily, manifest.Tools)
 				canonical, invalid := mcpmanifest.CanonicalToolsJSON(filtered)
 				if invalid != nil || strings.TrimSpace(manifest.ManifestETag) == "" || len(canonical) > mcpmanifest.MaxBytes {

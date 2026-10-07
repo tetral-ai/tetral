@@ -184,7 +184,8 @@ manifest itself is complete. Broad test roles remain useful for shared-store
 behavior and RLS tests, but do not establish serving authorization.
 
 Authorization changes must also inspect other callers: API control-plane stores,
-Bridge Runtime APIs and cleanup, Sandbox lifecycle/execution/projection and
+Bridge Runtime APIs, Job Runner placement/delivery/recovery and Session cleanup,
+Sandbox lifecycle/execution/projection and
 background command settlement, API event admission's child-close fence, Queue
 lease and maintenance, Auth key management, Cleanup admission, Gateway credential
 resolution, Git Proxy ticket/credential reads, and Event Stream's dedicated

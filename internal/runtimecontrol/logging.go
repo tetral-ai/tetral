@@ -6,7 +6,7 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-// logRuntimeInputCustodyTransition emits bounded post-commit evidence. Durable
+// LogRuntimeInputCustodyTransition emits bounded post-commit evidence. Durable
 // Inbox and Queue state remain authoritative; logging is never consulted by a
 // lifecycle decision.
 func LogRuntimeInputCustodyTransition(logger *slog.Logger, component string, scope *bridgev1.RuntimeScope, transition string, count int) {

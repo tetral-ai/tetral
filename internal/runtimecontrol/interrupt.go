@@ -31,7 +31,7 @@ type activeInterruptCustody struct {
 	hasReceipt    bool
 }
 
-// lockRuntimeInputQueueCustodyTx locks active Runtime-input Queue rows before a
+// LockRuntimeInputQueueCustodyTx locks active Runtime-input Queue rows before a
 // closeout transaction locks the corresponding Inbox or Thread rows. An empty
 // Thread list means every Thread in the Session; otherwise only the declared
 // target set is included.
@@ -346,7 +346,7 @@ func RequireThreadMutationAllowedTx(ctx context.Context, tx *dbconnect.Tx, scope
 		}
 		return ThreadInterruptBarrierStaleError(status.Error(codes.FailedPrecondition, "Session-root termination authority is invalid"))
 	}
-	// Only validateInterruptLeaseRefTx and exact final-lease exhaustion mint this
+	// Only ValidateInterruptLeaseRefTx and exact final-lease exhaustion mint this
 	// transaction-local authority. Once minted, the closeout may pass through
 	// intermediate Inbox=committed state before its receipt row is inserted.
 	if authority, ok := interruptCloseoutAuthorityFromContext(ctx); ok {

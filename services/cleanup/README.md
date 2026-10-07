@@ -24,12 +24,12 @@ write is scoped by `workspace_id` (a signed principal binding, with
 The service owns no tables; the schema lives in `internal/storage`
 (`postgresql_schema.go`). Cleanup state is four columns on
 `session_runtime_status` plus the two binding columns; ownership of each
-transition is split between Bridge (arm) and Job Runner (finalize/reschedule) and this
-scheduler (claim/enqueue).
+transition is split between Bridge or Job Runner idle writes (arm), Job Runner
+(finalize/reschedule) and this scheduler (claim/enqueue).
 
 | Column | Set by | Cleared / advanced by |
 |--------|--------|-----------------------|
-| `cleanup_after` | Bridge ordinary idle write, a fixed 30-minute delay past idle | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
+| `cleanup_after` | Bridge or Job Runner idle write, a fixed 30-minute delay past idle | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
 | `cleanup_job_id` | this scheduler, when it claims a due row | Job Runner finalize and busy reschedule set it `NULL` |
 | `cleanup_enqueued_at` | this scheduler, at claim | Job Runner finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
 | `cleanup_claimed_at` | Job Runner, at execution claim time | Job Runner finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
@@ -40,10 +40,11 @@ The 30-minute delay is owned by shared Runtime control
 serves both the initial idle re-arm and the busy reschedule, so the two delays
 cannot drift apart. Its length is the window a bound-but-idle, non-terminal
 session stays hot before a due cleanup releases its Runtime Pod binding. A
-terminal Session is the exception: Bridge closes its residency row to `idle`,
-clears every cleanup marker, and retains the binding identity only for closeout
-replay. Any already-issued cleanup job then converges through the stale-job
-path and cannot target the Runtime. Sandbox
+terminal Session is the exception: the shared termination owner
+(`runtimecontrol.SettleRuntimeTerminationTx`, used by Bridge and Job Runner)
+closes its residency row to `idle`, clears every cleanup marker, and retains
+the binding identity only for closeout replay. Any already-issued cleanup job
+then converges through the stale-job path and cannot target the Runtime. Sandbox
 auto-stop/auto-archive/auto-delete timing and the 30-day retention floor in
 `services/sandbox/config.go` are independent of this TTL.
 
@@ -77,7 +78,7 @@ in lockstep or the scan loses coverage.
 
 | Step | Actor | Effect |
 |------|-------|--------|
-| 1 | Bridge ordinary idle write | stamps `cleanup_after` when a reusable run finishes |
+| 1 | Bridge or Job Runner idle write | stamps `cleanup_after` when a reusable run finishes |
 | 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
 | 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
 | 4 | scheduler `queue.EnqueueTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
@@ -91,7 +92,7 @@ tenant count.
 
 The `cleanup_after` alarm is only a hint — it is armed by the main run and
 may be stale while children still run. **The authority is the claim.**
-Inside Bridge's claim transaction (holding the `session_runtime_status`
+Inside Job Runner's claim transaction (holding the `session_runtime_status`
 row lock), and again inside the finalize transaction, cleanup proves that
 no `session_threads` row is busy. The check is **role-blind**: it scans
 every thread of the session regardless of role, so a running
@@ -156,9 +157,9 @@ durable history (`session_threads`, `session_events`, `session_messages`).
 Conformance: `TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs`,
 `TestCleanupWorkloadStaysWithinSchedulerBoundary`.
 
-### Execution boundary (Bridge — `bridge/runtime_session_cleanup.go`)
+### Execution boundary (Job Runner — `job-runner/runtime_session_cleanup.go`)
 
-Everything after enqueue belongs to Bridge and is a replaceable executor
+Everything after enqueue belongs to Job Runner and is a replaceable executor
 behind the `cleanup_session` queue job. The contract this scheduler
 depends on: the executor re-validates the idle fence, binding generation,
 target Runtime Pod, and the role-blind tree fence at **both** claim and
@@ -168,7 +169,7 @@ ACKed with no side effects; finalize nulls `binding_id` **and**
 executor must keep the finalize-time busy reschedule (never a bare ACK). This
 executor does not change Sandbox provider state; Session deletion uses its
 separate cleanup kind and durable Sandbox release operation.
-Conformance (Bridge suite `runtime_session_cleanup_test.go`):
+Conformance (`integration/runtime_session_cleanup_test.go`):
 `TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns`,
 `...ReschedulesWhenChildStartsBeforeFinalize`,
 `...TreeFenceClassifiesQuiescentAndBusyThreads`,
@@ -198,7 +199,7 @@ export is off by default and the shipped `k8s/networkpolicy.yaml` (postgres
 (HTTP(S), no credentials, else startup error), and
 `TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT` (positive duration, default 2s).
 The tick schedule lives in `k8s/cronjob.yaml`; batch size is config; the
-TTL delay is the fixed Bridge constant. Invalid positive-integer / URL /
+TTL delay is `runtimecontrol.IdleCleanupDelay`. Invalid positive-integer / URL /
 duration settings are startup errors (`workload.NewConfigError`).
 Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 
@@ -209,7 +210,7 @@ Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 | `scheduler_test.go` | the due predicate selects only due, bound, idle rows; markers stamped and one deduped job enqueued; the workload stays within its read/write boundary; metrics counters stay safe |
 | `workspace_fanout_test.go` | every discovered workspace is visited once per tick |
 | `metrics_exporter_test.go` | exported series carry no scope labels; config validation rejects a bad exporter endpoint |
-| `bridge/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |
+| `integration/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |
 
 If a PR changes the due predicate, the workspace fan-out, the marker
 writes, the enqueue shape, or the metrics/config surface in this folder,

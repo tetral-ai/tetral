@@ -241,7 +241,7 @@ func RuntimeTaskNotificationStatus(terminalStatus string) string {
 	}
 }
 
-// parkTaskNotificationInboxTx is the sole queued/delivering/accepted-to-parked
+// ParkTaskNotificationInboxTx is the sole queued/delivering/accepted-to-parked
 // transition. Queue ownership remains with the caller: a leased delivery ACKs
 // its exact token, while close admission targeted-cancels pending custody.
 func ParkTaskNotificationInboxTx(

@@ -110,7 +110,8 @@ Session-exclusive; only a structurally declared target interrupt may cross a
 pending or leased config boundary, and it does not release ordinary input past
 that boundary. The concrete carriers are `queue.EnqueueRequest`,
 `queue.PostgreSQLQueueStore.Lease`, `AppendClientEvents`,
-`threadInterruptBarrier`, and `RuntimePodDirectDeliverer`.
+`runtimecontrol.ThreadInterruptBarrier`, and Job Runner's
+`RuntimePodDirectDeliverer` (`services/job-runner`).
 
 ### The Bridge API RPC surface
 

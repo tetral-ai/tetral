@@ -241,17 +241,20 @@ git endpoint route shapes are accepted, and ambient proxy environment
 variables are ignored. Setting `cilium.gitProxyFQDNPolicy=true` restores the
 network-layer FQDN restriction subject to the CNI limitation above.
 
-Bridge, Runner, Web and Sandbox egress-intent annotations derive hostnames from the
-same non-secret endpoint values as their ConfigMaps. The api and Bridge blob
-endpoints are Secret-sourced, so their egress-intent annotations remain
-operator-advisory canonical literals; the chart cannot verify a value it
-cannot read.
+Sandbox and Web egress-intent annotations derive provider, search and reader
+hostnames from the same non-secret values as their ConfigMaps. Bridge, Job
+Runner, Web and Sandbox derive the object-store hostname from `blob.endpoint`.
+Bridge, Job Runner and Web read their actual endpoint from Secrets
+(`tetral-blob` key `endpoint`, `gateway-web-blob` key `TETRAL_BLOB_ENDPOINT`),
+so their object-store annotation is advisory and correct only while
+`blob.endpoint` names the same host. The api annotation remains an advisory
+canonical literal. The chart cannot verify Secret values.
 
 Sandbox provider completions and Queue lease wait times are logged at the
 default info level. Set `sandbox.debugLogging: true` only while diagnosing
 Sandbox queue waits or provider commands; logged summaries remain bounded and
 exclude command bodies, credentials, tokens, headers, and mount URLs. Queue
-notifications are wake hints: Bridge and Sandbox reconnect their PostgreSQL
+notifications are wake hints: Job Runner and Sandbox reconnect their PostgreSQL
 listeners and retain timer polling as fallback, while Queue `Lease` remains the
 execution authority.
 The Sandbox over-limit reconciler, expired output-capture sweep, and

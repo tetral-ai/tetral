@@ -275,7 +275,7 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 						got[rel+":"+function.Name.Name] = true
 					}
 				case *ast.Ident:
-					if ((aliases["."] || filepath.ToSlash(filepath.Dir(rel)) == "internal/runtimecontrol") && fun.Name == "MarshalDataJSON") || fun.Name == "marshalBridgeDataJSON" {
+					if (aliases["."] || filepath.ToSlash(filepath.Dir(rel)) == "internal/runtimecontrol") && fun.Name == "MarshalDataJSON" {
 						got[rel+":"+function.Name.Name] = true
 					}
 				}
