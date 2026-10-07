@@ -197,7 +197,7 @@ func TestPostgreSQLProtectedStoreConnections(t *testing.T) {
 	p.Trust(t, trust, "malformed", []byte("malformed trust"))
 	awaitStore(t, 3*time.Second, func() bool { s := state(); return s != nil && s["failed"].(float64) > 0 })
 	time.Sleep(600 * time.Millisecond)
-	if s := state(); s["failed"] != float64(1) {
+	if s := state(); s["failed"] != float64(1) || s["reason"] != "invalid_bundle" {
 		t.Fatalf("reload degradation diagnostics were not bounded: %v", s)
 	}
 	if err := fixtureHTTP(ctx, control, "read", nil, &read); err != nil {
@@ -287,10 +287,67 @@ func TestPostgreSQLProtectedStoreConnections(t *testing.T) {
 	if err := fixtureHTTP(ctx, control, "read", nil, &read); err != nil {
 		t.Fatal("locked-Bun store did not recover after issuer restoration", err)
 	}
+	// A well-formed update that removes a still-valid CA is authoritative trust
+	// removal. The server still presents an R1 leaf, so the R2-only candidate
+	// cannot verify: new store work is refused instead of continuing under R1,
+	// while a transaction admitted before the update commits on its pool.
+	if err := fixtureHTTP(ctx, control, "hold", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	awaitStore(t, 3*time.Second, func() bool { s := state(); return s != nil && s["heldPID"].(float64) > 0 })
+	failedBeforeNarrowing := state()["failed"].(float64)
+	p.Trust(t, trust, "narrowed-before-migration", root2.PEM)
+	awaitStore(t, 3*time.Second, func() bool { s := state(); return s != nil && s["failed"].(float64) > failedBeforeNarrowing })
+	if err := fixtureHTTP(ctx, control, "release", nil, nil); err != nil {
+		t.Fatal("transaction admitted before trust narrowing did not finish on its generation", err)
+	}
+	if s := state(); s["reason"] != "candidate_verification_failed" || s["heldPID"] != s["releasedPID"] || s["maxPools"] != float64(2) {
+		t.Fatalf("narrowed trust failure, held generation or pool ceiling: %v", s)
+	}
+	if err := sql.QueryRowContext(ctx, "SELECT count(*) FROM transport_effects").Scan(&committed); err != nil || committed != 2 {
+		t.Fatalf("transaction held across trust narrowing commit=%d %v", committed, err)
+	}
+	if err := fixtureHTTP(ctx, control, "read", nil, &read); err == nil {
+		t.Fatal("removed CA kept admitting store work after its narrowed candidate failed")
+	}
+	// Retries of the same unverifiable bundle are spaced (250 ms doubling to a
+	// 5 s cap) instead of building a full candidate pool on every 250 ms poll.
+	openedBeforeWindow := state()["opened"].(float64)
+	time.Sleep(2500 * time.Millisecond)
+	if s := state(); s["opened"].(float64)-openedBeforeWindow > 5 {
+		t.Fatalf("failing candidate retries were not spaced: %v", s)
+	}
+	if err := fixtureHTTP(ctx, control, "read", nil, &read); err == nil {
+		t.Fatal("store admission reopened without a verified candidate")
+	}
+	// Once the server presents a chain to the remaining trust, a spaced retry
+	// of the same bundle verifies and re-admits work.
 	transporttest.Must(0, os.WriteFile(ca, append(append([]byte{}, p.Authority.PEM...), root2.PEM...), 0600))
 	leafR2 := transporttest.Must(root2.ValidLeaf("postgres.transport.test", ""))
+	activatedBeforeRecovery, recoveredBeforeRecovery := state()["activated"].(float64), state()["recovered"].(float64)
 	p.Reload(t, "R2-leaf", leafR2)
 	observeLeaf(leafR2)
+	awaitStore(t, 8*time.Second, func() bool {
+		s := state()
+		return s != nil && s["activated"].(float64) > activatedBeforeRecovery && s["recovered"].(float64) > recoveredBeforeRecovery
+	})
+	if err := fixtureHTTP(ctx, control, "read", nil, &read); err != nil {
+		t.Fatal("verified narrowed candidate did not re-admit store work", err)
+	}
+	// An anchor past its validity is left out instead of invalidating the
+	// bundle, so an old CA expiring during the overlap does not disable trust.
+	expiredRoot := transporttest.Must(transporttest.NewAuthorityWithValidity("postgres-expired", time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)))
+	failedBeforeOverlap, activatedBeforeOverlap := state()["failed"].(float64), state()["activated"].(float64)
+	p.Trust(t, trust, "overlap-with-expired", append(append(append([]byte{}, expiredRoot.PEM...), p.Authority.PEM...), root2.PEM...))
+	awaitStore(t, 3*time.Second, func() bool { s := state(); return s != nil && s["activated"].(float64) > activatedBeforeOverlap })
+	if s := state(); s["failed"] != failedBeforeOverlap {
+		t.Fatalf("expired anchor invalidated the trust bundle: %v", s)
+	}
+	if err := fixtureHTTP(ctx, control, "read", nil, &read); err != nil {
+		t.Fatal("store read failed with an expired anchor in the bundle", err)
+	}
+	// Planned retirement: every peer already presents an R2 leaf before R1 is
+	// removed, so the narrowed candidate verifies and replaces the generation.
 	beforeActivation := state()["activated"].(float64)
 	p.Trust(t, trust, "R2-only", root2.PEM)
 	transporttest.Must(0, os.WriteFile(ca, root2.PEM, 0600))

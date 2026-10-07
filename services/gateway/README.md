@@ -994,8 +994,11 @@ generation. Explicit database TLS requires both
 `TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`, hostname
 verification, and a complete verified initial generation before readiness.
 Every actual awaited store operation, including transaction commit, stays inside
-the generation owner's `withSQL` callback. CA rotation verifies a candidate
-before publishing it, then joins old-generation borrowers under its running
-20-second rotation bound. Shutdown interrupts candidate validation and uses the
-remaining application deadline; it does not start a fresh rotation budget.
+the generation owner's `withSQL` callback. CA rotation follows the owner's
+[trust replacement policy](../../internal/ts-dbconnect/README.md#pool-generation-owner):
+a candidate verifies before it receives work, and an update that removes a
+still-valid CA first stops admission on the old generation. Old-generation
+borrowers are joined under the 20-second drain bound. Shutdown interrupts
+candidate validation and uses the remaining application deadline; it does not
+start a fresh rotation budget.
 Go's independently owned pool policy remains distinct.

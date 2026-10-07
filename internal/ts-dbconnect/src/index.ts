@@ -1,4 +1,4 @@
-/** Process-owned Bun PostgreSQL pool policy. Go pools have a distinct owner and policy. */
+/** Process-owned Bun PostgreSQL pool policy and pool generation owner. Go pools have a distinct owner and policy. */
 export { asSQLSource, fixedSQLSource, openPostgresSQLOwner } from "./owner.js";
 export type { SQLSource, PostgresSQLOwner, PostgresSQLOwnerOptions, SQLOwnerObservation } from "./owner.js";
 export interface DatabasePoolConfig {

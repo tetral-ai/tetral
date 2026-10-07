@@ -17,10 +17,17 @@ export function asSQLSource<S>(input: S | SQLSource<S>): SQLSource<S> {
 export interface PostgresSQLOwner extends SQLSource<Bun.SQL> {
   close(options?: { readonly deadline?: Date }): Promise<void>;
 }
+/**
+ * Bounded reason carried by reload_failed: the mounted bundle was unusable, or
+ * a complete candidate pool built from it failed verification. A failure to
+ * close a replaced generation carries no reason.
+ */
+export type SQLOwnerReloadFailure = "invalid_bundle" | "candidate_verification_failed";
 export interface SQLOwnerObservation {
   readonly kind: "opened" | "closed" | "activated" | "reload_failed" | "reload_recovered";
   readonly pools: number;
   readonly failedCount?: number;
+  readonly reason?: SQLOwnerReloadFailure;
 }
 export interface PostgresSQLOwnerOptions {
   readonly url: string;
@@ -32,8 +39,20 @@ export interface PostgresSQLOwnerOptions {
   /** Bounded lifecycle observations carry no connection strings or material. */
   readonly observe?: (event: SQLOwnerObservation) => void;
 }
-interface Trust { readonly pem: string; readonly fingerprint: string; readonly expires: number }
+interface Trust {
+  /** Currently valid anchors only; this is the CA material given to Bun. */
+  readonly pem: string;
+  /** Identity of the whole mounted file, so any file change is observed. */
+  readonly fingerprint: string;
+  /** Latest expiry among retained anchors. */
+  readonly expires: number;
+  /** Retained anchors by DER SHA-256, with their expiry. */
+  readonly anchors: ReadonlyMap<string, number>;
+}
 interface Generation { readonly sql: Bun.SQL; readonly trust?: Trust; users: number; idle: (() => void)[] }
+
+const candidateRetryInitialMs = 250;
+const candidateRetryMaxMs = 5_000;
 
 async function readTrust(path: string): Promise<Trust> {
   const resolved = await realpath(path);
@@ -41,17 +60,42 @@ async function readTrust(path: string): Promise<Trust> {
   if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (blocks === null || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() !== "") throw new Error("database trust bundle is malformed");
-  let expires = Infinity;
+  const now = Date.now();
+  const retained: string[] = [];
+  const anchors = new Map<string, number>();
+  let expires = 0;
   for (const block of blocks) {
     const cert = new X509Certificate(block);
     const from = Date.parse(cert.validFrom), until = Date.parse(cert.validTo);
-    if (!cert.ca || Date.now() < from || Date.now() >= until) throw new Error("database trust bundle is outside its validity period");
-    expires = Math.min(expires, until);
+    if (!cert.ca) throw new Error("database trust bundle contains an invalid CA");
+    // A not-yet-valid anchor keeps the update invalid, so the last-known-good
+    // generation stays active and a later poll activates the bundle once the
+    // anchor is valid. An expired anchor cannot validate any chain; leaving it
+    // out keeps an old CA that expires during a planned overlap from disabling
+    // the generation that still holds the current CA.
+    if (now < from) throw new Error("database trust bundle contains a CA that is not yet valid");
+    if (now >= until) continue;
+    retained.push(block);
+    const der = Buffer.from(block.replace(/-----(BEGIN|END) CERTIFICATE-----|\s/g, ""), "base64");
+    anchors.set(createHash("sha256").update(der).digest("hex"), until);
+    expires = Math.max(expires, until);
   }
-  return { pem, expires, fingerprint: createHash("sha256").update(pem).digest("hex") };
+  if (retained.length === 0) throw new Error("database trust bundle has no currently valid CA");
+  return { pem: retained.join("\n"), expires, anchors, fingerprint: createHash("sha256").update(pem).digest("hex") };
 }
 
-/** Owns at most two pools, including candidate verification and old-pool drain. */
+/** True when the update removes an anchor of the active trust that is still valid. */
+function narrows(active: Trust, next: Trust): boolean {
+  const now = Date.now();
+  for (const [anchor, until] of active.anchors) if (until > now && !next.anchors.has(anchor)) return true;
+  return false;
+}
+
+/**
+ * Process-owned Bun PostgreSQL pool generation owner. Owns at most two pools,
+ * including candidate verification and old-pool drain; README.md states the
+ * trust replacement, expiry and diagnostic contract.
+ */
 export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Promise<PostgresSQLOwner> {
   const drain = options.drainTimeoutSeconds ?? 20;
   if (!Number.isFinite(drain) || drain <= 0) throw new Error("database drain bound is invalid");
@@ -64,16 +108,19 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
   let stopDrain!: () => void;
   const drainingStopped = new Promise<void>((resolve) => { stopDrain = resolve; });
   let reloadFailures = 0, lastFailureSummary = 0, degraded = false;
-  const event = (kind: SQLOwnerObservation["kind"], failedCount?: number) => {
+  // A failing candidate is retried with exponential spacing; any new mounted
+  // fingerprint or an activation resets the spacing.
+  let failedFingerprint: string | undefined, failedAttempts = 0, retryAt = 0;
+  const event = (kind: SQLOwnerObservation["kind"], failedCount?: number, reason?: SQLOwnerReloadFailure) => {
     // Diagnostics cannot alter SQL admission, activation or joined cleanup.
-    try { options.observe?.({ kind, pools, ...(failedCount === undefined ? {} : { failedCount }) }); } catch { /* observer owns its sink */ }
+    try { options.observe?.({ kind, pools, ...(failedCount === undefined ? {} : { failedCount }), ...(reason === undefined ? {} : { reason }) }); } catch { /* observer owns its sink */ }
   };
-  const reloadFailed = () => {
+  const reloadFailed = (reason?: SQLOwnerReloadFailure) => {
     reloadFailures++;
     const now = Date.now();
     if (!degraded || now - lastFailureSummary >= 30_000) {
       degraded = true; lastFailureSummary = now;
-      event("reload_failed", reloadFailures);
+      event("reload_failed", reloadFailures, reason);
     }
   };
   const reloadRecovered = () => {
@@ -114,7 +161,9 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     try { await options.verify(sql); return generation; }
     catch { await closePool(generation, 1); throw new Error("database pool generation verification failed"); }
   };
-  let active = await create(options.tls === undefined ? undefined : await readTrust(options.tls.caPath));
+  // Undefined only while a narrowed trust update has retired admission and no
+  // candidate built from the mounted bundle has verified yet.
+  let active: Generation | undefined = await create(options.tls === undefined ? undefined : await readTrust(options.tls.caPath));
   const drainOld = async (old: Generation) => {
     const deadline = Date.now() + drain * 1000;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -131,21 +180,56 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     }
     await closePool(old, stopped ? 5 : Math.max(0, (deadline - Date.now()) / 1000));
   };
+  // Every update is validated as a complete candidate pool before it receives
+  // new work. An update that only adds anchors, or keeps them, leaves the
+  // active generation admitting until its candidate verifies. An update that
+  // removes a still-valid anchor is authoritative trust removal: the active
+  // generation stops admitting at once and drains, and admission resumes only
+  // through a verified candidate built from the narrowed bundle. If the server
+  // does not yet present a chain to the remaining trust, the store stays
+  // unavailable until it does, rather than keeping the removed CA in use.
   const observe = async () => {
     if (stopped || options.tls === undefined) return;
     let trust: Trust;
     try { trust = await readTrust(options.tls.caPath); }
-    catch { if (!stopped) reloadFailed(); return; }
+    catch { if (!stopped) reloadFailed("invalid_bundle"); return; }
     if (stopped) return;
-    if (active.trust?.fingerprint === trust.fingerprint) { reloadRecovered(); return; }
+    if (active !== undefined && active.trust?.fingerprint === trust.fingerprint) {
+      failedFingerprint = undefined; failedAttempts = 0;
+      reloadRecovered(); return;
+    }
+    if (trust.fingerprint === failedFingerprint && Date.now() < retryAt) return;
     if (rotation !== undefined) { pending = true; return; }
     rotation = (async () => {
+      const previous = active;
+      // The rotation joins this drain, so a retry candidate never adds a third
+      // pool. The drain runs alongside the candidate and can settle first, so
+      // its failure handler is attached when it starts.
+      let retiring: Promise<void> | undefined;
+      if (previous?.trust !== undefined && narrows(previous.trust, trust)) {
+        active = undefined;
+        retiring = drainOld(previous).catch(() => { if (!stopped) reloadFailed(); });
+      }
       try {
-        const candidate = await create(trust);
+        let candidate: Generation;
+        try { candidate = await create(trust); }
+        catch {
+          if (!stopped) {
+            failedAttempts = trust.fingerprint === failedFingerprint ? failedAttempts + 1 : 1;
+            failedFingerprint = trust.fingerprint;
+            retryAt = Date.now() + Math.min(candidateRetryMaxMs, candidateRetryInitialMs * 2 ** (failedAttempts - 1));
+            reloadFailed("candidate_verification_failed");
+          }
+          return;
+        }
         if (stopped) { await closePool(candidate, 5); return; }
-        const old = active; active = candidate; event("activated"); reloadRecovered();
-        await drainOld(old);
+        active = candidate; event("activated"); reloadRecovered();
+        failedFingerprint = undefined; failedAttempts = 0;
+        if (previous !== undefined && retiring === undefined) await drainOld(previous);
       } catch { if (!stopped) reloadFailed(); }
+      finally {
+        if (retiring !== undefined) await retiring;
+      }
     })().finally(() => {
       rotation = undefined;
       // Re-read the mounted current generation; never retain queued credentials.
@@ -163,6 +247,7 @@ export async function openPostgresSQLOwner(options: PostgresSQLOwnerOptions): Pr
     withSQL: async (operation) => {
       if (stopped) throw new Error("database owner is closed");
       const generation = active;
+      if (generation === undefined) throw new Error("database trust generation is retired pending a verified replacement");
       if (generation.trust !== undefined && Date.now() >= generation.trust.expires) throw new Error("database trust generation is expired");
       generation.users++;
       try { return await operation(generation.sql); }

@@ -226,7 +226,11 @@ export async function buildProviderGatewayCommandDependencies(input: {
               : "transport.credential_reload_recovered",
             component: "database",
             "transport.stage": "credential_reload",
-            "transport.outcome": failed ? "invalid_generation" : "recovered",
+            "transport.outcome": !failed
+              ? "recovered"
+              : event.reason === "candidate_verification_failed"
+                ? "candidate_verification_failed"
+                : "invalid_generation",
             "failed.count": event.failedCount ?? 0,
           });
         } catch {
