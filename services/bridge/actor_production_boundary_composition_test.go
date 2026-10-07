@@ -7,9 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -90,37 +88,20 @@ func runSubagentProductionComposition(
 	if err != nil {
 		t.Fatalf("listen for subagent ToolRunner composition: %v", err)
 	}
+	// A failed composition reports the last declaration attempts the actual
+	// Bridge handler received; tool inputs themselves are never recorded.
 	type declarationAttempt struct {
-		WriteID             string                           `json:"writeId"`
-		EnteredAtUnixMS     int64                            `json:"enteredAtUnixMs"`
-		RemainingDeadlineMS int64                            `json:"remainingDeadlineMs"`
-		InputBytes          int                              `json:"inputBytes"`
-		Pending             bool                             `json:"pending"`
-		ElapsedMS           int64                            `json:"elapsedMs"`
-		ReturnContext       string                           `json:"returnContext,omitempty"`
-		ReturnCode          string                           `json:"returnCode,omitempty"`
-		SamplingGoroutineID uint64                           `json:"samplingGoroutineId,omitempty"`
-		StackSamples        []subagentDeclarationStackSample `json:"stackSamples,omitempty"`
+		WriteID             string `json:"writeId"`
+		EnteredAtUnixMS     int64  `json:"enteredAtUnixMs"`
+		RemainingDeadlineMS int64  `json:"remainingDeadlineMs"`
+		InputBytes          int    `json:"inputBytes"`
+		Pending             bool   `json:"pending"`
+		ElapsedMS           int64  `json:"elapsedMs"`
+		ReturnContext       string `json:"returnContext,omitempty"`
+		ReturnCode          string `json:"returnCode,omitempty"`
 	}
 	var declarationMu sync.Mutex
 	var declarationAttempts []*declarationAttempt
-	var samplerWG sync.WaitGroup
-	samplerStop := make(chan struct{})
-	samplerStopped := false
-	stackAttempts := 0
-	defer func() {
-		declarationMu.Lock()
-		samplerStopped = true
-		close(samplerStop)
-		declarationMu.Unlock()
-		joined := make(chan struct{})
-		go func() { samplerWG.Wait(); close(joined) }()
-		select {
-		case <-joined:
-		case <-time.After(time.Second):
-			t.Error("subagent declaration stack sampler did not join")
-		}
-	}()
 	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		write, ok := request.(*bridgev1.WriteEventRequest)
 		if !ok || write.GetToolDeclaration() == nil {
@@ -141,30 +122,8 @@ func runSubagentProductionComposition(
 		if len(declarationAttempts) > 3 {
 			declarationAttempts = declarationAttempts[1:]
 		}
-
-		capture := !samplerStopped && observation.InputBytes >= 2*1024*1024 && stackAttempts < 3
-		if capture {
-			stackAttempts++
-			samplerWG.Add(1)
-		}
 		declarationMu.Unlock()
-		handlerReturned := make(chan struct{})
-		if capture {
-			goroutineID := subagentDeclarationGoroutineID()
-			declarationMu.Lock()
-			observation.SamplingGoroutineID = goroutineID
-			declarationMu.Unlock()
-			go func() {
-				defer samplerWG.Done()
-				observeSubagentDeclarationStack(ctx, started, goroutineID, handlerReturned, samplerStop, func(sample subagentDeclarationStackSample) {
-					declarationMu.Lock()
-					observation.StackSamples = append(observation.StackSamples, sample)
-					declarationMu.Unlock()
-				})
-			}()
-		}
 		response, err := handler(ctx, request)
-		close(handlerReturned)
 		declarationMu.Lock()
 		observation.Pending, observation.ElapsedMS, observation.ReturnCode = false, time.Since(started).Milliseconds(), status.Code(err).String()
 		observation.ReturnContext = "active"
@@ -296,7 +255,6 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
-	observeSubagentDeclarationDB(t, admin)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
 	result := runSubagentProductionComposition(
@@ -318,68 +276,6 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 	if children != 0 || operations != 0 || inbox != 0 || jobs != 0 {
 		t.Fatalf("oversized prompt child/operation/inbox/queue mutations = %d/%d/%d/%d", children, operations, inbox, jobs)
 	}
-}
-
-// This clone has no background worker. Sample only bounded backend state while
-// the real composition runs, so a failed declaration can distinguish a DB wait
-// from preparation before SQL. Query text and Tool inputs are never observed.
-func observeSubagentDeclarationDB(t *testing.T, admin *sql.DB) {
-	t.Helper()
-	type sample struct {
-		AtUnixMS int64           `json:"atUnixMs"`
-		Backends json.RawMessage `json:"backends,omitempty"`
-		Failed   bool            `json:"queryFailed,omitempty"`
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	done := make(chan struct{})
-	var samples []sample
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		var previous string
-		// Bound observer work separately from the child watchdog and each query.
-		for attempt := 0; attempt < 120; attempt++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			queryCtx, queryCancel := context.WithTimeout(ctx, 250*time.Millisecond)
-			var snapshot string
-			err := admin.QueryRowContext(queryCtx, `SELECT COALESCE(json_agg(json_build_object(
-				'pid',pid,'state',state,'waitType',wait_event_type,'waitEvent',wait_event,
-				'blockingCount',cardinality(pg_blocking_pids(pid))))::text,'[]')
-				FROM (SELECT pid,state,wait_event_type,wait_event FROM pg_stat_activity
-				WHERE datname=current_database() AND pid<>pg_backend_pid()
-				AND backend_type='client backend' ORDER BY pid LIMIT 8) observed`).Scan(&snapshot)
-			queryCancel()
-			if ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				samples = append(samples, sample{AtUnixMS: time.Now().UnixMilli(), Failed: true})
-			} else if snapshot != previous {
-				samples = append(samples, sample{AtUnixMS: time.Now().UnixMilli(), Backends: json.RawMessage(snapshot)})
-				previous = snapshot
-			}
-			if len(samples) > 8 {
-				samples = samples[len(samples)-8:]
-			}
-		}
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-		if t.Failed() {
-			observations, err := json.Marshal(samples)
-			if err != nil {
-				t.Error("encode subagent declaration DB observations")
-				return
-			}
-			t.Logf("subagent declaration DB observations=%s", observations)
-		}
-	})
 }
 
 func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) {
@@ -773,138 +669,4 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	if operationCount != 3 {
 		t.Fatalf("durable reviewer ensure operation count = %d; want two trunks plus one sidecar", operationCount)
 	}
-}
-
-// Observe only slow fixture declarations. A sample is a best-effort snapshot,
-// not an exact phase timer or a measurement of CPU time. Sampling starts 750ms
-// before the actual server deadline and may continue after it while the handler
-// remains active, at most eight times 250ms apart. Raw stacks are never logged.
-type subagentDeclarationStackSample struct {
-	ElapsedMS   int64  `json:"elapsedMs"`
-	AtUnixMS    int64  `json:"atUnixMs"`
-	RemainingMS int64  `json:"remainingMs"`
-	Context     string `json:"context"`
-	Phase       string `json:"phase"`
-	Activity    string `json:"activity"`
-	GoState     string `json:"goState,omitempty"`
-	CaptureUS   int64  `json:"captureUs"`
-	Missing     bool   `json:"targetMissing,omitempty"`
-	Truncated   bool   `json:"truncated,omitempty"`
-}
-
-func subagentDeclarationGoroutineID() uint64 {
-	var header [512]byte
-	n := runtime.Stack(header[:], false)
-	fields := strings.Fields(string(header[:n]))
-	if len(fields) < 2 || fields[0] != "goroutine" {
-		return 0
-	}
-	id, _ := strconv.ParseUint(fields[1], 10, 64)
-	return id
-}
-func observeSubagentDeclarationStack(ctx context.Context, started time.Time, goroutineID uint64, returned, stop <-chan struct{}, record func(subagentDeclarationStackSample)) {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return
-	}
-	timer := time.NewTimer(max(0, time.Until(deadline)-750*time.Millisecond))
-	defer timer.Stop()
-	var buffer [64 * 1024]byte
-	for attempt := 0; attempt < 8; attempt++ {
-		select {
-		case <-returned:
-			return
-		case <-stop:
-			return
-		case <-timer.C:
-		}
-		// Both channels may already be ready if this observer was scheduled late.
-		// Recheck completion before asking for any process-wide stack snapshot.
-		select {
-		case <-returned:
-			return
-		case <-stop:
-			return
-		default:
-		}
-		before := time.Now()
-		n := runtime.Stack(buffer[:], true)
-		after := time.Now()
-		sample := subagentDeclarationStackSample{ElapsedMS: after.Sub(started).Milliseconds(), AtUnixMS: after.UnixMilli(), RemainingMS: time.Until(deadline).Milliseconds(), Context: "active", Phase: "unavailable", Activity: "unavailable", CaptureUS: after.Sub(before).Microseconds(), Missing: true, Truncated: n == len(buffer)}
-		if ctx.Err() == context.DeadlineExceeded {
-			sample.Context = "deadline"
-		} else if ctx.Err() == context.Canceled {
-			sample.Context = "canceled"
-		}
-		raw := string(buffer[:n])
-		needle := "goroutine " + strconv.FormatUint(goroutineID, 10) + " ["
-		offset := strings.Index(raw, needle)
-		if goroutineID != 0 && offset >= 0 {
-			block := raw[offset:]
-			end := strings.Index(block, "\n\n")
-			if end >= 0 || !sample.Truncated {
-				if end >= 0 {
-					block = block[:end]
-				}
-				sample.Missing = false
-				sample.Phase, sample.Activity, sample.GoState = subagentDeclarationStackLabels(block)
-			}
-		}
-		record(sample)
-		timer.Reset(250 * time.Millisecond)
-	}
-}
-func subagentDeclarationStackLabels(block string) (phase, activity, state string) {
-	phase, activity, state = "handler", "go", "other"
-	if strings.Contains(block, "normalizeRuntimeToolDeclaration(") {
-		phase = "normalize"
-		if strings.Contains(block, "canonicalRuntimeContext") {
-			phase = "normalize.context"
-		} else if strings.Contains(block, "CanonicalRunToolJSON(") {
-			phase = "normalize.canonical"
-		} else if strings.Contains(block, "encoding/json.Unmarshal(") {
-			phase = "normalize.decode"
-		}
-	} else if strings.Contains(block, "writeToolDeclarationDigest(") {
-		phase = "digest"
-		if strings.Contains(block, "canonicalRuntimeContext") {
-			phase = "digest.context"
-		} else if strings.Contains(block, "runtimeJSONStringifyBytes(") {
-			phase = "digest.stringify"
-		} else if strings.Contains(block, "CanonicalRunToolJSON(") {
-			phase = "digest.canonical"
-		} else if strings.Contains(block, "marshalRuntimeDeclarationObject(") {
-			phase = "digest.encode"
-		} else if strings.Contains(block, "Sha256Hex(") {
-			phase = "digest.hash"
-		}
-	} else if strings.Contains(block, "runtimeToolEventPayloadJSON(") {
-		phase = "event.payload"
-	} else if strings.Contains(block, "appendRuntimeAssistantContextTx(") || strings.Contains(block, "appendPreparedRuntimeAssistantContextTx(") {
-		phase = "transaction.context"
-	} else if strings.Contains(block, "withWorkspaceTx(") {
-		phase = "transaction"
-		if strings.Contains(block, "runtimecontrol.MarshalJSON(") {
-			phase = "transaction.json"
-		}
-	}
-	if strings.Contains(block, "database/sql.(*DB).conn(") {
-		activity = "pool"
-	} else if strings.Contains(block, "database/sql.(*Tx).Commit(") {
-		activity = "commit"
-	} else if strings.Contains(block, "database/sql.(*Tx).Rollback(") {
-		activity = "rollback"
-	} else if strings.Contains(block, "pgconn.") || strings.Contains(block, "pgx/") || strings.Contains(block, "database/sql.(*Tx).Exec") || strings.Contains(block, "database/sql.(*Tx).Query") {
-		activity = "sql"
-	}
-	if a := strings.Index(block, "["); a >= 0 {
-		if b := strings.Index(block[a:], "]"); b >= 0 {
-			value := strings.Split(block[a+1:a+b], ",")[0]
-			switch value {
-			case "running", "runnable", "IO wait", "select", "chan receive", "chan send", "semacquire", "sleep":
-				state = value
-			}
-		}
-	}
-	return
 }
