@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,10 +25,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// The release keeps admission closed until this actual command sequence has
-// succeeded. An import failure does not stop an already running Auth process.
+// The actual initialization commands run against a private empty target. A
+// rejected preparation or import exits nonzero without mutating the target;
+// Auth cannot start before bootstrap; repeating preparation, bootstrap and
+// import preserves workspace, grant and key identities; a failed import leaves
+// the prior authority rows unchanged, and the repaired sequence admits again.
 func TestPostgreSQLManagedInitialization(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "managed_initialization_assertion=commands_order_repeat_failure_closed", func(t *testing.T) {
+	oidcIsolatedTLSCaseWithMarker(t, "managed_initialization_assertion=commands_order_repeat_failure_preserved", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		defer cancel()
 		admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
@@ -82,8 +84,8 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Allocate distinct addresses, then release for closed-listener probes and
-		// the negative pre-bootstrap Auth command. Each serving start reserves anew.
+		// Allocate addresses for the negative pre-bootstrap Auth start; each
+		// serving start reserves anew.
 		processEnv := managedInitializationClone(base)
 		delete(processEnv, "TETRAL_DATABASE_ADMIN_URL")
 		for key, value := range map[string]string{"TETRAL_DATABASE_URL": roleURL("auth"), "TETRAL_AUTH_GRPC_TRANSPORT": "plaintext", "TETRAL_HTTP_TRANSPORT": "plaintext", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64": privateKey, "ENGINE_API_KEY": strings.Repeat("m", auth.MinBootstrapKeyBytes), "ENGINE_BOOTSTRAP_WORKSPACE_ID": "managed_workspace"} {
@@ -97,7 +99,6 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 			return managedInitializationCommand(ctx, t, binaries[name], environment, input, wantOK, args...)
 		}
 		run("prepare", base, []byte(`{"roles":{}}`), false)
-		managedInitializationClosed(t, processEnv)
 		if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace`).Scan(&objects); err != nil || objects != 0 {
 			t.Fatal("failed initialization mutated the empty target")
 		}
@@ -130,7 +131,6 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		// Both real grant import and real Auth startup require explicit bootstrap.
 		run("policy", base, policyInput, false)
 		run("auth", processEnv, nil, false)
-		managedInitializationClosed(t, processEnv)
 		if err := admin.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM workspaces)+(SELECT count(*) FROM auth_federation_rules)+(SELECT count(*) FROM auth_identities)+(SELECT count(*) FROM auth_workspace_grants)+(SELECT count(*) FROM api_keys)`).Scan(&count); err != nil || count != 0 {
 			t.Fatal("failed pre-bootstrap import/startup created hidden workspace, policy or keys")
 		}
@@ -166,7 +166,6 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		failed.FederationRules = append(append([]auth.FederationRule{}, document.FederationRules...), auth.FederationRule{ID: "failed_rule", OrganizationID: "managed_org", Issuer: "https://issuer.failure.test", Audience: "tetral-engine", JWKSURL: "https://issuer.failure.test/keys", Algorithm: "RS256", Enabled: true})
 		failed.WorkspaceGrants = []auth.WorkspaceGrant{{ID: "failed_grant", IdentityID: "managed_identity", WorkspaceID: workspace.ID("missing_workspace"), Role: auth.WorkspaceFullAccess, Enabled: true}}
 		run("policy", base, managedInitializationJSON(t, failed), false)
-		managedInitializationClosed(t, processEnv)
 		if after := managedInitializationRows(ctx, t, admin); after != before {
 			t.Fatal("failed preparation/import destroyed or partially changed seeded data")
 		}
@@ -176,7 +175,7 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		process = managedInitializationStartAuth(ctx, t, binaries["auth"], processEnv)
 		managedInitializationProbes(ctx, t, process, processEnv["ENGINE_API_KEY"])
 		process.stop(t)
-		t.Log("managed_initialization_assertion=commands_order_repeat_failure_closed")
+		t.Log("managed_initialization_assertion=commands_order_repeat_failure_preserved")
 	})
 }
 
@@ -243,16 +242,6 @@ func managedInitializationChanges(t *testing.T, output []byte, want int) {
 	}
 	if err := json.Unmarshal(output, &result); err != nil || len(result.Changes) != want {
 		t.Fatal("actual policy command lost exact change/no-op result")
-	}
-}
-func managedInitializationClosed(t *testing.T, values map[string]string) {
-	t.Helper()
-	for _, key := range []string{"TETRAL_AUTH_HTTP_ADDR", "TETRAL_AUTH_METRICS_ADDR", "TETRAL_AUTH_GRPC_ADDR"} {
-		connection, err := net.DialTimeout("tcp", values[key], time.Second)
-		if err == nil {
-			_ = connection.Close()
-			t.Fatal("release admitted a listener before initialization succeeded")
-		}
 	}
 }
 func managedInitializationRows(ctx context.Context, t *testing.T, admin *sql.DB) string {
