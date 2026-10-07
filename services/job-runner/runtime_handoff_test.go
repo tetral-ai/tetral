@@ -55,10 +55,9 @@ func TestPostgreSQLRuntimeHandoffRecoveryExactSourceAndLease(t *testing.T) {
 		t.Fatalf("decoded recovery aliases event: %+v", job)
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "session_handoff", "binding_new", 2, "pod_new")
-	store := NewPostgreSQLRuntimeDeliveryStore(client, 19090)
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	store := NewPostgreSQLRuntimeDeliveryStore(client, 19090, KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_new", PodIP: "10.0.0.10"}})
-	}}
+	}})
 	plan, err := store.ActivateRuntimeRecovery(ctx, job)
 	if err != nil {
 		t.Fatal(err)

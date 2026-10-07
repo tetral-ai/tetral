@@ -56,7 +56,7 @@ func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *tes
 		t.Fatal("reclaimed interrupt lease reused its old token")
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), staleJob, RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, ErrorKind: "runtime_delivery_exhausted",
 	})
@@ -132,7 +132,7 @@ func TestPostgreSQLJobRunnerLosingInterruptLeaseBeforeReplayCannotCancelMessages
 		t.Fatalf("current interrupt lease = %s/%s; want reclaimed %s with a new token", current.ID, current.LeaseToken, first.ID)
 	}
 
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer}
 	if err := runner.processRuntimeJob(context.Background(), queueJobProto(first), JobRunnerConfig{}); err != nil {
@@ -183,7 +183,7 @@ func TestPostgreSQLInterruptLeaseLossAfterReplayStopsBeforePreparationAndSend(t 
 	if err != nil {
 		t.Fatalf("decode first interrupt lease: %v", err)
 	}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	if replayed, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), job); err != nil || found {
 		t.Fatalf("successful pre-delivery replay = %+v/%v/%v; want no receipt", replayed, found, err)
 	}
@@ -270,7 +270,7 @@ func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSibl
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childThreadID, interruptID, "interrupt_control", interruptEvent, 3, 1, now)
-	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "child-interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -334,7 +334,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		t.Fatalf("malform canonical interrupt metadata: %v", err)
 	}
 
-	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -410,7 +410,7 @@ func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *t
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 2, 3, now)
 
-	baseStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	baseStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	pausingStore := &postPlanInterruptFenceStore{
 		PostgreSQLRuntimeDeliveryStore: baseStore,
 		planned:                        make(chan struct{}), resume: make(chan struct{}),
@@ -558,7 +558,7 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 	now := time.Now().UTC().Add(-time.Minute)
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, followerID, "messages", followerEvt, 2, queue.DefaultMaxAttempts, now.Add(time.Microsecond))
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := invalidFinalizationInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore}}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
@@ -651,7 +651,7 @@ func TestPostgreSQLMalformedInterruptFinalizationRollbackPreservesExactLease(t *
 		FOR EACH ROW EXECUTE FUNCTION fail_malformed_interrupt_terminal_event()`); err != nil {
 		t.Fatalf("install malformed interrupt rollback trigger: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	if _, err := store.FinalizeMalformedRuntimeInputCustody(context.Background(), malformedRuntimeInputLease(queueJobProto(leased))); err == nil {
 		t.Fatal("malformed interrupt finalization survived injected transaction failure")
 	}
@@ -698,7 +698,7 @@ func TestPostgreSQLMalformedInterruptResponseLossReplaysTerminalResult(t *testin
 		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "malformed-interrupt-replay",
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	lease := malformedRuntimeInputLease(queueJobProto(leased))
 	first, err := store.FinalizeMalformedRuntimeInputCustody(context.Background(), lease)
 	if err != nil || !first.Handled || !first.InterruptTerminalized || !first.QueueLeaseSettled {

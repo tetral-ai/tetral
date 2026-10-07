@@ -14,9 +14,9 @@ import (
 )
 
 func runtimePodLossSweepStore(t *testing.T, runtime *sql.DB, logs *bytes.Buffer, snapshot func() enginekubernetes.BindingVisibilitySnapshot) *jobrunner.PostgreSQLRuntimeDeliveryStore {
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: snapshot, Clock: store.Clock, GetPod: fixtureConfirmedMissingRuntimePod}
+	clock := func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: snapshot, Clock: clock, GetPod: fixtureConfirmedMissingRuntimePod})
+	store.Clock = clock
 	if logs != nil {
 		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	}

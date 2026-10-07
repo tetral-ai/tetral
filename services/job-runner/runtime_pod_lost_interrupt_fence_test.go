@@ -203,10 +203,9 @@ func TestPostgreSQLRuntimePodLossRepairsSiblingWithoutClosingInterruptedThread(t
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, interruptedID, interruptInput, "interrupt_control", interruptEvent, 3, queue.DefaultMaxAttempts, time.Now().UTC())
 
 	now := time.Date(2026, 8, 24, 21, 0, 0, 0, time.UTC)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.TargetResolver = KubernetesRuntimeTargetResolver{GetPod: fixtureAbsentRuntimePod, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, KubernetesRuntimeTargetResolver{GetPod: fixtureAbsentRuntimePod, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
-	}}
+	}})
 	if _, err := store.mutateLostRuntimeBinding(context.Background(), "default", sessionID, binding, now, false); err != nil {
 		t.Fatalf("repair mixed pod-loss Threads: %v", err)
 	}

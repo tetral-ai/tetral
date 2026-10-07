@@ -59,7 +59,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	job := exhaustionRuntimeJob(sessionID, threadID, "rin_exhaustion_delivery", "messages", []string{"evt_exhaustion_delivery"})
 	job.SequenceFrom = 2
 	job.SequenceTo = 2
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResultForBinding(bindingID, 1, podUID)); err != nil {
 		t.Fatalf("finalize exhausted delivery: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentQueuedInboxFinalizationLineariz
 	const eventID = "evt_exhaust_concurrent_event"
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 30, 0, time.UTC) }
 	job := exhaustionRuntimeJob(sessionID, threadID, "rin_exhaust_concurrent_event", "messages", []string{eventID})
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -154,7 +154,7 @@ func TestPostgreSQLCompletionMailProducerAndJobRunnerTerminalizeQueuedInbox(t *t
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}},

@@ -75,7 +75,7 @@ func TestPostgreSQLThreadInterruptBarrierDefersExactInflightCustody(t *testing.T
 		sessionID, interruptID, threadID); err != nil {
 		t.Fatalf("release interrupt barrier before stale response finalization: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{Status: RuntimeDeliveryBarrierStale})
 	if err != nil || result.Status != RuntimeDeliveryBarrierStale || !result.QueueLeaseSettled {
 		t.Fatalf("finalize barrier stale = %#v/%v", result, err)
@@ -171,7 +171,7 @@ func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
 	}
 	staleJob.JobID, staleJob.LeaseToken, staleJob.Kind = created.ID, leaseToken, created.Kind
 	staleJob.PartitionKey, staleJob.DedupeKey = created.PartitionKey, created.DedupeKey
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	plan, err := store.PrepareRuntimeCommand(context.Background(), staleJob)
 	if err != nil || !plan.StaleAccepted || !plan.QueueLeaseSettled {
 		t.Fatalf("superseded interrupt plan = %#v/%v; want settled stale", plan, err)

@@ -76,7 +76,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_pending_tool_uses(workspace_id,session_id,session_thread_id,tool_use_event_id,model_tool_call_id,tool_name,input_json,status,created_at,updated_at) VALUES('default',$1,$2,$3,$4,'Read','{"file_path":"README.md"}','cancelled','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, sessionID, threadID, toolUseEventID, modelToolCallID); err != nil {
 		t.Fatalf("seed canceled cleanup execution route: %v", err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(client, admin, 9090)
 	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	job := leaseCleanupRuntimeJobForTest(t, runtime, cleanupTreeJob(sessionID, "cleanup_narrow_tool"))
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
@@ -194,7 +194,7 @@ func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
 	if _, err := admin.Exec(`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
 		t.Fatalf("remove runtime binding before deleted-session cleanup: %v", err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryStore.AttachmentBlobStore = store.AttachmentBlobStore
 	deliveryStore.Clock = func() time.Time { return store.Clock().Add(time.Minute) }
 	result, err := deliveryStore.FinalizeRuntimeCleanup(context.Background(), jobrunner.RuntimeJob{
@@ -253,7 +253,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 		nextBridgeAPIEventSequenceForTest(t, admin, "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim"),
 	)
 
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	plan, err := store.PrepareRuntimeCommand(context.Background(), jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID:          "qjob_cleanup_bridge_preclaim",
@@ -322,7 +322,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 		t.Fatalf("mark cleanup enqueued: %v", err)
 	}
 
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	job := jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID:          "qjob_cleanup_bridge_confirm",
@@ -417,7 +417,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 		t.Fatalf("mark cleanup enqueued: %v", err)
 	}
 
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	plan, err := store.PrepareRuntimeCommand(context.Background(), jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID:          "qjob_cleanup_bridge_preidle",
@@ -464,7 +464,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 	}
 	seedBridgeAPIUserMessageEvent(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_child", "sevt_cleanup_child_postidle_message", 1)
 
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	plan, err := store.PrepareRuntimeCommand(context.Background(), jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID:          "qjob_cleanup_bridge_child_postidle",
@@ -499,7 +499,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns(t
 		t.Fatalf("mark child running: %v", err)
 	}
 
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	plan, err := store.PrepareRuntimeCommand(context.Background(), cleanupTreeJob(sessionID, cleanupID))
 	if err != nil {
@@ -543,7 +543,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhenChildStartsB
 		cleanupID = "cleanup_bridge_tree_finalize_1"
 	)
 	seedBridgeCleanupTreeFixture(t, runtime, admin, sessionID, mainID, childID, cleanupID, false)
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	job := leaseCleanupRuntimeJobForTest(t, runtime, cleanupTreeJob(sessionID, cleanupID))
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
@@ -593,7 +593,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 			sessionID, childID); err != nil {
 			t.Fatalf("mark child requires_action: %v", err)
 		}
-		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+		store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 		plan, err := store.PrepareRuntimeCommand(context.Background(), cleanupTreeJob(sessionID, cleanupID))
 		if err != nil {
@@ -619,7 +619,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 			t.Fatalf("mark child requires_action: %v", err)
 		}
 		seedBridgeAPIToolConfirmationEvent(t, admin, "default", sessionID, childID, "sevt_cleanup_tree_confirmation", 1, "sevt_cleanup_tree_wait", "allow")
-		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+		store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 		plan, err := store.PrepareRuntimeCommand(context.Background(), cleanupTreeJob(sessionID, cleanupID))
 		if err != nil {
@@ -645,7 +645,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 			sessionID, reviewer); err != nil {
 			t.Fatalf("mark reviewer running: %v", err)
 		}
-		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+		store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 		store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 		plan, err := store.PrepareRuntimeCommand(context.Background(), cleanupTreeJob(sessionID, cleanupID))
 		if err != nil {
@@ -709,9 +709,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	}
 
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(true, enginekubernetes.BoundRuntimePod{
 				Namespace: "tetral-agent-runtime",
@@ -720,7 +718,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 				PodIP:     "10.0.0.10",
 			}, enginekubernetes.BindingVisibilityAbsent)
 		},
-	}
+	})
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	job := jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID:          "qjob_cleanup_bridge_gone",
 		LeaseToken:     "lease_cleanup_bridge_gone",
@@ -863,9 +862,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatalf("mark cleanup approval enqueued: %v", err)
 	}
 
-	cleanupStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	cleanupStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	cleanupStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
+	cleanupStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, jobrunner.KubernetesRuntimeTargetResolver{GetPod: fixtureConfirmedMissingRuntimePod,
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(
 				true,
@@ -875,7 +872,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 				enginekubernetes.BindingVisibilityAbsent,
 			)
 		},
-	}
+	})
+	cleanupStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
 	job := leaseCleanupRuntimeJobForTest(t, runtime, jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID,
 		RuntimeInputID: "cleanup_session:cleanup_cold_approval_1", CleanupJobID: "cleanup_cold_approval_1",

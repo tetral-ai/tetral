@@ -87,8 +87,7 @@ func TestPostgreSQLRuntimePromotedReplacementRetainsLossAuthority(t *testing.T) 
 				visibility = kubernetes.BindingVisibilityNotReady
 			}
 			getCalls := 0
-			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(installed.DB), 19090)
-			store.TargetResolver = KubernetesRuntimeTargetResolver{
+			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(installed.DB), 19090, KubernetesRuntimeTargetResolver{
 				Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 					return kubernetes.NewBindingVisibilitySnapshotStateForTest(true, kubernetes.BoundRuntimePod{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP}, visibility)
 				},
@@ -96,7 +95,7 @@ func TestPostgreSQLRuntimePromotedReplacementRetainsLossAuthority(t *testing.T) 
 					getCalls++
 					return &kubernetes.PodObservation{Namespace: binding.Namespace, Name: binding.PodName, UID: binding.PodUID, IP: binding.PodIP, Running: true, Absent: scenario.absent}, nil
 				},
-			}
+			})
 			first, err := store.mutateLostRuntimeBinding(ctx, "default", "replacement-session", binding, time.Now(), true)
 			if err != nil {
 				t.Fatal(err)

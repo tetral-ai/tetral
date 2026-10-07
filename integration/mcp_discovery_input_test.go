@@ -26,7 +26,7 @@ func newInputDiscoveryFixture(t *testing.T) (*jobrunner.PostgreSQLRuntimeDeliver
 		RuntimeInputID: "rin_discovery", InputKind: "messages", EventIDs: []string{"evt_discovery"}, SequenceFrom: 1, SequenceTo: 1}
 	seedBridgeAPIEvent(t, admin, "default", job.SessionID, job.SessionThreadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"run"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, job)
-	return jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090), admin, job
+	return fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090), admin, job
 }
 
 func TestMCPInputDiscoveryFailureReplayAndNextInputRecovery(t *testing.T) {
@@ -40,7 +40,7 @@ func TestMCPInputDiscoveryFailureReplayAndNextInputRecovery(t *testing.T) {
 		t.Fatalf("failed input = %+v/%v sends=%d attempts=%d", result, err, len(sender.requests), len(failed.requests))
 	}
 	// A new process handles the same input: no discovery, no second error, no model.
-	restarted := jobrunner.NewPostgreSQLRuntimeDeliveryStore(store.Client, 9090)
+	restarted := fixtureRuntimeDeliveryStore(store.Client, admin, 9090)
 	restarted.MCPManifestLister = failed
 	_, err = (jobrunner.RuntimePodDirectDeliverer{Store: restarted, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil || len(failed.requests) != 3 || len(sender.requests) != 0 {

@@ -101,7 +101,7 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 		podUID:    podUID,
 		suffix:    suffix,
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, runtimePort)
+	deliveryStore := fixtureRuntimeDeliveryStore(client, adminDB, runtimePort)
 	deliveryStore.Clock = func() time.Time {
 		return time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
 	}

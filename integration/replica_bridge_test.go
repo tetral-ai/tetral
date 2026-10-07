@@ -29,7 +29,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -255,7 +254,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2`, session, toolID).Scan(&acceptedRows); err != nil || acceptedRows != 1 {
 			t.Fatalf("wait expiry lost accepted custody=%d/%v", acceptedRows, err)
 		}
-		fixture := &separatedOwners{ctx: context.Background(), admin: admin, peerDB: runtimeDB, runner: jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 19090), queue: queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)), sessionID: session, threadID: thread}
+		fixture := &separatedOwners{ctx: context.Background(), admin: admin, peerDB: runtimeDB, runner: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 19090), queue: queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)), sessionID: session, threadID: thread}
 		calls := separatedExecuteSandbox(t, fixture, scope, toolID, `{"status":"completed","stdout":{"text":"original result","truncated":false},"stderr":{"text":"","truncated":false}}`)
 		if calls != 1 {
 			t.Fatalf("external invocation ledger=%d", calls)

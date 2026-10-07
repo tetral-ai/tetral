@@ -108,7 +108,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission(t
 		t.Fatalf("admit parent close after recovery lease = %#v/%v", admitted, err)
 	}
 
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(client, admin, 9090)
 	finalized, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, jobrunner.RuntimeDeliveryResult{
 		Status: jobrunner.RuntimeDeliveryRejected, Retryable: true,
 		ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
@@ -207,7 +207,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureSettlesSingleAttemptInpu
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 			enqueueExhaustionJob(t, queueStore, job, now.Add(-time.Second))
 
-			deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 			deliveryStore.Clock = func() time.Time { return now }
 			deliveryStore.MCPManifestLister = test.lister(t)
 			sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
@@ -292,7 +292,7 @@ func TestPostgreSQLRuntimeDeliveryStoreSettlesUnclassifiedMCPFailureAfterBounded
 			}
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"retain custody"}]}`)
 			seedRuntimeInboxBirthForJob(t, admin, job)
-			store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 			store.MCPManifestLister = newExactFailureMCPManifestLister(t, test.code, test.values)
 			sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 			result, err := (jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
@@ -338,7 +338,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 		}
 		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"race"}]}`)
 		seedRuntimeInboxBirthForJob(t, admin, job)
-		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+		store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 		store.MCPManifestLister = lister
 		sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 		return admin, store, job, sender
@@ -462,7 +462,7 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 	var runtimeConfigPayload string
 	client := dbconnect.NewClientForTesting(runtime)
 	var err error
-	runtimeConfigPayload, err = prepareFixtureConfigPayload(context.Background(), client, jobrunner.RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1", RuntimeInputID: "runtime_config_update:" + sessionID + ":1"})
+	runtimeConfigPayload, err = prepareFixtureConfigPayload(context.Background(), client, admin, jobrunner.RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1", RuntimeInputID: "runtime_config_update:" + sessionID + ":1"})
 	if err != nil {
 		t.Fatalf("rebuild runtime config: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 		UnreadyGeneration:        2,
 		ToolName:                 "github_search",
 	}
-	delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	delivery := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryResult, err := (jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(
 		context.Background(), queuedManifestJob(t, admin, sessionID, 2),
 	)
@@ -560,7 +560,7 @@ func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBefore
 	responses = append(responses, jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted})
 	sender := &recordingRuntimeCommandSender{results: responses}
 	queueServer := tetralqueue.NewServer(queueStore, nil)
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	composedDeliverer := manifestCompositionDeliverer{direct: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}}
 	runner := &jobrunner.JobRunner{
 		Queue: queueServer, Workspaces: staticWorkspaceLister{"default"},
@@ -654,7 +654,7 @@ func deliverQueuedManifestPayload(t *testing.T, runtime *sql.DB, admin *sql.DB, 
 	t.Helper()
 	job := queuedManifestJob(t, admin, sessionID, generation)
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
-	delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	delivery := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	result, err := (jobrunner.RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
 	if err != nil || result.Status != jobrunner.RuntimeDeliveryAccepted || len(sender.requests) != 1 {
 		t.Fatalf("deliver manifest generation %d = %+v, %v, requests %d", generation, result, err, len(sender.requests))
@@ -783,18 +783,17 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
 	enqueueExhaustionJob(t, queueStore, job, now)
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.MCPManifestLister = mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", "pod_oauth_manifest")
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_oauth_manifest", PodIP: "10.0.0.10",
 		}})
-	}}
+	}})
+	deliveryStore.MCPManifestLister = mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 	var runtimeConfigPayload string
 	client := dbconnect.NewClientForTesting(runtime)
 	var payloadErr error
-	runtimeConfigPayload, payloadErr = prepareFixtureConfigPayload(context.Background(), client, jobrunner.RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1", RuntimeInputID: "runtime_config_update:" + sessionID + ":1"})
+	runtimeConfigPayload, payloadErr = prepareFixtureConfigPayload(context.Background(), client, admin, jobrunner.RuntimeJob{Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1", RuntimeInputID: "runtime_config_update:" + sessionID + ":1"})
 	if payloadErr != nil {
 		t.Fatalf("build OAuth Runtime config: %v", payloadErr)
 	}
@@ -879,7 +878,7 @@ func (s *oauthReadyRuntimeSender) AcceptInput(ctx context.Context, _ jobrunner.R
 		return nil, errors.New(s.lastError)
 	}
 	var manifestPayload string
-	manifestPayload, err = prepareFixtureConfigPayload(ctx, s.client, manifestJob)
+	manifestPayload, err = prepareFixtureConfigPayload(ctx, s.client, s.admin, manifestJob)
 	if err != nil {
 		s.lastError = fmt.Sprintf("build ready manifest payload: %v", err)
 		return nil, errors.New(s.lastError)
@@ -1133,8 +1132,6 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 		'task_notification','[]','queued','2026-01-01T00:01:00Z','2026-01-01T00:01:00Z')`); err != nil {
 		t.Fatalf("seed queued task notification: %v", err)
 	}
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
 	resolver := &recordingRuntimeTargetResolver{binding: runtimecontrol.Binding{
 		BindingID:         "bind_bridge_task_delivery",
 		BindingGeneration: 1,
@@ -1144,7 +1141,8 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 		RuntimeProcessID:  "process_pod_uid_task_delivery",
 		PodIP:             "10.0.0.1",
 	}}
-	store.TargetResolver = resolver
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, resolver)
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
 
 	job := jobrunner.RuntimeJob{
 		JobID:           "qjob_bridge_task_delivery",
@@ -1289,7 +1287,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 	enqueue(interruptJob, 3)
 	enqueue(messageJob, queue.DefaultMaxAttempts)
 
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	sender := &receiptGatedInterruptSender{

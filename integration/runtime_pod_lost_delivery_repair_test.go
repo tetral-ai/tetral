@@ -304,7 +304,9 @@ func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePo
 }
 
 func runRuntimePodLostRepairTransaction(ctx context.Context, runtime *sql.DB, sessionID string, binding runtimecontrol.Binding, now time.Time) (int, error) {
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	// repairLostBindingThroughProduction installs the confirmed-loss visibility
+	// for its repair; the store resolves no other target.
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, nil)
 	err := repairLostBindingThroughProduction(ctx, store, "default", sessionID, binding, now)
 	return 0, err
 }

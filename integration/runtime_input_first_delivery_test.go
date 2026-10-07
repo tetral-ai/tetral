@@ -398,7 +398,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		t.Fatalf("configure final producer input attempt: %v", err)
 	}
 	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(client, admin, 9090)
 	var attemptLog bytes.Buffer
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
@@ -441,7 +441,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		"preparation.error_kind", "queue.attempt", "queue.job.id", "queue.max_attempts",
 		"runtime.input.id", "runtime.input.kind", "session.id", "thread.id", "time", "workspace.id",
 	}
-	if !reflect.DeepEqual(keys, wantKeys) || record["preparation.error_kind"] != "runtime_binding_unavailable" ||
+	if !reflect.DeepEqual(keys, wantKeys) || record["preparation.error_kind"] != "runtime_placement_no_candidates" ||
 		record["finalization.disposition"] != "rejected:runtime_delivery_exhausted" {
 		t.Fatalf("Runtime delivery attempt log = %#v; want bounded attempt and finalization evidence", record)
 	}

@@ -69,10 +69,9 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 			qStore := queue.NewPostgreSQLStore(client)
 			rpc := serveQueueReplica(t, qStore, &queueReplicaResponseFault{})
 			sender := &drainRuntimeSender{RuntimePodCommandClient: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{}), admitted: make(chan struct{}), release: make(chan struct{})}
-			delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port)
-			delivery.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+			delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port, jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 				return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_old", PodIP: "127.0.0.1"}})
-			}}
+			}})
 			acquire, quiesce := context.WithCancel(ctx)
 			defer quiesce()
 			cfg := jobrunner.JobRunnerConfig{LeaseOwner: "draining-runner", MaxJobs: 1, LeaseDuration: 3 * time.Second, HeartbeatInterval: 150 * time.Millisecond, PollInterval: 10 * time.Millisecond, DrainTimeout: 600 * time.Millisecond, CancelJoinTimeout: time.Second}
@@ -133,8 +132,7 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 					t.Fatalf("forced Runner custody reclamation=%d/%v", n, err)
 				}
 			}
-			nextDelivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(successorClient, child.port)
-			nextDelivery.TargetResolver = delivery.TargetResolver
+			nextDelivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(successorClient, child.port, delivery.TargetResolver)
 			successor := &jobrunner.JobRunner{Queue: jobrunner.QueueClientFromGRPC(serveQueueReplica(t, successorQueue, &queueReplicaResponseFault{})), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: nextDelivery, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "replacement-runner", MaxJobs: 2, LeaseDuration: 3 * time.Second, HeartbeatInterval: 150 * time.Millisecond}}
 			for range 2 {
 				if _, err := successor.RunOnceWithActivity(ctx); err != nil {

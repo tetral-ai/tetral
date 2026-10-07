@@ -375,14 +375,14 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		enginekubernetes.BindingVisibilityDeleted,
 		[]enginekubernetes.BindingCandidate{newCandidate},
 	)
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
+	clock := func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090, jobrunner.KubernetesRuntimeTargetResolver{
 		Snapshot:   func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
 		GetPod:     fixtureConfirmedMissingRuntimePod,
 		LoadClient: fixtureRuntimeLoadClient(t),
-		Clock:      store.Clock,
-	}
+		Clock:      clock,
+	})
+	store.Clock = clock
 	job := jobrunner.RuntimeJob{
 		JobID:           "qjob_pod_loss_later",
 		LeaseToken:      "lease_pod_loss_later",
@@ -652,7 +652,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 
 			apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-pod-loss-approval-key!!")
-			deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 0)
+			deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 0)
 			if err := repairLostBindingThroughProduction(context.Background(), deliveryStore, workspace.DefaultID.String(), sessionID, binding,
 				time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 			); err != nil {

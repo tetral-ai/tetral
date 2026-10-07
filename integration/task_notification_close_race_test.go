@@ -82,7 +82,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 		Scope: parentScope, SourceToolUseEventId: closeSource, TargetChildThreadId: childID,
 		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 
 	blocker, err := admin.BeginTx(context.Background(), nil)

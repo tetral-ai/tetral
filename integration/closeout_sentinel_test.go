@@ -189,7 +189,7 @@ func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.
 		duplicate.GetDuplicate().GetCloseoutEventId() != committed.GetCommitted().GetCloseoutEventId() {
 		t.Fatalf("same-binding termination replay = %#v/%v; want exact duplicate", duplicate, err)
 	}
-	cleanupStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(fixture.runtime), 9090)
+	cleanupStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(fixture.runtime), fixture.admin, 9090)
 	cleanupPlan, err := cleanupStore.PrepareRuntimeCommand(context.Background(), jobrunner.RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		JobID: "qjob_" + cleanupJobID, LeaseToken: "lease_" + cleanupJobID,
 		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: fixture.sessionID,

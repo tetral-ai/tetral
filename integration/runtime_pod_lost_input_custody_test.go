@@ -47,14 +47,13 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 		t.Fatalf("corrupt agent-mail Queue thread: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.Clock = func() time.Time { return now }
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
 		}})
-	}}
+	}})
+	deliveryStore.Clock = func() time.Time { return now }
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	sender := &committingAgentMailSender{
 		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}},
@@ -380,7 +379,9 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 
 func handOffLostRuntimeInputsForTest(t *testing.T, runtime *sql.DB, sessionID string, bindingID string, podUID string, now time.Time) int {
 	t.Helper()
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	// repairLostBindingThroughProduction installs the confirmed-loss visibility
+	// for its repair; the store resolves no other target.
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, nil)
 	if err := repairLostBindingThroughProduction(context.Background(), store, "default", sessionID, runtimecontrol.Binding{BindingID: bindingID, BindingGeneration: 1, PodUID: podUID}, now); err != nil {
 		t.Fatalf("hand off lost Runtime inputs: %v", err)
 	}

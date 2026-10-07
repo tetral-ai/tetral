@@ -55,7 +55,7 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 		t.Fatalf("decode interrupt race lease: %v", err)
 	}
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	commitRequest := &bridgev1.CommitInputsRequest{
 		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
 		InterruptLeaseRef: bridgeInterruptLeaseRef(leased),
@@ -267,7 +267,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		t.Fatalf("enqueue terminalized Session cleanup custody: %v", err)
 	}
 
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,

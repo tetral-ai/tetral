@@ -66,7 +66,13 @@ Runner SELECT on the global process tables and EXECUTE on the fixed lock-only
 function; Bridge owns registration and promotion writes.
 
 Delivery, placement, cleanup and proactive loss repair share one process-aware
-classifier:
+classifier. Every delivery store, in production and in tests, is built with a
+target resolver; there is no mode that reads a binding directly and skips the
+classifier. A store without a resolver fails delivery and cleanup decisions with
+retryable `runtime_visibility_unavailable`. Compositions supply Kubernetes
+observations through `jobrunnertest.BindingVisibility`, which shows the Pods of
+committed bindings as ready and never proves loss, so delivery still requires a
+current accepting process:
 
 | Rechecked evidence | Action |
 | --- | --- |

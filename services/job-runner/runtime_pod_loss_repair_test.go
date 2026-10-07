@@ -773,12 +773,12 @@ func seedRuntimePodLossSweepSession(t *testing.T, db *sql.DB, index int, runtime
 }
 
 func runtimePodLossSweepStore(t *testing.T, runtime *sql.DB, logs *bytes.Buffer, snapshot func() enginekubernetes.BindingVisibilitySnapshot) *PostgreSQLRuntimeDeliveryStore {
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: snapshot, Clock: store.Clock,
+	clock := func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, KubernetesRuntimeTargetResolver{Snapshot: snapshot, Clock: clock,
 		GetPod:     fixtureAbsentRuntimePod,
 		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
-	}
+	})
+	store.Clock = clock
 	if logs != nil {
 		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	}

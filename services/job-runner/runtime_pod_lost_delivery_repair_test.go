@@ -203,7 +203,7 @@ func TestPostgreSQLRuntimePodLossDeliveryStaleBindingFencePreventsSettlement(t *
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 22, "send_message", "idle", true, true, false, true, false)
 	stale := fixture.binding
 	stale.BindingGeneration--
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, stale, fixture.now)
 	assertRuntimePodLostRetryableError(t, err, "runtime_pod_lost_claim_stale")
 	var resultCount int

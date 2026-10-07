@@ -118,7 +118,7 @@ func TestPostgreSQLCompletionMailWakeAcceptsEveryStaleRecipientArm(t *testing.T)
 				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 				test.mutate(t, admin, sessionID, threadID)
 			}
-			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 			plan, err := store.PrepareRuntimeCommand(context.Background(),
 				completionMailRuntimeJob(sessionID, threadID, "agent_mail:delivery_stale_"+suffix))
 			if err != nil {
@@ -179,7 +179,7 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 				bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
 			seedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_"+suffix, 1, "pod_"+suffix)
-			store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 			job := leaseCompletionMailRuntimeJob(t, runtime)
 

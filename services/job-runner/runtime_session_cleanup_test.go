@@ -203,7 +203,7 @@ func TestSessionDeleteCleanupSupersedesFailedDisplacedSandboxRelease(t *testing.
 		t.Fatalf("seed failed release receipt: %v", err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return now.Add(time.Minute) }
 	result, err := store.finalizeSessionDeleteCleanup(context.Background(), RuntimeJob{
 		Kind: queue.KindSessionDeleteCleanup, WorkspaceID: "default", SessionID: sessionID,
@@ -264,7 +264,7 @@ func TestSessionDeleteCleanupFinalAttemptDoesNotCreateReleaseSuccessor(t *testin
 		t.Fatalf("seed failed release: %v", err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	result, err := store.finalizeSessionDeleteCleanup(context.Background(), RuntimeJob{
 		Kind: queue.KindSessionDeleteCleanup, WorkspaceID: "default", SessionID: sessionID,
 		DeleteCleanupID: cleanupID, AttemptCount: 5, MaxAttempts: 5,
@@ -316,7 +316,7 @@ func TestSessionDeleteCleanupRetainsUnresolvedHandleCreation(t *testing.T) {
 		t.Fatalf("seed unresolved activation: %v", err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return now.Add(time.Minute) }
 	result, err := store.finalizeSessionDeleteCleanup(context.Background(), RuntimeJob{
 		Kind: queue.KindSessionDeleteCleanup, WorkspaceID: "default", SessionID: sessionID,
@@ -345,7 +345,7 @@ func TestPostgreSQLRuntimeDeliveryStoreDeletedSessionSilentlyStalesOrdinaryJobs(
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted' WHERE id=$1`, sessionID); err != nil {
 		t.Fatalf("mark session deleted: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	for _, job := range []RuntimeJob{
 		{JobID: "qjob_deleted_input", LeaseToken: "lease_deleted_input", Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, RuntimeInputID: "rin_deleted_input", InputKind: "messages"},
 		{JobID: "qjob_deleted_config", LeaseToken: "lease_deleted_config", Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, RuntimeInputID: "config_deleted", ConfigGeneration: "2"},
@@ -417,7 +417,7 @@ func TestPostgreSQLSessionDeleteRevokesPausedRuntimeWorkerBeforeDurableEffects(t
 	workerDone := make(chan RuntimeDeliveryResult, 1)
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	deliverer := RuntimePodDirectDeliverer{
-		Store:  NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090),
+		Store:  fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 9090),
 		Sender: sender,
 	}
 	go func() {

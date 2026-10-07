@@ -780,13 +780,17 @@ type PostgreSQLRuntimeDeliveryStore struct {
 	Clock               func() time.Time
 }
 
-// NewPostgreSQLRuntimeDeliveryStore provides a dependency-light store for
-// focused callers and tests. Production Job Runner assembly must use
-// NewJobRunnerRuntimeDeliveryStore so every delivery dependency is installed.
-func NewPostgreSQLRuntimeDeliveryStore(client *dbconnect.Client, runtimeGRPCPort int) *PostgreSQLRuntimeDeliveryStore {
+// NewPostgreSQLRuntimeDeliveryStore builds a delivery store around the given
+// target resolver. Every delivery, cleanup and loss decision goes through that
+// resolver's process-aware classifier; a store without one fails closed with
+// runtime_visibility_unavailable instead of reading the binding directly.
+// Production Job Runner assembly uses NewJobRunnerRuntimeDeliveryStore so every
+// delivery dependency is installed.
+func NewPostgreSQLRuntimeDeliveryStore(client *dbconnect.Client, runtimeGRPCPort int, resolver RuntimeTargetResolver) *PostgreSQLRuntimeDeliveryStore {
 	return &PostgreSQLRuntimeDeliveryStore{
 		Client:          client,
 		RuntimeGRPCPort: runtimeGRPCPort,
+		TargetResolver:  resolver,
 		Clock:           func() time.Time { return storage.Now() },
 	}
 }
@@ -799,15 +803,19 @@ func NewJobRunnerRuntimeDeliveryStore(
 	cfg JobRunnerConfig,
 	bindingSnapshot func() enginekubernetes.BindingVisibilitySnapshot,
 ) *PostgreSQLRuntimeDeliveryStore {
-	store := NewPostgreSQLRuntimeDeliveryStore(client, cfg.AgentRuntimeGRPCPort)
+	metrics := &RuntimePlacementMetrics{}
+	store := NewPostgreSQLRuntimeDeliveryStore(client, cfg.AgentRuntimeGRPCPort, KubernetesRuntimeTargetResolver{Snapshot: bindingSnapshot, PlacementPolicy: cfg.PlacementPolicy, ProcessPolicy: cfg.ProcessPolicy, PlacementMetrics: metrics})
 	store.Logger = logger
-	store.PlacementMetrics = &RuntimePlacementMetrics{}
+	store.PlacementMetrics = metrics
 	store.MCPManifestLister = mcpmanifest.NewConnectorLister(cfg.MCPConnectorGRPCAddress, internalgrpcauth.FileTokenSource{
 		Path: cfg.GatewayTokenPath,
 	})
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: bindingSnapshot, PlacementPolicy: cfg.PlacementPolicy, ProcessPolicy: cfg.ProcessPolicy, PlacementMetrics: store.PlacementMetrics}
 	return store
 }
+
+// errRuntimeVisibilityUnavailable is returned when a store has no target
+// resolver; there is no process-unaware fallback.
+var errRuntimeVisibilityUnavailable = runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "process-aware Runtime target resolution is unavailable", Retryable: true}
 
 const maxRuntimePreparationReentries = 2
 
@@ -2812,10 +2820,10 @@ func runtimeTaskNotificationPayloadJSON(plan *RuntimeTaskNotificationPlan, termi
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) resolveRuntimeTarget(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (runtimecontrol.Binding, error) {
-	if s.TargetResolver != nil {
-		return s.TargetResolver.ResolveRuntimeTarget(ctx, tx, job)
+	if s.TargetResolver == nil {
+		return runtimecontrol.Binding{}, errRuntimeVisibilityUnavailable
 	}
-	return runtimecontrol.ReadRuntimeBindingForDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	return s.TargetResolver.ResolveRuntimeTarget(ctx, tx, job)
 }
 
 func runtimeCommandPayloadForJobTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (string, string, error) {

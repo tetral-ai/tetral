@@ -340,7 +340,7 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 		  AND payload_json::jsonb->>'input_kind'='interrupt_control'`, sessionID, childID); err != nil {
 		t.Fatalf("advance child control to final delivery owner: %v", err)
 	}
-	deliverer := &postgresFinalizingDeliverer{store: jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "child-control-rejoin", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},

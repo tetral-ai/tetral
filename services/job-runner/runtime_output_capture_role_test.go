@@ -24,7 +24,7 @@ func TestPostgreSQLInstalledJobRunnerDeletesOutputCaptureCustody(t *testing.T) {
 			_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			serving := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 			client := dbconnect.NewClientForTesting(serving.DB)
-			store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+			store := fixtureRuntimeDeliveryStore(client, admin, 9090)
 			now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 			store.Clock = func() time.Time { return now }
 			const sessionID = "sesn_capture_role"

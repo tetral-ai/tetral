@@ -19,7 +19,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFiltersPinnedFamilyAndL
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_collision_initial", "thr_mcp_collision_initial", "gpt")
 	var logs bytes.Buffer
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	store.MCPManifestLister = &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "connector_etag_initial",
@@ -45,7 +45,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestFailureBeforeAcceptance
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_collision_initial_fail", "thr_mcp_collision_initial_fail", "gpt")
 	var logs bytes.Buffer
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	store.MCPManifestLister = &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "connector_etag_initial_fail",

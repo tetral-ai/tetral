@@ -98,7 +98,7 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 	}); err != nil || reclaimed != 1 {
 		t.Fatalf("reclaim rejected task notification lease = %d/%v; want one", reclaimed, err)
 	}
-	deliverer := &taskNotificationReplayOnlyDeliverer{store: jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	deliverer := &taskNotificationReplayOnlyDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
 		Config: jobrunner.JobRunnerConfig{LeaseOwner: "rejection-after-crash", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -168,7 +168,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 	if err != nil || response.GetRejected().GetReason() != bridgev1.TaskNotificationRejectionReason_TASK_NOTIFICATION_REJECTION_REASON_DURABLE_RESULT_INVALID {
 		t.Fatalf("commit terminal notification rejection = %#v/%v", response, err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	attemptedBinding := jobrunner.RuntimeAttemptedBinding{
 		BindingID: bindingID, Generation: 1, TargetPodUID: podUID, RuntimeProcessID: "process_" + podUID,
 	}

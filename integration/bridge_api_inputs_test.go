@@ -69,7 +69,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		job.InputKind != "agent_mail" {
 		t.Fatalf("resolved inter-agent job = %#v; want exact child mail wake", job)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || plan.AcceptAgentMail == nil || plan.StaleAccepted {

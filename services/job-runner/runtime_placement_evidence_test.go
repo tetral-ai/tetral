@@ -263,9 +263,8 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			var sink bytes.Buffer
 			owner := workload.NewProcessLogger(&sink, "job-runner", "test", "unit", workload.DefaultDiagnosticConfig())
 			defer owner.CloseWithBudget()
-			store := NewPostgreSQLRuntimeDeliveryStore(client, 19090)
+			store := NewPostgreSQLRuntimeDeliveryStore(client, 19090, resolver)
 			store.Logger = owner.Logger
-			store.TargetResolver = resolver
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			var plan RuntimeCommandPlan
 			var err error
@@ -444,11 +443,10 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				var sink bytes.Buffer
 				owner := workload.NewProcessLogger(&sink, "job-runner", "test", "unit", workload.DefaultDiagnosticConfig())
 				defer owner.CloseWithBudget()
-				store := NewPostgreSQLRuntimeDeliveryStore(client, 19090)
-				store.Logger = owner.Logger
-				store.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+				store := NewPostgreSQLRuntimeDeliveryStore(client, 19090, KubernetesRuntimeTargetResolver{LoadClient: httpClient, PlacementPolicy: DefaultRuntimePlacementPolicy(), Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 					return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{candidate})
-				}}
+				}})
+				store.Logger = owner.Logger
 				plan, err := store.PrepareRuntimeCommand(ctx, job)
 				if err != nil || !plan.hasCommand() {
 					t.Fatalf("actual %s preparation=%+v/%v", inputKind, plan, err)

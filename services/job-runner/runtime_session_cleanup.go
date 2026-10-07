@@ -22,6 +22,9 @@ import (
 // This file owns cleanup-session and delete-cleanup state transitions.
 
 func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, claim cleanupSessionClaim) (bool, error) {
+	if s.TargetResolver == nil {
+		return false, errRuntimeVisibilityUnavailable
+	}
 	prover, ok := s.TargetResolver.(RuntimeCleanupTargetProver)
 	if !ok {
 		return false, nil

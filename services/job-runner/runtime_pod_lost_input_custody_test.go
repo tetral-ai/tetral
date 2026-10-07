@@ -95,7 +95,7 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			}
 			if test.name == "accepted leased" {
 				staleAttempt := retryableExhaustionResultForBinding(bindingID, 1, podUID)
-				deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+				deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 				if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), leasedRuntimeJob, staleAttempt); !invalidRuntimeJobPayload(err) {
 					t.Fatalf("stale finalization error = %v; want invalid_runtime_job_payload", err)
 				}
@@ -189,7 +189,7 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 	if inboxStatus != "queued" || queueStatus != queue.StatusPending || attempts != 2 || lineage != 1 {
 		t.Fatalf("exhausted handoff = inbox:%s queue:%s attempts:%d lineage:%d; want queued/pending/2/1", inboxStatus, queueStatus, attempts, lineage)
 	}
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
@@ -324,12 +324,11 @@ func TestPostgreSQLRuntimeDeliveryAcknowledgesReclaimedJobAlreadyAcceptedByLiveB
 		t.Fatalf("lease reclaimed Queue job = %#v, %v; want one", leased, err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	lister := &recordingMCPManifestLister{err: errors.New("manifest readiness must not be consulted")}
 	resolver := &recordingRuntimeTargetResolver{err: errors.New("target availability must not be consulted")}
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, resolver)
+	store.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	store.MCPManifestLister = lister
-	store.TargetResolver = resolver
 	sender := &recordingRuntimeCommandSender{}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), RuntimeJob{
 		JobID: jobID, LeaseToken: leased[0].LeaseToken, Kind: queue.KindRuntimeInput,

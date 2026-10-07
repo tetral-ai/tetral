@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+	"github.com/tetral-ai/tetral/services/job-runner/jobrunnertest"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
@@ -88,7 +89,8 @@ func TestPostgreSQLTaskNotificationProducerAndJobRunnerTerminalizeQueuedInbox(t 
 	}
 
 	sender := &runtimeInputExhaustionSender{}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	visibility := jobrunnertest.NewBindingVisibility(adminDB)
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090, jobrunner.KubernetesRuntimeTargetResolver{Snapshot: visibility.Snapshot, GetPod: visibility.GetPod, LoadClient: jobrunnertest.UnavailableLoadClient()})
 	runner := &jobrunner.JobRunner{
 		Queue:      tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil),
 		Workspaces: runtimeInputExhaustionWorkspaceLister{},

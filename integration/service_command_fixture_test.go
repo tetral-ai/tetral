@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net"
@@ -16,11 +17,26 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+	"github.com/tetral-ai/tetral/services/job-runner/jobrunnertest"
 )
 
+// fixtureRuntimeTargetResolver is the production process-aware resolver over
+// Kubernetes observations derived from the test's committed bindings. Bound
+// Pods are visible, so delivery still requires the bound process to be current
+// and accepting; placement probes fail, so an unbound Session stays unplaced.
+// observer must be a pool other than the store's own, normally the admin pool.
+func fixtureRuntimeTargetResolver(observer *sql.DB) jobrunner.KubernetesRuntimeTargetResolver {
+	visibility := jobrunnertest.NewBindingVisibility(observer)
+	return jobrunner.KubernetesRuntimeTargetResolver{Snapshot: visibility.Snapshot, GetPod: visibility.GetPod, LoadClient: jobrunnertest.UnavailableLoadClient()}
+}
+
+func fixtureRuntimeDeliveryStore(client *dbconnect.Client, observer *sql.DB, port int) *jobrunner.PostgreSQLRuntimeDeliveryStore {
+	return jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port, fixtureRuntimeTargetResolver(observer))
+}
+
 // Invoke the owning command preparation and observe its returned wire.
-func prepareFixtureConfigPayload(ctx context.Context, client *dbconnect.Client, job jobrunner.RuntimeJob) (string, error) {
-	plan, err := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090).PrepareRuntimeCommand(ctx, job)
+func prepareFixtureConfigPayload(ctx context.Context, client *dbconnect.Client, observer *sql.DB, job jobrunner.RuntimeJob) (string, error) {
+	plan, err := fixtureRuntimeDeliveryStore(client, observer, 9090).PrepareRuntimeCommand(ctx, job)
 	if err != nil {
 		return "", err
 	}

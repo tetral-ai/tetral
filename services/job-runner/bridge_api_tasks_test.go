@@ -58,7 +58,7 @@ func TestPostgreSQLRuntimeDeliveryReplayKeepsGenuineTaskNotificationExhaustionTe
 		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2`, job.SessionID, job.RuntimeInputID); err != nil {
 		t.Fatalf("terminalize task notification Inbox: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 
 	replayed, found, err := store.ReplayRuntimeDeliveryFinalization(context.Background(), job)
 	if err != nil || !found || replayed.Status != RuntimeDeliveryRejected || replayed.Retryable || replayed.ErrorKind != "runtime_delivery_exhausted" {

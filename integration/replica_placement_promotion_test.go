@@ -94,10 +94,9 @@ func TestPostgreSQLReplicaPlacementPromotionRaces(t *testing.T) {
 			runnerRole := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 			trace := &placementAuthorityTrace{reached: make(chan struct{}), release: make(chan struct{})}
 			pool := storagetest.OpenRuntimeRoleDBWithTracer(t, runnerRole.DB, trace)
-			store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(pool), 19090)
-			store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+			store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(pool), 19090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 				return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{candidate})
-			}}
+			}})
 			type result struct {
 				plan jobrunner.RuntimeCommandPlan
 				err  error

@@ -217,7 +217,7 @@ func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.
 			queueStatus, leaseToken, inboxStatus, startsBeforeWinner)
 	}
 
-	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 9090)
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	winner := &JobRunner{
 		Queue: queueServer, Workspaces: staticWorkspaceLister{workspace.DefaultID},

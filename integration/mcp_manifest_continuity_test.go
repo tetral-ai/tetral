@@ -23,7 +23,7 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyWit
 	bridge := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridge.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag_exhaust", "github_exhaust")}
 	mustAcceptMCPManifestChange(t, bridge, "sesn_mcp_exhaust", "etag_exhaust")
-	delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 0)
+	delivery := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 0)
 	logs := &lockedBuffer{}
 	delivery.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	job := jobrunner.RuntimeJob{

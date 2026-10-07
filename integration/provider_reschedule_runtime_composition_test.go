@@ -959,7 +959,7 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	}); err != nil || ended.GetCommitted().GetRescheduled() == nil {
 		t.Fatalf("commit recoverable provider reschedule: response=%#v err=%v", ended, err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 9090)
 	if err := repairLostBindingThroughProduction(context.Background(), deliveryStore, "default", sessionID, runtimecontrol.Binding{
 		BindingID: oldBindingID, BindingGeneration: 1,
 	}, acceptedAt.Add(100*time.Millisecond)); err != nil {
@@ -1249,7 +1249,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 			sessionEventIndex, selectedRows, planJSON)
 	}
 
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), 9090)
+	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), admin, 9090)
 	if err := repairLostBindingThroughProduction(context.Background(), deliveryStore, "default", sessionID, runtimecontrol.Binding{
 		BindingID: oldBindingID, BindingGeneration: 1,
 	}, acceptedAt.Add(100*time.Millisecond)); err != nil {
@@ -1733,13 +1733,12 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 	)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", newPodUID)
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtimeDB), runtimeProcess.port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-subagent-reschedule-new",
 			PodUID: newPodUID, PodIP: "127.0.0.1",
 		}})
-	}}
+	}})
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{})},

@@ -520,10 +520,9 @@ func deliverMCPContinuationInput(t *testing.T, runtimeDB, admin *sql.DB, port in
 		t.Fatal(err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: scope.Binding.TargetPodUid, PodIP: "127.0.0.1"}})
-	}}
+	}})
 	deliverer := &continuationDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}}
 	runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer, Config: jobrunner.JobRunnerConfig{LeaseOwner: "mcp-continuation", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
 	if active, err := runner.RunOnceWithActivity(context.Background()); err != nil || !active {

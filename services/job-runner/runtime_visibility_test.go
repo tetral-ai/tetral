@@ -115,9 +115,8 @@ func TestPostgreSQLRuntimeProcessVisibilityRechecksReport(t *testing.T) {
 	}
 	entered := make(chan struct{})
 	resume := make(chan struct{})
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 19090)
 	binding := runtimecontrol.Binding{BindingID: "visibility-binding", BindingGeneration: 1, Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "visibility-pod", PodIP: "10.0.0.10", RuntimeProcessID: "process_visibility-pod"}
-	store.TargetResolver = KubernetesRuntimeTargetResolver{
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 19090, KubernetesRuntimeTargetResolver{
 		Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 			return kubernetes.NewBindingVisibilitySnapshotStateForTest(true, kubernetes.BoundRuntimePod{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP}, kubernetes.BindingVisibilityNotReady)
 		},
@@ -130,7 +129,7 @@ func TestPostgreSQLRuntimeProcessVisibilityRechecksReport(t *testing.T) {
 			}
 			return &kubernetes.PodObservation{Namespace: namespace, Name: name, UID: binding.PodUID, Running: true, IP: binding.PodIP}, nil
 		},
-	}
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	type outcome struct {

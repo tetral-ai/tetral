@@ -33,7 +33,7 @@ func newInputDiscoveryFixture(t *testing.T) (*PostgreSQLRuntimeDeliveryStore, *s
 		RuntimeInputID: "rin_discovery", InputKind: "messages", EventIDs: []string{"evt_discovery"}, SequenceFrom: 1, SequenceTo: 1}
 	seedBridgeAPIEvent(t, admin, "default", job.SessionID, job.SessionThreadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"run"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, job)
-	return NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090), admin, job
+	return fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090), admin, job
 }
 
 func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
@@ -50,7 +50,7 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			restarted := NewPostgreSQLRuntimeDeliveryStore(store.Client, 9090)
+			restarted := fixtureRuntimeDeliveryStore(store.Client, admin, 9090)
 			lister := &recordingMCPManifestLister{err: errors.New("failed")}
 			restarted.MCPManifestLister = lister
 			_, err := restarted.PrepareRuntimeCommand(context.Background(), job)
@@ -203,7 +203,7 @@ func TestMCPInputDiscoveryLeaseReclaimKeepsSpentAttempts(t *testing.T) {
 	if reclaimed.LeaseToken == job.LeaseToken {
 		t.Fatal("lease token was not replaced")
 	}
-	restarted := NewPostgreSQLRuntimeDeliveryStore(store.Client, 9090)
+	restarted := fixtureRuntimeDeliveryStore(store.Client, admin, 9090)
 	failures := &recordingMCPManifestLister{err: errors.New("still unavailable")}
 	restarted.MCPManifestLister = failures
 	_, err = restarted.PrepareRuntimeCommand(context.Background(), reclaimed)

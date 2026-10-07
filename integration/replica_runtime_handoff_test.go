@@ -483,7 +483,6 @@ func deliverHandoffRecovery(t *testing.T, runtimeDB *sql.DB, child *handoffRunti
 	if err != nil || len(leases) < 1 {
 		t.Fatalf("handoff recovery lease %v/%v", leases, err)
 	}
-	delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port)
 	targetURL, err := url.Parse(child.httpURL)
 	if err != nil {
 		t.Fatal(err)
@@ -492,7 +491,7 @@ func deliverHandoffRecovery(t *testing.T, runtimeDB *sql.DB, child *handoffRunti
 		return (&net.Dialer{}).DialContext(ctx, network, targetURL.Host)
 	}}
 	defer transport.CloseIdleConnections()
-	delivery.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
+	delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port, jobrunner.KubernetesRuntimeTargetResolver{GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
 		uid, ip, ready := podUID, "127.0.0.3", true
 		if name == "runtime-pod-0" {
 			uid, ip, ready = "pod_old", "127.0.0.1", false
@@ -500,7 +499,7 @@ func deliverHandoffRecovery(t *testing.T, runtimeDB *sql.DB, child *handoffRunti
 		return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: uid, IP: ip, Running: true, Ready: ready}, nil
 	}, LoadClient: &http.Client{Transport: transport}, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-new", PodUID: podUID, PodIP: "127.0.0.3"}})
-	}}
+	}})
 	// Discovered IPs stay identical to the placement fixture's stored binding;
 	// only the socket maps to the selected actual child's ephemeral listener.
 	sender := jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -528,7 +527,6 @@ func deliverHandoffRecovery(t *testing.T, runtimeDB *sql.DB, child *handoffRunti
 func deliverHandoffInputWithPlacement(t *testing.T, runtimeDB *sql.DB, old, next *handoffRuntimeChild, sessionID string) {
 	t.Helper()
 	client := dbconnect.NewClientForTesting(runtimeDB)
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 19090)
 	oldURL, err := url.Parse(old.httpURL)
 	if err != nil {
 		t.Fatal(err)
@@ -550,7 +548,7 @@ func deliverHandoffInputWithPlacement(t *testing.T, runtimeDB *sql.DB, old, next
 	}}
 	defer transport.CloseIdleConnections()
 	candidates := []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_old", PodIP: "127.0.0.2"}, {Namespace: "tetral-agent-runtime", PodName: "runtime-pod-new", PodUID: "pod_new", PodIP: "127.0.0.3"}}
-	store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 19090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, candidates)
 	}, GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
 		candidate := candidates[1]
@@ -558,7 +556,7 @@ func deliverHandoffInputWithPlacement(t *testing.T, runtimeDB *sql.DB, old, next
 			candidate = candidates[0]
 		}
 		return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: candidate.PodUID, IP: candidate.PodIP, Running: true, Ready: true}, nil
-	}}
+	}})
 	sender := jobrunner.NewRuntimePodCommandClient(attachmentRuntimeTokenSource{}, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
@@ -681,12 +679,11 @@ func raceHandoffBinders(t *testing.T, runtimeDB, admin *sql.DB, child *handoffRu
 			t.Fatalf("competing custody=%+v expected thread=%s", job, expectedThread)
 		}
 		jobs[index] = job
-		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port)
-		store.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+		store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, child.port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: &http.Client{Transport: transport}, Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-new", PodUID: "pod_new", PodIP: "127.0.0.1"}})
 		}, GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
 			return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: "pod_new", IP: "127.0.0.1", Running: true, Ready: true}, nil
-		}}
+		}})
 		competing := &handoffCompetingStore{PostgreSQLRuntimeDeliveryStore: store, entered: entered, gate: gate, recovery: index == 1}
 		deliverer := &handoffObservedDeliverer{RuntimePodDirectDeliverer: jobrunner.RuntimePodDirectDeliverer{Store: competing, Sender: sender}}
 		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
@@ -1865,8 +1862,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, targetURL.Host)
 		}}
 		defer transport.CloseIdleConnections()
-		delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, second.port)
-		delivery.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{
+		delivery := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, second.port, jobrunner.KubernetesRuntimeTargetResolver{
 			GetPod: func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
 				return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: pod, IP: "127.0.0.1", Running: true, Ready: true}, nil
 			},
@@ -1874,7 +1870,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: pod, PodIP: "127.0.0.1"}})
 			},
-		}
+		})
 		if repaired, err := delivery.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
 			t.Fatalf("same ready Pod superseded-process repair=%d err=%v", repaired, err)
 		}

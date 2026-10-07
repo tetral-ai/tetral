@@ -103,15 +103,11 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 			t.Cleanup(transport.CloseIdleConnections)
 			for i := range stores {
 				pool := storagetest.OpenRuntimeRoleDBWithTracer(t, role.DB, nil)
-				stores[i] = jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(pool), 19090)
-				logOwners[i] = workload.NewProcessLogger(&sinks[i], "job-runner", "test", "unit", workload.DefaultDiagnosticConfig())
-				t.Cleanup(logOwners[i].CloseWithBudget)
-				stores[i].Logger = logOwners[i].Logger
 				index := i
 				policy := jobrunner.DefaultRuntimePlacementPolicy()
 				policy.ProbeTimeout = 2 * time.Second
 				policy.ProbeBudget = 4 * time.Second
-				stores[i].TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{PlacementPolicy: policy, LoadClient: &http.Client{Transport: transport}, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
+				stores[i] = jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(pool), 19090, jobrunner.KubernetesRuntimeTargetResolver{PlacementPolicy: policy, LoadClient: &http.Client{Transport: transport}, Snapshot: func() kubernetes.BindingVisibilitySnapshot {
 					mu.Lock()
 					defer mu.Unlock()
 					if scenario == "temporary unready has no replacement" {
@@ -126,7 +122,10 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 						return &kubernetes.PodObservation{Absent: true}, nil
 					}
 					return &kubernetes.PodObservation{Namespace: namespace, Name: name, UID: candidate.PodUID, Running: true, IP: candidate.PodIP}, nil
-				}}
+				}})
+				logOwners[i] = workload.NewProcessLogger(&sinks[i], "job-runner", "test", "unit", workload.DefaultDiagnosticConfig())
+				t.Cleanup(logOwners[i].CloseWithBudget)
+				stores[i].Logger = logOwners[i].Logger
 			}
 			type result struct {
 				plan jobrunner.RuntimeCommandPlan

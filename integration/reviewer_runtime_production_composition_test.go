@@ -226,7 +226,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 		SequenceTo: interruptBirth.Data[0].Sequence, PayloadJSON: string(interruptLease.PayloadJSON),
 		AttemptCount: int32(interruptLease.AttemptCount), MaxAttempts: int32(interruptLease.MaxAttempts),
 	}
-	if _, err := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090).PrepareRuntimeCommand(context.Background(), interruptJob); err != nil {
+	if _, err := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090).PrepareRuntimeCommand(context.Background(), interruptJob); err != nil {
 		t.Fatalf("prepare Reviewer target interrupt delivery: %v", err)
 	}
 	parentEnd, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{

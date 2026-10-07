@@ -60,12 +60,11 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 	if err != nil {
 		t.Fatalf("decode task notification: %v", err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
-	deliveryStore.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimecontrol.Binding{
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, &recordingRuntimeTargetResolver{binding: runtimecontrol.Binding{
 		BindingID: bindingID, BindingGeneration: 1, Namespace: "runtime-ns", PodName: "runtime-pod",
 		PodUID: podUID, RuntimeProcessID: "process_" + podUID, PodIP: "10.0.0.1",
-	}}
+	}})
+	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || plan.AcceptTask == nil {
 		t.Fatalf("prepare task notification = %#v, %v; want Runtime request", plan, err)
@@ -160,9 +159,8 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
 	}
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	resolver := &recordingRuntimeTargetResolver{err: errors.New("target resolution must not run for parked custody")}
-	deliveryStore.TargetResolver = resolver
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, resolver)
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || !plan.SettledAccepted || !plan.QueueLeaseSettled || (plan.AcceptInput != nil || plan.AcceptAgentMail != nil || plan.AcceptTask != nil || plan.Interrupt != nil || plan.ToolConfirmation != nil || plan.RuntimeConfig != nil || plan.CleanupSession != nil || plan.RecoverThread != nil) {
 		t.Fatalf("prepare notification behind close fence = %#v, %v; want settled parked custody", plan, err)

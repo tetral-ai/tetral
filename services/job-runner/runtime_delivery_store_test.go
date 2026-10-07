@@ -67,12 +67,11 @@ func TestPrepareRuntimeRecoveryRequiresExactLiveQueueLeaseBeforeMutation(t *test
 		WHERE workspace_id='default' AND id=$1`, job.JobID); err != nil {
 		t.Fatalf("expire recovery Queue lease: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
-	store.TargetResolver = KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090, KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-lease-fence", PodUID: "pod-recovery-lease-fence", PodIP: "127.0.0.1",
 		}})
-	}}
+	}})
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || !plan.DeliveryAuthorityLost || plan.hasCommand() {
 		t.Fatalf("expired recovery preparation = %#v/%v; want authority-loss no-op", plan, err)
@@ -146,14 +145,13 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 		}
 	}
 	jobA := lease("worker-a")
-	baseStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	recoveryCandidate := enginekubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "runtime-recovery", PodUID: "pod-recovery", PodIP: "127.0.0.1"}
 	registerPlacementCandidateForTest(t, admin, recoveryCandidate)
-	baseStore.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	baseStore := NewPostgreSQLRuntimeDeliveryStore(client, 9090, KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-recovery", PodUID: "pod-recovery", PodIP: "127.0.0.1",
 		}})
-	}}
+	}})
 	blockedStore := &blockingRecoveryActivationStore{
 		PostgreSQLRuntimeDeliveryStore: baseStore,
 		entered:                        make(chan struct{}), release: make(chan struct{}),
@@ -281,7 +279,7 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 		RecoverySourceEventID: leasedPayload.SourceEventID, PayloadJSON: string(leased[0].PayloadJSON),
 		AttemptCount: int32(leased[0].MaxAttempts), MaxAttempts: int32(leased[0].MaxAttempts),
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+	store := fixtureRuntimeDeliveryStore(client, admin, 9090)
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{
 		Status: RuntimeDeliveryRejected, Retryable: true,
 		ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
@@ -367,7 +365,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
 				t.Fatalf("set child recovery attempt ceiling: %v", err)
 			}
-			store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
+			store := fixtureRuntimeDeliveryStore(client, admin, 9090)
 			store.Clock = func() time.Time { return time.Date(2026, 8, 21, 12, 30, 0, 0, time.UTC) }
 			deliverer := &postgresFinalizingDeliverer{store: store, result: RuntimeDeliveryResult{
 				Status: RuntimeDeliveryRejected, Retryable: true,
@@ -496,7 +494,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 		ManifestETag: "etag_initial",
 		Tools:        []mcpmanifest.Tool{{Name: "github_search", Description: "Search GitHub", InputSchemaJSON: `{"type":"object"}`}},
 	}}}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	store.MCPManifestLister = lister
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
@@ -577,7 +575,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 		t.Fatalf("decode committed MCP manifest delivery intent: %v", err)
 	}
 	redriveSender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
-	redriveStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	redriveStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	redriveResult, err := (RuntimePodDirectDeliverer{Store: redriveStore, Sender: redriveSender}).DeliverRuntimeJob(context.Background(), redrivenJob)
 	if err != nil {
 		t.Fatalf("redrive committed MCP manifest generation: %v", err)
@@ -631,7 +629,7 @@ func TestPostgreSQLRuntimeDeliveryPreparationBoundsStateDrivenReentry(t *testing
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, job.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"continue"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, job)
 	lister := &recordingMCPManifestLister{results: []mcpmanifest.ListResult{mcpManifestResult("etag_reentry_bound", "github_search")}}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.MCPManifestLister = lister
 
 	_, err := store.prepareRuntimeCommand(context.Background(), job, maxRuntimePreparationReentries)
@@ -663,7 +661,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPTransitionRollbackRetainsInputC
 	if _, err := admin.ExecContext(context.Background(), `DROP TABLE queue_jobs`); err != nil {
 		t.Fatalf("remove manifest Queue persistence: %v", err)
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.MCPManifestLister = &recordingMCPManifestLister{err: mcpmanifest.DiscoveryError{Diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable}}
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
@@ -793,7 +791,7 @@ func TestInitialMCPManifestListUsesFreshRPCOnlyDeadline(t *testing.T) {
 		t.Fatalf("seed deadline MCP toolsets: %v", err)
 	}
 	lister := &expiringMCPManifestLister{}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.MCPManifestLister = lister
 	err := store.captureInitialMCPManifestsWithListTimeout(
 		context.Background(),
@@ -990,7 +988,7 @@ func TestRuntimeConfigDeliveryRebuildsSupersededManifestAtTheCurrentGeneration(t
 		t.Fatalf("advance durable manifest: %v", err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), RuntimeJob{
@@ -1027,10 +1025,9 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationTerminalDuplicateIsStale(
 		t.Fatalf("mark terminal task: %v", err)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
 	resolver := &recordingRuntimeTargetResolver{err: errors.New("resolver must not run for terminal duplicate task notification")}
-	store.TargetResolver = resolver
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, resolver)
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
 	plan, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
 		JobID:           "qjob_bridge_task_delivery_terminal_dup",
 		LeaseToken:      "lease_bridge_task_delivery_terminal_dup",
@@ -1060,7 +1057,7 @@ func TestPostgreSQLRuntimeDeliveryStoreMarksInboxAcceptedAfterRuntimeAccepts(t *
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inbox_accept", "bind_bridge_inbox_accept", 1, "pod_uid_inbox_accept")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_accept", "thr_bridge_inbox_accept", "sevt_inbox_accept", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	job := RuntimeJob{
@@ -1099,6 +1096,61 @@ func TestPostgreSQLRuntimeDeliveryStoreMarksInboxAcceptedAfterRuntimeAccepts(t *
 	}
 }
 
+// A store without a target resolver has no process-unaware fallback: it never
+// reads a binding directly to deliver to it or to decide cleanup.
+func TestPostgreSQLRuntimeDeliveryStoreWithoutResolverFailsClosed(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_resolver_required"
+		threadID  = "thr_resolver_required"
+		bindingID = "bind_resolver_required"
+		podUID    = "pod_uid_resolver_required"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_resolver_required", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, nil)
+	job := RuntimeJob{
+		JobID: "qjob_resolver_required", LeaseToken: "lease_resolver_required", Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID, RuntimeInputID: "rin_resolver_required",
+		EventIDs: []string{"sevt_resolver_required"}, SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+		PayloadJSON: `{"workspace_id":"default","session_id":"sesn_resolver_required","session_thread_id":"thr_resolver_required","runtime_input_id":"rin_resolver_required","event_ids":["sevt_resolver_required"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	assertVisibilityUnavailable := func(operation string, err error) {
+		t.Helper()
+		var prepareErr runtimecontrol.PreparationError
+		if !errors.As(err, &prepareErr) || prepareErr.Kind != "runtime_visibility_unavailable" || !prepareErr.Retryable {
+			t.Fatalf("%s without resolver = %v; want retryable runtime_visibility_unavailable", operation, err)
+		}
+	}
+
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
+	assertVisibilityUnavailable("delivery preparation", err)
+	if plan.hasCommand() {
+		t.Fatalf("delivery preparation without resolver planned %#v", plan)
+	}
+	var inboxStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND runtime_input_id='rin_resolver_required'`).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read inbox after refused preparation: %v", err)
+	}
+	if inboxStatus != "queued" {
+		t.Fatalf("inbox after refused preparation = %q; want queued", inboxStatus)
+	}
+
+	binding := runtimePodLostBinding(sessionID, bindingID, 1)
+	binding.PodUID, binding.RuntimeProcessID = podUID, "process_"+podUID
+	err = store.Client.WithWorkspaceTx(context.Background(), "default", "jobrunner.test_cleanup_target", func(tx *dbconnect.Tx) error {
+		_, err := store.cleanupTargetProvenGone(context.Background(), tx, RuntimeJob{Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID, CleanupJobID: "cleanup_resolver_required"}, cleanupSessionClaim{
+			WorkspaceID: "default", SessionID: sessionID, BindingID: binding.BindingID, BindingGeneration: binding.BindingGeneration,
+			Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP, RuntimeProcessID: binding.RuntimeProcessID,
+		})
+		return err
+	})
+	assertVisibilityUnavailable("cleanup target decision", err)
+}
+
 func TestPostgreSQLRuntimeDeliveryStorePersistsDistinctInboxesForChunkedBacklog(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -1113,7 +1165,7 @@ func TestPostgreSQLRuntimeDeliveryStorePersistsDistinctInboxesForChunkedBacklog(
 		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventIDs[index], int64(index+1), "user.message", `{"content":[{"type":"text","text":"queued"}]}`)
 	}
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
 	chunks := [][]string{eventIDs[:queue.MaxRuntimeInputEventRefsPerJob], eventIDs[queue.MaxRuntimeInputEventRefsPerJob:]}
 	for index, chunk := range chunks {
@@ -1224,7 +1276,7 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inbox_accept_fence", "bind_bridge_inbox_accept_fence", 1, "pod_uid_inbox_accept_fence")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_accept_fence", "thr_bridge_inbox_accept_fence", "sevt_inbox_accept_fence", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
 	job := RuntimeJob{
 		JobID:           "qjob_inbox_accept_fence",
@@ -1318,7 +1370,7 @@ func TestPostgreSQLRuntimeDeliveryStoreAgentMailAcceptanceDoesNotRegressCommitte
 		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + inputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("prepare message input: %v", err)
@@ -1347,7 +1399,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRejectsRuntimeInboxPayloadConflict(t *tes
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict", "sevt_inbox_conflict_one", 1, "user.message", `{"content":[{"type":"text","text":"one"}]}`)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict", "sevt_inbox_conflict_two", 2, "user.message", `{"content":[{"type":"text","text":"two"}]}`)
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 5, 0, time.UTC) }
 	first := RuntimeJob{
 		JobID:           "qjob_inbox_conflict_one",
@@ -1401,7 +1453,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 2, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 3, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
 
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC) }
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
@@ -1480,14 +1532,13 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 		PodUID:    "pod-uid-a",
 		PodIP:     "10.0.0.25",
 	}
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	registerPlacementCandidateForTest(t, admin, candidate)
-	store.TargetResolver = KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, KubernetesRuntimeTargetResolver{LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},
-	}
+	})
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	job := RuntimeJob{
 		JobID:           "qjob_bridge_resolve",
 		LeaseToken:      "lease_bridge_resolve",
@@ -1534,7 +1585,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_runtime_rejected", "bind_bridge_runtime_rejected", 1, "pod_uid_runtime_rejected")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected", "evt_bridge_runtime_rejected", 1, "user.message", `{"type":"user.message","content":[{"type":"text","text":"hello"}]}`)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
 	job := RuntimeJob{
 		JobID:           "qjob_bridge_runtime_rejected",

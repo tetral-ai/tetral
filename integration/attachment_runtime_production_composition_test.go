@@ -210,13 +210,12 @@ func deliverAttachmentRuntimeInput(t *testing.T, runtimeDB, admin *sql.DB, port 
 		t.Fatalf("align attachment Runtime binding: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: podName, PodUID: podUID, PodIP: "127.0.0.1",
 		}})
-	}}
+	}})
 	runner := &jobrunner.JobRunner{
 		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Workspaces: staticWorkspaceLister{workspace.DefaultID},
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})},

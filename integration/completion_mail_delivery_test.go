@@ -87,7 +87,7 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 		sessionID,
 	)
 	defer func() { _ = blocker.Rollback() }()
-	store := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return now }
 	job := leaseCompletionMailRuntimeJob(t, runtime)
 	type prepareResult struct {

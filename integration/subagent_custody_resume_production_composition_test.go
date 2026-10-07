@@ -430,13 +430,12 @@ func TestSubagentFirstMailPreparationExhaustionSettlesCustodyAtomically(t *testi
 	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(client, queue.RetryPolicy{
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
-	baseStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	seedFixtureRuntimeProcess(t, client, "tetral-agent-runtime", fixture.podUID)
-	baseStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	baseStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, 9090, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: fixture.podUID, PodIP: "10.0.0.10",
 		}})
-	}}
+	}})
 	failedStore := &agentMailPreparationFailureStore{PostgreSQLRuntimeDeliveryStore: baseStore}
 	sender := &countingAgentMailSender{RuntimeCommandSender: fixtureRuntimeCommandClient(t, attachmentRuntimeTokenSource{})}
 	runner := &jobrunner.JobRunner{
@@ -2534,13 +2533,12 @@ func newSubagentRuntimeQueueRunner(
 	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(client, queue.RetryPolicy{
 		BaseDelay: time.Millisecond, MaxDelay: time.Millisecond, RandomInt64: func(int64) int64 { return 0 },
 	})
-	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port)
 	seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(admin), "tetral-agent-runtime", podUID)
-	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(client, port, jobrunner.KubernetesRuntimeTargetResolver{LoadClient: fixtureRuntimeLoadClient(t), Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "127.0.0.1",
 		}})
-	}}
+	}})
 	if queueClient == nil {
 		queueClient = tetralqueue.NewServer(queueStore, nil)
 	}

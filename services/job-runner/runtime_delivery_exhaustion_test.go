@@ -66,7 +66,7 @@ func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(
 		WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
 		t.Fatalf("malform non-interrupt Queue payload: %v", err)
 	}
-	deliverer := &postgresFinalizingDeliverer{store: NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)}
+	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
 		Queue: tetralqueue.NewServer(queueStore, nil), Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-message-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
@@ -98,7 +98,7 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *tes
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "evt_exhaust_delivering", 1, "user.message", `{"type":"user.message"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", `["evt_exhaust_delivering"]`, "delivering", "bind_exhaust_delivering", "pod_exhaust_delivering", 1, 1)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_exhaust_delivering", "bind_exhaust_delivering", 1, "pod_exhaust_delivering")
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", []string{"evt_exhaust_delivering"})
 
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResultForBinding("bind_exhaust_delivering", 1, "pod_exhaust_delivering"))
@@ -114,7 +114,7 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionCancelledBeforeTransactionWrite
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled", "evt_exhaust_cancelled", 1, "user.message", `{"type":"user.message"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled", "rin_exhaust_cancelled", "messages", `["evt_exhaust_cancelled"]`, "accepted", "bind_exhaust_cancelled", "pod_exhaust_cancelled", 1, 1)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_cancelled", "thr_exhaust_cancelled", "rin_exhaust_cancelled", "messages", []string{"evt_exhaust_cancelled"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -144,7 +144,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		bridgeRuntime, bridgeAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		queueRuntime, queueAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		job := seedCrossDatabaseExhaustionFixture(t, bridgeAdmin, "before_bridge", true)
-		bridgeStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), 9090)
+		bridgeStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), bridgeAdmin, 9090)
 		queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 		leased := enqueueAndLeaseExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 1, 59, 0, 0, time.UTC))
 		job.JobID = leased.ID
@@ -190,7 +190,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 				queueRuntime, queueAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 				suffix := strings.NewReplacer("-", "_", " ", "_").Replace(arm.name)
 				job := seedCrossDatabaseExhaustionFixture(t, bridgeAdmin, suffix, true)
-				bridgeStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), 9090)
+				bridgeStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), bridgeAdmin, 9090)
 				bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC) }
 				queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 				leased := enqueueAndLeaseExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC))
@@ -235,7 +235,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		bridgeRuntime, bridgeAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		queueRuntime, queueAdmin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		job := seedCrossDatabaseExhaustionFixture(t, bridgeAdmin, "queue_response_loss", true)
-		bridgeStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), 9090)
+		bridgeStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(bridgeRuntime), bridgeAdmin, 9090)
 		bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 2, 1, 0, 0, time.UTC) }
 		queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 		enqueueExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 2, 1, 0, 0, time.UTC))
@@ -389,7 +389,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 			sessionID, jobID := test.setup(t, admin, queueStore, now)
 			deliverer := &postgresFinalizingDeliverer{
-				store:  NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090),
+				store:  fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090),
 				result: retryableExhaustionResult(),
 			}
 			runner := &JobRunner{
