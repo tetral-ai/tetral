@@ -55,7 +55,12 @@ python3 deploy/nats/render.py --charts-dir deploy/nats/charts \
 
 Use the verified official archive, base values, selected hardened values and
 generated locked values together when installing the independent Helm release.
-The rendered policy grants client 4222 only to Gateway/Event Stream, route 6222
+The broker NetworkPolicy is not a chart value: it lives in
+[network.yaml](network.yaml), which `render.py` appends to its output, so the
+checked manifests contain it. Installing the `render.py` output includes the
+policy; a direct Helm install from the archive and values must apply
+`network.yaml` in the same change.
+The policy grants client 4222 only to Gateway/Event Stream, route 6222
 only to broker Pods, and exporter 7777 only to the monitoring namespace role.
 Monitoring 8222 is internal to the Pod and is not granted through the policy.
 The app chart adds the corresponding two narrowly scoped egress grants.
