@@ -12,6 +12,8 @@ require (
 	github.com/daytonaio/daytona/libs/api-client-go v0.189.0
 	github.com/daytonaio/daytona/libs/sdk-go v0.189.0
 	github.com/daytonaio/daytona/libs/toolbox-api-client-go v0.189.0
+	github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908
+	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/nats-io/nats.go v1.53.0
@@ -48,8 +50,6 @@ require (
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
-	github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908 // indirect
-	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908 // indirect
 	github.com/envoyproxy/go-control-plane/ratelimit v0.1.1-0.20260729145720-a2d8c7492908 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
