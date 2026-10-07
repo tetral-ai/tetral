@@ -90,6 +90,7 @@ Select the optional Cilium/native-certificate/issuer-policy flags only for their
 rendered installation features. The check never contacts or mutates a cluster.
 Omitting `--require-complete` produces explicitly partial evidence and cannot
 establish installation completeness. A surviving superseded owned Deployment, autoscaler, network policy, Service or
-RBAC grant is a failed inventory check even when the new Gateway is healthy.
+RBAC grant is a failed inventory check even when the replacement workloads and
+public edge are healthy.
 Unrelated resources without matching ownership are preserved; controller/CRD
 prerequisites remain independently verified rather than silently adopted.

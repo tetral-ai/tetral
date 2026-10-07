@@ -2,8 +2,9 @@
 
 ## Responsibilities
 
-Streaming git smart-HTTP relay between sandboxes and `github.com`, and the
-platform's only internet-reachable ingress. Sandboxes hold no git credentials;
+Streaming git smart-HTTP relay between sandboxes and `github.com`, served
+through the shared public edge's separate Git host listener, which makes no API
+credential check. Sandboxes hold no git credentials;
 this service is the single site that injects the per-repository access token on
 the upstream leg of each request. It owns no durable tables, holds no
 cross-request state beyond the per-ticket in-flight counter

@@ -49,10 +49,15 @@ Use the token as `Authorization: Bearer <token>` on workspace API requests. Keep
 assertions and tokens out of URLs and logs. The exchange endpoint authenticates
 the assertion itself and requires no existing Engine API key or bearer token.
 
-The deployment edge must route the exact token endpoint to Auth and forward
-Bearer credentials on authenticated business requests. Those edge configuration
-changes are owned by the deployment guide; issuer connectivity and trust must
-be installed before enabling federation.
+The public edge routes only `POST` on the exact `/v1/oauth/token` path to Auth
+without a credential check. For every other API route it sends the Bearer token
+or API key to Auth's gRPC Check, then removes `Authorization`, `X-Api-Key` and
+untrusted `X-Tetral-*` and `X-Original-*` headers before forwarding. API, Auth
+API-key and Event Stream handlers receive only the signed
+`X-Tetral-Internal-Principal`, never the public credential. The
+[edge contract](../deploy/envoy-gateway/README.md) owns these routes and header
+rules. Issuer connectivity and trust must be installed before enabling
+federation.
 
 ## Configure the TypeScript SDK
 

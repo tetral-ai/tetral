@@ -511,16 +511,17 @@ verification in the deployment's actual environment.
 `replicas.eventStream` controls independent SSE processes and contributes each
 replica plus rollout surge to the PostgreSQL connection ledger. Every opted-in
 process uses an ordinary Core NATS subscription, so cross-process viewers each
-receive their own preview copy. Gateway receives only publisher credentials;
-Event Stream receives only subscriber credentials. The Runtime, Runner, API,
-Auth and MCP Connector receive no NATS credentials. `preview.brokerAddress`
+receive their own preview copy. Provider Gateway receives only publisher
+credentials; Event Stream receives only subscriber credentials. The Runtime,
+Runner, API, Auth and MCP Connector receive no NATS credentials. `preview.brokerAddress`
 is a DNS name on 4222 without URL credentials. Standard routing uses
 `nats://`; hardened native transport uses `tls://` with complete verified
-trust/role certificate paths and excludes 4222 from Gateway's mesh capture.
+trust/role certificate paths and excludes 4222 from Provider Gateway's mesh
+capture.
 
-`preview.gateway` configures the bounded publication queue, batch byte/frame
-limits, connect/flush deadlines, retry cap, credential poll interval, and native
-NATS heartbeat settings. `preview.subscriber` configures the connect deadline,
+`preview.gateway` (the Provider Gateway publisher) configures the bounded
+publication queue, batch byte/frame limits, connect/flush deadlines, retry cap,
+credential poll interval, and native NATS heartbeat settings. `preview.subscriber` configures the connect deadline,
 the supervisor's fresh-connection retry interval and its own native NATS
 heartbeat settings. `eventStream`
 configures formal polling/heartbeat/write deadlines, preview setup timeout,
@@ -535,8 +536,8 @@ The two roles share environment key names but retain distinct client defaults:
 | `preview.gateway.pingIntervalMs` / `maxPingOut` | Default 1000; range 1–60000 ms | Default 1; range 1–16 |
 | `preview.subscriber.pingIntervalMs` / `maxPingOut` | Default 120000; range 1–3600000 ms | Default 2; range 1–16 |
 
-Gateway's defaults bound detection of an idle lost publisher. Event Stream keeps
-the pinned Go client's existing two-minute/two-outstanding-ping defaults; its
+Provider Gateway's defaults bound detection of an idle lost publisher. Event
+Stream keeps the pinned Go client's existing two-minute/two-outstanding-ping defaults; its
 reconnect supervisor and projected timeout settings remain independent.
 These operational limits do not change preview JSON or durable event identity.
 Set `preview.enabled=false` to omit all broker credentials, network grants and
