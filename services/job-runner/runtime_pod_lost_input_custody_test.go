@@ -45,7 +45,7 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
 
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-			request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
+			request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
 				SessionThreadID: threadID,
 				RuntimeInputID:  runtimeInputID,
 				InputKind:       "messages",
@@ -147,7 +147,7 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 		BaseDelay: time.Second, MaxDelay: time.Second, MaxAttempts: 2,
 		RandomInt64: func(bound int64) int64 { return bound - 1 },
 	})
-	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
+	request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
 		SessionThreadID: threadID, RuntimeInputID: runtimeInputID, InputKind: "interrupt_control",
 		EventIDsJSON: `["evt_lost_interrupt_barrier"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
 	}, now)
@@ -226,7 +226,7 @@ func TestPostgreSQLRuntimePodLossReplacesOnlyAcknowledgedQueueCustody(t *testing
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_acked"]`, "accepted", bindingID, podUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
+	request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
 		SessionThreadID: threadID, RuntimeInputID: runtimeInputID, InputKind: "messages",
 		EventIDsJSON: `["evt_pod_loss_queue_acked"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
 	}, now)
@@ -305,7 +305,7 @@ func TestPostgreSQLRuntimeDeliveryAcknowledgesReclaimedJobAlreadyAcceptedByLiveB
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_reclaimed_live_binding"]`, "accepted", bindingID, podUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	request, err := lostRuntimeInputEnqueueRequest("default", sessionID, runtimePodLostAcceptedInput{
+	request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
 		SessionThreadID: threadID, RuntimeInputID: runtimeInputID, InputKind: "messages",
 		EventIDsJSON: `["evt_reclaimed_live_binding"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
 	}, now)
@@ -373,7 +373,7 @@ func TestPostgreSQLRuntimePodLossRejectsDeliveringInputWithoutActiveQueueCustody
 
 	client := dbconnect.NewClientForTesting(runtime)
 	err := client.WithWorkspaceTx(context.Background(), "default", "test.runtime_pod_loss_missing_queue_custody", func(tx *dbconnect.Tx) error {
-		_, err := handOffLostRuntimeAcceptedInputsTx(context.Background(), tx, "default", sessionID,
+		_, err := runtimecontrol.HandBackRuntimeInputsTx(context.Background(), tx, "default", sessionID,
 			runtimecontrol.Binding{BindingID: bindingID, BindingGeneration: 1, PodUID: podUID},
 			time.Date(2026, 8, 10, 14, 0, 0, 0, time.UTC))
 		return err
@@ -398,7 +398,7 @@ func handOffLostRuntimeInputsForTest(t *testing.T, runtime *sql.DB, sessionID st
 	handedOff := 0
 	if err := client.WithWorkspaceTx(context.Background(), "default", "test.runtime_pod_loss_queue_custody", func(tx *dbconnect.Tx) error {
 		var err error
-		handedOff, err = handOffLostRuntimeAcceptedInputsTx(context.Background(), tx, "default", sessionID,
+		handedOff, err = runtimecontrol.HandBackRuntimeInputsTx(context.Background(), tx, "default", sessionID,
 			runtimecontrol.Binding{BindingID: bindingID, BindingGeneration: 1, PodUID: podUID}, now)
 		return err
 	}); err != nil {

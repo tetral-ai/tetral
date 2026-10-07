@@ -267,20 +267,7 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 			if n, err := replacementQueue.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{Limit: 20}); err != nil || n != 1 {
 				t.Fatalf("reclaim killed worker=%d/%v", n, err)
 			}
-			maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
-			maintenanceJoined := make(chan struct{})
-			go func() {
-				defer close(maintenanceJoined)
-				tetralqueue.RunStalledLeaseMaintenance(maintenanceCtx, replacementQueue, tetralqueue.MaintenanceConfig{Interval: 100 * time.Millisecond, Limit: 20})
-			}()
-			t.Cleanup(func() {
-				stopMaintenance()
-				select {
-				case <-maintenanceJoined:
-				case <-time.After(10 * time.Second):
-					t.Error("Queue maintenance did not join")
-				}
-			})
+			startReplicaQueueMaintenance(ctx, t, replacementQueue, 10*time.Second)
 			close(release)
 			replacementProvider := &sandboxReplicaProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}, ledger: ledger, entered: make(chan string, 20), release: release}
 			registry, err := sandbox.NewProviderRegistry(map[string]sandbox.ProviderAdapter{driver.DaytonaProviderName: replacementProvider})

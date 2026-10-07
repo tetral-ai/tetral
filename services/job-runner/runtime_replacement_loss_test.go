@@ -33,7 +33,7 @@ func TestPostgreSQLRuntimePromotedReplacementRetainsLossAuthority(t *testing.T) 
 			seedRuntimePodLostStatusFence(t, admin, "replacement-session", "replacement-binding", 1)
 			seedBridgeAPIEvent(t, admin, "default", "replacement-session", "replacement-thread", "replacement-event", 1, "user.message", `{"type":"user.message"}`)
 			seedBridgeAPIRuntimeInbox(t, admin, "default", "replacement-session", "replacement-thread", "replacement-input", "messages", `["replacement-event"]`, "accepted", "replacement-binding", "replacement-pod", 1, 1)
-			request, err := lostRuntimeInputEnqueueRequest("default", "replacement-session", runtimePodLostAcceptedInput{
+			request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", "replacement-session", runtimecontrol.AcceptedRuntimeInput{
 				SessionThreadID: "replacement-thread", RuntimeInputID: "replacement-input", InputKind: "messages", EventIDsJSON: `["replacement-event"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
 			}, time.Now())
 			if err != nil {

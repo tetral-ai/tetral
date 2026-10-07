@@ -180,7 +180,7 @@ func (s *Server) Retry(ctx context.Context, request *queuev1.RetryRequest) (*que
 // over-budget notification with DeadLetterExhaustedTx.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (Defer, ReclaimExpiredLeases,
-// leaseCandidate); services/queue/maintenance.go (RunStalledLeaseMaintenance).
+// leaseCandidate); services/queue/maintenance.go (runStalledLeaseMaintenance).
 func (s *Server) Defer(ctx context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
 	if s == nil || s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "queue store is required")

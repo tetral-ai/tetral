@@ -37,7 +37,7 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 	for threadID, barrier := range barriers {
 		interruptedThreads[threadID] = barrier.RuntimeInputID
 	}
-	handedOff, err := handOffLostRuntimeAcceptedInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
+	handedOff, err := runtimecontrol.HandBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -363,17 +363,6 @@ func runtimeToolResultPartFromProjection(projectionJSON string) (map[string]any,
 	return map[string]any{
 		"type": "tool_result", "modelToolCallId": projection.ModelToolCallID, "result": result,
 	}, nil
-}
-
-// The common custody owner is shared by cooperative release and proven loss.
-type runtimePodLostAcceptedInput = runtimecontrol.AcceptedRuntimeInput
-
-func handOffLostRuntimeAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, binding runtimecontrol.Binding, now time.Time) (int, error) {
-	return runtimecontrol.HandBackRuntimeInputsTx(ctx, tx, workspaceID, sessionID, binding, now)
-}
-
-func lostRuntimeInputEnqueueRequest(workspaceID, sessionID string, input runtimePodLostAcceptedInput, now time.Time) (queue.EnqueueRequest, error) {
-	return runtimecontrol.RuntimeInputEnqueueRequest(workspaceID, sessionID, input, now)
 }
 
 func runtimePodLostAffectedThreadsTx(

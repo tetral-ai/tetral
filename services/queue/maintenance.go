@@ -21,10 +21,6 @@ type MaintenanceConfig struct {
 	Logger   *slog.Logger
 }
 
-func RunStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig) {
-	runStalledLeaseMaintenance(ctx, store, cfg, nil)
-}
-
 // maintenanceAdmission closes cycle admission without cancelling a cycle that
 // already owns database work. The service later cancels that work at its drain
 // deadline and joins this loop before returning database ownership to command.

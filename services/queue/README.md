@@ -124,7 +124,7 @@ durable invariants; the transition writers uphold them under concurrency.
 
 ### The maintenance loop
 
-One background goroutine (`RunStalledLeaseMaintenance`) runs
+One background goroutine owned by `Run` (`runStalledLeaseMaintenance`) runs
 `ReclaimExpiredLeases` across all workspaces on a fixed interval, taking a bounded
 batch per scan. This is what unsticks a `runtime_input`,
 `cleanup_session`, `session_delete_cleanup`, or Sandbox job stranded by a crashed

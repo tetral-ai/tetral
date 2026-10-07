@@ -3,7 +3,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -208,21 +211,7 @@ func TestPostgreSQLReplicaSandboxTakeover(t *testing.T) {
 			// A stopped owner leaves one expired capability. A subsequent heartbeat
 			// failure may leave another, so recovery needs the actual Queue maintenance
 			// owner throughout settlement, rather than one global reclamation pass.
-			maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
-			maintenanceJoined := make(chan struct{})
-			t.Cleanup(func() {
-				stopMaintenance()
-				select {
-				case <-maintenanceJoined:
-				case <-time.After(5 * time.Second):
-					t.Error("Queue maintenance did not join within bound")
-					<-maintenanceJoined
-				}
-			})
-			go func() {
-				defer close(maintenanceJoined)
-				tetralqueue.RunStalledLeaseMaintenance(maintenanceCtx, stores[1], tetralqueue.MaintenanceConfig{Interval: 100 * time.Millisecond, Limit: 20})
-			}()
+			startReplicaQueueMaintenance(ctx, t, stores[1], 5*time.Second)
 			waitHandoffCondition(t, "replacement settles every admitted execution", func() bool {
 				var count int
 				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM queue_jobs WHERE kind=$1 AND status='acknowledged'`, queue.KindSandboxToolExecute).Scan(&count); err != nil {
@@ -298,4 +287,33 @@ func containsSandboxUnknownResult(result string) bool {
 	var value map[string]any
 	_ = json.Unmarshal([]byte(result), &value)
 	return value["status"] == "unknown_outcome" || strings.Contains(result, "sandbox_execution_outcome_unknown")
+}
+
+// startReplicaQueueMaintenance runs the production Queue service as the
+// expired-lease maintenance owner shared by the Sandbox takeover cases. Cleanup
+// is registered before the service starts; it cancels the service and joins it
+// within joinBound.
+func startReplicaQueueMaintenance(ctx context.Context, t *testing.T, store *queue.PostgreSQLQueueStore, joinBound time.Duration) {
+	t.Helper()
+	maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+	joined := make(chan error, 1)
+	t.Cleanup(func() {
+		stopMaintenance()
+		select {
+		case err := <-joined:
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Queue maintenance service stopped with %v", err)
+			}
+		case <-time.After(joinBound):
+			t.Error("Queue maintenance did not join within bound")
+			<-joined
+		}
+	})
+	go func() {
+		joined <- tetralqueue.Run(maintenanceCtx, tetralqueue.Config{
+			GRPCAddress: "127.0.0.1:0", HTTPAddress: "127.0.0.1:0",
+			LeaseReclaimInterval: 100 * time.Millisecond, LeaseReclaimBatchLimit: 20,
+			DrainTimeout: 200 * time.Millisecond,
+		}, store, tetralqueue.RuntimeConfig{MaintenanceStore: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	}()
 }
