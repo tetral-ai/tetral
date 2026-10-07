@@ -17,8 +17,11 @@ import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js"
 /** Defines the structured record shape accepted by the connector logger. */
 export type McpConnectorLogRecord = TetralLogRecord;
 
-/** Defines the shared JSON logger specialized for connector records. */
-export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord>;
+/**
+ * Defines the shared JSON logger specialized for connector records. The
+ * process logger also supplies `warn`, which connector warnings use.
+ */
+export type McpConnectorLogger = TetralJsonLogger<McpConnectorLogRecord> & Partial<Pick<TetralDiagnosticLogger<McpConnectorLogRecord>, "warn">>;
 
 /** Creates a structured logger whose service identity is always `mcp-connector`. */
 export function createJsonLogger(options: {

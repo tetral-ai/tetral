@@ -677,7 +677,12 @@ it preserves the stated invariants and passes the named suites.
 - **Invariants.** `RunMcpTool` is caller-authenticated as the Runtime pod plus a
   binding-token check; `ListMcpTools` is caller-authenticated as Bridge or Job Runner for discovery only; identity
   failures are gRPC status errors, never tool results. Exactly one terminal
-  `run_mcp_tool` record per call. `RunMcpToolResponse.attachments[]` carry refs
+  `run_mcp_tool` record per call, carrying the configured `mcp.server.name`,
+  `mcp.tool.name`, `status`, `mcp.credential.refresh_triggered`,
+  `mcp.result.content_count` and `mcp.result.attachment_count`; a failed call
+  also carries the shared `error.class`/`error.code`/`error.message_safe`
+  tuple. Omitted platform-name collisions are WARN records subject to the
+  shared repeated-warning limiter. `RunMcpToolResponse.attachments[]` carry refs
   only — raw/base64 media bytes never appear.
 - **Conformance.** `service.test.ts`, `bounds.test.ts`, `auth.test.ts`,
   `http-server.test.ts`.

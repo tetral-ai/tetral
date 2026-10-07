@@ -8,9 +8,11 @@ import {
   MCP_RECONNECT_MAX_RETRIES,
   MCP_TOOLSETS_HEADER,
   McpSDKClient,
+  mcpDiscoveryPaginationFailureLogRecord,
   mcpToolsListChangedFailureLogRecord,
   streamableHTTPTransportOptions,
 } from "../../src/client.js";
+import { createJsonLogger } from "../../src/logger.js";
 import type { SDKClientLike } from "../../src/client.js";
 import type { GitHubMcpCredentialResolver } from "../../src/credential.js";
 
@@ -51,19 +53,38 @@ describe("McpSDKClient", () => {
 
   test("tools/list_changed failure logs carry shared correlation fields", () => {
     for (const failure of ["refresh_failed", "notify_failed"] as const) {
-      expect(mcpToolsListChangedFailureLogRecord(validIdentity(), failure)).toMatchObject({
+      const expected = {
         event: `mcp_tools_list_changed_${failure}`,
         "event.kind": `mcp_tools_list_changed_${failure}`,
         operation: "mcp_manifest_refresh",
         component: "mcp-connector",
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
-        mcp_server_name: "github",
+        "mcp.server.name": "github",
         "error.class": "mcp_connection_failed",
         "error.code": "mcp_connection_failed",
         "error.message_safe": `mcp tools/list_changed ${failure === "refresh_failed" ? "refresh" : "notify"} failed`,
-      });
+      };
+      const record = mcpToolsListChangedFailureLogRecord(validIdentity(), failure);
+      expect(record).toMatchObject(expected);
+      expect(serializedThroughSharedLogger(record)).toMatchObject({ ...expected, level: "error" });
     }
+  });
+
+  test("discovery pagination failure logs keep their fields through the shared logger", () => {
+    const serialized = serializedThroughSharedLogger(mcpDiscoveryPaginationFailureLogRecord(validIdentity(), "repeated_cursor", 3, 42));
+    expect(serialized).toMatchObject({
+      level: "error",
+      event: "mcp_discovery_pagination_failed",
+      "workspace.id": "wksp_1",
+      "session.id": "sesn_1",
+      "mcp.server.name": "github",
+      "mcp.discovery.failure_reason": "repeated_cursor",
+      "mcp.discovery.pages": 3,
+      "mcp.discovery.tool_count": 42,
+      "error.code": "mcp_connection_failed",
+    });
+    expect(serialized).not.toHaveProperty("mcp_server_name");
   });
 
   test("maps SDK reconnect errors to retrying and exhausted statuses", async () => {
@@ -847,6 +868,17 @@ function validIdentity() {
     sessionId: "sesn_1",
     mcpServerName: "github",
   };
+}
+
+// One logger per record keeps the shared repeated-failure limiter from
+// suppressing records that share an event and reason.
+function serializedThroughSharedLogger(record: Parameters<ReturnType<typeof createJsonLogger>["error"]>[0]): Record<string, unknown> {
+  const lines: string[] = [];
+  const logger = createJsonLogger({ write: (line) => lines.push(line) });
+  logger.error(record);
+  logger.close();
+  expect(lines).toHaveLength(1);
+  return JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
 }
 
 function fakeSetTimer(callback: () => void, _ms: number): ReturnType<typeof setTimeout> {

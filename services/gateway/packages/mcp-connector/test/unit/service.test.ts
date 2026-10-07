@@ -7,6 +7,7 @@ import type { RunMcpToolRequest } from "@tetral/gateway-protocol/src/gen/tetral/
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpConnectorError } from "../../src/errors.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse, RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -69,19 +70,24 @@ describe("McpConnectorServiceShell", () => {
       input_schema: JSON.parse(tool.inputSchemaJson) as unknown,
     }));
     expect(response.manifestEtag).toBe(createHash("sha256").update(canonicalJson(canonicalManifest)).digest("hex"));
-    const warningRecords = (logger.records as Array<Record<string, unknown>>).filter((record) => record["event.kind"] === "mcp_manifest_tool_omitted");
+    const omittedIndexes = (logger.records as Array<Record<string, unknown>>)
+      .map((record, index) => (record["event.kind"] === "mcp_manifest_tool_omitted" ? index : -1))
+      .filter((index) => index >= 0);
+    const warningRecords = omittedIndexes.map((index) => logger.records[index] as Record<string, unknown>);
     expect(warningRecords).toHaveLength(platformNames.length);
+    expect(omittedIndexes.map((index) => logger.levels[index])).toEqual(platformNames.map(() => "warn"));
     expect(warningRecords.map((record) => record["mcp.tool.name"])).toEqual(platformNames);
     for (const record of warningRecords) {
       expect(record).toMatchObject({
-        severity: "warning",
         operation: "mcp_manifest_list",
         component: "mcp-connector",
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
         "mcp.server.name": "github",
+        reason: "builtin_name_collision",
         "mcp.omission.reason": "builtin_name_collision",
       });
+      expect(record).not.toHaveProperty("severity");
     }
     expect(logger.records).toContainEqual(expect.objectContaining({
       event: "mcp_manifest_listed",
@@ -569,7 +575,7 @@ describe("McpConnectorServiceShell", () => {
       retryStatus: McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
     });
     expect(logger.records).toHaveLength(1);
-    expect(logger.records[0]).toMatchObject({ status: "runtime_error", error_kind: "mcp_commit_failed" });
+    expect(logger.records[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
   });
 
@@ -615,7 +621,7 @@ describe("McpConnectorServiceShell", () => {
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         status: "runtime_error",
-        error_kind: testCase.errorKind,
+        "error.code": testCase.errorKind,
       });
     }
   });
@@ -692,7 +698,8 @@ describe("McpConnectorServiceShell", () => {
         { type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" },
       ],
     };
-    const logger = new MemoryLogger();
+    const lines: string[] = [];
+    const logger = createJsonLogger({ write: (line) => lines.push(line) });
     const service = createService(
       client,
       new RecordingManifestChangeNotifier(),
@@ -708,27 +715,14 @@ describe("McpConnectorServiceShell", () => {
     await service.runMcpTool(request, authorizationMetadata());
 
     expect(response.status).toBe(RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED);
-    expect(logger.records).toHaveLength(2);
-    for (const [index, record] of (logger.records as Array<Record<string, unknown>>).entries()) {
-      expect(Object.keys(record).sort()).toEqual([
-        "attachment_count",
-        "component",
-        "content_items",
-        "duration.ms",
-        "error_kind",
-        "event.kind",
-        "mcp_server_name",
-        "operation",
-        "refresh_triggered",
-        "request.id",
-        "session.id",
-        "status",
-        "thread.id",
-        "tool.use.event.id",
-        "tool_name",
-        "workspace.id",
-      ].sort());
+    const records = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record["event.kind"] === "mcpconnector.call");
+    expect(records).toHaveLength(2);
+    for (const [index, record] of records.entries()) {
       expect(record).toMatchObject({
+        level: "info",
+        "service.name": "mcp-connector",
         "request.id": expect.stringMatching(/^mcpclaim_/),
         "workspace.id": "wksp_1",
         "session.id": "sesn_1",
@@ -737,20 +731,23 @@ describe("McpConnectorServiceShell", () => {
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         component: "mcp-connector",
-        mcp_server_name: index === 0 ? "github" : "",
-        tool_name: index === 0 ? "create_issue" : "",
+        "mcp.server.name": index === 0 ? "github" : "",
+        "mcp.tool.name": index === 0 ? "create_issue" : "",
         status: "completed",
-        error_kind: "",
-        refresh_triggered: true,
-        content_items: 2,
-        attachment_count: 1,
+        "mcp.credential.refresh_triggered": true,
+        "mcp.result.content_count": 2,
+        "mcp.result.attachment_count": 1,
       });
       expect(typeof record["duration.ms"]).toBe("number");
-      const serialized = JSON.stringify(record);
-      expect(serialized).not.toContain("Authorization");
-      expect(serialized).not.toContain("Bearer");
-      expect(serialized).not.toContain("rtbt_v1");
+      for (const removed of ["mcp_server_name", "tool_name", "error_kind", "refresh_triggered", "content_items", "attachment_count", "severity", "error.code"]) {
+        expect(record).not.toHaveProperty(removed);
+      }
+      expect(Object.values(record)).not.toContain("[REDACTED]");
     }
+    const serialized = lines.join("");
+    expect(serialized).not.toContain("Authorization");
+    expect(serialized).not.toContain("Bearer");
+    expect(serialized).not.toContain("rtbt_v1");
   });
 
   test("maps invalid MCP arguments to model-visible tool errors", async () => {
@@ -775,33 +772,31 @@ describe("McpConnectorServiceShell", () => {
       operation: "run_mcp_tool",
       "event.kind": "mcpconnector.call",
       component: "mcp-connector",
-      mcp_server_name: "github",
-      tool_name: "create_issue",
+      "mcp.server.name": "github",
+      "mcp.tool.name": "create_issue",
       status: "tool_error",
-      error_kind: "mcp_invalid_input",
       "error.class": "mcp_invalid_input",
       "error.code": "mcp_invalid_input",
       "error.message_safe": "MCP connector call failed.",
     });
     expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
-      "attachment_count",
       "component",
-      "content_items",
       "duration.ms",
       "error.class",
       "error.code",
-      "error_kind",
       "error.message_safe",
       "event.kind",
-      "mcp_server_name",
+      "mcp.credential.refresh_triggered",
+      "mcp.result.attachment_count",
+      "mcp.result.content_count",
+      "mcp.server.name",
+      "mcp.tool.name",
       "operation",
-      "refresh_triggered",
       "request.id",
       "session.id",
       "status",
       "thread.id",
       "tool.use.event.id",
-      "tool_name",
       "workspace.id",
     ].sort());
     expect(JSON.stringify(logger.records[0])).not.toContain("MCP server rejected the arguments.");
@@ -873,7 +868,7 @@ describe("McpConnectorServiceShell", () => {
     expect(bridge.commitCalls).toHaveLength(1);
     expect(logger.records).toContainEqual(expect.objectContaining({
       status: "runtime_error",
-      error_kind: "mcp_internal_error",
+      "error.code": "mcp_internal_error",
       "error.class": "mcp_internal_error",
     }));
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_internal_error"} 1');
@@ -985,36 +980,34 @@ describe("McpConnectorServiceShell", () => {
         operation: "run_mcp_tool",
         "event.kind": "mcpconnector.call",
         component: "mcp-connector",
-        mcp_server_name: "",
-        tool_name: "",
+        "mcp.server.name": "",
+        "mcp.tool.name": "",
         status: "runtime_error",
-        error_kind: "runtime_binding_token_rejected",
-        refresh_triggered: false,
-        content_items: 0,
-        attachment_count: 0,
+        "mcp.credential.refresh_triggered": false,
+        "mcp.result.content_count": 0,
+        "mcp.result.attachment_count": 0,
         "error.class": "runtime_binding_token_rejected",
         "error.code": "runtime_binding_token_rejected",
         "error.message_safe": "MCP connector call failed.",
       });
       expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
-        "attachment_count",
         "component",
-        "content_items",
         "duration.ms",
         "error.class",
         "error.code",
-        "error_kind",
         "error.message_safe",
         "event.kind",
-        "mcp_server_name",
+        "mcp.credential.refresh_triggered",
+        "mcp.result.attachment_count",
+        "mcp.result.content_count",
+        "mcp.server.name",
+        "mcp.tool.name",
         "operation",
-        "refresh_triggered",
         "request.id",
         "session.id",
         "status",
-      "thread.id",
-      "tool.use.event.id",
-      "tool_name",
+        "thread.id",
+        "tool.use.event.id",
         "workspace.id",
       ].sort());
       expect(JSON.stringify(logger.records[0])).not.toContain("rtbt_v1");
@@ -1424,13 +1417,21 @@ class AllowingAuthenticator implements McpAuthenticator {
 
 class MemoryLogger implements McpConnectorLogger {
   readonly records: unknown[] = [];
+  readonly levels: Array<"info" | "warn" | "error"> = [];
 
   info(record: unknown): void {
     this.records.push(record);
+    this.levels.push("info");
+  }
+
+  warn(record: unknown): void {
+    this.records.push(record);
+    this.levels.push("warn");
   }
 
   error(record: unknown): void {
     this.records.push(record);
+    this.levels.push("error");
   }
 }
 

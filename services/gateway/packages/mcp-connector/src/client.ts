@@ -646,7 +646,7 @@ export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failu
     component: "mcp-connector",
     "workspace.id": identity.workspaceId,
     "session.id": identity.sessionId,
-    mcp_server_name: identity.mcpServerName,
+    "mcp.server.name": identity.mcpServerName,
     ...semanticErrorFields({
       errorClass: "mcp_connection_failed",
       errorCode: "mcp_connection_failed",
@@ -669,7 +669,7 @@ export function mcpDiscoveryPaginationFailureLogRecord(
     component: "mcp-connector",
     "workspace.id": identity.workspaceId,
     "session.id": identity.sessionId,
-    mcp_server_name: identity.mcpServerName,
+    "mcp.server.name": identity.mcpServerName,
     "mcp.discovery.failure_reason": reason,
     "mcp.discovery.pages": pages,
     "mcp.discovery.tool_count": toolCount,

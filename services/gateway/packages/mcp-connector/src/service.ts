@@ -100,6 +100,8 @@ export interface McpClientTool {
  */
 export interface McpConnectorLogger {
   readonly info: (record: McpLogRecord) => void;
+  /** Supplied by the process logger; an injected logger without it records warnings through `info`. */
+  readonly warn?: (record: McpLogRecord) => void;
   readonly error: (record: McpLogRecord) => void;
 }
 
@@ -144,13 +146,12 @@ type RunMcpToolLogRecordFields = {
   readonly "event.kind": "mcpconnector.call";
   readonly component: "mcp-connector";
   readonly "duration.ms": number;
-  readonly mcp_server_name: string;
-  readonly tool_name: string;
+  readonly "mcp.server.name": string;
+  readonly "mcp.tool.name": string;
   readonly status: string;
-  readonly error_kind: string;
-  readonly refresh_triggered: boolean;
-  readonly content_items: number;
-  readonly attachment_count: number;
+  readonly "mcp.credential.refresh_triggered": boolean;
+  readonly "mcp.result.content_count": number;
+  readonly "mcp.result.attachment_count": number;
 };
 
 type RunMcpToolLogRecord = RunMcpToolLogRecordFields & TetralLogRecord;
@@ -249,9 +250,8 @@ export class McpConnectorServiceShell {
     }
     this.#metrics.recordManifestRefresh();
     for (const omitted of omittedTools) {
-      safeConnectorLog(this.options.logger, "info", {
+      safeConnectorLog(this.options.logger, "warn", {
         event: "mcp_manifest_tool_omitted",
-        severity: "warning",
         operation: "mcp_manifest_list",
         component: "mcp-connector",
         "event.kind": "mcp_manifest_tool_omitted",
@@ -261,6 +261,7 @@ export class McpConnectorServiceShell {
         "session.id": request.sessionId,
         "mcp.server.name": request.mcpServerName,
         "mcp.tool.name": omitted.name,
+        reason: omitted.reason,
         "mcp.omission.reason": omitted.reason,
       });
     }
@@ -616,8 +617,12 @@ function abortableManifestNotifySleep(delayMs: number, signal?: AbortSignal): Pr
 
 // Connector telemetry observes a completed owner decision; sink failure may
 // never rewrite discovery, notification, or Tool settlement semantics.
-function safeConnectorLog(logger: McpConnectorLogger, level: "info" | "error", record: McpLogRecord): void {
+function safeConnectorLog(logger: McpConnectorLogger, level: "info" | "warn" | "error", record: McpLogRecord): void {
   try {
+    if (level === "warn") {
+      (logger.warn ?? logger.info).call(logger, record);
+      return;
+    }
     logger[level](record);
   } catch {
     // Business results and retries do not depend on observability.
@@ -664,13 +669,12 @@ function runMcpToolLogRecord(
     "event.kind": "mcpconnector.call",
     component: "mcp-connector",
     "duration.ms": durationMs,
-    mcp_server_name: request.mcpServerName,
-    tool_name: request.toolName,
+    "mcp.server.name": request.mcpServerName,
+    "mcp.tool.name": request.toolName,
     status,
-    error_kind: errorCode,
-    refresh_triggered: execution.refreshTriggered,
-    content_items: execution.contentItems,
-    attachment_count: response.attachments.length,
+    "mcp.credential.refresh_triggered": execution.refreshTriggered,
+    "mcp.result.content_count": execution.contentItems,
+    "mcp.result.attachment_count": response.attachments.length,
   };
   if (errorCode !== "") {
     return {
@@ -696,13 +700,12 @@ function runMcpToolFailureLogRecord(
     "event.kind": "mcpconnector.call",
     component: "mcp-connector",
     "duration.ms": Math.round(performance.now() - started),
-    mcp_server_name: request.mcpServerName,
-    tool_name: request.toolName,
+    "mcp.server.name": request.mcpServerName,
+    "mcp.tool.name": request.toolName,
     status: "runtime_error",
-    error_kind: errorCode,
-    refresh_triggered: false,
-    content_items: 0,
-    attachment_count: 0,
+    "mcp.credential.refresh_triggered": false,
+    "mcp.result.content_count": 0,
+    "mcp.result.attachment_count": 0,
     ...semanticErrorFields({ errorClass: errorCode, errorCode, messageSafe: "MCP connector call failed." }),
   };
 }
