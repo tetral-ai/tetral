@@ -58,9 +58,6 @@ func NewRouter(cfg RouterConfig) http.Handler {
 		panic(err)
 	}
 	cfg.exchangeLimiter = newExchangeLimiter(cfg.ExchangeLimits)
-	if cfg.Resolver == nil && cfg.Store != nil {
-		cfg.Resolver = cfg.Store.AuthorityResolver()
-	}
 	r := chi.NewRouter()
 	logger := cfg.Logger
 	if logger == nil {
@@ -233,10 +230,6 @@ func (cfg RouterConfig) principalFromRequest(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
 		writeAuthError(w, r, err)
-		return auth.Principal{}, false
-	}
-	if principal.Workspace.ID == "" {
-		writeAuthError(w, r, workspace.ErrNoWorkspaceInContext)
 		return auth.Principal{}, false
 	}
 	return principal, true

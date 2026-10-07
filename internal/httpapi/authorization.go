@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 
 	"github.com/go-chi/chi/v5"
 
@@ -68,9 +67,11 @@ func AuthorizePublicRequest(ctx context.Context, resource auth.ResourceReference
 	return auth.AuthorizeWithAudit(ctx, principal, operation, resource)
 }
 
-// authorizeWorkspace is called at the existing handler workspace boundary,
-// after parsing and before business effects. Resource loaders remain local to
-// their HTTP owner and retain its tenant-safe repository semantics.
+// authorizeWorkspace applies the per-request gate that registerPublicRoute
+// installs (the route's operation plus an owner-resolved resource reference)
+// and returns the authorized workspace. Handlers reach it through
+// requestWorkspace. Resource loaders remain local to their HTTP owner and
+// retain its tenant-safe repository semantics.
 func authorizeWorkspace(ctx context.Context) (workspace.ID, error) {
 	ws, err := workspace.MustIDFromContext(ctx)
 	if err != nil {
@@ -87,9 +88,12 @@ func authorizeWorkspace(ctx context.Context) (workspace.ID, error) {
 }
 
 func registerPublicRoute(r chi.Router, method, pattern string, handler http.HandlerFunc, sessions *SessionHandler, opts *routerOptions, stub bool) {
-	// Read handlers authorize their existing owner result before disclosure.
-	// Mutations load trusted facts at the handler workspace boundary.
-	ownGate := (pattern == "/sessions/{session_id}/events" || pattern == "/sessions/{session_id}/threads/{thread_id}/events") && method == http.MethodGet
+	// Unimplemented routes authorize the typed workspace here. Real handlers
+	// invoke the gate through requestWorkspace: GET requests authorize the
+	// workspace and read handlers then authorize their owner result before
+	// disclosure; mutations first resolve trusted owner facts. The GET
+	// event-list handlers from internal/eventstream do not invoke this gate; they
+	// call AuthorizePublicRequest after their tenant-safe list.
 	r.Method(method, pattern, DeclarePublicOperation(method, "/v1"+pattern, func(w http.ResponseWriter, req *http.Request) {
 		gate := func(ws workspace.ID) error {
 			if stub || req.Method == http.MethodGet {
@@ -102,7 +106,7 @@ func registerPublicRoute(r chi.Router, method, pattern string, handler http.Hand
 			return AuthorizePublicRequest(req.Context(), reference)
 		}
 		req = req.WithContext(context.WithValue(req.Context(), authorizationContextKey{}, gate))
-		if !ownGate && stub {
+		if stub {
 			if _, err := authorizeWorkspace(req.Context()); err != nil {
 				writeError(w, req, err)
 				return
@@ -142,18 +146,6 @@ func authorizeReadResource(w http.ResponseWriter, r *http.Request, ws workspace.
 
 func resolvePublicResource(r *http.Request, ws workspace.ID, sessions *SessionHandler, opts *routerOptions) (auth.ResourceReference, error) {
 	ctx := r.Context()
-	if rawID := chi.URLParam(r, "model_id"); rawID != "" {
-		id, err := url.PathUnescape(rawID)
-		if err != nil {
-			return auth.ResourceReference{}, &ValidationError{Message: "invalid model id"}
-		}
-		for _, model := range currentModelCatalog() {
-			if model.ID == id {
-				return resourceReference(ws, "model", model.ID, nil)
-			}
-		}
-		return auth.ResourceReference{}, &NotFoundError{Message: "model not found"}
-	}
 	if id := chi.URLParam(r, "session_id"); id != "" {
 		if sessions == nil {
 			return auth.ResourceReference{}, errors.New("session resource owner is not configured")

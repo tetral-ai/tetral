@@ -76,11 +76,7 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 	if err != nil {
 		return nil, err
 	}
-	cacheTTL := cfg.JWKSCacheTTL
-	if cacheTTL == 0 {
-		cacheTTL = 10 * time.Minute
-	}
-	verifier, err := auth.NewConfiguredAssertionVerifier(ctx, auth.AssertionVerifierConfig{KeyCacheTTL: cacheTTL})
+	verifier, err := auth.NewConfiguredAssertionVerifier(ctx, auth.AssertionVerifierConfig{KeyCacheTTL: cfg.JWKSCacheTTL})
 	if err != nil {
 		_ = database.OpenResult.Client.Close()
 		return nil, err

@@ -360,9 +360,6 @@ func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, 
 	return AccessTokenResponse{AccessToken: raw, TokenType: "Bearer", ExpiresIn: seconds}, nil
 }
 
-// AuthorityResolver shares the store's pool; it does not own pool lifetime.
-func (s *APIKeyStore) AuthorityResolver() *AuthorityResolver { return NewAuthorityResolver(s.db, "") }
-
 func authenticationDependencyError(err error) error {
 	if err == nil {
 		return nil

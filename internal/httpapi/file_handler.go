@@ -352,7 +352,7 @@ func (h *FileHandler) getFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mimeType := "application/octet-stream"
-	if stream.Metadata != nil && stream.Metadata.MIMEType != "" {
+	if stream.Metadata.MIMEType != "" {
 		mimeType = stream.Metadata.MIMEType
 	}
 	w.Header().Set("Content-Type", mimeType)

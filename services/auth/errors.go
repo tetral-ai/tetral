@@ -38,11 +38,10 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	})
 }
 
+// authRequestID returns the ID that RequestIDMiddleware generated. Auth never
+// echoes a client-supplied X-Request-Id into its error envelope.
 func authRequestID(r *http.Request) string {
-	if requestID := httpapi.RequestIDFromContext(r.Context()); requestID != "" {
-		return requestID
-	}
-	return r.Header.Get("X-Request-Id")
+	return httpapi.RequestIDFromContext(r.Context())
 }
 
 func writeAuthJSON(w http.ResponseWriter, status int, value any) {

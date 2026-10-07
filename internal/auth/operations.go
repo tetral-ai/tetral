@@ -256,8 +256,7 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/vaults/{vault_id}/credentials/{credential_id}/mcp_oauth_validate", OperationCredentialsValidateMcpOauth},
 }
 
-func RegisteredOperations() []Operation           { return slices.Clone(registeredOperations) }
-func RegisteredOperationRoutes() []OperationRoute { return slices.Clone(operationRoutes) }
+func RegisteredOperations() []Operation { return slices.Clone(registeredOperations) }
 func IsRegisteredOperation(operation Operation) bool {
 	return slices.Contains(registeredOperations, operation)
 }

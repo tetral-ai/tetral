@@ -32,8 +32,17 @@ func NewAgentHandler(service *agent.Service) *AgentHandler {
 	return &AgentHandler{service: service}
 }
 
-// requestWorkspace extracts the authenticated workspace from ctx.
-// Real resource handlers fail closed when auth did not attach one.
+// requestWorkspace is the mandatory authorization call for public business
+// handlers in this package. It returns the principal's workspace only after the
+// route's operation gate allows the request. Every GET request, and every
+// collection, create or unimplemented route, authorizes the typed workspace
+// here; single-resource read handlers then call authorizeReadResource on the
+// owner result before disclosure. Mutations of an addressed resource first
+// resolve it through its tenant-scoped owner, so absent or foreign resources
+// fail as not found. Call it after request validation and before any business
+// effect; handlers in this package never read workspace.MustIDFromContext
+// directly. The event-list handlers in internal/eventstream instead authorize
+// their tenant-safe list result through AuthorizePublicRequest.
 func requestWorkspace(ctx context.Context) (workspace.ID, error) {
 	return authorizeWorkspace(ctx)
 }
