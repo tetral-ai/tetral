@@ -188,16 +188,6 @@ async function runCase({ phase, sink, holdInitialReport }: Case): Promise<void> 
         expect(names.indexOf("report.ack.accepting"), context).toBeLessThan(
           names.indexOf("process.ready"),
         );
-      console.info(
-        "stale_process_exit " + JSON.stringify({
-          phase,
-          sink,
-          exit_code: code,
-          elapsed_ms: elapsed,
-          registration_count: registrations.length,
-          joined: true,
-        }),
-      );
     }
   } finally {
     if (watchdog !== undefined) clearTimeout(watchdog);

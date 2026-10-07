@@ -188,9 +188,6 @@ test("earlier phase cancels actual termination RPC and joins before retry comple
         expect(admissions[0]).toBeLessThanOrEqual(100);
         expect(performance.now() - started).toBeLessThan(1000);
         expect(active).toBe(0);
-        console.info(JSON.stringify({
-            event: "termination_phase_probe", phase_ms: 100, completion_ms: performance.now() - started, admissions, active, cancelled
-        }));
     }
     finally {
         await assembled.dependencies.app.shutdown();
