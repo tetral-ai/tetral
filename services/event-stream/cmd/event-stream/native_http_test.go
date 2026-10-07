@@ -18,6 +18,6 @@ func TestEventStreamNativeHTTPServiceLifecycle(t *testing.T) {
 		runWorkload = run
 		defer func() { runWorkload = original }()
 		cfg := commandConfig{HTTPTransport: transport, ListenAddress: "127.0.0.1:0", MetricsAddress: "127.0.0.1:0"}
-		return runPublicAndMetricsHTTP(ctx, cfg, ready, slog.New(slog.NewTextHandler(io.Discard, nil)), buildHTTPHandler(ready, public), metrics)
+		return runPublicAndMetricsHTTP(ctx, cfg, ready, slog.New(slog.NewTextHandler(io.Discard, nil)), buildHTTPHandler(ready, public), metrics, workload.NewOperationMetrics("event-stream"))
 	})
 }

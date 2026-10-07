@@ -173,11 +173,10 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
-	operationMetrics ...*workload.OperationMetrics,
+	metrics *workload.OperationMetrics,
 ) error {
-	var metrics *workload.OperationMetrics
-	if len(operationMetrics) != 0 {
-		metrics = operationMetrics[0]
+	if metrics == nil {
+		return workload.NewConfigError("HTTP operation metrics are required")
 	}
 	if ctx == nil {
 		ctx = context.Background()

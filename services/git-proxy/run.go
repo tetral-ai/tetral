@@ -75,11 +75,10 @@ func runHTTPPair(
 	cfg Config,
 	proxyHandler http.Handler,
 	metricsHandler http.Handler,
-	operationMetrics ...*workload.OperationMetrics,
+	operations *workload.OperationMetrics,
 ) error {
-	var operations *workload.OperationMetrics
-	if len(operationMetrics) != 0 {
-		operations = operationMetrics[0]
+	if operations == nil {
+		return workload.NewConfigError("HTTP operation metrics are required")
 	}
 	if ctx == nil {
 		ctx = context.Background()

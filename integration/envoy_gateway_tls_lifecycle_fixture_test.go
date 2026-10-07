@@ -17,6 +17,7 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 	authservice "github.com/tetral-ai/tetral/services/auth"
 )
 
@@ -245,7 +246,7 @@ func (l *edgeTLSLifecycle) restartCheck(t *testing.T) {
 		cfg.GRPCTLSKeyPath = filepath.Join(l.checkDirectory, "tls.key")
 		cfg.GRPCTLSEdgeClientURI = "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
 	}
-	server := transporttest.Must(authservice.OpenExternalAuthorizationServer(l.context, cfg, l.adapter, nil))
+	server := transporttest.Must(authservice.OpenExternalAuthorizationServer(l.context, cfg, l.adapter, nil, workload.NewOperationMetrics("auth")))
 	ctx, cancel := context.WithCancel(l.context)
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx, nil) }()

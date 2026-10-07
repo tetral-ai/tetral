@@ -66,7 +66,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 	processLogger := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "unit", workload.DefaultDiagnosticConfig())
 	defer processLogger.CloseWithBudget()
 	router := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: store, Resolver: resolver, AssertionVerifier: verifier, Signer: signer})
-	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: processLogger.Logger})
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: processLogger.Logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		unavailableRouter := NewRouter(RouterConfig{Logger: processLogger.Logger, Store: auth.NewAPIKeyStore(closed), Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b"), AssertionVerifier: verifier, Signer: signer})
 		endpoint := httptest.NewServer(unavailableRouter)
 		defer endpoint.Close()
-		unavailableAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b")}, Signer: signer, Logger: processLogger.Logger})
+		unavailableAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closed, "workspace_exchange_b")}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: processLogger.Logger})
 		if err != nil {
 			t.Fatal(err)
 		}

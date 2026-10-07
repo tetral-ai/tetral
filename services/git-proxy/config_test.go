@@ -104,6 +104,7 @@ func TestBuildMetricsHTTPHandlerServesMetricsOnInternalSurface(t *testing.T) {
 
 func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 	calls := make(chan workload.Config, 2)
+	operations := workload.NewOperationMetrics(ServiceName)
 	err := runHTTPPair(
 		context.Background(),
 		func(_ context.Context, cfg workload.Config) error {
@@ -122,6 +123,7 @@ func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 		},
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		operations,
 	)
 	if err != nil {
 		t.Fatalf("runHTTPPair: %v", err)
@@ -136,6 +138,9 @@ func TestRunHTTPPairStartsPublicAndMetricsListeners(t *testing.T) {
 	}
 	if byKey[EnvMetricsAddress].ListenAddress != "127.0.0.1:18081" {
 		t.Fatalf("metrics listener config = %+v", byKey[EnvMetricsAddress])
+	}
+	if byKey[EnvHTTPAddress].Metrics != operations || byKey[EnvMetricsAddress].Metrics != operations {
+		t.Fatal("public and metrics listeners must record the process operation metrics")
 	}
 }
 

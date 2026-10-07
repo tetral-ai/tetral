@@ -35,20 +35,19 @@ type ExternalAuthorizationServer struct {
 
 const externalAuthorizationCheckMethod = "/envoy.service.auth.v3.Authorization/Check"
 
-func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *ExternalAuthorization, logger *slog.Logger, metrics ...*workload.OperationMetrics) (*ExternalAuthorizationServer, error) {
+// OpenExternalAuthorizationServer records Check outcomes in the Auth process's
+// shared operation metrics, so the caller supplies the metrics it exports.
+func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *ExternalAuthorization, logger *slog.Logger, metrics *workload.OperationMetrics) (*ExternalAuthorizationServer, error) {
 	if adapter == nil {
 		return nil, workload.NewConfigError("external authorization adapter is required")
+	}
+	if metrics == nil {
+		return nil, workload.NewConfigError("external authorization operation metrics are required")
 	}
 	if logger == nil {
 		logger = workload.ComponentLogger("auth")
 	}
-	owner := &ExternalAuthorizationServer{logger: logger, health: health.NewServer()}
-	if len(metrics) != 0 {
-		owner.metrics = metrics[0]
-	}
-	if owner.metrics == nil {
-		owner.metrics = workload.NewOperationMetrics("auth")
-	}
+	owner := &ExternalAuthorizationServer{logger: logger, health: health.NewServer(), metrics: metrics}
 	owner.metrics.SetOperations([]string{externalAuthorizationCheckMethod})
 	validatePeer := func(ctx context.Context) error {
 		if owner.credentials != nil {

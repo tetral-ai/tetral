@@ -43,9 +43,6 @@ func NewExternalAuthorization(cfg ExternalAuthorizationConfig) (*ExternalAuthori
 	if cfg.Authenticator == nil || cfg.Authenticator.Resolver == nil || cfg.Signer == nil {
 		return nil, errors.New("external authorization requires authenticator and signer")
 	}
-	if cfg.PrincipalTTL == 0 {
-		cfg.PrincipalTTL = DefaultInternalPrincipalTTL
-	}
 	if cfg.PrincipalTTL <= 0 || cfg.PrincipalTTL > auth.MaxInternalPrincipalTTL {
 		return nil, workload.NewConfigError("external authorization principal TTL is invalid")
 	}

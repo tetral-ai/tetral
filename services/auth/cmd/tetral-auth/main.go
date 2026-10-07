@@ -108,7 +108,7 @@ func runPublicAndMetricsHTTP(
 	logger *slog.Logger,
 	publicHandler http.Handler,
 	metricsHandler http.Handler,
-	listeners ...boundHTTPListeners,
+	listeners boundHTTPListeners,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -118,11 +118,9 @@ func runPublicAndMetricsHTTP(
 	results := make(chan error, 2)
 	go func() {
 		publicConfig := tetralauth.WorkloadConfig(cfg, publicHandler, readiness, logger)
-		if len(listeners) == 1 {
-			publicConfig.Listener = listeners[0].public
-			publicConfig.TLSConfig = listeners[0].tls
-			publicConfig.Metrics = listeners[0].operationMetrics
-		}
+		publicConfig.Listener = listeners.public
+		publicConfig.TLSConfig = listeners.tls
+		publicConfig.Metrics = listeners.operationMetrics
 		results <- runWorkload(runCtx, publicConfig)
 	}()
 	go func() {
@@ -136,10 +134,8 @@ func runPublicAndMetricsHTTP(
 			Readiness:             readiness,
 			ShutdownTimeout:       tetralauth.DefaultShutdownTimeout,
 			Logger:                logger,
-		}
-		if len(listeners) == 1 {
-			metricsConfig.Listener = listeners[0].metrics
-			metricsConfig.Metrics = listeners[0].operationMetrics
+			Listener:              listeners.metrics,
+			Metrics:               listeners.operationMetrics,
 		}
 		results <- runWorkload(runCtx, metricsConfig)
 	}()

@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	authservice "github.com/tetral-ai/tetral/services/auth"
 )
@@ -457,7 +458,7 @@ func startEnvoyGatewayAuthCheck(ctx context.Context, t *testing.T, fixture *envo
 		cfg.GRPCTLSKeyPath = filepath.Join(directory, "tls.key")
 		cfg.GRPCTLSEdgeClientURI = "spiffe://cluster.local/ns/envoy-gateway-system/sa/tetral-public-edge"
 	}
-	check := transporttest.Must(authservice.OpenExternalAuthorizationServer(ctx, cfg, adapter, nil))
+	check := transporttest.Must(authservice.OpenExternalAuthorizationServer(ctx, cfg, adapter, nil, workload.NewOperationMetrics("auth")))
 	checkCtx, stopCheck := context.WithCancel(ctx)
 	checkJoined := make(chan error, 1)
 	go func() { checkJoined <- check.Run(checkCtx, nil) }()

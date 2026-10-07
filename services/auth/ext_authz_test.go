@@ -98,9 +98,21 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	diagnosticConfig.Level = slog.LevelDebug
 	diagnosticOwner := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "owning", diagnosticConfig)
 	defer diagnosticOwner.CloseWithBudget()
-	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: diagnosticOwner.Logger})
+	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The validated Auth configuration owns the principal TTL and the process
+	// owns its exported metrics; neither has a constructor default.
+	if _, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: diagnosticOwner.Logger}); err == nil {
+		t.Fatal("external authorization accepted an unset principal TTL")
+	} else if _, ok := workload.AsConfigError(err); !ok {
+		t.Fatalf("unset principal TTL error = %v; want config error", err)
+	}
+	if _, err := OpenExternalAuthorizationServer(ctx, Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "plaintext"}, adapter, diagnosticOwner.Logger, nil); err == nil {
+		t.Fatal("Check listener opened without its operation metrics")
+	} else if _, ok := workload.AsConfigError(err); !ok {
+		t.Fatalf("missing Check metrics error = %v; want config error", err)
 	}
 	metrics := workload.NewOperationMetrics("auth")
 	server, err := OpenExternalAuthorizationServer(ctx, Config{GRPCAddress: "127.0.0.1:0", GRPCTransport: "plaintext"}, adapter, diagnosticOwner.Logger, metrics)
@@ -437,7 +449,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	t.Run("DefaultInfoAdmissionAndSinkSafety", func(t *testing.T) {
 		var quiet bytes.Buffer
 		owner := workload.NewProcessLogger(&quiet, "auth", "test", "quiet", workload.DefaultDiagnosticConfig())
-		good, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: owner.Logger})
+		good, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: owner.Logger})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -449,7 +461,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if quiet.Len() != 0 {
 			t.Fatal("healthy admission emitted default INFO diagnostics")
 		}
-		throwing, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, Logger: slog.New(externalThrowingDiagnostics{})})
+		throwing, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: slog.New(externalThrowingDiagnostics{})})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -473,7 +485,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err := closedDB.Close(); err != nil {
 			t.Fatal(err)
 		}
-		failedAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closedDB, "ws_auth_test")}, Signer: signer, Logger: diagnosticOwner.Logger})
+		failedAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closedDB, "ws_auth_test")}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
 		if err != nil {
 			t.Fatal(err)
 		}
