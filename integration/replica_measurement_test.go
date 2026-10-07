@@ -8,9 +8,12 @@ import (
 	"time"
 )
 
-// Samples use monotonic operation boundaries. Batch orchestration and percentile
-// reporting belong to the evidence runner; whole-test elapsed times are never
-// substituted for these call/stream completion measurements.
+// Samples use monotonic operation boundaries and are emitted as structured
+// replica_completion records in the test log output for offline analysis;
+// nothing in the repository computes percentiles from them. The tests enforce
+// operation correctness and failure counts, not latency bounds, and whole-test
+// elapsed times are never substituted for these call/stream completion
+// measurements.
 type replicaCompletionSample struct {
 	Cohort        string `json:"cohort"`
 	Method        string `json:"method"`

@@ -232,13 +232,17 @@ func assertTransportMCPStored(t *testing.T, admin *sql.DB, eventID string) strin
 	return result
 }
 
+// transportMCPBeforeStore holds each commit before the production store method,
+// which it never calls, until the receiver observes the caller's cancellation.
 type transportMCPBeforeStore struct {
 	bridge.BridgeAPIStore
-	reached chan struct{}
-	invoked atomic.Int32
+	reached           chan struct{}
+	entered, returned atomic.Int32
 }
 
 func (s *transportMCPBeforeStore) CommitMcpToolResult(ctx context.Context, r *bridgev1.CommitMcpToolResultRequest) (*bridgev1.CommitMcpToolResultResponse, error) {
+	s.entered.Add(1)
+	defer s.returned.Add(1)
 	select {
 	case s.reached <- struct{}{}:
 	default:
@@ -247,7 +251,9 @@ func (s *transportMCPBeforeStore) CommitMcpToolResult(ctx context.Context, r *br
 	return nil, status.FromContextError(ctx.Err()).Err()
 }
 func TestPostgreSQLTransportCommittedResponseLoss(t *testing.T) {
-	t.Run("commit response reset reconciles through independent receiver", func(t *testing.T) { runTransportMCPCommittedFault(t, transporttest.FaultReset, true) })
+	// This reset run is also the reset variant of transport disconnect
+	// recovery; TestPostgreSQLTransportDisconnectRecovery adds the blackhole.
+	t.Run("commit response reset reconciles through independent receiver", func(t *testing.T) { runTransportMCPCommittedFault(t, transporttest.FaultReset) })
 	t.Run("before commit cancellation does not invoke store", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		store, scope, eventID := seedTransportMCP(t, runtimeDB, admin)
@@ -261,16 +267,50 @@ func TestPostgreSQLTransportCommittedResponseLoss(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("before-commit barrier not reached")
 		}
-		waitTransportMCPFile(t, child, "result.json")
+		raw := waitTransportMCPFile(t, child, "result.json")
+		resultAt := time.Now()
+		var outcome struct {
+			Result struct {
+				Response json.RawMessage `json:"response"`
+				Code     int             `json:"code"`
+			} `json:"result"`
+			DurationMS     float64           `json:"durationMs"`
+			CommitRequests []json.RawMessage `json:"commitRequests"`
+		}
+		if err := json.Unmarshal(raw, &outcome); err != nil {
+			t.Fatal(err)
+		}
+		// The caller gets a bounded failure, never a fabricated result.
+		if outcome.Result.Response != nil || codes.Code(outcome.Result.Code) == codes.OK || outcome.DurationMS > 3000 {
+			t.Fatalf("before-commit caller outcome %s", raw)
+		}
+		if len(outcome.CommitRequests) == 0 {
+			t.Fatalf("no commit attempt reached the receiver: %s", raw)
+		}
+		for _, request := range outcome.CommitRequests[1:] {
+			if string(request) != string(outcome.CommitRequests[0]) {
+				t.Fatalf("same-identity commit retry changed bytes: %s", raw)
+			}
+		}
+		// Every receiver entry observed the cancellation and returned within
+		// one second of the caller's result.
+		joinedCtx, cancelJoined := context.WithDeadline(context.Background(), resultAt.Add(time.Second))
+		defer cancelJoined()
+		if err := transporttest.Await(joinedCtx, func() bool {
+			entered := before.entered.Load()
+			return entered >= 1 && before.returned.Load() == entered
+		}); err != nil {
+			t.Fatalf("receiver commit entries entered=%d returned=%d did not join", before.entered.Load(), before.returned.Load())
+		}
 		child.signal(t, "shutdown")
 		child.join(t)
 		var committed, receipts int
-		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_runtime_tool_results WHERE mcp_claim_status IN ('stored','consumed')),(SELECT count(*) FROM session_bridge_operations WHERE operation='commit_mcp_tool_result')`).Scan(&committed, &receipts); err != nil || committed != 0 || receipts != 0 || before.invoked.Load() != 0 || external.calls.Load() != 1 {
-			t.Fatalf("before-commit control committed=%d receipts=%d invoked=%d external=%d err=%v", committed, receipts, before.invoked.Load(), external.calls.Load(), err)
+		if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_runtime_tool_results WHERE mcp_claim_status IN ('stored','consumed')),(SELECT count(*) FROM session_bridge_operations WHERE operation='commit_mcp_tool_result')`).Scan(&committed, &receipts); err != nil || committed != 0 || receipts != 0 || external.calls.Load() != 1 {
+			t.Fatalf("before-commit control committed=%d receipts=%d external=%d err=%v", committed, receipts, external.calls.Load(), err)
 		}
 	})
 }
-func runTransportMCPCommittedFault(t *testing.T, mode transporttest.FaultMode, retry bool) {
+func runTransportMCPCommittedFault(t *testing.T, mode transporttest.FaultMode) {
 	t.Helper()
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store, scope, eventID := seedTransportMCP(t, runtimeDB, admin)
@@ -305,7 +345,7 @@ func runTransportMCPCommittedFault(t *testing.T, mode transporttest.FaultMode, r
 			t.Error(err)
 		}
 	})
-	child := startTransportMCPChild(t, []string{forwarder.Address, b.Address}, external.URL, scope, eventID, "initial", retry)
+	child := startTransportMCPChild(t, []string{forwarder.Address, b.Address}, external.URL, scope, eventID, "initial", true)
 	child.signal(t, "run")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -367,10 +407,12 @@ func runTransportMCPCommittedFault(t *testing.T, mode transporttest.FaultMode, r
 		t.Fatalf("changed process identity must produce exact stale union: %v/%v", denied, err)
 	}
 }
+
+// The reset variant runs once, as the commit-response reset subtest of
+// TestPostgreSQLTransportCommittedResponseLoss: the scenario and assertions are
+// the same, so it is not repeated here.
 func TestPostgreSQLTransportDisconnectRecovery(t *testing.T) {
-	for _, mode := range []transporttest.FaultMode{transporttest.FaultReset, transporttest.FaultBlackhole} {
-		t.Run(string(mode), func(t *testing.T) { runTransportMCPCommittedFault(t, mode, true) })
-	}
+	t.Run(string(transporttest.FaultBlackhole), func(t *testing.T) { runTransportMCPCommittedFault(t, transporttest.FaultBlackhole) })
 }
 func TestPostgreSQLTransportProcessRestart(t *testing.T) {
 	for _, mode := range []string{"graceful", "forced", "abrupt"} {

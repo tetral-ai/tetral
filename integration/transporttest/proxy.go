@@ -285,7 +285,18 @@ func Bootstrap(role string, port int) map[string]any {
 // RejectedUpdates observes the actual file-SDS consumer before testing retained
 // credentials, so a racing test cannot mistake an unread malformed file for LKG.
 func RejectedUpdates(ctx context.Context, admin string) (uint64, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, admin+"/stats?format=json&filter=update_rejected", nil)
+	return statTotal(ctx, admin, "update_rejected")
+}
+
+// VerifyFailures counts the proxy's peer-certificate verification failures
+// (chain, validity or SAN), so a denial is attributed to certificate
+// enforcement rather than to an unrelated connection failure.
+func VerifyFailures(ctx context.Context, admin string) (uint64, error) {
+	return statTotal(ctx, admin, "ssl.fail_verify")
+}
+
+func statTotal(ctx context.Context, admin, filter string) (uint64, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, admin+"/stats?format=json&filter="+filter, nil)
 	if err != nil {
 		return 0, err
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,6 +93,76 @@ func requireTransportDenied(t *testing.T, p *transporttest.ProxyPair, config *tl
 	}
 }
 
+// projectReceiverLeaf replaces the receiver Envoy's SDS leaf and waits until a
+// fresh handshake presents it; probe must trust the leaf's issuer.
+func projectReceiverLeaf(t *testing.T, p *transporttest.ProxyPair, generation string, leaf transporttest.Leaf, probe *tls.Config) {
+	t.Helper()
+	if err := transporttest.Project(filepath.Join(p.Directory, "receiver", "leaf"), generation, map[string][]byte{"tls.crt": leaf.Certificate, "tls.key": leaf.Key}); err != nil {
+		t.Fatal(err)
+	}
+	reload, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := transporttest.Await(reload, func() bool {
+		state, err := transportHealth(reload, p.ReceiverAddress, probe)
+		return err == nil && !state.DidResume && len(state.PeerCertificates) > 0 && sha256.Sum256(state.PeerCertificates[0].Raw) == sha256.Sum256(leaf.Parsed.Raw)
+	}); err != nil {
+		t.Fatalf("receiver did not present leaf %s: %v", generation, err)
+	}
+}
+
+// replaceSourceProxy starts a fresh caller Envoy, so its next call performs a
+// full upstream handshake instead of reusing a pooled connection.
+func replaceSourceProxy(t *testing.T, p *transporttest.ProxyPair) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	p.ReplaceSource(ctx, t)
+	if err := transporttest.Await(ctx, func() bool {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.SourceAdmin+"/ready", nil)
+		if err != nil {
+			return false
+		}
+		response, err := (&http.Client{Timeout: time.Second}).Do(request)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = response.Body.Close() }()
+		return response.StatusCode == http.StatusOK
+	}); err != nil {
+		t.Fatal("replacement caller proxy did not become ready", err)
+	}
+}
+
+// requireCallerDenied calls through the caller Envoy, which must refuse the
+// receiver certificate itself: the call fails, the caller proxy records a
+// certificate verification failure and the backend admits no operation.
+func requireCallerDenied(t *testing.T, p *transporttest.ProxyPair) {
+	t.Helper()
+	operations := transporttest.Must(p.Operations(t.Context()))
+	failures := transporttest.Must(transporttest.VerifyFailures(t.Context(), p.SourceAdmin))
+	if _, err := transportHealth(t.Context(), p.SourceAddress, nil); err == nil {
+		t.Fatal("caller proxy accepted an invalid receiver certificate")
+	}
+	if after := transporttest.Must(p.Operations(t.Context())); after != operations {
+		t.Fatalf("caller-denied transport admitted operations: before=%d after=%d", operations, after)
+	}
+	if after := transporttest.Must(transporttest.VerifyFailures(t.Context(), p.SourceAdmin)); after <= failures {
+		t.Fatalf("caller proxy recorded no certificate verification failure: before=%d after=%d", failures, after)
+	}
+}
+
+// requireCallerAllowed waits for the caller Envoy path to succeed again. The
+// bound covers one outlier ejection of the receiver endpoint.
+func requireCallerAllowed(t *testing.T, p *transporttest.ProxyPair) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := transporttest.Await(ctx, func() bool { _, err := transportHealth(ctx, p.SourceAddress, nil); return err == nil }); err != nil {
+		logs, _ := p.Source.Logs(t.Context())
+		t.Fatalf("caller Envoy path did not recover: %v\n%s", err, logs)
+	}
+}
+
 func TestTransportSecurityPeerValidation(t *testing.T) {
 	p := transporttest.NewProxyPair(t)
 	allowed := transportClient(t, p.Root.PEM, p.Caller)
@@ -104,12 +175,11 @@ func TestTransportSecurityPeerValidation(t *testing.T) {
 	differentKey := transportClient(t, p.Root.PEM, wrongRole).Certificates[0].PrivateKey
 	wrongKey.Certificates = []tls.Certificate{allowed.Certificates[0]}
 	wrongKey.Certificates[0].PrivateKey = differentKey
-	wrongName := allowed.Clone()
-	wrongName.ServerName = "wrong.transport.test"
+	// Receiver enforcement: the receiver Envoy refuses each invalid caller.
 	cases := []struct {
 		name   string
 		config *tls.Config
-	}{{"Plaintext", nil}, {"AbsentClientCertificate", transportClient(t, p.Root.PEM, transporttest.Leaf{})}, {"WrongClientRoot", transportClient(t, p.Root.PEM, wrongRoot)}, {"WrongServerRoot", transportClient(t, other.PEM, p.Caller)}, {"ValidUnauthorizedRole", transportClient(t, p.Root.PEM, wrongRole)}, {"ExpiredClient", transportClient(t, p.Root.PEM, expired)}, {"FutureClient", transportClient(t, p.Root.PEM, future)}, {"MismatchedSigningKeyAtHandshake", wrongKey}, {"WrongServerName", wrongName}}
+	}{{"Plaintext", nil}, {"AbsentClientCertificate", transportClient(t, p.Root.PEM, transporttest.Leaf{})}, {"WrongClientRoot", transportClient(t, p.Root.PEM, wrongRoot)}, {"ValidUnauthorizedRole", transportClient(t, p.Root.PEM, wrongRole)}, {"ExpiredClient", transportClient(t, p.Root.PEM, expired)}, {"FutureClient", transportClient(t, p.Root.PEM, future)}, {"MismatchedSigningKeyAtHandshake", wrongKey}}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			requireTransportAllowed(t, p, allowed)
@@ -117,6 +187,25 @@ func TestTransportSecurityPeerValidation(t *testing.T) {
 			requireTransportAllowed(t, p, allowed)
 		})
 	}
+	// Caller enforcement: server identity is checked by the calling Envoy,
+	// which a test TLS client cannot stand in for. Each invalid receiver leaf
+	// is refused on a fresh caller proxy before any backend operation.
+	t.Run("CallerRejectsInvalidReceiver", func(t *testing.T) {
+		for _, invalid := range []struct {
+			name  string
+			leaf  transporttest.Leaf
+			probe *tls.Config
+		}{
+			{"unknown-root", transporttest.Must(other.ValidLeaf("receiver.transport.test", transporttest.ReceiverURI)), transportClient(t, other.PEM, p.Caller)},
+			{"wrong-identity", transporttest.Must(p.Root.ValidLeaf("receiver.transport.test", "spiffe://transport.test/ns/test/sa/unauthorized")), allowed},
+		} {
+			projectReceiverLeaf(t, p, "invalid-"+invalid.name, invalid.leaf, invalid.probe)
+			replaceSourceProxy(t, p)
+			requireCallerDenied(t, p)
+			projectReceiverLeaf(t, p, "restored-"+invalid.name, p.ReceiverLeaf, allowed)
+			requireCallerAllowed(t, p)
+		}
+	})
 	if _, err := transportHealth(t.Context(), p.SourceAddress, nil); err != nil {
 		logs, _ := p.Source.Logs(t.Context())
 		t.Fatalf("actual caller Envoy mTLS path failed: %v\n%s", err, logs)
@@ -303,6 +392,10 @@ func TestTransportSecurityIssuerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireTransportDenied(t, p, config)
+	// The calling Envoy is the party that enforces receiver validity: on a
+	// fresh full handshake it refuses the expired leaf.
+	replaceSourceProxy(t, p)
+	requireCallerDenied(t, p)
 	renewed := transporttest.Must(p.Root.ValidLeaf("receiver.transport.test", transporttest.ReceiverURI))
 	transporttest.Must(0, transporttest.Project(filepath.Join(p.Directory, "receiver", "leaf"), "issuer-restored", map[string][]byte{"tls.crt": renewed.Certificate, "tls.key": renewed.Key}))
 	restored, cancelRestored := context.WithTimeout(t.Context(), 5*time.Second)
@@ -314,6 +407,7 @@ func TestTransportSecurityIssuerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireTransportAllowed(t, p, config)
+	requireCallerAllowed(t, p)
 }
 
 func TestTransportSecurityRPCBounds(t *testing.T) {

@@ -118,10 +118,13 @@ func TestRuntimeDirectTLS(t *testing.T) {
 		wrongRoot := transporttest.Must(transporttest.NewAuthority("wrong"))
 		wrongRole := transporttest.Must(root.ValidLeaf("other.transport.test", "spiffe://cluster.local/ns/tetral-system/sa/other"))
 		expired := transporttest.Must(root.Issue("runner.transport.test", directRunnerURI, time.Now().Add(-120*time.Second), time.Now().Add(-60*time.Second)))
+		// Receiver enforcement: the Runtime's Envoy listener refuses each invalid
+		// caller. Server identity is the Runner client's to enforce and is
+		// checked through the production credential owner below.
 		cases := []struct {
 			name   string
 			config *tls.Config
-		}{{"Plaintext", nil}, {"MissingClient", directTLS(t, root.PEM, transporttest.Leaf{}, directRuntimeDNS)}, {"WrongTrust", directTLS(t, wrongRoot.PEM, caller, directRuntimeDNS)}, {"WrongName", directTLS(t, root.PEM, caller, "wrong.transport.test")}, {"WrongRole", directTLS(t, root.PEM, wrongRole, directRuntimeDNS)}, {"ExpiredClient", directTLS(t, root.PEM, expired, directRuntimeDNS)}}
+		}{{"Plaintext", nil}, {"MissingClient", directTLS(t, root.PEM, transporttest.Leaf{}, directRuntimeDNS)}, {"WrongRole", directTLS(t, root.PEM, wrongRole, directRuntimeDNS)}, {"ExpiredClient", directTLS(t, root.PEM, expired, directRuntimeDNS)}}
 		for _, variant := range cases {
 			t.Run(variant.name, func(t *testing.T) {
 				before := transporttest.Must(p.State(t.Context()))
@@ -219,6 +222,48 @@ func TestRuntimeDirectTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireDirectAccepted(t, p, "production-loader", productionCfg)
+		// Caller enforcement: the production Runner client refuses a Runtime
+		// presenting the wrong service name or a leaf from an untrusted root.
+		requireDirectCallerDenied := func(name string, config *tls.Config) {
+			t.Helper()
+			before := transporttest.Must(p.State(t.Context()))
+			if _, _, err := directCall(t.Context(), p, directInput(p, "caller-denied-"+name), config, ""); err == nil {
+				t.Fatalf("production Runner client accepted %s", name)
+			}
+			if after := transporttest.Must(p.State(t.Context())); after.Operations != before.Operations {
+				t.Fatalf("%s admitted Runtime work", name)
+			}
+		}
+		wrongName, err := owner.ClientTLSConfig("wrong.transport.test", directRuntimeURI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireDirectCallerDenied("wrong service name", wrongName)
+		awaitDirectLeaf := func(generation string, leaf transporttest.Leaf, probe *tls.Config) {
+			t.Helper()
+			if err := transporttest.Project(filepath.Join(p.Directory, "leaf"), generation, map[string][]byte{"tls.crt": leaf.Certificate, "tls.key": leaf.Key}); err != nil {
+				t.Fatal(err)
+			}
+			reload, stop := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stop()
+			if err := transporttest.Await(reload, func() bool {
+				dialer := &tls.Dialer{Config: probe}
+				raw, err := dialer.DialContext(reload, "tcp", p.Address)
+				if err != nil {
+					return false
+				}
+				defer func() { _ = raw.Close() }()
+				state := raw.(*tls.Conn).ConnectionState()
+				return !state.DidResume && len(state.PeerCertificates) > 0 && sha256.Sum256(state.PeerCertificates[0].Raw) == sha256.Sum256(leaf.Parsed.Raw)
+			}); err != nil {
+				t.Fatalf("direct listener did not present leaf %s", generation)
+			}
+		}
+		foreign := transporttest.Must(wrongRoot.ValidLeaf(directRuntimeDNS, directRuntimeURI))
+		awaitDirectLeaf("foreign-root", foreign, directTLS(t, wrongRoot.PEM, caller, directRuntimeDNS))
+		requireDirectCallerDenied("untrusted Runtime root", productionCfg)
+		awaitDirectLeaf("restored", renewed, cfg)
+		requireDirectAccepted(t, p, "production-loader-restored", productionCfg)
 		otherState = transporttest.Must(other.State(t.Context()))
 		if otherState.Operations != 0 {
 			t.Fatal("selected direct endpoint routed to another Runtime")

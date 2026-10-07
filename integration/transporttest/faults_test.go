@@ -2,8 +2,10 @@ package transporttest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -77,6 +79,17 @@ func TestFaultForwarderSelectedConnection(t *testing.T) {
 			if err := forwarder.Fault("case-owned", mode); err != nil {
 				t.Fatal(err)
 			}
+			peers := map[string]net.Conn{"client": client, "server": server}
+			if mode == FaultReset {
+				// A reset aborts both connections: each peer observes a
+				// connection reset, not an orderly end of stream.
+				for name, peer := range peers {
+					_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+					if _, err := peer.Read(buffer); !errors.Is(err, syscall.ECONNRESET) {
+						t.Fatalf("reset %s read err=%v; want connection reset", name, err)
+					}
+				}
+			}
 			if mode == FaultBlackhole {
 				if _, err := client.Write([]byte("client-drop")); err != nil {
 					t.Fatal(err)
@@ -134,6 +147,16 @@ func TestFaultForwarderSelectedConnection(t *testing.T) {
 			snapshot, _ = forwarder.Snapshot("case-owned")
 			if !snapshot.ClientClosed || !snapshot.ServerClosed {
 				t.Fatal("joined cancellation retained owned sockets")
+			}
+			if mode == FaultBlackhole {
+				// Joined cancellation closes the retained sockets gracefully,
+				// the control for the reset case above.
+				for name, peer := range peers {
+					_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+					if _, err := peer.Read(buffer); err != io.EOF {
+						t.Fatalf("graceful close %s read err=%v; want end of stream", name, err)
+					}
+				}
 			}
 		})
 	}
