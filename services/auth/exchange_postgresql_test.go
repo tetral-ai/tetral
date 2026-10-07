@@ -271,7 +271,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		for _, credentials := range []struct{ key, bearer string }{{"selected-key", ""}, {"", "Bearer " + serviceToken.AccessToken}} {
 			result, err := unavailableAdapter.Check(ctx, externalTestRequest(http.MethodGet, "/v1/sessions", credentials.key, []string{credentials.bearer}))
 			if err != nil || externalTestStatus(result) != 500 || !strings.Contains(result.GetDeniedResponse().Body, "authentication unavailable") {
-				t.Fatal("Check dependency failure lost safe500 response")
+				t.Fatal("Check dependency failure lost safe 500 response")
 			}
 		}
 		before, _, _ := counts(t)

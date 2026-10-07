@@ -31,14 +31,14 @@ func TestAuthCheckMetricOutcomesDistinguishTypedDenialAndTransport(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := externalAuthorizationOutcome(context.Background(), tc.response, tc.err); got != tc.want {
-				t.Fatalf("outcome=%s want%s", got, tc.want)
+				t.Fatalf("outcome=%s want %s", got, tc.want)
 			}
 		})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if got := externalAuthorizationOutcome(ctx, deniedExternalAuthorization(errors.New("cancelled database wait"), ""), nil); got != "cancelled" {
-		t.Fatalf("cancelled owner returned typed500: %s", got)
+		t.Fatalf("cancelled owner returned typed 500: %s", got)
 	}
 }
 

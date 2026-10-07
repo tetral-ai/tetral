@@ -244,7 +244,7 @@ func recordEnvoyStartupDiagnostics(t *testing.T, container *testinfra.DockerCont
 	}
 	digest := sha256.Sum256([]byte(body))
 	t.Logf("pinned Envoy startup diagnostics: class=%s bytes=%d sha256=%s", class, len(body), hex.EncodeToString(digest[:]))
-	// Optional native diagnostics remain private, mode0600, and are never rendered.
+	// Optional native diagnostics remain private, mode 0600, and are never rendered.
 	// The standard proof needs only the safe stage receipt above.
 	if directory := os.Getenv("TETRAL_TEST_EDGE_DIAGNOSTICS_DIR"); directory != "" {
 		if !filepath.IsAbs(directory) {

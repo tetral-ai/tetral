@@ -422,7 +422,7 @@ func (edge *translatedPublicEdge) assertTLSNegatives(t *testing.T, f *publicProj
 		lifecycle.restartCheck(t)
 		// Check fails before protected HTTP receivers. Bypass Auth HTTP and Git
 		// independently prove their native client validation; API/Event native-role
-		// validation is owned by service-local tests, not inferred from this503.
+		// validation is owned by service-local tests, not inferred from this 503.
 		for _, role := range []string{"auth", "git-proxy"} {
 			lifecycle.restartHTTP(t, role)
 			edge.assertTLSRole(t, f, role, 503, 0, "")

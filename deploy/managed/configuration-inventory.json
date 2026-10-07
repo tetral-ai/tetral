@@ -93,7 +93,7 @@
       },
       "units": "strings",
       "unset_zero": "Go exact empty defaults, Git trims all metadata; TS requires nonempty metadata.",
-      "constraints": "Provider/Runtime config limit253; MCP4096; emitted resources253, bounded/sanitized. Process IDs are runtime-generated.",
+      "constraints": "Provider/Runtime config limit 253; MCP 4096; emitted resources 253, bounded/sanitized. Process IDs are runtime-generated.",
       "projection": "observability.deploymentEnvironment/serviceVersion; downward API identities, never generated inventory values.",
       "proofs": [
         "internal/workload/resource_config_test.go",
@@ -121,7 +121,7 @@
       },
       "units": "severity, bytes, milliseconds, records per event/reason/window",
       "unset_zero": "Empty/unset defaults; zero invalid.",
-      "constraints": "Canonical integers; bytes1024..65536, interval100..3600000, burst1..1000. Fixed64 Go queue/256 limiter states, TS65536 buffer remain implementation bounds.",
+      "constraints": "Canonical integers; bytes 1024..65536, interval 100..3600000, burst 1..1000. Fixed 64 Go queue/256 limiter states, TS 65536 buffer remain implementation bounds.",
       "projection": "observability.logLevel/logMaxRecordBytes/logSummaryIntervalMs/logBurst; common helper projects every application container.",
       "proofs": [
         "internal/workload/diagnostics_test.go",
@@ -173,7 +173,7 @@
       },
       "units": "seconds, bytes, concurrent requests, requests/minute, milliseconds, addresses",
       "unset_zero": "Empty uses bounded defaults; credentials required and never catalogued.",
-      "constraints": "Distinct listeners; principalTTL1..300, JWKS1..600; exchange body1024..65536, concurrency1..32, rate1..6000, read100..5000. Native TLS requires complete material/exact edge URI; plaintext rejects material.",
+      "constraints": "Distinct listeners; principalTTL 1..300, JWKS 1..600; exchange body 1024..65536, concurrency 1..32, rate 1..6000, read 100..5000. Native TLS requires complete material/exact edge URI; plaintext rejects material.",
       "projection": "Identity and TLS refs projected; exchange limits intentionally stay owning service defaults.",
       "proofs": [
         "services/auth/exchange_bounds_test.go",
@@ -345,7 +345,7 @@
       },
       "units": "attempt counts, milliseconds",
       "unset_zero": "Whitespace empty reschedule defaults; zero budget valid.",
-      "constraints": "Budgets0..10; pool>=2 reserves notification connection; lifecycle application allocation.",
+      "constraints": "Budgets 0..10; pool>=2 reserves notification connection; lifecycle application allocation.",
       "projection": "lifecycle.bridgeDrainMs; retry counts intentionally retain service defaults; HMAC/token refs only.",
       "proofs": [
         "services/bridge/config_test.go",
@@ -414,7 +414,7 @@
       "units": "jobs, Go duration",
       "unset_zero": "Whitespace empty defaults; metrics export unset disables export; zero invalid.",
       "constraints": "Positive count/timeout; optional HTTP(S) export URL must omit credentials.",
-      "projection": "Fixed CronJob claim100/schedule1minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed.",
+      "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed.",
       "proofs": [
         "deploy/helm/database_consumer_test.go",
         "deploy/helm/configuration_projection_test.go"
@@ -953,7 +953,7 @@
       },
       "units": "Milliseconds per RPC attempt; remaining Provider deadlines are absolute milliseconds supplied by the caller.",
       "unset_zero": "Only undefined selects each method default. Fixed overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget method rejects.",
-      "constraints": "Exactly37 fixed and3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate3 attempts and100/300ms backoffs retain their existing retry authority. Method policies authorize no retries. Fixed deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
+      "constraints": "Exactly 37 fixed and 3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate 3 attempts and 100/300 ms backoffs retain their existing retry authority. Method policies authorize no retries. Fixed deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
       "projection": "Runtime startup parses these supported application env overrides. No dedicated Helm per-method override knobs: service/raw/Helm Runtime defaults retain the owner policies. The checked bridge-method-policy.json mirror enumerates RPC routes; internal-routing.yaml disables proxy timeout and retries for every Bridge method, so the proxy cannot shorten application overrides. Existing transport tests check the descriptor mirror and proxy disposition; configuration_projection_test.go checks this complete catalog against actual owner exports/key derivation.",
       "proofs": [
         "services/agent-runtime/packages/runtime-pod/test/unit/bridge-policy.test.ts",
@@ -1038,7 +1038,7 @@
       "units": "seconds, listener addresses",
       "unset_zero": "Whitespace empty defaults; positive grace.",
       "constraints": "Drain grace also ticket rotation accept window; distinct listener/TLS config; ticket body/query never logged.",
-      "projection": "Fixed portable drain1800/Pod grace1805, secret refs/nativeHTTP trust; keep Git retention/relay policies independent.",
+      "projection": "Fixed portable drain 1800/Pod grace 1805, secret refs/native HTTP trust; keep Git retention/relay policies independent.",
       "proofs": [
         "services/git-proxy/config_test.go",
         "deploy/helm/transport_test.go"
@@ -1072,7 +1072,7 @@
       },
       "units": "seconds, milliseconds, HTTPS URLs",
       "unset_zero": "Whitespace empty endpoints default; API key JSON array/HMAC required.",
-      "constraints": "HTTPS endpoint no user/query/fragment; drain1..20000; drain+join<=25000. Backend/cache/tool-visible caps stay independent.",
+      "constraints": "HTTPS endpoint no user/query/fragment; drain 1..20000; drain+join<=25000. Backend/cache/tool-visible caps stay independent.",
       "projection": "web endpoints and lifecycle.webDrainMs/cancelJoinMs; credentials secret refs only.",
       "proofs": [
         "services/web-connector/config_test.go",
@@ -1103,7 +1103,7 @@
       "units": "listener addresses, filesystem paths, workspace identities",
       "unset_zero": "Owning startup parser supplies paths/listeners; boot workspace/key references required.",
       "constraints": "Trusted HTTP transport complete and role-scope boot authority; schema/role versions are storage contract, CLI results are deliberate output.",
-      "projection": "API ConfigMap/Secret refs and nativeHTTP trust; database preparation remains explicit operator command.",
+      "projection": "API ConfigMap/Secret refs and native HTTP trust; database preparation remains explicit operator command.",
       "proofs": [
         "services/api/config_validators_test.go",
         "services/api/startup_config_surface_test.go"
@@ -1318,7 +1318,7 @@
       "units": "transport modes, exact DNS/SPIFFE identities, mounted file references, milliseconds",
       "unset_zero": "Empty HTTP mode is plaintext; mounted trust/complete optional leaf pair required; invalid profiles/material combinations reject.",
       "constraints": "Native HTTP exact trusted edge URI; complete projected generation; retain valid prior material after malformed replacement; DNS/peer verification and profile-specific listeners remain semantic constraints.",
-      "projection": "Checked profiles/native HTTP helper/trust and leaf refs; credential observer250ms intentionally fixed, not a workload lease or business timer.",
+      "projection": "Checked profiles/native HTTP helper/trust and leaf refs; credential observer 250 ms intentionally fixed, not a workload lease or business timer.",
       "proofs": [
         "internal/transportsecurity/http_test.go",
         "internal/transportsecurity/credentials_test.go",

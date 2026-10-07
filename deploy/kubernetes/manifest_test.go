@@ -912,7 +912,7 @@ func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing
 func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 	documents := readEdgeGatewayAdapterDocuments(t, "envoy-gateway.yaml")
 	if len(documents) != 12 {
-		t.Fatalf("edge object count=%d want12 application-owned resources", len(documents))
+		t.Fatalf("edge object count=%d want 12 application-owned resources", len(documents))
 	}
 	gateway := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "Gateway", "tetral-public-edge")
 	for _, required := range []string{`gatewayClassName: "tetral-envoy-gateway"`, `hostname: "api.tetral.example"`, `hostname: "git.tetral.example"`, `name: "tetral-api-public-tls"`, `name: "tetral-git-public-tls"`, "name: http", "name: api-https", "name: git-https"} {
@@ -942,7 +942,7 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 
 	want := map[string]string{`^/v1/sessions/[^/]+/events/stream$`: "event-stream", `^/v1/sessions/[^/]+/threads/[^/]+/stream$`: "event-stream", "/v1/api_keys": "auth", "/v1": "api"}
 	if !reflect.DeepEqual(routes, want) {
-		t.Fatalf("API backend routes=%v want%v", routes, want)
+		t.Fatalf("API backend routes=%v want %v", routes, want)
 	}
 	exchange := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-token-exchange")
 	for _, required := range []string{"method: POST", "type: Exact", "value: /v1/oauth/token", "name: auth", "port: 8080", "Authorization", "X-Api-Key"} {
@@ -987,7 +987,7 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 		requireContains(t, patch, required)
 	}
 	if strings.Count(patch.text, "value: true") != 2 {
-		t.Fatal("raw header patch must set exactly2 reviewed fields")
+		t.Fatal("raw header patch must set exactly 2 reviewed fields")
 	}
 	for index := range documents {
 		for _, forbidden := range []string{"nginx", "/internal/auth/authorize", "Ingress", "withRequestBody", "maxRequestBytes", "buffering"} {

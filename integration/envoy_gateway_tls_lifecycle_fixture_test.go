@@ -375,8 +375,8 @@ func (control *translatedEnvoyControl) drainConnections(ctx context.Context, t *
 
 func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) {
 	t.Helper()
-	// The pinned Shutdown defaults are health delay0, minimum10s, timeout60s,
-	// threshold0 (internal/cmd/envoy.go44–53). It fails health checks, then counts
+	// The pinned Shutdown defaults are health delay 0, minimum 10s, timeout 60s,
+	// threshold 0 (internal/cmd/envoy.go:44–53). It fails health checks, then counts
 	// listener connections excluding admin/readiness/stats/worker observations.
 	started := time.Now()
 	active, _ := control.drainConnections(control.context, t, "held-stream-before-drain")

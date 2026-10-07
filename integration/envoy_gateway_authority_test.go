@@ -39,7 +39,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					t.Fatal("real edge assertion exchange did not issue a bearer")
 				}
 				if issuer.counts() != (oidcIssuerCounts{total: 1, jwks: 1}) {
-					t.Fatal("actual exchange did not fetch exactly the registered realHTTPS JWKS")
+					t.Fatal("actual exchange did not fetch exactly the registered real HTTPS JWKS")
 				}
 				issuerBefore := issuer.counts()
 				principal := transporttest.Must(auth.NewAuthorityResolver(f.db, workspace.DefaultID).AuthenticateBearer(edge.ctx, issued.AccessToken))
@@ -48,7 +48,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				// accepted PR6 fixture boundary. Current product role remains full access;
 				// authentication and every public authorization decision use production code.
 				if _, err := f.db.ExecContext(edge.ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,federation_rule_id,identity_id,grant_id,rule_revision,identity_revision,grant_revision,role_version,issuance_operations,parent_credential_id,created_at) VALUES('ak_edge_restricted','default','historical restricted fixture','fixture',$1,'standard','identity_grant',$2,$3,$4,$5,$6,$7,$8,'["sessions.read"]'::jsonb,$9,clock_timestamp())`, auth.DigestAPIKey(restricted), principal.Authority.RuleID, principal.Authority.IdentityID, principal.Authority.GrantID, principal.Authority.RuleRevision, principal.Authority.IdentityRevision, principal.Authority.GrantRevision, principal.Authority.PolicyVersion, principal.Credential.ID); err != nil {
-					t.Fatal("provision restricted immutable derivedkey fixture")
+					t.Fatal("provision restricted immutable derived key fixture")
 				}
 				baseline := edgeAuthorityEffects(edge.ctx, t, f.db, f.session)
 				for _, vector := range []struct {
@@ -91,11 +91,11 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				disclosedSession := bytes.Contains(body, []byte(f.session))
 				t.Logf("envoy_gateway_authority_wrong_workspace profile=%s status=%d error_type=%s api_delta=%d check_delta=%d disclosed_session=%t", profile, status, errorType, apiDelta, checkDelta, disclosedSession)
 				if status != 404 || errorType != "not_found_error" || disclosedSession || apiDelta != 1 || checkDelta != 1 {
-					t.Fatal("wrongworkspace credential escaped real API isolation")
+					t.Fatal("wrong-workspace credential escaped real API isolation")
 				}
 				status, _ = edge.authorityRequest(edge.ctx, t, "GET", "/v1/api_keys-extra", edge.key, "", nil)
 				if status != 404 {
-					t.Fatal("ordinary API did not retain its own missing-route404")
+					t.Fatal("ordinary API did not retain its own missing-route 404")
 				}
 				// A real issued bearer makes precedence and duplicate rejection distinct
 				// from an invalid-token control; raw TLS bytes preserve each header entry.
@@ -119,14 +119,14 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 						wantDelta = 1
 					}
 					if response.StatusCode != vector.want || edge.apiRequests.Load() != before+wantDelta || edgeAuthCheckCount(edge.ctx, t, edge.fixture.Ports.Admin) != beforeChecks+1 {
-						t.Fatal("realbearer/rawcredential precedence did not preserve exact actual backend admission")
+						t.Fatal("real bearer/raw credential precedence did not preserve exact actual backend admission")
 					}
 					if vector.want == 200 && !bytes.Contains(body, []byte(f.session)) {
 						t.Fatal("admitted real credential did not retrieve its actual scoped session")
 					}
 				}
 				if issuer.counts() != issuerBefore {
-					t.Fatal("frozen bearer/derivedkey admission unexpectedly contacted issuer")
+					t.Fatal("frozen bearer/derived key admission unexpectedly contacted issuer")
 				}
 				key := edge.authorityCreateKey(t, "revoke through actual Auth CRUD")
 				status, _ = edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", key.APIKey, "", nil)
@@ -140,11 +140,11 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				before = edge.apiRequests.Load()
 				status, _ = edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", key.APIKey, "", nil)
 				if status != 401 || edge.apiRequests.Load() != before {
-					t.Fatal("new admission after actualrevocation reached business receiver")
+					t.Fatal("new admission after actual revocation reached business receiver")
 				}
 				edge.assertHeldAuthority(t, f)
 				if edgeAuthorityEffects(edge.ctx, t, f.db, f.session) != baseline {
-					t.Fatal("authorization isolation, rejection or heldCheck controls changed durable business state")
+					t.Fatal("authorization isolation, rejection or held Check controls changed durable business state")
 				}
 				t.Logf("envoy_gateway_authority_assertion=actual_receivers profile=%s permission403_noeffects=true wrongworkspace404=true bearer_precedence=true revocation401=true held_check=true passed=true", profile)
 			})
@@ -261,7 +261,7 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 			joined = true
 			if timeout {
 				if result.err != nil || result.status != 503 {
-					t.Fatal("actual five-second heldCheck timeout did not failclosed503")
+					t.Fatal("actual five-second held Check timeout did not fail closed with 503")
 				}
 			} else if !errors.Is(result.err, context.Canceled) {
 				t.Fatal("shorter downstream cancellation did not join held edge request")
@@ -277,7 +277,7 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 			if f.db.QueryRowContext(releaseCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND cardinality(pg_blocking_pids(pid))>0)`, waiter).Scan(&blocked) != nil {
 				ticker.Stop()
 				release()
-				t.Fatal("heldCheck cancellation lock census unavailable")
+				t.Fatal("held Check cancellation lock census unavailable")
 			}
 			if !blocked {
 				break
@@ -286,7 +286,7 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 			case <-releaseCtx.Done():
 				ticker.Stop()
 				release()
-				t.Fatal("heldCheck retained blocked Auth work after request completion")
+				t.Fatal("held Check retained blocked Auth work after request completion")
 			case <-ticker.C:
 			}
 		}
@@ -294,14 +294,14 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 		release()
 		var lastUsed sql.NullTime
 		if f.db.QueryRowContext(edge.ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&lastUsed) != nil || lastUsed.Valid || edge.apiRequests.Load() != before {
-			t.Fatal("failed heldCheck changed usage or forwarded to business backend")
+			t.Fatal("failed held Check changed usage or forwarded to business backend")
 		}
 		if held.Rollback() != nil {
 			t.Fatal("held authority transaction did not release")
 		}
 		status, _ := edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", key.APIKey, "", nil)
 		if status != 200 {
-			t.Fatal("heldCheck rollback did not restore actual authority admission")
+			t.Fatal("held Check rollback did not restore actual authority admission")
 		}
 	}
 }
@@ -320,7 +320,7 @@ func edgeAwaitAuthorityBlock(ctx context.Context, t *testing.T, db *sql.DB, hold
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("actualCheck did not reach held PG row lock")
+			t.Fatal("actual Check did not reach held PG row lock")
 		case <-ticker.C:
 		}
 	}

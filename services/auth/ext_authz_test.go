@@ -518,7 +518,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			t.Fatalf("closed owning DB Check=%v/%v", response, err)
 		}
 		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") != 0 {
-			t.Fatal("typed500 was counted as successful gRPC admission")
+			t.Fatal("typed 500 was counted as successful gRPC admission")
 		}
 		var used sql.NullTime
 		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&used); err != nil || used.Valid {

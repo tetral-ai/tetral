@@ -229,7 +229,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				}
 				// Gateway API PathPrefix matches complete slash-delimited elements.
 				// api_keys-extra belongs to the ordinary API route; this protocol
-				// receiver proves dispatch and binding, not the API's missing-route404.
+				// receiver proves dispatch and binding, not the API's missing-route 404.
 				beforeAuth := authRequests.Load()
 				beforeAPI = apiRequests.Load()
 				prefixChecks := edgeAuthCheckCount(ctx, t, ports.Admin)
@@ -301,7 +301,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				}
 				// Omit only raw header encoding through the official production
 				// resource translator. Auth rejects the resulting flattened metadata
-				// with its typed400 rather than attempting credential selection.
+				// with its typed 400 rather than attempting credential selection.
 				negative := translateEdgeWithoutRawHeaders(t, fixture)
 				fixture.Control.publish(t, negative)
 				beforeAPI, beforeAuth = apiRequests.Load(), authRequests.Load()
@@ -323,15 +323,15 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					t.Fatal("restored exact production raw encoding did not restore selected-first-key admission")
 				}
 				t.Logf("envoy_gateway_assertion=actual_raw_header_omission_control profile=%s baseline=200 omitted=400 restored=200 passed=true", profile)
-				// Dependency failures are the actual Auth domain's typed500, while
-				// an unavailable transport is Envoy's separate fail-closed503.
+				// Dependency failures are the actual Auth domain's typed 500, while
+				// an unavailable transport is Envoy's separate fail-closed 503.
 				beforeAPI = apiRequests.Load()
 				if err := authDB.Close(); err != nil {
 					t.Fatal("close Auth authority role pool")
 				}
 				response, denied := request("GET", "api.localhost", "/v1/ping", key)
 				if response.StatusCode != 500 || edgeSafeErrorKind(denied) != "api_error" || apiRequests.Load() != beforeAPI {
-					t.Fatal("actual authority failure did not preserve typed500 without backend forwarding")
+					t.Fatal("actual authority failure did not preserve typed 500 without backend forwarding")
 				}
 				beforeAPI = apiRequests.Load()
 				joinCheck()

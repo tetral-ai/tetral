@@ -355,7 +355,7 @@ func unusedControlPlaneTLSFailure(err error, resources *resource.Resources, xdsI
 }
 
 // The Kubernetes provider passes this exact translated proxy configuration to
-// BuildProxyArgs (resource.go125/resource_provider.go496). Extract only the
+// BuildProxyArgs (resource.go:125/resource_provider.go:496). Extract only the
 // process drain options; original egctl Bootstrap and policy remain served.
 func upstreamProxyDrainArgs(infra *ir.ProxyInfra) ([]string, error) {
 	if infra == nil || infra.Config == nil {

@@ -252,7 +252,7 @@ from the actual Check unary boundary, including current-peer validation. A typed
 allow is `success`; a typed 4xx denial is `rejected`; a typed 5xx or transport
 failure is `error`. Actual caller/transport cancellation or deadline expiry is
 `cancelled`/`timeout`. A nil gRPC error on a denied response never means success.
-An internal dependency expiry returned as HTTP500 remains `error` unless the
+An internal dependency expiry returned as HTTP 500 remains `error` unless the
 caller/transport context itself expired. No request, credential or workspace
 labels are added, and HTTP token/key metrics retain their names and units.
 
