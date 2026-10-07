@@ -11,7 +11,7 @@ available. Do not replace these examples with `latest` or an unnumbered Alpha
 tag.
 
 Before applying updated workloads, complete the separate database preparation
-step described in the [upgrade procedure](../helm/tetral/README.md#database-preparation-and-compatible-rollout).
+step described in [database preparation and compatible rollout](../helm/tetral/README.md#database-preparation-and-compatible-rollout).
 Every serving process verifies readiness; applying API first no longer migrates
 the database. The former `rollout-schema-ordered.sh` is removed for that reason.
 

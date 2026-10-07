@@ -98,8 +98,9 @@ For native TLS rotation, first project an old-plus-new CA bundle, then issue and
 activate new leaves. Probe fresh connections from the edge to Auth Check and
 each HTTP backend, including the intended DNS name and peer role. Existing
 streams retain their admitted contexts during overlap. Before removing old
-trust, withdraw public admission and drain every owning stream, connection pool
-and listener; wait for the proxy and affected receiver owners to join. Remove
+trust, withdraw [public admission](../managed/README.md#public-admission) and
+drain every owning stream, connection pool and listener; wait for the proxy
+and affected receiver owners to join. Remove
 old trust only after that drain, restart the required owners and verify fresh
 connections again. Read formal history through the SDK list API when reopening
 an SSE subscription; a reopened stream begins at its current high-water mark

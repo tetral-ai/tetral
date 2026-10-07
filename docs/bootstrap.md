@@ -223,8 +223,8 @@ delete it before reusing the same name for another attempt.
 
 Proceed only after a zero exit. Schema initialization and role installation use
 separate transactions, so a role failure may leave the canonical schema committed.
-Keep admission closed, inspect the structured logs, and rerun the same revision
-after repair. A predecessor or unknown nonempty schema is rejected without
+Do not continue to the next step until the command succeeds; inspect the
+structured logs and rerun the same revision after repair. A predecessor or unknown nonempty schema is rejected without
 mutation. Neither command deploys services, resets data, or restores an older
 architecture. Compatible later workload updates must preserve this initialized
 state and durable custody; schema equality alone does not establish protocol
@@ -329,7 +329,8 @@ The [Auth contract](../services/auth/README.md) owns the policy document,
 issuer/audience/trust/private-destination validation and atomic import behavior.
 Import only explicit workspace grants. Configure the corresponding Auth HTTPS
 network destinations separately; network access never grants issuer authority.
-A failed import preserves prior authority and keeps public admission closed.
+A failed import preserves prior authority and data; do not continue to the next
+step until the command succeeds.
 
 ## 6. Install and verify the platform
 
@@ -337,13 +338,16 @@ Set Helm's `bootstrapWorkspaceID` to the seeded ID, or set the corresponding
 environment value in the raw manifests, and install Tetral. Every database
 consumer verifies the schema and its serving role before becoming ready.
 Auth finds the workspace and registers the bootstrap API key from
-`auth-bootstrap/engine-api-key`. Keep public admission closed during installation.
-Require ready prerequisites and workload schema/role checks, then exercise
-allowed/denied Check, exact token exchange, tenant/operation authorization and
-TLS/issuer controls through the declared test address and Host. Validate the
-complete rendered installation inventory and retirement of superseded owned
-resources before opening public admission. An unresolved probe, resource or
-capacity failure keeps admission closed.
+`auth-bootstrap/engine-api-key`. Keep
+[public admission](../deploy/managed/README.md#public-admission) closed during
+installation: do not publish the API and Git host names yet. Require ready
+prerequisites and workload schema/role checks, then exercise allowed/denied
+Check, exact token exchange, tenant/operation authorization and TLS/issuer
+controls through the
+[explicit test address and Host](../deploy/managed/README.md#public-admission).
+Validate the complete rendered installation inventory and retirement of
+superseded owned resources before opening public admission. An unresolved
+probe, resource or capacity failure keeps admission closed.
 
 The [managed installation contract](../deploy/managed/README.md) owns this
 prepare → bootstrap → policy import → closed installation → probes/inventory →

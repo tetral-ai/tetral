@@ -18,6 +18,29 @@ profile rather than silently adding missing references. Standard and hardened
 workload sets replace one another. Optional public edge resources and separately
 owned controller prerequisites have distinct installation/cleanup owners.
 
+## Public admission
+
+Public admission means that public clients can reach the edge Gateway through
+the installation's published `edge.apiHost` and `gitProxyHost` DNS names, and
+through any exposure the provider's load-balancer configuration allows. The
+chart neither opens nor closes it; keeping it closed is an operator procedure.
+Do not publish those names until step 5 succeeds. An unpublished load-balancer
+address is not a network control: an installation that must also block direct
+public access before then restricts the provider's load-balancer
+configuration, for example with source ranges or an internal-only load
+balancer. Open admission after step 5 by publishing the names and widening any
+such restriction.
+
+The explicit test address and Host are the provisioned Gateway address reached
+directly with the declared Host and SNI, for example an unauthenticated request
+that Auth must deny with 401:
+
+```bash
+curl --resolve <api-host>:443:<gateway-address> https://<api-host>/v1/sessions
+```
+
+## Initialization sequence
+
 Use a dedicated empty database and isolated object namespace. Verify those
 identities before preparation. Commands come from the exact workload revision;
 all administrative connections require verified native PostgreSQL TLS.
@@ -45,17 +68,20 @@ Administrative/schema-owner credentials never enter serving workload Secrets.
    A failed atomic import leaves prior authority unchanged.
 4. Supply matching serving-role Secrets, signing keys, verified public trust,
    issued native/public leaves and separately installed controller readiness.
-   Install matching workload images/configuration with public admission closed.
+   Install matching workload images/configuration with
+   [public admission](#public-admission) closed.
 5. Verify schema/role and workload readiness, allowed and denied API-key/Bearer
    Check, exact token-exchange routing, tenant/operation gates, issuer HTTPS and
-   TLS peer controls through the explicit test address and Host. Verify the
-   aggregate resource/removal inventory before opening public admission.
+   TLS peer controls through the
+   [explicit test address and Host](#public-admission). Verify the aggregate
+   resource/removal inventory before opening public admission.
 
 Repeating preparation/bootstrap/import against an exact matching installation
 verifies or preserves existing identities and authority. An unexpected
 predecessor, partial/nonempty catalog, invalid role declaration or failed import
-keeps admission closed. There is no predecessor copy, reverse migration,
-credential fallback or data-erasing repair. Keep the isolated object namespace
+stops the sequence, so [public admission](#public-admission) stays closed.
+There is no predecessor copy, reverse migration, credential fallback or
+data-erasing repair. Keep the isolated object namespace
 and existing workspace/grant/key identities after any failed preparation.
 
 The [bootstrap guide](../../docs/bootstrap.md) owns Secret keys and actual
