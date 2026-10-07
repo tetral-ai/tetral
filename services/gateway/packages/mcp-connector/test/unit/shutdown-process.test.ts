@@ -1,58 +1,18 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import {
+  runShutdownFixture,
+  testExecutableShutdown,
+} from "@tetral/ts-observability/test-support/executable-shutdown";
 
-test("MCP executable exits incomplete shutdown within one application budget without early dependency close", async () => {
-  const cases = [
-    { sink: "normal", trigger: "SIGTERM" },
-    { sink: "silent", trigger: "SIGINT" },
-    { sink: "throw", trigger: "finally" },
-  ];
-  await Promise.all(
-    cases.map(async ({ sink, trigger }) => {
-      const result = await child(sink, trigger, "held");
-      expect(result.code, result.diagnostic).toBe(1);
-      expect(result.events.some((event) => event.event.endsWith(".held"))).toBe(
-        true,
-      );
-      expect(
-        result.events.some((event) => event.event.endsWith(".joined")),
-      ).toBe(false);
-      expect(
-        result.events.some((event) => event.event.endsWith(".close")),
-      ).toBe(false);
-      expect(
-        result.events.some((event) => event.event.startsWith("handoff")),
-      ).toBe(false);
-      const began = result.events.find(
-        (event) => event.event === "shutdown.begin",
-      );
-      expect(began).toBeDefined();
-      expect(result.exitedAt - began!.at).toBeGreaterThanOrEqual(4950);
-      // Bounded exit, not a second budget: the tolerance covers three concurrent children.
-      expect(result.exitedAt - began!.at).toBeLessThan(5000 + 2000);
-      if (sink === "normal")
-        expect(result.stderr).toContain(
-          '"event":"workload.shutdown_deadline_exceeded"',
-        );
-      else expect(result.stderr).toBe("");
-      expect(result.stderr).not.toContain("synthetic diagnostic sink failure");
-    }),
-  );
-  const cooperative = await child("normal", "SIGTERM", "cooperative");
-  expect(cooperative.code, cooperative.diagnostic).toBe(0);
-  const names = cooperative.events.map((event) => event.event);
-  const joined = names
-    .map((event, index) => (event.endsWith(".joined") ? index : -1))
-    .filter((index) => index >= 0);
-  const closed = names.findIndex((event) => event.endsWith(".close"));
-  expect(joined).toHaveLength(1);
-  for (const index of joined) expect(closed).toBeGreaterThan(index);
-  expect(cooperative.stderr).not.toContain(
-    "workload.shutdown_deadline_exceeded",
-  );
-}, 20_000);
+const fixtureUrl = new URL("../fixtures/shutdown-process.ts", import.meta.url);
+
+testExecutableShutdown({
+  receiver: "MCP",
+  fixtureUrl,
+  expectedJoins: 1,
+  // The fixture's 2000 ms drain plus 3000 ms cancellation join.
+  budgetMs: 5000,
+});
 
 test("default MCP executable client retains raw credential SQL through its configured exit deadline under every sink", async () => {
   await Promise.all(
@@ -61,7 +21,12 @@ test("default MCP executable client retains raw credential SQL through its confi
       { sink: "silent", trigger: "SIGINT" },
       { sink: "throw", trigger: "finally" },
     ].map(async ({ sink, trigger }) => {
-      const result = await child(sink, trigger, "credential-held");
+      const result = await runShutdownFixture(fixtureUrl, {
+        sink,
+        trigger,
+        mode: "credential-held",
+        watchdogMs: 5000,
+      });
       expect(result.code, result.diagnostic).toBe(1);
       const names = result.events.map((event) => event.event);
       expect(names).toContain("credential.held");
@@ -84,11 +49,12 @@ test("default MCP executable client retains raw credential SQL through its confi
       expect(result.stderr).not.toContain("synthetic diagnostic sink failure");
     }),
   );
-  const cooperative = await child(
-    "normal",
-    "SIGTERM",
-    "credential-cooperative",
-  );
+  const cooperative = await runShutdownFixture(fixtureUrl, {
+    sink: "normal",
+    trigger: "SIGTERM",
+    mode: "credential-cooperative",
+    watchdogMs: 5000,
+  });
   expect(cooperative.code, cooperative.diagnostic).toBe(0);
   const names = cooperative.events.map((event) => event.event);
   expect(names.filter((event) => event === "database.close")).toHaveLength(1);
@@ -100,53 +66,3 @@ test("default MCP executable client retains raw credential SQL through its confi
     "workload.shutdown_deadline_exceeded",
   );
 }, 10_000);
-
-async function child(sink: string, trigger: string, mode: string) {
-  const watchdogMs = mode.startsWith("credential-") ? 5000 : 15_000;
-  const directory = await mkdtemp(join(tmpdir(), "shutdown-child-"));
-  const process = Bun.spawn({
-    cmd: [
-      globalThis.process.execPath,
-      new URL("../fixtures/shutdown-process.ts", import.meta.url).pathname,
-      sink,
-      trigger,
-      mode,
-      directory,
-    ],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = new Response(process.stdout).text();
-  const stderr = new Response(process.stderr).text();
-  let watchdog: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const code = await Promise.race([
-      process.exited,
-      new Promise<never>((_resolve, reject) => {
-        watchdog = setTimeout(() => {
-          process.kill("SIGKILL");
-          reject(new Error(`${watchdogMs}ms child shutdown watchdog exceeded`));
-        }, watchdogMs);
-      }),
-    ]);
-    const exitedAt = Date.now();
-    const [out, err] = await Promise.all([stdout, stderr]);
-    const events = out
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as { event: string; at: number });
-    return {
-      code,
-      exitedAt,
-      events,
-      stderr: err,
-      diagnostic: `stdout=${out} stderr=${err}`,
-    };
-  } finally {
-    if (watchdog !== undefined) clearTimeout(watchdog);
-    if (process.exitCode === null) process.kill("SIGKILL");
-    await process.exited;
-    await rm(directory, { recursive: true, force: true });
-  }
-}

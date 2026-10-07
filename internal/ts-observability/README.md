@@ -104,6 +104,16 @@ Runtime's real HTTP metrics test also exercises asynchronous stream failure.
 The owning service packages typecheck and bundle these file dependencies.
 Their selected command-failure tests exercise real Bun executable and signal
 exits, acquired-resource cleanup, and diagnostic backpressure.
+Their `shutdown-process` tests run each service's own command fixture through
+the test-only `@tetral/ts-observability/test-support/executable-shutdown`
+driver, which the package entry does not export. Held work under a normal,
+silent or throwing diagnostic sink, triggered respectively by SIGTERM, SIGINT
+and command finally, must exit nonzero between 50 ms before and two seconds
+after the fixture's application budget elapses, without a join, dependency
+close or handoff; only the normal sink reports the deadline diagnostic. A
+cooperative run must exit zero after the service's expected joins and before
+dependency close. The driver module documents the fixture arguments and event
+lines.
 
 ## Operation histograms
 
