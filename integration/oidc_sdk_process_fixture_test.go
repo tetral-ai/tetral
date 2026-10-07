@@ -30,82 +30,30 @@ import (
 
 const oidcSDKPin = "406e6eee5e28a2cb3e2caa4531700abb682a96e5"
 
-// Like the accepted public process cases, the child selects TLS PostgreSQL
-// before the process-global storage registry initializes. Actual Auth also
-// verifies this server's explicit CA and hostname through its production opener.
-func oidcIsolatedTLSCase(t *testing.T, body func(*testing.T)) {
-	t.Helper()
-	oidcIsolatedTLSCaseWithMarker(t, "oidc_sdk_assertion=", body)
-}
-
-func oidcIsolatedTLSCaseWithMarker(t *testing.T, marker string, body func(*testing.T)) {
-	t.Helper()
-	if os.Getenv("TETRAL_OIDC_PROCESS_CASE") == t.Name() {
-		dsn, err := url.Parse(os.Getenv("TETRAL_OIDC_PROCESS_PG_URL"))
-		if err != nil || dsn.Host == "" {
-			t.Fatal("isolated OIDC TLS PostgreSQL is absent")
-		}
-		query := dsn.Query()
-		query.Set("sslmode", "require")
-		dsn.RawQuery = query.Encode()
-		t.Setenv(storagetest.EnvTestDatabaseURL, dsn.String())
-		t.Setenv(storagetest.EnvTestRunID, "")
-		body(t)
-		return
-	}
-	postgres := transporttest.NewPostgreSQL(t)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	command := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.v") //nolint:gosec // Current test executable, fixed owning root.
-	command.Env = append(os.Environ(), "TETRAL_OIDC_PROCESS_CASE="+t.Name(), "TETRAL_OIDC_PROCESS_PG_CERTS="+postgres.Directory, "TETRAL_OIDC_PROCESS_PG_URL="+postgres.URL)
-	output, err := command.CombinedOutput()
-	t.Logf("isolated OIDC process assertions:\n%s", output)
-	if err != nil {
-		t.Fatalf("actual OIDC process composition failed: %v", err)
-	}
-	if !strings.Contains(string(output), "--- PASS: "+t.Name()) || !strings.Contains(string(output), marker) {
-		t.Fatal("OIDC composition lacks executed owning assertions")
-	}
-}
-
 // Give each reported identity subtest custody of its actual isolated flow. The
-// child still selects TLS PostgreSQL before global storage initialization; its
-// fixed selector runs the owning human/service body rather than a report stub.
+// child selects TLS PostgreSQL before global storage initialization; its fixed
+// selector runs the owning human/service body rather than a report stub.
 func oidcIsolatedSDKIdentityCases(t *testing.T, body func(*testing.T)) {
 	t.Helper()
-	if os.Getenv("TETRAL_OIDC_PROCESS_CASE") == t.Name() {
-		oidcIsolatedTLSCase(t, body)
+	if os.Getenv(envIsolatedTLSRoot) == t.Name() {
+		runIsolatedTLSChild(t, body)
 		return
 	}
 	postgres := transporttest.NewPostgreSQL(t)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	root := t.Name()
 	for _, actor := range []string{"human", "service"} {
 		t.Run(actor, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-			defer cancel()
-			//nolint:gosec // Current executable and fixed owning identity selectors.
-			command := exec.CommandContext(ctx, executable, "-test.run=^"+root+"$/^"+actor+"$", "-test.v")
-			command.Env = append(os.Environ(), "TETRAL_OIDC_PROCESS_CASE="+root, "TETRAL_OIDC_PROCESS_PG_CERTS="+postgres.Directory, "TETRAL_OIDC_PROCESS_PG_URL="+postgres.URL)
-			output, err := command.CombinedOutput()
-			t.Logf("isolated OIDC identity process assertions:\n%s", output)
+			output, err := runIsolatedTLSProcess(t.Context(), t, root, "^"+root+"$/^"+actor+"$", postgres, isolatedTLSRootBudget)
 			if err != nil {
-				t.Fatalf("actual OIDC identity process composition failed: %v", err)
+				t.Fatalf("isolated TLS root %s failed: %v", t.Name(), err)
 			}
 			for _, required := range []string{
 				"--- PASS: " + root + "/" + actor + " (",
 				"oidc_sdk_assertion=" + actor + "_session_memory_cached_token_one401_one_exchange_one_effect passed=true sdk_pin=" + oidcSDKPin,
 				"oidc_sdk_assertion=" + actor + "_typed_created_by_redacted_by_stable_identity passed=true sdk_pin=" + oidcSDKPin,
 			} {
-				if !strings.Contains(string(output), required) {
-					t.Fatal("OIDC identity composition lacks executed owning assertions")
+				if !strings.Contains(output, required) {
+					t.Fatalf("isolated TLS root %s lacks marker %q", t.Name(), required)
 				}
 			}
 		})
@@ -235,7 +183,7 @@ func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary st
 		"TETRAL_AUTH_HTTP_ADDR":                          strings.TrimPrefix(process.URL, "http://"),
 		"TETRAL_AUTH_METRICS_ADDR":                       strings.TrimPrefix(process.MetricsURL, "http://"),
 		"TETRAL_DATABASE_URL":                            storagetest.RuntimeDatabaseURL(t, database),
-		"TETRAL_DATABASE_TLS_CA_PATH":                    filepath.Join(os.Getenv("TETRAL_OIDC_PROCESS_PG_CERTS"), "ca.pem"),
+		"TETRAL_DATABASE_TLS_CA_PATH":                    filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"),
 		"TETRAL_DATABASE_TLS_SERVER_NAME":                "postgres.transport.test",
 		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64": privateKey,
 		"ENGINE_API_KEY":                                 strings.Repeat("o", auth.MinBootstrapKeyBytes),

@@ -22,7 +22,7 @@ import (
 // A typed short cache lifetime permits a bounded real-time retirement check;
 // deterministic verifier tests separately own exact equality and network counts.
 func TestOIDCKeycloakAuthRotation(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "oidc_rotation_assertion=", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "oidc_rotation_assertion=", isolatedTLSRootBudget, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		t.Cleanup(cancel)
 		fixture, err := testinfra.LoadKeycloakFixture()

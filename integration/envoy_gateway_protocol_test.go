@@ -29,7 +29,7 @@ import (
 // on a role-separated PostgreSQL authority. Controlled HTTP receivers record the
 // edge's exact request mutation; SDK/business persistence has its own composition.
 func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "envoy_gateway_assertion=", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {
 		for _, profile := range []string{"standard-routed", "hardened"} {
 			t.Run(profile, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)

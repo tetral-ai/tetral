@@ -31,7 +31,7 @@ import (
 // import preserves workspace, grant and key identities; a failed import leaves
 // the prior authority rows unchanged, and the repaired sequence admits again.
 func TestPostgreSQLManagedInitialization(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "managed_initialization_assertion=commands_order_repeat_failure_preserved", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "managed_initialization_assertion=commands_order_repeat_failure_preserved", isolatedTLSRootBudget, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		defer cancel()
 		admin := storagetest.NewEmptyPostgreSQLAdminDB(t)
@@ -70,7 +70,7 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 			}
 			binaries[entry.name] = binary
 		}
-		base := map[string]string{"TETRAL_DATABASE_ADMIN_URL": connection.String(), "TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(os.Getenv("TETRAL_OIDC_PROCESS_PG_CERTS"), "ca.pem"), "TETRAL_DATABASE_TLS_SERVER_NAME": "postgres.transport.test"}
+		base := map[string]string{"TETRAL_DATABASE_ADMIN_URL": connection.String(), "TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"), "TETRAL_DATABASE_TLS_SERVER_NAME": "postgres.transport.test"}
 		roleURL := func(name string) string {
 			u := *connection
 			role := declarations.Roles[name]

@@ -144,7 +144,7 @@ func requireOnlyEdgeTLSMaterialDelta(t *testing.T, fixture *envoyGatewayTranslat
 }
 
 func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "envoy_gateway_tls_assertion=", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_tls_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {
 		for _, profile := range []string{"standard-routed", "hardened"} {
 			t.Run(profile, func(t *testing.T) {
 				edge := &translatedPublicEdge{lifecycle: &edgeTLSLifecycle{}}

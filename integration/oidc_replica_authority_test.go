@@ -157,7 +157,7 @@ func oidcAssertFrozenReplicas(ctx context.Context, t *testing.T, issuer *oidcRep
 }
 
 func TestOIDCReplicaAuthority(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "oidc_replica_assertion=", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "oidc_replica_assertion=", isolatedTLSRootBudget, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		t.Cleanup(cancel)
 		_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

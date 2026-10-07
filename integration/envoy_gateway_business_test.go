@@ -221,7 +221,7 @@ func (transport edgeGitTransport) RoundTrip(request *http.Request) (*http.Respon
 }
 
 func TestPostgreSQLEnvoyGatewayPublicParity(t *testing.T) {
-	oidcIsolatedTLSCaseWithMarker(t, "envoy_gateway_business_assertion=", func(t *testing.T) {
+	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_business_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {
 		for _, profile := range []string{"standard-routed", "hardened"} {
 			t.Run(profile, func(t *testing.T) {
 				edge := &translatedPublicEdge{}
