@@ -63,8 +63,7 @@ func TestPublicOperationRouteCoverage(t *testing.T) {
 			httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(nil)),
 			httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(nil)),
 			httpapi.WithSessionEventListHandler(eventstream.NewListHandler(nil))),
-		"standalone lists": eventstream.NewListRouter(nil, nil),
-		"sse":              publicstream.NewRouter(nil, nil),
+		"sse": publicstream.NewRouter(nil, nil),
 	}
 	for name, router := range routers {
 		t.Run(name, func(t *testing.T) {

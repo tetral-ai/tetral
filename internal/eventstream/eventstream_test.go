@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	eventstream "github.com/tetral-ai/tetral/internal/eventstream"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
@@ -65,7 +66,7 @@ func TestEventStreamListReturnsPublicEventEnvelope(t *testing.T) {
 			NextPage: stringPtr("next-token"),
 		},
 	}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&limit=2&order=asc")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 
@@ -131,7 +132,7 @@ func testEventStreamListProjectsAllPublicChildEventVariants(t *testing.T, path s
 	}
 	reader := &recordingReader{listResult: eventstream.ListResult{Data: data}}
 	recorder := httptest.NewRecorder()
-	eventstream.NewListRouter(reader, verifier).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
+	listRouter(reader, verifier, nil).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -243,7 +244,7 @@ func assertPublicChildOutletEvents(t *testing.T, got []map[string]any, fixtures 
 func TestEventStreamSessionListDecodesSDKFiltersAndRejectsUnknownParameters(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true&types[]=user.message&types[]=agent.message&created_at[gt]=2026-01-01T00:00:00Z&created_at[lte]=2026-01-02T00:00:00Z")
 	recorder := httptest.NewRecorder()
 
@@ -290,7 +291,7 @@ func TestEventStreamRoutesRequireExactlyOneBetaMarkerBeforeReaderAccess(t *testi
 				if strings.HasSuffix(route, "/stream") {
 					router = eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamMaxEmptyPolls(1))
 				} else {
-					router = eventstream.NewListRouter(reader, verifier)
+					router = listRouter(reader, verifier, nil)
 				}
 				recorder := httptest.NewRecorder()
 				router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, route+query))
@@ -396,7 +397,7 @@ func TestEventStreamThreadRoutesUseThreadScope(t *testing.T) {
 			},
 		},
 	}
-	router := eventstream.NewListRouter(reader, verifier)
+	router := listRouter(reader, verifier, nil)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_thread_events/threads/thr_child/events?limit=2&order=desc&beta=true")
 	recorder := httptest.NewRecorder()
 
@@ -732,7 +733,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	t.Run("fast 2xx emits no boundary log", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(&recordingReader{}, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
 		if recorder.Code != http.StatusOK {
@@ -745,7 +746,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 
 	t.Run("missing principal is auth-only and not boundary logged", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(&recordingReader{}, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(&recordingReader{}, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_events/events", nil))
 		if recorder.Code != http.StatusUnauthorized {
@@ -758,7 +759,7 @@ func TestEventStreamBoundaryLogsServerErrorsOnly(t *testing.T) {
 
 	t.Run("500 emits boundary log", func(t *testing.T) {
 		var buffer bytes.Buffer
-		router := eventstream.NewListRouter(nil, verifier, eventstream.WithListLogger(captureLogger(&buffer)))
+		router := listRouter(nil, verifier, captureLogger(&buffer))
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true"))
 		if recorder.Code != http.StatusInternalServerError {
@@ -782,6 +783,8 @@ type recordingReader struct {
 	changeCalls      int
 	currentCalls     int
 	listCalls        int
+	previewCalls     int
+	finalCalls       int
 }
 
 type ListResult = eventstream.ListResult
@@ -906,6 +909,13 @@ func signedRequest(t *testing.T, signer *auth.InternalPrincipalSigner, method st
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	return request
+}
+
+// listRouter mounts the list handler through the public API router exactly as
+// the API service does: signed principal admission, declared operations and
+// the production boundary middleware. A nil logger keeps the router default.
+func listRouter(reader eventstream.ListReader, verifier *auth.InternalPrincipalVerifier, logger *slog.Logger) http.Handler {
+	return httpapi.NewRouter(nil, "", httpapi.WithSessionEventListHandler(eventstream.NewListHandler(reader)), httpapi.WithInternalPrincipalVerifier(verifier), httpapi.WithLogger(logger))
 }
 
 func captureLogger(buffer *bytes.Buffer) *slog.Logger {
@@ -1072,9 +1082,11 @@ func equalStrings(left []string, right []string) bool {
 }
 
 func (r *recordingReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {
+	r.previewCalls++
 	return eventstream.PreviewRequest{}, nil
 }
 func (r *recordingReader) ListRequestFinalMessages(context.Context, eventstream.ReadScope, string, int64, int) ([]eventstream.RequestFinalMessage, error) {
+	r.finalCalls++
 	return nil, nil
 }
 
@@ -1100,7 +1112,7 @@ func TestPublicAuthorizationEventReadsDenyBeforeReaderAccess(t *testing.T) {
 			if strings.Contains(path, "/stream") {
 				router = eventstreamservice.NewRouter(reader, verifier)
 			} else {
-				router = eventstream.NewListRouter(reader, verifier)
+				router = listRouter(reader, verifier, nil)
 			}
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			token, err := signer.Mint(principal, http.MethodGet, request.URL.Path, "req_restricted_fixture", time.Minute)
@@ -1114,8 +1126,8 @@ func TestPublicAuthorizationEventReadsDenyBeforeReaderAccess(t *testing.T) {
 				t.Fatalf("status=%d want403 body=%s", recorder.Code, recorder.Body.String())
 			}
 			assertErrorEnvelope(t, recorder, "permission_error", true)
-			if reader.listCalls != 0 || reader.currentCalls != 0 || reader.changeCalls != 0 {
-				t.Fatalf("denied route reached reader: list=%d current=%d changes=%d", reader.listCalls, reader.currentCalls, reader.changeCalls)
+			if reader.listCalls != 0 || reader.currentCalls != 0 || reader.changeCalls != 0 || reader.previewCalls != 0 || reader.finalCalls != 0 {
+				t.Fatalf("denied route reached reader: list=%d current=%d changes=%d preview=%d final=%d", reader.listCalls, reader.currentCalls, reader.changeCalls, reader.previewCalls, reader.finalCalls)
 			}
 			if strings.Contains(recorder.Body.String(), "secret stored content") || recorder.Header().Get("Content-Type") == "text/event-stream" {
 				t.Fatal("denial started a stream or disclosed data")

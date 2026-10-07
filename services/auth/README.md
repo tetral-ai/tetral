@@ -287,5 +287,6 @@ establishes them. Operation denials include the registered semantic
 stay absent. Successful request admission and operation checks stay quiet at the
 default level. Repeated failures share fixed stage/code suppression partitions;
 kind, revisions, and actions never expand limiter keys. The same shared audit
-context covers Auth, API, EventStream, and standalone event-list gates. Diagnostic
-sink failure cannot change the authorization result or business effects.
+context covers Auth, API (including its event-list routes), and EventStream
+gates. Diagnostic sink failure cannot change the authorization result or
+business effects.

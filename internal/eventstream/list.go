@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -116,41 +114,11 @@ type ListReader interface {
 	ListThreadEvents(context.Context, workspace.ID, string, string, ListOptions) (ListResult, error)
 }
 
-type ListOption func(*listOptions)
-
-type listOptions struct {
-	logger         *slog.Logger
-	requestMetrics httpapi.RequestMetricsRecorder
-}
-
-func WithListLogger(logger *slog.Logger) ListOption {
-	return func(options *listOptions) { options.logger = logger }
-}
-
-func WithListRequestMetrics(metrics httpapi.RequestMetricsRecorder) ListOption {
-	return func(options *listOptions) { options.requestMetrics = metrics }
-}
-
-func NewListRouter(reader ListReader, verifier *auth.InternalPrincipalVerifier, opts ...ListOption) http.Handler {
-	options := newListOptions(opts...)
-	listHandler := NewListHandler(reader, opts...)
-	router := chi.NewRouter()
-	router.Use(httpapi.RequestIDMiddleware)
-	router.Use(httpapi.PublicRecoveryMiddleware(options.logger))
-	router.Use(httpapi.RequestLogMiddleware(options.logger, httpapi.DefaultSlowRequestThreshold, httpapi.WithRequestLogMetrics(options.requestMetrics)))
-	router.Route("/v1", func(router chi.Router) {
-		router.Use(internalPrincipalMiddleware(verifier))
-		router.Method(http.MethodGet, "/sessions/{session_id}/events", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/events", listHandler.ServeSessionEvents))
-		router.Method(http.MethodGet, "/sessions/{session_id}/threads/{thread_id}/events", httpapi.DeclarePublicOperation(http.MethodGet, "/v1/sessions/{session_id}/threads/{thread_id}/events", listHandler.ServeThreadEvents))
-	})
-	return router
-}
-
 type ListHandler struct {
 	reader ListReader
 }
 
-func NewListHandler(reader ListReader, _ ...ListOption) *ListHandler {
+func NewListHandler(reader ListReader) *ListHandler {
 	return &ListHandler{reader: reader}
 }
 
@@ -206,28 +174,6 @@ func (handler *ListHandler) ServeThreadEvents(writer http.ResponseWriter, reques
 		return
 	}
 	writeJSON(writer, http.StatusOK, normalizeListResult(result))
-}
-
-func newListOptions(opts ...ListOption) *listOptions {
-	options := &listOptions{}
-	for _, option := range opts {
-		option(options)
-	}
-	if options.logger == nil {
-		options.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	return options
-}
-
-func internalPrincipalMiddleware(verifier *auth.InternalPrincipalVerifier) func(http.Handler) http.Handler {
-	if verifier != nil {
-		return auth.InternalPrincipalMiddleware(verifier, httpapi.WriteError, httpapi.RequestIDFromContext)
-	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			httpapi.WriteError(writer, request, &auth.AuthenticationError{Message: "authentication unavailable"})
-		})
-	}
 }
 
 func decodeListOptions(request *http.Request, allowFilters bool) (ListOptions, error) {

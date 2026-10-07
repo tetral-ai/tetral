@@ -30,7 +30,7 @@ func TestFinalArchitectureEventStreamIsImplementedReadOnlyService(t *testing.T) 
 	// retain routing and read authorization. Keep list ownership out of every
 	// production file in this service, including the separate writer.
 	scanProductionSourceTokens(t, engineRoot, "services/event-stream", []string{
-		"NewListRouter", "NewListHandler", "ListSessionEvents", "ListThreadEvents",
+		"NewListHandler", "ListSessionEvents", "ListThreadEvents",
 	})
 	if !strings.Contains(tetralAPISource, "github.com/tetral-ai/tetral/internal/eventstream") {
 		t.Fatal("api must compose the shared internal/eventstream list handler")
