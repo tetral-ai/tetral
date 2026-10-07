@@ -52,16 +52,18 @@ type S3BlobStore struct {
 	closeResources func() error
 }
 
-// NewS3BlobStore constructs the production S3-backed store from a
-// validated Config. Endpoint, region, and static credentials map to
-// the SDK's standard option chain. Path-style addressing is enabled
-// for non-AWS hosts so MinIO / R2 / B2 work identically to AWS S3.
+// NewS3BlobStore constructs the fixture and local-development S3-backed store
+// from a validated Config. It enforces the CA/DNS owner only when TLS
+// references are set; production roots use NewProtectedS3BlobStore. Endpoint,
+// region, and static credentials map to the SDK's standard option chain.
+// Path-style addressing is enabled for non-AWS hosts so MinIO / R2 / B2 work
+// identically to AWS S3.
 func NewS3BlobStore(ctx context.Context, cfg *Config) (*S3BlobStore, error) {
 	return newS3BlobStore(ctx, cfg, false)
 }
 
-// NewProtectedS3BlobStore requires the operator's explicit trust and DNS
-// references. Deliberate local fixture stores use NewS3BlobStore instead.
+// NewProtectedS3BlobStore is the production constructor: it requires the
+// operator's explicit trust and DNS references.
 func NewProtectedS3BlobStore(ctx context.Context, cfg *Config) (*S3BlobStore, error) {
 	return newS3BlobStore(ctx, cfg, true)
 }

@@ -26,10 +26,8 @@ type OpenResult struct {
 	RawDatabaseForExcludedStores *sql.DB
 }
 
-func OpenPlainDSNFromEnv(ctx context.Context) (OpenResult, error) {
-	return OpenPlainDSN(ctx, envProductionDatabaseURL, os.Getenv(envProductionDatabaseURL))
-}
-
+// OpenPlainDSN is the fixture and local opener: the connection honors only the
+// DSN's own sslmode. Production stores open through OpenProtectedDSNFromEnv.
 func OpenPlainDSN(ctx context.Context, envVarName string, dsn string) (OpenResult, error) {
 	return openDSN(ctx, envVarName, dsn, nil, "")
 }
@@ -82,9 +80,13 @@ func OpenProtectedConfig(ctx context.Context, dsn, caPath, serverName string) (*
 }
 
 func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *transportsecurity.Owner, serverName string) (OpenResult, error) {
+	provider := ProviderPlainDSN
+	if tlsOwner != nil {
+		provider = ProviderProtectedDSN
+	}
 	if dsn == "" {
 		return OpenResult{}, diagnostic(
-			ProviderPlainDSN,
+			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
 			KindInvalidConfig,
@@ -97,7 +99,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 	poolConfig, err := PoolConfigFromEnv(os.Getenv)
 	if err != nil {
 		return OpenResult{}, diagnostic(
-			ProviderPlainDSN,
+			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
 			KindInvalidConfig,
@@ -109,7 +111,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 	cfg, err := configurePlainDSN(dsn)
 	if err != nil {
 		return OpenResult{}, diagnostic(
-			ProviderPlainDSN,
+			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
 			KindInvalidConfig,
@@ -151,7 +153,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 	}
 	db := sql.OpenDB(connector)
 	applyPoolConfig(db, poolConfig)
-	client := newClient(db, ProviderPlainDSN, descriptor)
+	client := newClient(db, provider, descriptor)
 	if tlsOwner != nil {
 		client.closeResources = tlsOwner.Close
 		if err := tlsOwner.SetActivationObserver(func() {
@@ -168,7 +170,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return OpenResult{}, diagnostic(
-			ProviderPlainDSN,
+			provider,
 			descriptor,
 			PhasePing,
 			classifyOpenOrPingKind(err),
@@ -179,7 +181,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 	}
 	return OpenResult{
 		Client:                       client,
-		Provider:                     ProviderPlainDSN,
+		Provider:                     provider,
 		Descriptor:                   descriptor,
 		RawDatabaseForExcludedStores: db,
 	}, nil

@@ -4,7 +4,13 @@ import "fmt"
 
 type Provider string
 
-const ProviderPlainDSN Provider = "plain_dsn"
+// ProviderPlainDSN labels a client opened from a DSN string that honors only
+// the DSN's own sslmode; ProviderProtectedDSN labels a client whose TLS trust
+// and server name come from a mounted credential owner.
+const (
+	ProviderPlainDSN     Provider = "plain_dsn"
+	ProviderProtectedDSN Provider = "protected_dsn"
+)
 
 type Phase string
 

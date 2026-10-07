@@ -356,7 +356,7 @@ func (r *ownedRouter) Close() error {
 //
 // This is the SINGLE conversion point for foreign config-validation errors. It
 // is applied ONLY at config-validation call sites (Bucket C); dependency and
-// construction sites (Bucket D — DB open, schema init, blob.NewS3BlobStore)
+// construction sites (Bucket D — DB open, schema init, blob.NewProtectedS3BlobStore)
 // are NOT routed through it and
 // therefore stay class-only. The contract is that every wrapped error's Error()
 // is already operator-safe (names a config KEY, never echoes a secret value);

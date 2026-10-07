@@ -162,7 +162,7 @@ func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *te
 			t.Fatalf("services/event-stream/cmd/event-stream/main.go references forbidden startup token %q", forbidden)
 		}
 	}
-	if strings.Contains(text, "OpenPlainDSNFromEnv") {
+	if strings.Contains(text, "OpenProtectedDSNFromEnv") {
 		t.Fatal("event-stream must use its service-specific read-only database DSN env")
 	}
 	if !strings.Contains(text, envEventStreamDatabaseURL) {

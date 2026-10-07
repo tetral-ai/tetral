@@ -34,6 +34,9 @@ func TestPostgreSQLProtectedStoreConnections(t *testing.T) {
 	ca := filepath.Join(p.Directory, "ca.pem")
 	db := transporttest.Must(dbconnect.OpenProtectedDSN(ctx, p.URL, ca, "postgres.transport.test"))
 	defer func() { _ = db.Client.Close() }()
+	if db.Provider != dbconnect.ProviderProtectedDSN {
+		t.Fatalf("protected open labelled %q", db.Provider)
+	}
 	sql := db.RawDatabaseForExcludedStores
 	var secure bool
 	if err := sql.QueryRowContext(ctx, "SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()").Scan(&secure); err != nil || !secure {
