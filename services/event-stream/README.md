@@ -113,13 +113,14 @@ never replayed. The thread stream is the same loop scoped to one
 | State | Trigger | Action |
 | --- | --- | --- |
 | Open | valid principal and `beta=true` | resolve high-water cursor, flush headers (`200`) |
-| Poll | each iteration | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
+| Poll | the poll interval is due; or the previous poll returned rows or an End group; or an admitted preview's Start is not yet behind the cursor; or preview loss was observed | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
 | Emit | ordinary rows present | per row: `event: <event.type>` + `data: <public Event JSON>`, advance the durable cursor only after a successful write |
 | Defer generated text | `agent.message` correlated to a model request | consume its change position without emitting or closing its preview; the SQL change query returns identity metadata with no text payload |
 | Publish request text | visible durable `span.model_request_end` | release the ordinary batch and suffix; read one complete committed text per page in stored sequence order, emit each full original event, then End; query discarded suffix again after the End cursor |
-| Heartbeat | no rows this poll | write a `: heartbeat` comment frame, flush, wait for the independent poll/heartbeat timers (both initially 1s) or a preview wake, then re-poll |
+| Heartbeat | the heartbeat timer is due (first iteration, then every `TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS`), independent of rows | write a `: heartbeat` comment frame and flush |
+| Wait | the poll returned no rows, or no poll was due | wait for the independent poll/heartbeat timers (both initially 1s), a preview wake or cancellation; a preview wake runs the bounded preview slice without a formal change poll. After rows or an End group the loop re-polls without waiting |
 | Close (deleted) | an emitted event's type is `session.deleted` | return; the server closes and sends nothing further |
-| Close (disconnect) | client context done at the poll sleep | return |
+| Close (disconnect) | client context done at the wait | return |
 | Close (read/marshal/write error) | error mid-loop, after headers flushed | return silently — the client sees the connection close with no error frame and no further bytes |
 
 The heartbeat comment frame is required behavior: an idle session produces no
@@ -180,10 +181,17 @@ undetectable and is not counted as detected loss.
 
 One response writer owns formal data, previews and heartbeats. Every write and
 flush gets a ten-second deadline; request cancellation retires an active blocked
-write and joins that cancellation watcher. Formal polling and lifecycle closure
-run between bounded preview slices, so a preview flood cannot monopolize the
-writer. Session deletion remains observable on an existing Session feed;
-deleted sessions cannot open new feeds. An End group whose End precedes
+write and joins that cancellation watcher. Formal changes are polled at least
+once per poll interval, and at once after a poll that made progress, when an
+admitted preview's Start is not yet behind the cursor, or after preview loss;
+preview wakes never add a formal change poll per delta. A preview flood
+therefore cannot delay formal lifecycle or End-group delivery beyond one poll
+interval, the same bound formal-only viewers have, and previews of a request
+may continue for up to that interval after its End commits; they remain
+prefixes and the emitted End closes them.
+
+Session deletion remains observable on an existing Session feed; deleted
+sessions cannot open new feeds. An End group whose End precedes
 `session.deleted` is still published on that existing Session feed. Preview
 loss detected after deletion stops previews and releases the subscription,
 while formal delivery continues until `session.deleted`. Thread loss of
@@ -340,7 +348,7 @@ request bodies and path parameters never supply identity.
 | `TestEventStreamBoundaryLogsServerErrorsOnly` | `internal/eventstream/eventstream_test.go` | logging redaction: client errors are not logged as server errors |
 | `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission` / `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` | `internal/eventstream/request_final_messages_test.go` | actual read-only serving role: exact scope/Start/End, metadata-only changes, one-message pages, committed list bodies, cancellation and deletion visibility, and an End group committed before deletion staying expandable only on the open Session feed |
 | `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer for Session and Thread: three large complete messages whose change descriptors carry no body; the first End-group body write held at the response sink, where the reader-returned change arrays (including the unconsumed suffix) no longer reference payloads, exactly one End page has been requested and the current encoding is in flight; then exact End/suffix order (with the Session marked deleted at the held write on Session feeds), or cancellation at the held write without a later page |
-| `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
+| `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: a multi-batch backlog, End group and suffix drain without a poll-interval wait; preview wakes add no formal poll per delta; a formal row committed during a delta flood is still delivered; preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
 | `TestNATSNative*` / `TestNATSSubscriber*` | `services/event-stream/preview_native_queue_test.go` / `preview_nats_test.go` | pinned official client over controlled TCP: shared process queue/reservations, at/over byte and count bounds, unaffected/future healthy controls, oversized frame/broker ceiling rejection, current callback and connection-attempt joins; real broker/TLS/SDK coverage is separate integration evidence |
 | `TestPreviewHubExact*` / `TestPreviewViewerExact*` / `TestPreviewHubIngressCount*` / `TestPreviewViewerCount*` | `services/event-stream/preview_bounds_test.go` | independently padded limit−1/exact/+1 encoded byte boundaries for ingress, fanout, viewer queue/current write/encoding and aggregate encoding; independent current-ingress/current-write count limits, unaffected viewers and joined cleanup |
 | `TestNATSNativeExactProcessByteReservationBoundary` / `TestNATSNativeHeartbeatOptionsConsumeTypedEnvironment` / `TestNATSHeartbeatConfigRangesAndFailFast` | `services/event-stream/preview_native_queue_test.go` / `config_test.go` | native byte reservation threshold−1/exact/+1 with frame counts nonbinding; environment defaults/overrides reach real pinned-client ping options; invalid local settings fail before startup |

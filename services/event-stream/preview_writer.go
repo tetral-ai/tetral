@@ -99,25 +99,40 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		return
 	}
 	nextHeartbeat := time.Now()
+	// Formal changes are polled at least once per poll interval, and at once
+	// after a poll that returned rows, when an admitted preview's Start is not
+	// yet behind the cursor, or after a preview loss. A preview wake alone runs
+	// the bounded preview slice without a formal change poll, so polling never
+	// follows each delta and a delta flood cannot delay lifecycle or End-group
+	// delivery beyond one poll interval.
+	var lastPoll time.Time
+	forcePoll := true
 	emptyPolls := 0
 	for {
 		if r.Context().Err() != nil {
 			return
 		}
-		// Formal lifecycle/finals have priority on every bounded preview slice.
+		var changes []StreamChange
 		selectedAt := time.Now()
-		changes, err := listChanges(r.Context(), cursor)
-		if err != nil {
-			return
-		}
-		if len(changes) == 0 {
-			emptyPolls++
-			if h.options.streamMaxEmptyPolls > 0 && emptyPolls >= h.options.streamMaxEmptyPolls {
+		if forcePoll || !selectedAt.Before(lastPoll.Add(h.options.streamConfig.PollInterval)) {
+			lastPoll = selectedAt
+			var err error
+			changes, err = listChanges(r.Context(), cursor)
+			if err != nil {
 				return
 			}
-		} else {
-			emptyPolls = 0
+			if len(changes) == 0 {
+				emptyPolls++
+				if h.options.streamMaxEmptyPolls > 0 && emptyPolls >= h.options.streamMaxEmptyPolls {
+					return
+				}
+			} else {
+				emptyPolls = 0
+			}
 		}
+		// Rows or an End group were consumed and more may be waiting: poll again
+		// without waiting once the preview slice and heartbeat check have run.
+		forcePoll = len(changes) > 0
 		for len(changes) > 0 {
 			// Zero each consumed element so the reader-returned batch no longer
 			// references its payload once the row is handled.
@@ -176,6 +191,7 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 					viewer = nil
 					h.options.previewMetrics.stoppedRequests.Add(1)
 					h.logPreviewStop(scope, "", "session_unreadable")
+					forcePoll = true
 					continue
 				}
 				if err != nil {
@@ -190,6 +206,7 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 				state.epoch = epoch
 				h.options.previewMetrics.stoppedRequests.Add(1)
 				h.logPreviewStop(scope, "", reason)
+				forcePoll = true
 			}
 			needPoll := false
 			for i := 0; i < 64; i++ {
@@ -213,18 +230,22 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 				}
 			}
 			if needPoll {
+				forcePoll = true
 				continue
 			}
 		}
-		now := time.Now()
-		if !now.Before(nextHeartbeat) {
+		if !time.Now().Before(nextHeartbeat) {
 			if err := writer.heartbeat(); err != nil {
 				return
 			}
 			nextHeartbeat = time.Now().Add(h.options.streamConfig.HeartbeatInterval)
 		}
-		nextPoll := now.Add(h.options.streamConfig.PollInterval)
-		delay := time.Until(nextPoll)
+		if forcePoll {
+			continue
+		}
+		// Wait only after an empty or skipped poll: for the poll timer, the
+		// heartbeat timer, a preview wake or cancellation.
+		delay := time.Until(lastPoll.Add(h.options.streamConfig.PollInterval))
 		if heartbeatDelay := time.Until(nextHeartbeat); heartbeatDelay < delay {
 			delay = heartbeatDelay
 		}
@@ -371,8 +392,10 @@ func (h *handler) previewFrame(ctx context.Context, writer *sseWriter, scope Rea
 	if request == nil || !request.observed || request.stopped || request.startPosition <= state.watermark || frame.ModelRequestStartEventID != request.startID || frame.ThreadID != request.threadID || !state.types[frame.EventType] {
 		return nil
 	}
-	// The ordinary formal query always runs first, so a queued start waits until
-	// its acknowledged Start is visible on this connection's durable cursor.
+	// An admitted request_open whose Start is not yet behind the cursor forces a
+	// formal poll before the next frame is taken. A frame taken while its Start
+	// is still ahead of the cursor is dropped, so no preview precedes its Start
+	// on this connection's durable cursor.
 	if cursor < request.startPosition {
 		return nil
 	}

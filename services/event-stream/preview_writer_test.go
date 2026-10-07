@@ -383,3 +383,220 @@ func TestStreamLoopPreviewLossAfterSessionDeletionContinuesFormalDelivery(t *tes
 		t.Fatal("preview stop or stream ownership unbalanced")
 	}
 }
+
+// streamSink is a concurrency-safe response sink for observing a live stream.
+type streamSink struct {
+	header http.Header
+	mu     sync.Mutex
+	body   bytes.Buffer
+	opened chan struct{}
+	once   sync.Once
+}
+
+func newStreamSink() *streamSink {
+	return &streamSink{header: make(http.Header), opened: make(chan struct{})}
+}
+func (s *streamSink) Header() http.Header { return s.header }
+func (*streamSink) WriteHeader(int)       {}
+func (s *streamSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.Write(p)
+}
+func (s *streamSink) Flush() { s.once.Do(func() { close(s.opened) }) }
+func (s *streamSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.String()
+}
+func (s *streamSink) count(frame string) int { return strings.Count(s.String(), frame) }
+
+func sseDataIDs(t *testing.T, body string) []string {
+	t.Helper()
+	ids := []string{}
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, event.ID)
+	}
+	return ids
+}
+
+type noFinalMessagesReader struct{ Reader }
+
+func (noFinalMessagesReader) ListRequestFinalMessages(context.Context, ReadScope, string, int64, int) ([]RequestFinalMessage, error) {
+	return nil, nil
+}
+
+// A backlog larger than one batch, an End group and its re-read suffix are
+// delivered back to back; the loop waits for its poll timer only after a poll
+// that returned nothing. The one-minute timers make any intermediate wait fail.
+func TestStreamLoopDrainsBacklogAndEndSuffixWithoutPollWait(t *testing.T) {
+	config := DefaultStreamConfig()
+	config.PollInterval, config.HeartbeatInterval = time.Minute, time.Minute
+	h := &handler{reader: noFinalMessagesReader{}, options: newOptions(WithStreamConfig(config))}
+	rows := []StreamChange{}
+	want := []string{}
+	for position := int64(1); position <= 150; position++ {
+		id := fmt.Sprintf("evt_backlog_%03d", position)
+		rows = append(rows, StreamChange{StreamPosition: position, Event: Event{ID: id, Type: "session.status_idle", Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}})
+		want = append(want, id)
+	}
+	rows = append(rows,
+		StreamChange{StreamPosition: 151, Event: Event{ID: "evt_end", ThreadID: "thr_main", Type: "span.model_request_end", Payload: json.RawMessage(`{"model_request_start_id":"evt_start"}`)}, ModelRequestID: "mreq_backlog", RequestStartEventID: "evt_start", ThreadRole: "main", RequestKind: "agent_provider_request"},
+		StreamChange{StreamPosition: 152, Event: Event{ID: "evt_suffix", Type: "session.status_idle", Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}})
+	want = append(want, "evt_end", "evt_suffix")
+	var mu sync.Mutex
+	polls := 0
+	idle := make(chan struct{})
+	var idleOnce sync.Once
+	listChanges := func(_ context.Context, after int64) ([]StreamChange, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		polls++
+		batch := []StreamChange{}
+		for _, row := range rows {
+			if row.StreamPosition > after && len(batch) < defaultStreamBatchSize {
+				batch = append(batch, row)
+			}
+		}
+		if len(batch) == 0 {
+			idleOnce.Do(func() { close(idle) })
+		}
+		return batch, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sink := newStreamSink()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.streamEvents(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_backlog"}, nil, func(context.Context) (int64, error) { return 0, nil }, listChanges)
+	}()
+	select {
+	case <-idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backlog, End group and suffix were not drained before a poll-interval wait")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not join")
+	}
+	if got := sseDataIDs(t, sink.String()); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("delivered order=%v", got)
+	}
+	// Two full or End-truncated batches, the re-read suffix, then one empty poll.
+	mu.Lock()
+	defer mu.Unlock()
+	if polls != 4 {
+		t.Fatalf("formal polls=%d want one per non-empty batch plus one empty poll", polls)
+	}
+}
+
+// previewLoopFixture opens a preview Session stream whose Start is already
+// visible after the opening mark, then waits until the loop is idle.
+func previewLoopFixture(t *testing.T, pollInterval time.Duration, formal func(after int64) []StreamChange) (*fixtureTransport, *streamSink, func() int) {
+	t.Helper()
+	config := DefaultStreamConfig()
+	config.PollInterval, config.HeartbeatInterval = pollInterval, time.Minute
+	metrics := NewPreviewMetrics()
+	transport := &fixtureTransport{}
+	hub, err := NewPreviewHub(transport, config, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &admissionReader{descriptor: PreviewRequest{StartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main", ThreadVisibility: "public", IsPrimaryThread: true}}
+	h := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics))}
+	start := StreamChange{StreamPosition: 11, Event: Event{ID: "evt_start", ThreadID: "thr_main", Type: "span.model_request_start", Payload: json.RawMessage(`{}`)}, ModelRequestID: "mreq_preview", RequestStartEventID: "evt_start", RequestStartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main"}
+	var mu sync.Mutex
+	polls := 0
+	pollCount := func() int { mu.Lock(); defer mu.Unlock(); return polls }
+	listChanges := func(_ context.Context, after int64) ([]StreamChange, error) {
+		mu.Lock()
+		polls++
+		mu.Unlock()
+		if after < start.StreamPosition {
+			return []StreamChange{start}, nil
+		}
+		return formal(after), nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	sink := newStreamSink()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.streamEvents(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}, map[string]bool{"agent.message": true}, func(context.Context) (int64, error) { return 10, nil }, listChanges)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("stream did not join")
+		}
+		hub.Close()
+	})
+	select {
+	case <-sink.opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not open")
+	}
+	// The opening poll returns the Start; the next poll is empty.
+	waitCondition(t, func() bool { return pollCount() >= 2 })
+	transport.publish(t, fixtureFrame("request_open", "", 0, ""))
+	transport.publish(t, fixtureFrame("event_start", "evt_message", 0, ""))
+	waitCondition(t, func() bool { return sink.count("event: event_start\n") == 1 })
+	return transport, sink, pollCount
+}
+
+// Each preview wake runs the preview slice without a formal database poll.
+// With a one-minute poll interval, fifty separately woken deltas leave only
+// the opening poll and the empty poll that followed its progress.
+func TestStreamLoopPreviewWakesDoNotPollPerDelta(t *testing.T) {
+	transport, sink, pollCount := previewLoopFixture(t, time.Minute, func(int64) []StreamChange { return nil })
+	for sequence := int64(1); sequence <= 50; sequence++ {
+		transport.publish(t, fixtureFrame("event_delta", "evt_message", sequence, "x"))
+		waitCondition(t, func() bool { return sink.count("event: event_delta\n") == int(sequence) })
+	}
+	if polls := pollCount(); polls > 2 {
+		t.Fatalf("preview wakes ran %d formal polls", polls)
+	}
+}
+
+// A continuous delta flood cannot starve formal delivery: a row committed
+// mid-flood is written within the poll interval while deltas keep arriving.
+func TestStreamLoopDeliversFormalRowDuringPreviewFlood(t *testing.T) {
+	var mu sync.Mutex
+	committed := false
+	formalRow := StreamChange{StreamPosition: 12, Event: Event{ID: "evt_formal", Type: "session.status_idle", Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}}
+	transport, sink, _ := previewLoopFixture(t, 50*time.Millisecond, func(after int64) []StreamChange {
+		mu.Lock()
+		defer mu.Unlock()
+		if committed && after < formalRow.StreamPosition {
+			return []StreamChange{formalRow}
+		}
+		return nil
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for sequence := int64(1); !strings.Contains(sink.String(), `"id":"evt_formal"`); sequence++ {
+		if time.Now().After(deadline) {
+			t.Fatal("formal row starved by the preview flood")
+		}
+		if sequence == 10 {
+			mu.Lock()
+			committed = true
+			mu.Unlock()
+		}
+		transport.publish(t, fixtureFrame("event_delta", "evt_message", sequence, "x"))
+		waitCondition(t, func() bool { return sink.count("event: event_delta\n") == int(sequence) })
+	}
+}
