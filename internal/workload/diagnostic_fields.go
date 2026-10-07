@@ -237,6 +237,8 @@ var approvedDiagnosticFields = map[string]bool{
 	"url.path":                          true,
 	"validation.member":                 true,
 	"visibility.state":                  true,
+	"warning.count":                     true,
+	"warning.features":                  true,
 	"workspace.id":                      true,
 	"writer":                            true,
 }

@@ -29,6 +29,7 @@ import {
 } from "./providers/credentials.js";
 import { createProviderTransport } from "./providers/transport.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
+import { MaxIdBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
 import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
@@ -37,6 +38,7 @@ import type { ProviderGatewayConfig } from "./config.js";
 import type { ProcessFailurePhase } from "@tetral/ts-observability";
 import type { GatewayLogRecord, GatewayLogger } from "./logger.js";
 import type { GatewayCredentialSQL } from "./providers/credentials.js";
+import type { GatewayModelWarning } from "./providers/clients.js";
 import type { SchemaSQL } from "../../schema/src/verify.js";
 
 /** Groups the process-owned application and infrastructure collaborators returned by composition. */
@@ -293,6 +295,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
   const providerTransport = createProviderTransport();
   const providerStreamer = createProviderClientRegistry({
     fetch: providerTransport.fetch,
+    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
     openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
       sql,
       masterKeyHex: input.config.vaultKeyHex,
@@ -335,6 +338,43 @@ export async function buildProviderGatewayCommandDependencies(input: {
       if (failed) throw failure;
     },
   };
+}
+
+/**
+ * Emits one content-free model-warning record for a provider request. Only the
+ * catalog provider/model identity, warning types and SDK option feature
+ * identifiers are recorded, never adapter message or details text. The shared
+ * logger rate-limits warn records by event and reason (the warning types), so a
+ * warning that repeats on every request to one model is summarized instead of
+ * written per request.
+ */
+function logProviderModelWarnings(
+  logger: GatewayLogger,
+  event: { readonly providerId: string; readonly modelId: string; readonly warnings: readonly GatewayModelWarning[] },
+): void {
+  const encoder = new TextEncoder();
+  const bounded = (value: string | undefined): value is string =>
+    value !== undefined && value.length > 0 && encoder.encode(value).byteLength <= MaxIdBytes;
+  const types = [...new Set(event.warnings.map((warning) => warning.type).filter(bounded))].sort();
+  const features = [...new Set(event.warnings.map((warning) => warning.feature).filter(bounded))].slice(0, 8);
+  const record: GatewayLogRecord = {
+    event: "provider.model_warnings",
+    "event.kind": "model_warnings",
+    component: "gateway",
+    operation: "provider.stream",
+    "provider.id": event.providerId,
+    "model.id": event.modelId,
+    reason: types.join(","),
+    "warning.count": event.warnings.length,
+    ...(features.length === 0 ? {} : { "warning.features": features.join(",") }),
+  };
+  // The process logger is a TetralDiagnosticLogger; narrower substitutes lack warn.
+  const diagnostic = logger as GatewayLogger & { readonly warn?: GatewayLogger["info"] };
+  try {
+    (diagnostic.warn ?? diagnostic.info).call(diagnostic, record);
+  } catch {
+    /* Model-warning diagnostics cannot change provider streaming. */
+  }
 }
 
 async function waitForever(): Promise<never> {

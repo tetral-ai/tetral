@@ -76,6 +76,8 @@ export interface ProviderClientRegistryOptions {
   readonly fetch: FetchFunction;
   readonly providerFetchTimeouts?: ProviderFetchTimeoutOptions | undefined;
   readonly openAIOAuthCredentialRefreshWriter?: OpenAIOAuthCredentialRefreshWriter | undefined;
+  /** Observes content-free model warnings with the request's catalog provider and model identity. */
+  readonly onModelWarnings?: ((event: { readonly providerId: string; readonly modelId: string; readonly warnings: readonly GatewayModelWarning[] }) => void) | undefined;
 }
 
 /** Anthropic SDK settings supplied by the registry's provider factory boundary. */
@@ -103,6 +105,12 @@ export type OpenAICompatibleProviderSettings = Pick<AIOpenAICompatibleProviderSe
 /** Creates an OpenAI-compatible provider whose returned selector binds a model ID. */
 export type OpenAICompatibleProviderFactory = (settings: OpenAICompatibleProviderSettings) => (modelId: string) => unknown;
 
+/** Content-free summary of one adapter stream-start warning. */
+export interface GatewayModelWarning {
+  readonly type: string;
+  readonly feature?: string | undefined;
+}
+
 /** Canonical AI SDK streaming call shape emitted after provider-specific lowering. */
 export interface GatewayModelStreamInput {
   readonly model: unknown;
@@ -118,6 +126,8 @@ export interface GatewayModelStreamInput {
   readonly abortSignal?: AbortSignal | undefined;
   readonly maxRetries: 0;
   readonly onError?: ((event: { readonly error: unknown }) => void | Promise<void>) | undefined;
+  /** Receives stream-start warnings as type and feature only, never adapter message or details text. */
+  readonly onWarnings?: ((warnings: readonly GatewayModelWarning[]) => void) | undefined;
 }
 
 /** Streaming portion of the AI SDK result consumed by the Gateway stream raiser. */
@@ -156,6 +166,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   private readonly fetch: FetchFunction;
   private readonly providerFetchTimeouts: ProviderFetchTimeoutOptions;
   private readonly openAIOAuthCredentialRefreshWriter: OpenAIOAuthCredentialRefreshWriter | undefined;
+  private readonly onModelWarnings: ProviderClientRegistryOptions["onModelWarnings"];
 
   constructor(options: ProviderClientRegistryOptions) {
     const invoke = options.streamModel ?? defaultModelStream;
@@ -188,6 +199,12 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     this.fetch = options.fetch;
     this.providerFetchTimeouts = options.providerFetchTimeouts ?? {};
     this.openAIOAuthCredentialRefreshWriter = options.openAIOAuthCredentialRefreshWriter;
+    this.onModelWarnings = options.onModelWarnings;
+  }
+
+  private modelWarnings(entry: GatewayModelCatalogEntry): Pick<GatewayModelStreamInput, "onWarnings"> {
+    const observe = this.onModelWarnings;
+    return observe === undefined ? {} : { onWarnings: (warnings) => observe({ providerId: entry.providerId, modelId: entry.modelId, warnings }) };
   }
 
   /** Streams one validated request through its catalog-selected provider client. */
@@ -302,6 +319,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       abortSignal: input.abortSignal,
       maxRetries: 0,
       onError: ignoreProviderStreamError,
+      ...this.modelWarnings(entry),
     });
     const raiser = new ProviderStreamRaiser({
       usageWireFamily: "anthropic-wire",
@@ -415,6 +433,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       abortSignal: input.abortSignal,
       maxRetries: 0,
       onError: ignoreProviderStreamError,
+      ...this.modelWarnings(entry),
     });
     const raiser = new ProviderStreamRaiser({
       usageWireFamily: "openai-wire",
@@ -494,6 +513,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
       abortSignal: input.abortSignal,
       maxRetries: 0,
       onError: ignoreProviderStreamError,
+      ...this.modelWarnings(entry),
     });
     const raiser = new ProviderStreamRaiser({
       usageWireFamily: "openai-wire",

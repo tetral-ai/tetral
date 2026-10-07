@@ -233,6 +233,8 @@
   "url.path",
   "validation.member",
   "visibility.state",
+  "warning.count",
+  "warning.features",
   "workspace.id",
   "writer"
 ]

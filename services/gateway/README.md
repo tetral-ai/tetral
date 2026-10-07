@@ -363,6 +363,13 @@ it preserves the stated invariants and passes the named suites.
   and translates usage and signed reasoning events one at a time. Unused SDK
   recorded content, step results and stream tees are absent. Completed content
   and record counts are diagnostics, not request-lifetime rejection rules.
+  Adapter stream-start warnings become one content-free `provider.model_warnings`
+  record per request at WARN: catalog `provider.id` and `model.id`, the warning
+  types as `reason`, `warning.count`, and at most eight bounded SDK option
+  identifiers in `warning.features`; adapter message and details text is never
+  recorded, and the SDK console warning printer is not used. The shared limiter
+  keys these records by event and warning types, so warnings that repeat on
+  every request to one model are summarized with suppressed counts.
   `providers/block-assembler.ts` coalesces text/reasoning segments and bounds live
   content, open blocks, identities, segments and request-wide reasoning. Live
   content includes streamed Tool arguments until their complete call arrives;

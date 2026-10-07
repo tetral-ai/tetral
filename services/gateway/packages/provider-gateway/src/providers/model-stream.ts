@@ -129,7 +129,7 @@ export function streamLanguageModel(input: GatewayModelStreamInput): GatewayMode
             reasoningTokens:finish.usage.outputTokens.reasoning,cachedInputTokens:finish.usage.inputTokens.cacheRead,
           };
           const finishReason=finish?.finishReason.unified ?? "other",rawFinishReason=finish?.finishReason.raw;
-          logModelWarnings(warnings,model.provider,model.modelId);
+          reportModelWarnings(warnings,input.onWarnings);
           yield {type:"finish-step",finishReason,rawFinishReason,usage,providerMetadata:finish?.providerMetadata,response};
           yield {type:"finish",finishReason,rawFinishReason,totalUsage:usage};
           return;
@@ -176,20 +176,14 @@ function imageMediaType(bytes: Uint8Array): string | undefined {
   return signatures.find(([,prefix]) => bytes.length >= prefix.length && prefix.every((byte,index)=>byte===null || bytes[index]===byte))?.[0];
 }
 
-let warningBannerLogged=false;
-function logModelWarnings(warnings:SharedV3Warning[],provider:string,model:string):void {
-  if (warnings.length===0 || globalThis.AI_SDK_LOG_WARNINGS===false) return;
-  if (typeof globalThis.AI_SDK_LOG_WARNINGS==="function") {
-    globalThis.AI_SDK_LOG_WARNINGS({warnings,provider,model});
-    return;
-  }
-  if (!warningBannerLogged) {
-    warningBannerLogged=true;
-    console.info("AI SDK Warning System: To turn off warning logging, set the AI_SDK_LOG_WARNINGS global to false.");
-  }
-  for (const warning of warnings) {
-    const detail=warning.type==="other" ? warning.message :
-      `The feature "${warning.feature}" is ${warning.type==="unsupported" ? "not supported" : "used in a compatibility mode"}.${warning.details ? ` ${warning.details}` : ""}`;
-    console.warn(`AI SDK Warning (${provider} / ${model}): ${detail}`);
-  }
+/**
+ * Reports adapter stream-start warnings as type and feature only. Messages and
+ * details are adapter text and never leave this boundary; an observer failure
+ * cannot change the stream.
+ */
+function reportModelWarnings(warnings: readonly SharedV3Warning[], onWarnings: GatewayModelStreamInput["onWarnings"]): void {
+  if (warnings.length === 0 || onWarnings === undefined) return;
+  try {
+    onWarnings(warnings.map(warning => warning.type === "other" ? {type:warning.type} : {type:warning.type,feature:warning.feature}));
+  } catch { /* Diagnostics fail open. */ }
 }

@@ -1,4 +1,4 @@
-import {expect,test} from "bun:test";
+import {expect,spyOn,test} from "bun:test";
 import {credentials} from "@grpc/grpc-js";
 import {jsonSchema} from "ai";
 import {ProviderGatewayServiceClient} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -83,4 +83,25 @@ test("body rejection after V3 Finish preserves failure and joins cancellation wi
  const failure=new TypeError("fixture body read rejected");source.error(failure);await Bun.sleep(0);
  expect(cancelEntered).toBe(true);expect(settled).toBe(false);expect(cancelJoined).toBe(false);
  releaseJoin();await expect(first).rejects.toBe(failure);expect(cancelJoined).toBe(true);expect(released).toBe(true);expect((await iterator.next()).done).toBe(true);
+});
+
+test("stream-start warnings reach the observer as type and feature only without console output",async()=>{
+ const sentinel="fixture-secret-sentinel";
+ const warn=spyOn(console,"warn"),info=spyOn(console,"info");
+ try {
+  const {streamLanguageModel}=await import("../../src/providers/model-stream.js");
+  for(const throwing of [false,true]){
+   const stream=new ReadableStream<import("@ai-sdk/provider").LanguageModelV3StreamPart>({start(c){
+    c.enqueue({type:"stream-start",warnings:[{type:"unsupported",feature:"topK",details:sentinel},{type:"other",message:sentinel}]});
+    c.enqueue(terminalPart);c.close();
+   }});
+   const observed:unknown[]=[],parts:unknown[]=[];
+   const input={...bridgeInput(stream),onWarnings:(warnings:readonly unknown[])=>{observed.push(warnings);if(throwing)throw new Error(sentinel);}};
+   for await(const part of streamLanguageModel(input).fullStream)parts.push(part);
+   expect(observed).toEqual([[{type:"unsupported",feature:"topK"},{type:"other"}]]);
+   expect(parts.at(-1)).toMatchObject({type:"finish"});
+   expect(JSON.stringify(parts)).not.toContain(sentinel);
+  }
+  expect(warn).not.toHaveBeenCalled();expect(info).not.toHaveBeenCalled();
+ } finally {warn.mockRestore();info.mockRestore();}
 });

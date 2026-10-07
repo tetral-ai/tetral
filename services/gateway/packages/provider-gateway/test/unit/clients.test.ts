@@ -207,6 +207,23 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(calls.every((call) => call.output === undefined)).toBe(true);
   });
 
+  test("model warnings reach the registry observer with catalog provider and model identity", async () => {
+    const observed: unknown[] = [];
+    const registry = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
+      anthropicProviderFactory: () => (modelId) => ({ provider: "anthropic", modelId }),
+      onModelWarnings: (event) => observed.push(event),
+      streamModel: (input) => {
+        input.onWarnings?.([{ type: "unsupported", feature: "topK" }, { type: "other" }]);
+        return modelStreamResult([finishPart()]);
+      },
+    });
+
+    await collectEvents(registry.stream({ request: anthropicRequest(), credential: platformAnthropicCredential() }));
+
+    expect(observed).toEqual([{ providerId: "anthropic", modelId: "claude-opus-4-8", warnings: [{ type: "unsupported", feature: "topK" }, { type: "other" }] }]);
+  });
+
   test("lowers Anthropic requests into the pinned AI SDK v6 model input shape and raises provider events", async () => {
     const calls: GatewayModelStreamInput[] = [];
     const providerSettings: AnthropicProviderSettings[] = [];

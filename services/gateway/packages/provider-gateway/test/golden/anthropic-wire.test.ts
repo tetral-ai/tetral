@@ -114,10 +114,6 @@ const ApprovalReviewerOutputSchemaUrl = new URL(
 	import.meta.url,
 );
 
-(
-	globalThis as typeof globalThis & { AI_SDK_LOG_WARNINGS?: boolean }
-).AI_SDK_LOG_WARNINGS = false;
-
 describe("provider golden fixture provenance", () => {
 	test("requires date and model provenance on every JSON golden artifact", async () => {
 		const files = await collectGoldenJsonFixturePaths(
