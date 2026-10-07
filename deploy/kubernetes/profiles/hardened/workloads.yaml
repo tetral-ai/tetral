@@ -2103,8 +2103,6 @@ spec:
                 secretKeyRef:
                   name: "api-secrets"
                   key: engine-vault-key
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -2276,8 +2274,6 @@ spec:
                 secretKeyRef:
                   name: "auth-internal-principal"
                   key: private_key_b64
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -2388,8 +2384,6 @@ spec:
               value: "local"
             - name: TETRAL_SERVICE_VERSION
               value: "dev"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -2559,8 +2553,6 @@ spec:
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
               value: ":8081"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_EVENT_STREAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -2664,8 +2656,6 @@ spec:
               value: "local"
             - name: TETRAL_SERVICE_VERSION
               value: "dev"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -2790,8 +2780,6 @@ spec:
               value: "local"
             - name: TETRAL_SERVICE_VERSION
               value: "dev"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -3002,8 +2990,6 @@ spec:
               value: bridge.tetral-system.svc.cluster.local:9090
             - name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/bridge/token
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -3153,8 +3139,6 @@ spec:
               value: "local"
             - name: TETRAL_SERVICE_VERSION
               value: "dev"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -3323,8 +3307,6 @@ spec:
                 configMapKeyRef:
                   name: queue-config
                   key: TETRAL_SERVICE_VERSION
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -3458,8 +3440,6 @@ spec:
               value: "local"
             - name: TETRAL_SERVICE_VERSION
               value: "dev"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
@@ -3944,8 +3924,6 @@ spec:
                   value: "tetral-postgres.tetral-system.svc.cluster.local"
                 - name: TETRAL_DB_MAX_OPEN_CONNS
                   value: "20"
-                - name: TETRAL_SCHEMA_MODE
-                  value: verify
                 - name: TETRAL_DATABASE_URL
                   valueFrom:
                     secretKeyRef:
