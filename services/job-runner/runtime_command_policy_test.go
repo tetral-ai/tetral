@@ -247,3 +247,35 @@ func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {
 		t.Fatal("closed client reopened a command channel")
 	}
 }
+
+// An unconfigured client still bounds Interrupt with the default 30-second method policy.
+func TestRuntimeCommandClientDefaultInterruptDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := make(chan time.Duration, 1)
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, _ any, _ *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			remaining <- 0
+		} else {
+			remaining <- time.Until(deadline)
+		}
+		return &agentruntimev1.InterruptResponse{}, nil
+	}))
+	agentruntimev1.RegisterAgentRuntimePodServiceServer(server, &policyRuntimeServer{})
+	joined := make(chan struct{})
+	go func() { defer close(joined); _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); _ = listener.Close(); <-joined })
+	_, portText, _ := net.SplitHostPort(listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	client := NewRuntimePodCommandClient(&countingRuntimeCommandTokenSource{})
+	t.Cleanup(func() { _ = client.Close() })
+	if _, err := client.Interrupt(context.Background(), RuntimePodTarget{PodIP: "127.0.0.1", Port: port}, &agentruntimev1.InterruptRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-remaining; got <= 29*time.Second || got > 30*time.Second {
+		t.Fatalf("default Interrupt attempt deadline=%s want about 30s", got)
+	}
+}

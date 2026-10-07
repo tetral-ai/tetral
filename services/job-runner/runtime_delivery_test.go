@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -270,26 +269,6 @@ func TestRuntimePodDirectDelivererDoesNotSettleInterruptOnRuntimeAcceptanceAlone
 	}
 	if len(sender.requests) != 1 || len(store.acceptedJobs) != 0 || len(store.replayJobs) != 1 {
 		t.Fatalf("Runtime sends/accepted writes/receipt reads = %d/%d/%d; want 1/0/1", len(sender.requests), len(store.acceptedJobs), len(store.replayJobs))
-	}
-}
-
-func TestRuntimeCommandPlanBoundsOnlyInterruptDeliveryWait(t *testing.T) {
-	request := &agentruntimev1.InterruptRequest{
-		WorkspaceId: "ws_bridge", SessionId: "sesn_timeout", SessionThreadId: "thr_timeout",
-		RuntimeInputId: "rin_timeout", InterruptLeaseRef: testRuntimeInterruptLeaseRef("rin_timeout"),
-	}
-	sender := &recordingRuntimeCommandSender{observeInterruptDeadline: true}
-	started := time.Now()
-	_, err := (RuntimeCommandPlan{Target: RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090}, Interrupt: request}).send(context.Background(), sender)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("interrupt send error = %v; want deadline exceeded", err)
-	}
-	remaining := sender.interruptDeadline.Sub(started)
-	if remaining < DefaultRuntimeCommandPolicy().Interrupt-time.Second || remaining > DefaultRuntimeCommandPolicy().Interrupt+time.Second {
-		t.Fatalf("interrupt deadline = %s; want %s bound", remaining, DefaultRuntimeCommandPolicy().Interrupt)
-	}
-	if len(sender.requests) != 1 || sender.requests[0] != request {
-		t.Fatalf("bounded interrupt requests = %#v; want one exact command", sender.requests)
 	}
 }
 
@@ -690,13 +669,11 @@ func (s *recordingRuntimeDeliveryStore) FinalizeRuntimeCleanup(_ context.Context
 }
 
 type recordingRuntimeCommandSender struct {
-	result                   RuntimeDeliveryResult
-	results                  []RuntimeDeliveryResult
-	err                      error
-	targets                  []RuntimePodTarget
-	requests                 []proto.Message
-	observeInterruptDeadline bool
-	interruptDeadline        time.Time
+	result   RuntimeDeliveryResult
+	results  []RuntimeDeliveryResult
+	err      error
+	targets  []RuntimePodTarget
+	requests []proto.Message
 }
 
 type countingRuntimeCommandTokenSource struct {
@@ -778,17 +755,7 @@ func (s *recordingRuntimeCommandSender) AcceptTaskNotification(_ context.Context
 	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
 
-func (s *recordingRuntimeCommandSender) Interrupt(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
-	if s.observeInterruptDeadline {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			return nil, errors.New("interrupt context has no deadline")
-		}
-		s.interruptDeadline = deadline
-		s.targets = append(s.targets, target)
-		s.requests = append(s.requests, request)
-		return nil, context.DeadlineExceeded
-	}
+func (s *recordingRuntimeCommandSender) Interrupt(_ context.Context, target RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {
 		return nil, err

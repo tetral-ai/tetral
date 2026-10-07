@@ -201,17 +201,8 @@ func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSende
 		response, err := sender.AcceptTaskNotification(ctx, p.Target, p.AcceptTask)
 		return runtimeResultFromAcceptTask(response), err
 	case p.Interrupt != nil:
-		policy := DefaultRuntimeCommandPolicy()
-		if client, ok := sender.(*RuntimePodCommandClient); ok && client.Policy != (RuntimeCommandPolicy{}) {
-			policy = client.Policy
-		}
-		timeout, policyErr := policy.timeout("Interrupt")
-		if policyErr != nil {
-			return RuntimeDeliveryResult{}, policyErr
-		}
-		interruptCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		response, err := sender.Interrupt(interruptCtx, p.Target, p.Interrupt)
+		// The command client applies the Interrupt attempt deadline from its method policy.
+		response, err := sender.Interrupt(ctx, p.Target, p.Interrupt)
 		return runtimeResultFromInterrupt(response), err
 	case p.ToolConfirmation != nil:
 		response, err := sender.ResolveToolConfirmation(ctx, p.Target, p.ToolConfirmation)
@@ -762,8 +753,6 @@ func runtimeDeliveryResultFromSendError(err error) (RuntimeDeliveryResult, error
 			ErrorKind:    "runtime_command_internal_invariant",
 			ErrorMessage: "runtime pod reported a terminal command invariant failure",
 		}, nil
-	case codes.DeadlineExceeded, codes.Unavailable, codes.ResourceExhausted:
-		return RuntimeDeliveryResult{}, err
 	default:
 		return RuntimeDeliveryResult{}, err
 	}
