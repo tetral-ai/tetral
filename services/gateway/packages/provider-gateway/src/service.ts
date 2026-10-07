@@ -31,7 +31,7 @@ import { NormalizedProviderEventType, validateNormalizedProviderEvent } from "@t
 import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { ProviderBlockAssembler, ProviderIncompleteStreamError, ProviderAssemblyLimitError } from "./providers/block-assembler.js";
 import type { ProviderAssemblyBounds, ProviderAssemblyResources } from "./providers/block-assembler.js";
-import { ProviderAssemblyCalibrationCandidate } from "./providers/resource-policy.js";
+import { DefaultProviderAssemblyBounds } from "./providers/resource-policy.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, validateProviderRequest } from "@tetral/gateway-protocol/src/bounds.js";
 import { classifyProviderStreamError, ProviderRequestLoweringError, ProviderStreamTimeoutError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
@@ -159,7 +159,7 @@ export class ProviderGatewayServiceShell {
     let assemblyMetrics:ReturnType<ProviderGatewayMetricsRegistry["startContentAssembly"]> | undefined;
     try { assemblyMetrics=this.metrics.startContentAssembly(); } catch { /* Fail-open metrics. */ }
     const assembler = new ProviderBlockAssembler({
-      bounds: this.options.assemblyBounds ?? ProviderAssemblyCalibrationCandidate,
+      bounds: this.options.assemblyBounds ?? DefaultProviderAssemblyBounds,
       request,
       observeResources: resources=>{
         try { assemblyMetrics?.observe(resources); } catch { /* Fail-open metrics. */ }

@@ -10,7 +10,7 @@ import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-proto
 import { NormalizedProviderEventType as Kind, validateNormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 
-/** Operating resource caps are injectable and calibrated separately from legal content limits. */
+/** Operating resource caps are injectable and separate from legal content limits; production uses DefaultProviderAssemblyBounds. */
 export interface ProviderAssemblyBounds {
   readonly maxRetainedBytes: number;
   readonly maxOpenBlocks: number;

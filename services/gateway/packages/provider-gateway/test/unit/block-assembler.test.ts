@@ -3,7 +3,7 @@ import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/norma
 import { describe, expect, test } from "bun:test";
 import { ProviderBlockAssembler, ProviderAssemblyLimitError, ProviderIncompleteStreamError } from "../../src/providers/block-assembler.js";
 import type { ProviderAssemblyBounds, ProviderPreviewOffer } from "../../src/providers/block-assembler.js";
-import { ProviderAssemblyCalibrationCandidate } from "../../src/providers/resource-policy.js";
+import { DefaultProviderAssemblyBounds } from "../../src/providers/resource-policy.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
 import type { GatewayStreamPart } from "@tetral/gateway-lowering/src/stream.js";
 import { ProviderRequestKind, ProviderThreadRole, ProviderThreadVisibility, ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -16,9 +16,12 @@ function setup(options: { bounds?:Partial<ProviderAssemblyBounds>; previews?: Pa
  return {assembler,send,ids:()=>ids};
 }
 describe("Gateway complete block ownership",()=>{
+ test("production assembly defaults keep their documented values",()=>{
+  expect(DefaultProviderAssemblyBounds).toEqual({maxRetainedBytes:33554432,maxOpenBlocks:64,maxIdentities:4096,maxSegments:8192,coalesceCodeUnits:8192});
+ });
  test("completed blocks do not consume the next block's live-content budget",()=>{
   // This byte-boundary fixture checks the assembly contract, not model capacity.
-  const {assembler,send}=setup({bounds:ProviderAssemblyCalibrationCandidate});
+  const {assembler,send}=setup({bounds:DefaultProviderAssemblyBounds});
   const textBytes=16*1024*1024-2;
   for(let index=0;index<3;index++) {
    const id=`part-${index}`,text=String.fromCharCode(65+index).repeat(textBytes);

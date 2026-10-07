@@ -5,7 +5,7 @@ import type {FetchFunction} from "@ai-sdk/provider-utils";
 import {ProviderClientRegistry} from "../../src/providers/clients.js";
 import type {GatewayModelStreamResult} from "../../src/providers/clients.js";
 import {ProviderBlockAssembler} from "../../src/providers/block-assembler.js";
-import {ProviderAssemblyCalibrationCandidate} from "../../src/providers/resource-policy.js";
+import {DefaultProviderAssemblyBounds} from "../../src/providers/resource-policy.js";
 import {validProviderRequest} from "./fixtures.js";
 import type {ResolvedProviderCredential} from "../../src/providers/credentials.js";
 import type {ProviderStreamEvent} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -55,7 +55,7 @@ for(const family of ["anthropic","openai","deepseek"] as const)test(`official ${
  const outputs:ProviderStreamEvent[][]=[];
  for(const baseline of [true,false]){
   const registry=new ProviderClientRegistry({fetch:fetchImpl,...(baseline?{streamModel:input=>streamText(input as unknown as Parameters<typeof streamText>[0]) as GatewayModelStreamResult}:{})});
-  let id=0;const assembler=new ProviderBlockAssembler({bounds:ProviderAssemblyCalibrationCandidate,request,allocateEventId:()=>`evt_${String(++id).padStart(32,"0")}`});
+  let id=0;const assembler=new ProviderBlockAssembler({bounds:DefaultProviderAssemblyBounds,request,allocateEventId:()=>`evt_${String(++id).padStart(32,"0")}`});
   const complete:ProviderStreamEvent[]=[];
   try {for await(const part of registry.stream({request,credential}))complete.push(...assembler.accept(part));assembler.assertComplete();outputs.push(complete);}
   finally {assembler.release();}

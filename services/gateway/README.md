@@ -376,10 +376,15 @@ it preserves the stated invariants and passes the named suites.
   closes a transport of its own. Shutdown closes the process-owned dispatcher
   after request operations join, before SQL closes. This changes neither
   deployment settings nor admission.
-- **Operating policy.** Constructor-injected active assembly bounds are owned by
-  `providers/resource-policy.ts`. Resource exhaustion produces a fatal,
-  nonretryable request error, never a truncated successful block. No raw-record,
-  completed-content history or attachment-envelope limit is introduced here.
+- **Operating policy.** `DefaultProviderAssemblyBounds` in
+  `providers/resource-policy.ts` holds the production active assembly bounds:
+  32 MiB logical retained content, 64 open blocks, 4096 block/call identities,
+  and 8192 retained segments coalesced at 8192 UTF-16 code units. They are
+  operating bounds, separate from the legal content limits and not capacity
+  measurements; tests may inject smaller bounds through the constructor. Resource
+  exhaustion produces a fatal, nonretryable request error, never a truncated
+  successful block. No raw-record, completed-content history or
+  attachment-envelope limit is introduced here.
 - **Observations.** The service emits content-free `provider.stage_completed`
   samples for dispatch → first private content fragment, first fragment → first
   complete semantic frame, and complete frame → local write callback. Each sample
