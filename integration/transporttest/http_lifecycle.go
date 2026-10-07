@@ -184,17 +184,18 @@ func HTTPServiceLifecycle(t *testing.T, run HTTPServiceRun) {
 		wrongRole := Must(ca.ValidLeaf("wrong.edge.test", "spiffe://edge.test/ns/edge/sa/controller"))
 		wrongPeer := Must(wrongCA.ValidLeaf("edge.test", edgeURI))
 		expired := Must(ca.Issue("edge.test", edgeURI, time.Now().Add(-time.Hour), time.Now().Add(-time.Minute)))
+		// These rows are receiver enforcement: the service rejects the caller's
+		// certificate. Server identity (unknown CA, wrong DNS name) is enforced by
+		// the real caller, the edge Envoy, and is exercised by the Envoy Gateway
+		// TLS lifecycle root rather than by this Go test client.
 		for _, bad := range []struct {
-			name  string
-			trust []byte
-			peer  *Leaf
-			dns   string
+			name string
+			peer *Leaf
 		}{
-			{"role", ca.PEM, &wrongRole, serverDNS}, {"peer-ca", ca.PEM, &wrongPeer, serverDNS}, {"server-ca", wrongCA.PEM, &caller, serverDNS},
-			{"name", ca.PEM, &caller, "wrong.edge.test"}, {"missing-peer", ca.PEM, nil, serverDNS}, {"expired-peer", ca.PEM, &expired, serverDNS},
+			{"role", &wrongRole}, {"peer-ca", &wrongPeer}, {"missing-peer", nil}, {"expired-peer", &expired},
 		} {
 			before := admitted.Load()
-			response, err := request(makeClient(bad.trust, bad.peer, bad.dns), "/protected")
+			response, err := request(makeClient(ca.PEM, bad.peer, serverDNS), "/protected")
 			if response != nil {
 				_ = response.Body.Close()
 			}

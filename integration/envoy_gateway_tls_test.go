@@ -383,6 +383,7 @@ func (edge *translatedPublicEdge) assertPublicTLSLeaf(t *testing.T, leaf transpo
 func (edge *translatedPublicEdge) assertTLSNegatives(t *testing.T, f *publicProjectionFixture) {
 	t.Helper()
 	fixture, lifecycle := edge.fixture, edge.lifecycle
+	unknown := transporttest.Must(transporttest.NewAuthority("untrusted-edge-negative"))
 	for _, role := range []string{"auth", "api", "event-stream", "git-proxy"} {
 		edge.assertTLSRole(t, f, role, edgeTLSRoleStatus(role), 1, fixture.Leaves["edge"].Parsed.SerialNumber.String())
 		wrong := transporttest.Must(fixture.Authority.ValidLeaf("wrong-backend.edge.test", fixture.Leaves[role].Parsed.URIs[0].String()))
@@ -392,6 +393,16 @@ func (edge *translatedPublicEdge) assertTLSNegatives(t *testing.T, f *publicProj
 		lifecycle.projectHTTP(t, role, "restored-san", fixture.Authority.PEM, fixture.Leaves[role])
 		lifecycle.restartHTTP(t, role)
 		edge.assertTLSRole(t, f, role, edgeTLSRoleStatus(role), 1, fixture.Leaves["edge"].Parsed.SerialNumber.String())
+		// The backend presents its correct DNS name and role from a root the edge
+		// does not trust. The backend's own bundle includes that root only so its
+		// loader activates the leaf; the edge client must reject the server.
+		unknownServer := transporttest.Must(unknown.ValidLeaf(fixture.Leaves[role].Parsed.DNSNames[0], fixture.Leaves[role].Parsed.URIs[0].String()))
+		lifecycle.projectHTTP(t, role, "unknown-ca", append(append([]byte(nil), fixture.Authority.PEM...), unknown.PEM...), unknownServer)
+		lifecycle.restartHTTP(t, role)
+		edge.assertTLSRole(t, f, role, 503, 0, "")
+		lifecycle.projectHTTP(t, role, "restored-ca", fixture.Authority.PEM, fixture.Leaves[role])
+		lifecycle.restartHTTP(t, role)
+		edge.assertTLSRole(t, f, role, edgeTLSRoleStatus(role), 1, fixture.Leaves["edge"].Parsed.SerialNumber.String())
 	}
 	wrongCheck := transporttest.Must(fixture.Authority.ValidLeaf("wrong-check.edge.test", fixture.Leaves["auth"].Parsed.URIs[0].String()))
 	lifecycle.projectCheck(t, "wrong-san", fixture.Authority.PEM, wrongCheck)
@@ -399,7 +410,6 @@ func (edge *translatedPublicEdge) assertTLSNegatives(t *testing.T, f *publicProj
 	edge.assertTLSRole(t, f, "api", 503, 0, "")
 	lifecycle.projectCheck(t, "restored-san", fixture.Authority.PEM, fixture.Leaves["auth"])
 	lifecycle.restartCheck(t)
-	unknown := transporttest.Must(transporttest.NewAuthority("untrusted-edge-negative"))
 	for _, negative := range []struct {
 		name string
 		leaf transporttest.Leaf
