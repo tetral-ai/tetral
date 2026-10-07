@@ -183,8 +183,11 @@ flush gets a ten-second deadline; request cancellation retires an active blocked
 write and joins that cancellation watcher. Formal polling and lifecycle closure
 run between bounded preview slices, so a preview flood cannot monopolize the
 writer. Session deletion remains observable on an existing Session feed;
-deleted sessions cannot open new feeds. Thread loss of readability closes its
-feed and all departing viewers release their references.
+deleted sessions cannot open new feeds. An End group whose End precedes
+`session.deleted` is still published on that existing Session feed. Preview
+loss detected after deletion stops previews and releases the subscription,
+while formal delivery continues until `session.deleted`. Thread loss of
+readability closes its feed and all departing viewers release their references.
 
 ### Read scope by endpoint
 
@@ -201,9 +204,13 @@ The session-visible cross-post set is closed: `agent.thread_message_sent`,
 `session.thread_status_running`, `session.thread_status_idle`,
 `session.thread_status_rescheduled`, `session.thread_status_terminated`. All
 other child-thread events are written `session_visible = false`. A deleted
-session or thread reads as `404` and never confirms a foreign one
-(`ensureReadableSessionTx` / `ensureReadableThreadTx` gate every read on
-`sessions.lifecycle_state`).
+session reads as `404` when a stream opens, on lists and on every Thread read,
+and never confirms a foreign one (`ensureReadableSessionTx` /
+`ensureReadableThreadTx` gate those reads on `sessions.lifecycle_state`). An
+already-open Session feed is the exception: `ensureReadableSessionFeedTx` keeps
+it readable until its `session.deleted` change is behind the cursor, and its
+End-group expansion applies the same gate at the End's own position, so an End
+committed before the deletion change is still published.
 
 ### Startup and process lifecycle
 
@@ -250,7 +257,12 @@ ListRequestFinalMessages(ctx, scope, endEventID, afterSequence, 1) ([]RequestFin
 - **Conformance**: `TestPostgreSQLReaderListsAndStreamsPublicSessionVisibleEvents`,
   `TestEventStreamSessionSSEProjectsAllPublicChildEventVariants`,
   `TestEventStreamThreadSSEProjectsAllPublicChildEventVariants`,
-  `TestPostgreSQLReaderRedactsStableReasoningLedgerFromListAndStream`.
+  `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission`,
+  `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` (including an End
+  committed before the deletion change on an open Session feed). The
+  `TestPostgreSQLPublicStreamingIdentity` and
+  `TestPostgreSQLPublicStreamingVisibility` integration cases keep private
+  reasoning and tool-input markers out of preview frames and thinking events.
 
 ### List reader (`ListReader`, `list.go`, hosted by `api`)
 
@@ -321,13 +333,14 @@ request bodies and path parameters never supply identity.
 
 | Suite | Location | Proves |
 | --- | --- | --- |
-| `TestPostgreSQLReader*` | `internal/eventstream/eventstream_test.go` | read-only PostgreSQL behavior: public/session-visible filtering, cross-thread ordering by `insert_stream_position`, thread ordering by `sequence`, pagination stable across a revision bump, page-token scope/version rejection, type and `created_at` filters, stable-reasoning redaction |
+| `TestPostgreSQLReader*` | `internal/eventstream/eventstream_test.go` | read-only PostgreSQL behavior: public/session-visible filtering, cross-thread ordering by `insert_stream_position`, thread ordering by `sequence`, pagination stable across a revision bump, page-token scope/version rejection, type and `created_at` filters |
 | `TestEventStream*SSE*` / `TestIdleEventStreamEmitsHeartbeat*` / `TestEventStream*StartsAt*HighWater*` | `internal/eventstream/eventstream_test.go` | stream loop: start at current high-water, close on `session.deleted`, heartbeat before the next idle poll, thread-scoped high-water |
 | `TestEventStreamList*` / `TestEventStreamServiceRouterDoesNotServeListRoutes` | `internal/eventstream/eventstream_test.go` | list envelope, SDK filter decoding, unknown-parameter rejection, and that this binary serves streams only |
 | `TestEventStreamRoutesRequire*` | `internal/eventstream/eventstream_test.go` | signed-principal enforcement and the exact-`beta=true` gate |
 | `TestEventStreamBoundaryLogsServerErrorsOnly` | `internal/eventstream/eventstream_test.go` | logging redaction: client errors are not logged as server errors |
-| `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission` / `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` | `internal/eventstream/request_final_messages_test.go` | actual read-only serving role: exact scope/Start/End, metadata-only changes, one-message pages, committed list bodies, cancellation and deletion visibility |
-| `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer for Session and Thread: three large complete messages whose change descriptors carry no body; the first End-group body write held at the response sink, where the reader-returned change arrays (including the unconsumed suffix) no longer reference payloads, exactly one End page has been requested and the current encoding is in flight; then exact End/suffix order, or cancellation at the held write without a later page |
+| `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission` / `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` | `internal/eventstream/request_final_messages_test.go` | actual read-only serving role: exact scope/Start/End, metadata-only changes, one-message pages, committed list bodies, cancellation and deletion visibility, and an End group committed before deletion staying expandable only on the open Session feed |
+| `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer for Session and Thread: three large complete messages whose change descriptors carry no body; the first End-group body write held at the response sink, where the reader-returned change arrays (including the unconsumed suffix) no longer reference payloads, exactly one End page has been requested and the current encoding is in flight; then exact End/suffix order (with the Session marked deleted at the held write on Session feeds), or cancellation at the held write without a later page |
+| `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
 | `TestNATSNative*` / `TestNATSSubscriber*` | `services/event-stream/preview_native_queue_test.go` / `preview_nats_test.go` | pinned official client over controlled TCP: shared process queue/reservations, at/over byte and count bounds, unaffected/future healthy controls, oversized frame/broker ceiling rejection, current callback and connection-attempt joins; real broker/TLS/SDK coverage is separate integration evidence |
 | `TestPreviewHubExact*` / `TestPreviewViewerExact*` / `TestPreviewHubIngressCount*` / `TestPreviewViewerCount*` | `services/event-stream/preview_bounds_test.go` | independently padded limit−1/exact/+1 encoded byte boundaries for ingress, fanout, viewer queue/current write/encoding and aggregate encoding; independent current-ingress/current-write count limits, unaffected viewers and joined cleanup |
 | `TestNATSNativeExactProcessByteReservationBoundary` / `TestNATSNativeHeartbeatOptionsConsumeTypedEnvironment` / `TestNATSHeartbeatConfigRangesAndFailFast` | `services/event-stream/preview_native_queue_test.go` / `config_test.go` | native byte reservation threshold−1/exact/+1 with frame counts nonbinding; environment defaults/overrides reach real pinned-client ping options; invalid local settings fail before startup |

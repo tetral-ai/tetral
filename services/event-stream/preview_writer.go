@@ -165,6 +165,19 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 				// Capture durable loss high-water once per subscription/viewer loss. New
 				// requests after it can preview; already-started requests cannot replay.
 				position, err := currentPosition(r.Context())
+				var unreadable *httpapi.NotFoundError
+				if errors.As(err, &unreadable) {
+					// The session became unreadable after this feed opened. Stop
+					// previews and release the subscription; formal delivery continues
+					// until session.deleted is emitted or the feed's deletion gate
+					// closes the stream.
+					h.releasePreviewRequests(&state)
+					viewer.Close()
+					viewer = nil
+					h.options.previewMetrics.stoppedRequests.Add(1)
+					h.logPreviewStop(scope, "", "session_unreadable")
+					continue
+				}
 				if err != nil {
 					return
 				}

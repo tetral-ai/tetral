@@ -163,4 +163,41 @@ func TestPostgreSQLSessionChangeLifecyclePreservesDeletion(t *testing.T) {
 	if _, err := reader.ListThreadEventChanges(t.Context(), workspace.DefaultID, "sesn_delete_feed", "thr_delete_feed", 0, 100); err == nil {
 		t.Fatal("deleted thread read continues")
 	}
+
+	// A separate session holds a request End committed before the deletion
+	// change and a control End committed after it. An already-open Session feed
+	// can still expand the earlier group; the later one and the Thread feed cannot.
+	for _, statement := range []string{
+		`INSERT INTO sessions(workspace_id,id,main_thread_id,type,status,lifecycle_state,agent_id,agent_version,environment_id,created_at,updated_at)
+		 SELECT workspace_id,'sesn_delete_group','thr_delete_group',type,status,'active',agent_id,agent_version,environment_id,created_at,updated_at FROM sessions WHERE id='sesn_delete_feed'`,
+		`INSERT INTO session_threads(workspace_id,id,session_id,role,visibility,status,created_at,last_active_at,updated_at)
+		 VALUES('default','thr_delete_group','sesn_delete_group','main','public','idle',now(),now(),now())`,
+	} {
+		if _, err := admin.ExecContext(t.Context(), statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_group_start", 1, "span.model_request_start", "mreq_group", `{}`, "agent_provider_request", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_group_message", 2, "agent.message", "mreq_group", `{"content":[{"type":"text","text":"before deletion"}]}`, "", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_group_end", 3, "span.model_request_end", "mreq_group", `{"model_request_start_id":"evt_group_start","is_error":false}`, "", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "", "evt_group_deleted", 1, "session.deleted", "", `{}`, "", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_late_start", 4, "span.model_request_start", "mreq_late", `{}`, "agent_provider_request", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_late_message", 5, "agent.message", "mreq_late", `{"content":[{"type":"text","text":"after deletion"}]}`, "", true)
+	seedRequestEvent(t, admin, "sesn_delete_group", "thr_delete_group", "evt_late_end", 6, "span.model_request_end", "mreq_late", `{"model_request_start_id":"evt_late_start","is_error":false}`, "", true)
+	if _, err := admin.ExecContext(t.Context(), `UPDATE sessions SET lifecycle_state='deleted' WHERE id='sesn_delete_group'`); err != nil {
+		t.Fatal(err)
+	}
+	groupScope := eventstream.ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_delete_group"}
+	group, err := reader.ListRequestFinalMessages(t.Context(), groupScope, "evt_group_end", 0, 1)
+	if err != nil || len(group) != 1 || group[0].Event.ID != "evt_group_message" {
+		t.Fatalf("End before deletion not expandable on the open Session feed: %+v %v", group, err)
+	}
+	threadScope := groupScope
+	threadScope.ThreadID = "thr_delete_group"
+	if _, err := reader.ListRequestFinalMessages(t.Context(), threadScope, "evt_group_end", 0, 1); err == nil {
+		t.Fatal("deleted Thread feed expanded an End group")
+	}
+	if _, err := reader.ListRequestFinalMessages(t.Context(), groupScope, "evt_late_end", 0, 1); err == nil {
+		t.Fatal("End after the deletion change expanded")
+	}
 }

@@ -8,14 +8,17 @@
 //	  ListSessionEvents / ListThreadEvents                 paged list APIs over session_events
 //	  ListSessionEventChanges / ListThreadEventChanges     SSE change feed
 //	  CurrentStreamPosition / CurrentThreadStreamPosition  SSE cursor head
+//	  ReadPreviewRequest                                   exact scoped Start/thread admission descriptor for a private preview frame
+//	  ListRequestFinalMessages                             database-proven End expansion, one complete agent.message per page
 //	Bounds: MaxStreamBatchSize (100) caps rows per change-feed fetch;
-//	  defaultListLimit (20) and maxListLimit (100) bound the list page size.
+//	  defaultListLimit (20) and maxListLimit (100) bound the list page size;
+//	  a request-final page holds exactly one message (limit 1).
 //	Signed session_events page token (resource "session_events", version 3), in pagination.go.
 //	Reads, never writes, four tables:
 //	  session_event_stream_changes  SSE cursor movement (stream_position)
 //	  session_events                event body (type, payload_json, processed_at) and list paging keys
 //	  session_threads               thread visibility/role gate joined into every public read
-//	  sessions                      lifecycle_state readability guard (a deleted session reads as not-found)
+//	  sessions                      lifecycle_state readability guard (deletion rules under INVARIANTS)
 //
 // STATE MACHINE (durable ledger keys this reader pages on; every writer named
 // here lives OUTSIDE this package — the event append path in internal/sessionevent,
@@ -50,10 +53,23 @@
 //     reads drop such events per row through the session_threads join, while the
 //     thread reads gate the whole read once — a missing, non-public, or
 //     approval_reviewer thread reads as not-found (ensureReadableThreadTx).
+//   - A deleted session reads as not-found for opening reads (Current*StreamPosition),
+//     lists, preview admission and every thread-scoped read. An already-open
+//     Session feed is the exception: ensureReadableSessionFeedTx keeps it
+//     readable until its session.deleted change is behind the cursor, and the
+//     Session End-group expansion uses the same gate keyed by the End's own
+//     position, so an End ordered before the deletion change still publishes.
+//   - Change-feed agent.message rows linked to a model request select no payload
+//     (NULL payload_json, DeferredMessage). Their bodies are read only through
+//     ListRequestFinalMessages after the exact scoped End/Start lookup.
 //
 // UPDATE-WITH:
 //
 //   - internal/eventstream/postgresql_reader.go — the read queries themselves.
+//   - internal/eventstream/request_final_messages.go — preview admission and
+//     End-group reads.
+//   - services/event-stream/preview_writer.go — the SSE writer that consumes the
+//     deferred-message and End-group contract.
 //   - internal/eventstream/pagination.go — page-token position/sequence keys.
 //   - internal/eventstream/list.go — list limit bounds and query options.
 //   - internal/storage/postgresql_schema.go — stream_position IDENTITY,

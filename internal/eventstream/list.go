@@ -55,16 +55,27 @@ type ListResult struct {
 	NextPage *string `json:"next_page"`
 }
 
+// StreamChange is one change-feed row. The model-request fields are internal
+// correlation for End-group publication and preview closure; they never reach
+// the public event projection.
 type StreamChange struct {
-	StreamPosition             int64
-	Event                      Event
-	Sequence                   int64
-	ModelRequestID             string
+	StreamPosition int64
+	Event          Event
+	// Sequence is the event's thread-local sequence.
+	Sequence int64
+	// ModelRequestID is the producing model request, empty for other events.
+	ModelRequestID string
+	// RequestStartStreamPosition and RequestStartEventID identify that
+	// request's span.model_request_start by insert position and event ID.
 	RequestStartStreamPosition int64
 	RequestStartEventID        string
-	RequestKind                string
-	ThreadRole                 string
-	DeferredMessage            bool
+	// RequestKind is the request kind recorded on that Start.
+	RequestKind string
+	// ThreadRole is the event thread's role, empty for session-level events.
+	ThreadRole string
+	// DeferredMessage marks a generated agent.message selected without its
+	// payload; its body is published only within its request's End group.
+	DeferredMessage bool
 }
 
 // ReadScope selects either the session-visible feed or one public thread.
@@ -74,16 +85,28 @@ type ReadScope struct {
 	ThreadID    string
 }
 
+// PreviewRequest is the database admission descriptor for a private
+// request_open frame, read from the exact scoped Start and its thread row.
 type PreviewRequest struct {
+	// StartStreamPosition is the Start's insert position, compared with a
+	// connection's opening mark.
 	StartStreamPosition int64
-	RequestKind         string
-	ThreadRole          string
-	ThreadVisibility    string
-	IsPrimaryThread     bool
-	Ended               bool
+	// RequestKind is the request kind recorded on the Start.
+	RequestKind string
+	// ThreadRole and ThreadVisibility come from the Start's thread row.
+	// ThreadVisibility is always public here because the thread readability
+	// gate admits only public threads, and IsPrimaryThread restates
+	// ThreadRole == "main"; both remain explicit admission facts.
+	ThreadRole       string
+	ThreadVisibility string
+	IsPrimaryThread  bool
+	// Ended reports whether the request's durable End exists.
+	Ended bool
 }
 
+// RequestFinalMessage is one complete committed agent.message of an End group.
 type RequestFinalMessage struct {
+	// Sequence is the message's thread-local sequence, used as the page cursor.
 	Sequence int64
 	Event    Event
 }

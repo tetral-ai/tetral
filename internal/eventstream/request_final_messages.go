@@ -49,6 +49,12 @@ func (r *PostgreSQLReader) ReadPreviewRequest(ctx context.Context, ws workspace.
 // ListRequestFinalMessages expands only a database-proven End, paging the
 // existing request/thread sequence index. It never materializes deferred bodies
 // from the ordinary change feed or changes history-list ordering keys.
+//
+// Session scope is valid only for an already-open Session feed that has just
+// read the End. Its deletion gate is keyed by the End's own stream position,
+// as the change feed keys it by the cursor, so an End ordered before the
+// session's deletion change stays expandable until that deletion is delivered.
+// Thread scope uses the thread readability gate and closes on deletion.
 func (r *PostgreSQLReader) ListRequestFinalMessages(ctx context.Context, scope ReadScope, endEventID string, afterSequence int64, limit int) ([]RequestFinalMessage, error) {
 	if err := validateReaderScope(scope.WorkspaceID, scope.SessionID); err != nil {
 		return nil, err
@@ -66,7 +72,16 @@ func (r *PostgreSQLReader) ListRequestFinalMessages(ctx context.Context, scope R
 	result := []RequestFinalMessage{}
 	err := r.client.WithWorkspaceReadOnlyTx(ctx, string(scope.WorkspaceID), "eventstream.list_request_final_messages", func(tx *dbconnect.Tx) error {
 		if scope.ThreadID == "" {
-			if err := ensureReadableSessionTx(ctx, tx, scope.WorkspaceID, scope.SessionID); err != nil {
+			var endPosition int64
+			err := tx.QueryRow(ctx, `SELECT insert_stream_position FROM session_events
+   WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3 AND type='span.model_request_end'`, string(scope.WorkspaceID), scope.SessionID, endEventID).Scan(&endPosition)
+			if dbconnect.IsNoRows(err) {
+				return &httpapi.NotFoundError{Message: "model request end not found"}
+			}
+			if err != nil {
+				return err
+			}
+			if err := ensureReadableSessionFeedTx(ctx, tx, scope.WorkspaceID, scope.SessionID, endPosition); err != nil {
 				return err
 			}
 		} else {

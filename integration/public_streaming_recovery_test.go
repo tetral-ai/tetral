@@ -138,9 +138,12 @@ func runPublicSecondPageCancellation(t *testing.T, scope string) {
 		t.Fatal(err)
 	}
 	release()
+	// A Session-scope page first reads its End's stream position, so that
+	// statement is the one the lock holds; a Thread-scope page blocks on its
+	// final-message query.
 	blocked := func() bool {
 		var count int
-		if err := f.db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT ended.session_thread_id,%'`).Scan(&count); err != nil {
+		if err := f.db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'SELECT ended.session_thread_id,%' OR query LIKE 'SELECT insert_stream_position FROM session_events%')`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		return count > 0

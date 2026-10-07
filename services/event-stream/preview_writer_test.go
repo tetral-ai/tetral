@@ -17,6 +17,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	readerpkg "github.com/tetral-ai/tetral/internal/eventstream"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -240,6 +241,15 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 						t.Fatalf("history body changed for %s", event.ID)
 					}
 				}
+				if scope.ThreadID == "" {
+					// Mark the lifecycle deleted, as DeleteSession does alongside its
+					// session.deleted change, while the group is mid-publication. The
+					// open Session feed still publishes the remaining End pages, End,
+					// suffix and deletion.
+					if _, err := admin.ExecContext(t.Context(), `UPDATE sessions SET lifecycle_state='deleted' WHERE workspace_id='default' AND id='sesn_preview'`); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if cancelAtWrite {
 					cancel()
 				} else {
@@ -297,5 +307,79 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Preview loss observed after the session became unreadable stops previews and
+// releases the subscription; formal delivery continues to session.deleted.
+func TestStreamLoopPreviewLossAfterSessionDeletionContinuesFormalDelivery(t *testing.T) {
+	config := DefaultStreamConfig()
+	config.PollInterval = time.Millisecond
+	metrics := NewPreviewMetrics()
+	transport := &fixtureTransport{}
+	hub, err := NewPreviewHub(transport, config, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	h := &handler{options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics))}
+	scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
+	var mu sync.Mutex
+	deleted, unreadableServed := false, false
+	viewersAtDeletion, subscriptionsAtDeletion := int64(-1), int64(-1)
+	currentPosition := func(context.Context) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if deleted {
+			unreadableServed = true
+			return 0, &httpapi.NotFoundError{Message: "session not found"}
+		}
+		return 10, nil
+	}
+	// The deletion change becomes visible only after the loss re-read found the
+	// session unreadable, so the stream must survive that re-read to emit it.
+	listChanges := func(_ context.Context, after int64) ([]StreamChange, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !unreadableServed || after >= 11 {
+			return nil, nil
+		}
+		viewersAtDeletion, subscriptionsAtDeletion = metrics.viewers.Load(), metrics.subscriptions.Load()
+		return []StreamChange{{StreamPosition: 11, Event: Event{ID: "evt_deleted", Type: "session.deleted", SessionID: scope.SessionID, Payload: json.RawMessage(`{}`)}}}, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	response := &fixtureResponse{ResponseRecorder: httptest.NewRecorder(), opened: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.streamEvents(response, request, scope, map[string]bool{"agent.message": true}, currentPosition, listChanges)
+	}()
+	select {
+	case <-response.opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not open")
+	}
+	transport.mu.Lock()
+	subscription := transport.subscriptions[0]
+	transport.mu.Unlock()
+	mu.Lock()
+	deleted = true
+	mu.Unlock()
+	subscription.loss("nats_disconnect")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not close after session.deleted")
+	}
+	if !strings.Contains(response.Body.String(), "event: session.deleted\n") {
+		t.Fatalf("session.deleted not delivered after preview loss: %q", response.Body.String())
+	}
+	if viewersAtDeletion != 0 || subscriptionsAtDeletion != 0 {
+		t.Fatalf("preview ownership before session.deleted viewers=%d subscriptions=%d", viewersAtDeletion, subscriptionsAtDeletion)
+	}
+	if metrics.stoppedRequests.Load() != 1 || metrics.activeStreams.Load() != 0 || metrics.viewers.Load() != 0 || metrics.subscriptions.Load() != 0 {
+		t.Fatal("preview stop or stream ownership unbalanced")
 	}
 }
