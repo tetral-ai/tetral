@@ -8,8 +8,9 @@
  *
  * OWNS:
  * - RPCs: ListMcpTools, RunMcpTool (service.ts).
- * - The per-(workspaceId, sessionId, mcpServerName, sha256(token)) cache of MCP
- *   client connections and their idle/eviction lifecycle (client.ts).
+ * - The per-(workspaceId, sessionId, mcpServerName, vaultId, credentialId,
+ *   sha256(token)) cache of MCP client connections and their idle/eviction
+ *   lifecycle (client.ts).
  * - The one durable write in this package: the row-locked OAuth
  *   credential-update path (credential-update-path.ts). Every other store
  *   access — credential resolution, session vault lookup — is read-only, and

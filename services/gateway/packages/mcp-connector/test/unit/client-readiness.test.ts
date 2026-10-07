@@ -130,7 +130,7 @@ for(const name of ['read-401','read-403'])for(const warm of [false,true])test(`m
  try{if(warm){await f.client.listTools(identity);peer.resetCounts();}await expect(f.client.callTool({...call,toolName:name})).rejects.toMatchObject({code:-32600});expect(peer.counts).toMatchObject({call:1,effects:1,list:warm?0:1,initialize:warm?0:1});expect(f.refreshes()).toBe(0);}finally{await f.client.closeAll();await peer.close();}
 },10_000);
 
-for(const successful of [false,true])test(`second page HTTP401 ${successful?'successful replacement excludes old partial tools':'repeat rejection exhausts one listing allowance'}`,async()=>{
+for(const successful of [false,true])test(`second page HTTP 401 ${successful?'successful replacement excludes old partial tools':'repeat rejection exhausts one listing allowance'}`,async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const old={...fixtureTools()[0]!,name:'old_partial'};const fresh={...fixtureTools()[0]!,name:'new_session'};
  peer.pages=[{tools:[old],nextCursor:'page-two'},{tools:[]}];peer.faults.set('tools/list',successful?[0,401,0]:[0,401,0,401]);
  const f=component(peer,{},successful?()=>{peer.pages=[{tools:[fresh]}];}:undefined);
@@ -249,7 +249,7 @@ for(const failure of ['initialize','second-page','repeated-cursor','timeout']as 
  try{await held?.entered;if(failure==='timeout')await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});else if(failure==='repeated-cursor')await expect(operation).rejects.toMatchObject({reason:'repeated_cursor'});else await expect(operation).rejects.toMatchObject({code:500});expect(peer.counts.call).toBe(0);expect(f.refreshes()).toBe(0);expect(f.client.connectionCount()).toBe(0);expect(closures).toBe(1);held?.release();peer.pages=undefined;await f.client.callTool(call);expect(peer.counts.call).toBe(1);expect(f.client.connectionCount()).toBe(1);}finally{held?.release();await f.client.closeAll();await peer.close();}
 },10000);
 
-test('real HTTP500 body mentioning401 is not authentication provenance',async()=>{
+test('real HTTP 500 body mentioning 401 is not authentication provenance',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;peer.faultBody='upstream diagnostic mentions 401';peer.faults.set('tools/call',[500]);const f=component(peer);
  try{await expect(f.client.callTool(call)).rejects.toMatchObject({code:500});expect(f.refreshes()).toBe(0);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:0});}finally{await f.client.closeAll();await peer.close();}
 },10000);

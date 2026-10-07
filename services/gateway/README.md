@@ -707,7 +707,7 @@ compatibility, so appending unconditionally would duplicate it).
 
 #### Error taxonomy (`packages/mcp-connector/src/errors.ts`, closed)
 
-`McpConnectorErrorCode` is a ten-member union mapped to the protocol enum by
+`McpConnectorErrorCode` is a closed union mapped to the protocol enum by
 `mcpErrorKind`. Every `RunMcpTool` produces exactly one terminal record;
 `mcp_in_flight` is its own kind and is never logged as `mcp_connection_failed`.
 
@@ -722,6 +722,7 @@ compatibility, so appending unconditionally would duplicate it).
 | `mcp_claim_conflict` | Claim stored-result hash mismatch | `session.error` wrapping `unknown_error` with `retry_status = terminal`; call settles `runtime_error` |
 | `mcp_in_flight` | live unexpired reservation on claim | retryable `runtime_error`, no `session.error` |
 | `mcp_commit_failed` | post-effect Commit/store failure after the side effect ran | retryable `runtime_error`, no `session.error` |
+| `mcp_custody_lost` | Claim or Commit finds that the requesting Runtime binding or process no longer holds custody (stale custody) | `runtime_error` with no `retry_status` and no `session.error`; Runtime treats the response as stale custody and does not settle the call |
 | `mcp_internal_error` | an unclassified connector-side exception during execution | retryable `runtime_error`, no `session.error`, no `retry_status` |
 
 #### Event mapping

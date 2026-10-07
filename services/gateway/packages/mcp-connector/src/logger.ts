@@ -109,7 +109,17 @@ export interface McpExecutionObservation {
   readonly elapsedMs: number; readonly remainingMs: number;
 }
 
-/** Fixed owner-phase observation; never derives diagnostics from dependency messages. */
+/**
+ * Fixed owner-phase observation; never derives diagnostics from dependency messages.
+ *
+ * A phase completion without a claim identity, such as a client phase of explicit
+ * discovery or notification re-listing that no claimed execution observes, carries
+ * the control-only `diagnostic.repeat` marker for every outcome: `completed`,
+ * `failed`, `mcp_timeout` and `mcp_authentication_failed`. The marker admits these
+ * Info records to the shared repeated-event limiter and is never written. Limiter
+ * windows are keyed by event and reason (here the outcome), so each distinct phase
+ * outcome emits its first record and later repeats in the window are summarized.
+ */
 export function mcpPhaseCompletedLogRecord(input: {
   readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName?: string;
   readonly phase: string; readonly outcome: string; readonly durationMs: number;
