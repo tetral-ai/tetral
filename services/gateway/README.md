@@ -371,8 +371,11 @@ it preserves the stated invariants and passes the named suites.
   not pump unread response history into Bun's native fetch buffer. Egress,
   credentials, OAuth rewrites, deadlines and manual redirects remain owned by
   the client wrappers. Discarded redirect bodies are cancelled and joined.
-  Shutdown closes the process-owned dispatcher after request operations join,
-  before SQL closes. This changes neither deployment settings nor admission.
+  The process command creates the single transport and injects its fetch into
+  the provider client registry, which requires that fetch and never creates or
+  closes a transport of its own. Shutdown closes the process-owned dispatcher
+  after request operations join, before SQL closes. This changes neither
+  deployment settings nor admission.
 - **Operating policy.** Constructor-injected active assembly bounds are owned by
   `providers/resource-policy.ts`. Resource exhaustion produces a fatal,
   nonretryable request error, never a truncated successful block. No raw-record,

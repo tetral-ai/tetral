@@ -138,7 +138,7 @@ async function streamProviderRequest(
 export async function writeProviderStreamEvents(
   call: ProviderWritableStream,
   events: AsyncIterable<ProviderStreamEvent>,
-  options: { readonly registerWriteCustody?: (joined: Promise<void>) => void; readonly onWriteComplete?: (event: ProviderStreamEvent, durationMs: number) => void; readonly onWriteStarted?: (event: ProviderStreamEvent) => void; readonly onWriteCallback?: (event: ProviderStreamEvent) => void; readonly onWriteSettled?: (event: ProviderStreamEvent, outcome: "success" | "error" | "cancelled") => void; readonly deadline?: (event:ProviderStreamEvent)=>number|undefined; readonly onDeadline?: (event:ProviderStreamEvent)=>void; readonly clock?: ProviderWriteClock } = {},
+  options: { readonly registerWriteCustody?: (joined: Promise<void>) => void; readonly onWriteStarted?: (event: ProviderStreamEvent) => void; readonly onWriteCallback?: (event: ProviderStreamEvent) => void; readonly onWriteSettled?: (event: ProviderStreamEvent, outcome: "success" | "error" | "cancelled") => void; readonly deadline?: (event:ProviderStreamEvent)=>number|undefined; readonly onDeadline?: (event:ProviderStreamEvent)=>void; readonly clock?: ProviderWriteClock } = {},
 ): Promise<void> {
   for await (const event of events) {
     if (call.cancelled) { try { options.onWriteSettled?.(event,"cancelled"); } catch {} return; }
@@ -146,13 +146,11 @@ export async function writeProviderStreamEvents(
       try { options.onWriteSettled?.(event,"error"); } catch {}
       throw new GrpcStatusError(status.RESOURCE_EXHAUSTED,"gateway response frame exceeds transport bound");
     }
-    const started = performance.now();
     try { options.onWriteStarted?.(event); } catch { /* Observer cannot change delivery. */ }
     const pending = writeFrame(call,event,options.onWriteCallback,options.onWriteSettled,options.deadline?.(event),()=>{try{options.onDeadline?.(event);}catch{}},options.clock ?? SystemWriteClock);
     try { options.registerWriteCustody?.(pending.custody); } catch { /* Observer cannot alter transport. */ }
     const written = await pending.result;
     if (!written) return;
-    try { options.onWriteComplete?.(event, Math.max(0, performance.now() - started)); } catch { /* Observer cannot change delivery. */ }
   }
 }
 

@@ -9,6 +9,7 @@ import type {
   ProviderRequest,
   RunWebRequest,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { FetchFunction } from "@ai-sdk/provider-utils";
 
 export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   const request: ProviderRequest = {
@@ -109,3 +110,15 @@ export function validRunWebRequest(): RunWebRequest {
     },
   };
 }
+
+/**
+ * Provider fetch for registries whose cases inject the model stream or stop
+ * before provider HTTP. Production injects the command-owned transport; a call
+ * here means a case reached the network boundary it does not control.
+ */
+export const unusedProviderFetch: FetchFunction = Object.assign(
+  async (): Promise<Response> => {
+    throw new Error("fixture provider fetch is not configured for this case");
+  },
+  { preconnect: () => {} },
+);

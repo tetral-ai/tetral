@@ -58,7 +58,7 @@ for(const family of ["anthropic","openai","deepseek"] as const)test(`official ${
   let id=0;const assembler=new ProviderBlockAssembler({bounds:ProviderAssemblyCalibrationCandidate,request,allocateEventId:()=>`evt_${String(++id).padStart(32,"0")}`});
   const complete:ProviderStreamEvent[]=[];
   try {for await(const part of registry.stream({request,credential}))complete.push(...assembler.accept(part));assembler.assertComplete();outputs.push(complete);}
-  finally {assembler.release();await registry.close();}
+  finally {assembler.release();}
  }
  expect(requests).toHaveLength(2);expect(requests[1]).toEqual(requests[0]);expect(outputs[1]).toEqual(outputs[0]);
  expect(outputs[1]?.some(part=>part.toolCallComplete?.inputJson==='{"path":"test"}')).toBe(true);expect(outputs[1]?.at(-1)?.finish).toBeDefined();

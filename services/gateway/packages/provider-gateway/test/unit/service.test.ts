@@ -22,7 +22,7 @@ import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } fro
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { writeProviderStreamEvents } from "../../src/grpc-server.js";
-import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
+import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
 import { createJsonLogger } from "../../src/logger.js";
 import type { GatewayLogger } from "../../src/logger.js";
 import type { GatewayAuthenticator, ProviderAttachmentResolver, ProviderRequestStreamer } from "../../src/service.js";
@@ -277,6 +277,7 @@ describe("ProviderGatewayServiceShell", () => {
     let providerFactoryCalls = 0;
     let platformFailureRecords = 0;
     const providerStreamer = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       openAIProviderFactory: () => {
         providerFactoryCalls += 1;
         return { responses: (modelId) => ({ provider: "openai", modelId }) };
@@ -923,6 +924,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1"]);
     const providerStreamer = new ProviderClientRegistry({
+      fetch: unusedProviderFetch,
       anthropicProviderFactory: () => () => ({}),
       streamModel: () => {
         attempts += 1;
@@ -1101,6 +1103,7 @@ describe("ProviderGatewayServiceShell", () => {
       const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
       const pool = new RecordingPlatformCredentialPool(["pfk_opaque"]);
       const providerStreamer = new ProviderClientRegistry({
+        fetch: unusedProviderFetch,
         openAICompatibleProviderFactory: () => (modelId) => ({ provider: "deepseek", modelId }),
         streamModel: () => ({
           fullStream: (async function* () {

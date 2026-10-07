@@ -9,7 +9,6 @@ import type { GatewayModelStreamInput, GatewayModelStreamResult } from "./client
 export interface ProviderModelStreamResources {
   readonly operationId: number;
   readonly sourceRecords: number;
-  readonly forwardedRecords: number;
   readonly active: boolean;
 }
 /** Convert only the resolved, lowered message surface owned by Gateway (no remote downloads). */

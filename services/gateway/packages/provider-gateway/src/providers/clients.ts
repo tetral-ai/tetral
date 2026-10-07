@@ -28,8 +28,6 @@ import { jsonSchema, Output } from "ai";
 import { providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { lowerProviderRequest, remapOpenAICompatibleMessageMetadataForSDK } from "@tetral/gateway-lowering/src/request.js";
 import { lookupGatewayProviderRules } from "@tetral/gateway-lowering/src/rules/index.js";
-import { createProviderTransport } from "./transport.js";
-import type { ProviderTransport } from "./transport.js";
 import { streamLanguageModel } from "./model-stream.js";
 import type { ProviderModelStreamResources } from "./model-stream.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
@@ -67,14 +65,15 @@ import type { GatewayCatalogProviderId } from "./pool.js";
 import type { ResolvedProviderCredential, ResolvedSessionOAuthCredential } from "./credentials.js";
 import type { OpenAIOAuthCredentialRefreshWriter } from "./openai-oauth-refresh.js";
 
-/** Dependencies and transport overrides used to construct a provider client registry. */
+/** Dependencies used to construct a provider client registry, including the required process-owned fetch. */
 export interface ProviderClientRegistryOptions {
   readonly streamModel?: GatewayModelStreamFunction | undefined;
   readonly observeModelStream?: (resources: ProviderModelStreamResources) => void;
   readonly anthropicProviderFactory?: AnthropicProviderFactory | undefined;
   readonly openAIProviderFactory?: OpenAIProviderFactory | undefined;
   readonly openAICompatibleProviderFactory?: OpenAICompatibleProviderFactory | undefined;
-  readonly fetch?: FetchFunction | undefined;
+  /** Process-owned provider HTTP transport; the registry never creates or closes one. */
+  readonly fetch: FetchFunction;
   readonly providerFetchTimeouts?: ProviderFetchTimeoutOptions | undefined;
   readonly openAIOAuthCredentialRefreshWriter?: OpenAIOAuthCredentialRefreshWriter | undefined;
 }
@@ -155,18 +154,17 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   private readonly openAIProviderFactory: OpenAIProviderFactory;
   private readonly openAICompatibleProviderFactory: OpenAICompatibleProviderFactory;
   private readonly fetch: FetchFunction;
-  private readonly transport: ProviderTransport | undefined;
   private readonly providerFetchTimeouts: ProviderFetchTimeoutOptions;
   private readonly openAIOAuthCredentialRefreshWriter: OpenAIOAuthCredentialRefreshWriter | undefined;
 
-  constructor(options: ProviderClientRegistryOptions = {}) {
+  constructor(options: ProviderClientRegistryOptions) {
     const invoke = options.streamModel ?? defaultModelStream;
     this.streamModel = (input) => {
       const controller = new AbortController();
       const operationId = nextModelStreamOperationId++;
       let records = 0;
       const observe = (active: boolean): void => {
-        try { options.observeModelStream?.({operationId,sourceRecords:records,forwardedRecords:records,active}); } catch { /* Fail-open telemetry. */ }
+        try { options.observeModelStream?.({operationId,sourceRecords:records,active}); } catch { /* Fail-open telemetry. */ }
       };
       observe(true);
       const signal = input.abortSignal === undefined ? controller.signal : AbortSignal.any([input.abortSignal,controller.signal]);
@@ -187,14 +185,10 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     this.anthropicProviderFactory = options.anthropicProviderFactory ?? ((settings) => createAnthropic(settings));
     this.openAIProviderFactory = options.openAIProviderFactory ?? ((settings) => createOpenAI(settings));
     this.openAICompatibleProviderFactory = options.openAICompatibleProviderFactory ?? ((settings) => createOpenAICompatible(settings));
-    this.transport = options.fetch === undefined ? createProviderTransport() : undefined;
-    this.fetch = options.fetch ?? this.transport!.fetch;
+    this.fetch = options.fetch;
     this.providerFetchTimeouts = options.providerFetchTimeouts ?? {};
     this.openAIOAuthCredentialRefreshWriter = options.openAIOAuthCredentialRefreshWriter;
   }
-
-  /** Close process-owned HTTP connections only after provider operations have joined. */
-  async close(deadline?: Date): Promise<void> { await this.transport?.close(deadline); }
 
   /** Streams one validated request through its catalog-selected provider client. */
   async *stream(input: ProviderRequestStreamInput): AsyncGenerator<NormalizedProviderEvent> {
@@ -519,7 +513,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
 }
 
 /** Creates the production provider streamer with optional injectable boundaries. */
-export function createProviderClientRegistry(options: ProviderClientRegistryOptions = {}): ProviderClientRegistry {
+export function createProviderClientRegistry(options: ProviderClientRegistryOptions): ProviderClientRegistry {
   return new ProviderClientRegistry(options);
 }
 

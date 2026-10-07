@@ -30,7 +30,7 @@ import type {
 import { NormalizedProviderEventType, validateNormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { ProviderBlockAssembler, ProviderIncompleteStreamError, ProviderAssemblyLimitError } from "./providers/block-assembler.js";
-import type { ProviderAssemblyBounds, ProviderPreviewOffer, ProviderAssemblyResources } from "./providers/block-assembler.js";
+import type { ProviderAssemblyBounds, ProviderAssemblyResources } from "./providers/block-assembler.js";
 import { ProviderAssemblyCalibrationCandidate } from "./providers/resource-policy.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxIdBytes, validateProviderRequest } from "@tetral/gateway-protocol/src/bounds.js";
@@ -81,8 +81,6 @@ export interface ProviderGatewayServiceOptions {
   readonly providerStreamTimeouts?: ProviderStreamTimeoutOptions | undefined;
   readonly metrics?: ProviderGatewayMetricsRegistry | undefined;
   readonly assemblyBounds?: ProviderAssemblyBounds;
-  readonly allocateEventId?: () => string;
-  readonly offerPreview?: ProviderPreviewOffer;
   readonly observeAssemblyResources?: (resources:ProviderAssemblyResources,requestId:string)=>void;
   readonly observationClock?: ()=>number;
 }
@@ -167,8 +165,6 @@ export class ProviderGatewayServiceShell {
         try { assemblyMetrics?.observe(resources); } catch { /* Fail-open metrics. */ }
         try { this.options.observeAssemblyResources?.(resources,request.requestId); } catch { /* Fail-open metrics. */ }
       },
-      ...(this.options.allocateEventId === undefined ? {} : { allocateEventId: this.options.allocateEventId }),
-      ...(this.options.offerPreview === undefined ? {} : { offerPreview: this.options.offerPreview }),
     });
     const processController = new AbortController();
     abortSignal =
