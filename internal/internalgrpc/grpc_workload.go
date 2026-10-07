@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -85,13 +84,7 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	deploymentEnvironment, serviceVersion := resource.DeploymentEnvironment, resource.ServiceVersion
 	logger := params.Logger
 	if logger == nil {
-		diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
-		owner := workload.NewProcessLogger(os.Stderr, params.ServiceName, deploymentEnvironment, serviceVersion, diagnostics)
-		defer owner.CloseWithBudget()
-		logger = owner.Logger
-		if diagnosticErr != nil {
-			return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseConfiguration, diagnosticErr)
-		}
+		logger = workload.ComponentLogger(params.ServiceName)
 	}
 	httpMetrics := workload.NewHTTPMetrics()
 	grpcMetrics := workload.NewGRPCMetrics()
@@ -230,8 +223,5 @@ func valueOrDefault(value string, fallback string) string {
 // may carry DSNs, tokens, or payloads. The shared workload helper guarantees this
 // is the same rule every workload applies.
 func logGRPCStartupFailure(serviceName string, logger *slog.Logger, cause workload.StartupFailureCause, err error) error {
-	if logger == nil {
-		logger = workload.ComponentLogger(serviceName)
-	}
 	return workload.LogStartupFailure(logger, serviceName, workload.WithStartupFailureCause(cause, err))
 }

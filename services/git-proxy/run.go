@@ -136,7 +136,7 @@ func BuildHTTPHandler(readiness *workload.Readiness, proxy http.Handler) http.Ha
 	return mux
 }
 
-func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider, loggers ...*slog.Logger) http.Handler {
+func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMetrics, dbStatsProvider workload.DBStatsProvider, logger *slog.Logger) http.Handler {
 	if metrics == nil {
 		metrics = NewGitProxyMetrics()
 	}
@@ -163,9 +163,7 @@ func BuildMetricsHTTPHandler(readiness *workload.Readiness, metrics *GitProxyMet
 		}
 		_, _ = w.Write([]byte(workload.RuntimeMetricsTextWith(extra)))
 		_, _ = w.Write([]byte(metrics.render()))
-		if len(loggers) > 0 {
-			_, _ = w.Write([]byte(workload.DiagnosticMetricsText(loggers[0])))
-		}
+		_, _ = w.Write([]byte(workload.DiagnosticMetricsText(logger)))
 	})
 	return mux
 }

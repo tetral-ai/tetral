@@ -430,10 +430,10 @@ Provider failure messages pass the provider-message validator and are bounded.
 Credentials, headers, request bodies,
 tool JSON, commands, mount URLs, tokens, and raw stacks are omitted. Startup
 failure categories distinguish configuration, schema, listener, dependency
-readiness, and unknown failures. `TETRAL_SANDBOX_DEBUG_LOGGING=true` enables
-Sandbox debug diagnostics through the shared process logger. The common
-`TETRAL_LOG_LEVEL` controls the other process levels; the legacy Sandbox flag
-continues to enable debug when true. Successful Lease and heartbeat polling is
+readiness, and unknown failures. `TETRAL_SANDBOX_DEBUG_LOGGING=true` selects
+the Debug level for the Sandbox process logger regardless of
+`TETRAL_LOG_LEVEL`; when it is false or unset, `TETRAL_LOG_LEVEL` selects the
+level. Both are read once at boot. Successful Lease and heartbeat polling is
 quiet at the default Info level.
 
 ## Testing

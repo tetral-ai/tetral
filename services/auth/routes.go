@@ -66,10 +66,6 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	return r
 }
 
-func defaultRouterLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "auth", "", "")
-}
-
 func (cfg RouterConfig) authorize(w http.ResponseWriter, r *http.Request) {
 	if cfg.Store == nil || cfg.Signer == nil {
 		writeAuthError(w, r, &auth.AuthenticationError{Message: "authentication unavailable"})

@@ -154,7 +154,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		Handler: workload.HealthRouter(readiness,
 			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
-			workload.WithMetricsCollector("diagnostics", owner.Metrics()),
+			workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 			workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", database.Client)),
 		),
 		Readiness: readiness,

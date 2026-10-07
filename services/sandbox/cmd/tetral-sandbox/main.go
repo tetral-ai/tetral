@@ -41,6 +41,12 @@ func main() {
 
 func run(ctx context.Context, env envReader) error {
 	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
+	cfg, cfgErr := tetralsandbox.ConfigFromEnv(env)
+	if cfgErr == nil && cfg.DebugLogging {
+		// The Sandbox debug switch selects Debug regardless of TETRAL_LOG_LEVEL;
+		// both are boot settings applied once when the process logger is built.
+		diagnostics.Level = slog.LevelDebug
+	}
 	diagnosticOwner := workload.NewProcessLogger(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
 	defer diagnosticOwner.CloseWithBudget()
 	logger := diagnosticOwner.Logger
@@ -48,12 +54,8 @@ func run(ctx context.Context, env envReader) error {
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, diagnosticErr)
 	}
-	cfg, err := tetralsandbox.ConfigFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
-	}
-	if cfg.DebugLogging {
-		diagnosticOwner.SetLevel(slog.LevelDebug)
+	if cfgErr != nil {
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, cfgErr))
 	}
 	openResult, err := openDatabase(ctx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {

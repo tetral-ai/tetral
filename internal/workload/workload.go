@@ -25,15 +25,10 @@ import (
 // NewLogger is a synchronous adapter for prompt-return writers and embedded tests.
 // Production process commands own NewProcessLogger and its bounded shutdown.
 func NewLogger(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string) *slog.Logger {
-	return NewLoggerWithLevel(writer, serviceName, deploymentEnvironment, serviceVersion, slog.LevelInfo)
-}
-func NewLoggerWithLevel(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string, level slog.Level) *slog.Logger {
 	if writer == nil {
 		writer = os.Stderr
 	}
-	cfg := DefaultDiagnosticConfig()
-	cfg.Level = level
-	state := newDiagnosticState(cfg)
+	state := newDiagnosticState(DefaultDiagnosticConfig())
 	return newDiagnosticLogger(promptDiagnosticWriter{writer, &state.counts}, serviceName, deploymentEnvironment, serviceVersion, state)
 }
 
@@ -513,9 +508,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.ListenConfigKey = "listen.address"
 	}
 	if cfg.Logger == nil {
-		owner := NewProcessLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, DefaultDiagnosticConfig())
-		defer owner.CloseWithBudget()
-		cfg.Logger = owner.Logger
+		cfg.Logger = ComponentLogger(cfg.ServiceName)
 	}
 	if cfg.Readiness == nil {
 		cfg.Readiness = NewReadiness()

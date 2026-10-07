@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -46,9 +45,7 @@ type Config struct {
 
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Logger == nil {
-		owner := workload.NewProcessLogger(os.Stderr, cfg.ServiceName, cfg.DeploymentEnvironment, cfg.ServiceVersion, workload.DefaultDiagnosticConfig())
-		defer owner.CloseWithBudget()
-		cfg.Logger = owner.Logger
+		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
 	}
 	server, listener, healthServer, err := buildServer(cfg)
 	if err != nil {

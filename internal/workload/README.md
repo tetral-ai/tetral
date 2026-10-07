@@ -48,10 +48,12 @@ messages or approved bounded classifications. Adding a field requires reviewing
 its producer and updating the checked Go vocabulary alongside this file.
 
 JSON records carry `service.name`, `deployment.environment`, `service.version`,
-`service.instance.id`, and `process.pid`. Existing health/metrics servers expose
-fixed `tetral_diagnostic_*` counters for emissions, filtering, suppression,
-dropped records and sink failures, plus a limiter-entry gauge. They carry no
-request or tenant labels, and never report diagnostic loss through the log sink.
+`service.instance.id`, and `process.pid`. Existing health/metrics servers expose,
+through `DiagnosticMetrics`, fixed `tetral_diagnostic_*` counters for emissions,
+filtering, suppression, dropped records and sink failures, plus limiter-entry and
+queued-record gauges. The queued-record gauge reports the process logger's queue
+and is zero for synchronous writers. The series carry no request or tenant
+labels, and never report diagnostic loss through the log sink.
 Diagnostics are best effort: observer, encoding and sink faults cannot become
 business operation failures. Durable receipts and external effects remain owned
 by their business boundary.
@@ -68,12 +70,14 @@ inject a blocked writer must release it during cleanup. Production stderr has
 the same explicit write/backpressure boundary.
 
 `Stats` counts successfully completed writes as emitted and rejected, discarded,
-partial or failed writes as loss. `Metrics` adds the queue gauge. `NewLogger` and
-`NewLoggerWithLevel` are synchronous adapters for writers known to return
-promptly, such as test buffers; production commands use the process owner.
-Embedded components without an installed process logger remain quiet until the
-caller injects one. `InstallDefaultLogger` returns a restoration function so
-construction and tests do not leak global ownership.
+partial or failed writes as loss. `NewLogger` is a synchronous adapter at the
+default Info level for writers known to return promptly, such as test buffers;
+production commands use the process owner. Embedded components without an
+installed process logger remain quiet until the caller injects one. The shared
+runners `workload.Run`, `internalgrpc.Run` and `internalgrpc.RunGRPCWorkload`
+follow the same rule: without an injected `Logger` they use the installed
+process logger and are otherwise quiet. `InstallDefaultLogger` returns a
+restoration function so construction and tests do not leak global ownership.
 
 The package tests check literal controls, bounded retained samples, field
 projection, severity/recovery transitions and an actual paused OS pipe. Selected

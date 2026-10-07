@@ -95,7 +95,6 @@ func NewJSONAccessLogger(writer io.Writer, options ...AccessLoggerOption) *JSONA
 		writer = os.Stderr
 	}
 	logger := &JSONAccessLogger{
-
 		Writer:                writer,
 		ServiceName:           ServiceName,
 		ServiceVersion:        "unknown",

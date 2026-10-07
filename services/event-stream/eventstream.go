@@ -102,10 +102,6 @@ func newOptions(opts ...Option) *options {
 	return options
 }
 
-func defaultLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "event-stream", "", "")
-}
-
 type handler struct {
 	reader  Reader
 	options *options

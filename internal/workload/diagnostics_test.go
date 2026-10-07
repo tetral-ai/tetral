@@ -112,11 +112,14 @@ func TestDiagnosticSinkFailuresAndMetricsAreIndependent(t *testing.T) {
 		if s.SinkFailures != 1 || s.Dropped != 1 {
 			t.Fatalf("lost sink accounting: %+v", s)
 		}
-		router := HealthRouter(NewReadiness(), WithMetricsCollector("diagnostics", owner.Metrics()))
+		router := HealthRouter(NewReadiness(), WithMetricsCollector("diagnostics", DiagnosticMetrics(owner.Logger)))
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
 		if !strings.Contains(response.Body.String(), "tetral_diagnostic_sink_failures_total 1") {
 			t.Fatal("loss counters absent from actual metrics endpoint")
+		}
+		if !strings.Contains(response.Body.String(), "tetral_diagnostic_queue_records ") {
+			t.Fatal("queue gauge absent from actual metrics endpoint")
 		}
 	}
 }

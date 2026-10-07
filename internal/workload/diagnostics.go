@@ -189,12 +189,6 @@ func (p *ProcessLogger) Stats() DiagnosticStats {
 	s.Queued = len(p.queue)
 	return s
 }
-func (p *ProcessLogger) Metrics() MetricsCollector {
-	return func(context.Context) ([]Metric, error) {
-		s := p.Stats()
-		return []Metric{{Name: "tetral_diagnostic_emitted_total", Type: "counter", Value: float64(s.Emitted)}, {Name: "tetral_diagnostic_dropped_total", Type: "counter", Value: float64(s.Dropped)}, {Name: "tetral_diagnostic_sink_failures_total", Type: "counter", Value: float64(s.SinkFailures)}, {Name: "tetral_diagnostic_suppressed_total", Type: "counter", Value: float64(s.Suppressed)}, {Name: "tetral_diagnostic_filtered_total", Type: "counter", Value: float64(s.Filtered)}, {Name: "tetral_diagnostic_queue_records", Type: "gauge", Value: float64(s.Queued)}, {Name: "tetral_diagnostic_limiter_entries", Type: "gauge", Value: float64(s.LimiterEntries)}}, nil
-	}
-}
 func safeDiagnosticWrite(writer io.Writer, line []byte, c *diagnosticCounters) {
 	defer func() {
 		if recover() != nil {
@@ -408,7 +402,6 @@ func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error)
 		}
 	}()
 	fields := map[string]any{}
-	count := 0
 	visited := 0
 	var add func(slog.Attr, string)
 	add = func(a slog.Attr, prefix string) {
@@ -436,7 +429,6 @@ func (h *diagnosticHandler) Handle(_ context.Context, r slog.Record) (err error)
 		}
 		value, ok := diagnosticValue(key, a.Value)
 		if ok {
-			count++
 			fields[key] = value
 		}
 	}
@@ -550,6 +542,8 @@ func (w promptDiagnosticWriter) Write(line []byte) (int, error) {
 }
 
 // DiagnosticMetrics finds the owned shared handler; unrelated injected loggers expose no series.
+// The queue gauge reports the ProcessLogger queue when that owner is the handler's
+// writer, and zero for prompt synchronous writers, which hold no queued records.
 func DiagnosticMetrics(logger *slog.Logger) MetricsCollector {
 	return func(context.Context) ([]Metric, error) {
 		if logger == nil {
@@ -560,7 +554,11 @@ func DiagnosticMetrics(logger *slog.Logger) MetricsCollector {
 			return nil, nil
 		}
 		s := h.state.stats()
-		return []Metric{{Name: "tetral_diagnostic_emitted_total", Type: "counter", Value: float64(s.Emitted)}, {Name: "tetral_diagnostic_dropped_total", Type: "counter", Value: float64(s.Dropped)}, {Name: "tetral_diagnostic_sink_failures_total", Type: "counter", Value: float64(s.SinkFailures)}, {Name: "tetral_diagnostic_suppressed_total", Type: "counter", Value: float64(s.Suppressed)}, {Name: "tetral_diagnostic_filtered_total", Type: "counter", Value: float64(s.Filtered)}, {Name: "tetral_diagnostic_limiter_entries", Type: "gauge", Value: float64(s.LimiterEntries)}}, nil
+		queued := 0
+		if owner, ok := h.writer.(*ProcessLogger); ok {
+			queued = len(owner.queue)
+		}
+		return []Metric{{Name: "tetral_diagnostic_emitted_total", Type: "counter", Value: float64(s.Emitted)}, {Name: "tetral_diagnostic_dropped_total", Type: "counter", Value: float64(s.Dropped)}, {Name: "tetral_diagnostic_sink_failures_total", Type: "counter", Value: float64(s.SinkFailures)}, {Name: "tetral_diagnostic_suppressed_total", Type: "counter", Value: float64(s.Suppressed)}, {Name: "tetral_diagnostic_filtered_total", Type: "counter", Value: float64(s.Filtered)}, {Name: "tetral_diagnostic_queue_records", Type: "gauge", Value: float64(queued)}, {Name: "tetral_diagnostic_limiter_entries", Type: "gauge", Value: float64(s.LimiterEntries)}}, nil
 	}
 }
 
@@ -573,13 +571,6 @@ func DiagnosticMetricsText(logger *slog.Logger) string {
 		writeMetric(&b, headers, metric)
 	}
 	return b.String()
-}
-
-// SetLevel preserves a service's established boot-only debug switch. Call before serving traffic.
-func (p *ProcessLogger) SetLevel(level slog.Level) {
-	p.state.mu.Lock()
-	defer p.state.mu.Unlock()
-	p.state.cfg.Level = level
 }
 
 var diagnosticEventPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)

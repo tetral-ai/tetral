@@ -3,6 +3,7 @@ package gitproxy
 import (
 	"context"
 	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,13 +92,14 @@ func TestBuildMetricsHTTPHandlerServesMetricsOnInternalSurface(t *testing.T) {
 	readiness := workload.NewReadiness()
 	metrics := NewGitProxyMetrics()
 	metrics.IncActive()
-	handler := BuildMetricsHTTPHandler(readiness, metrics, fakeDBStatsProvider{stats: sql.DBStats{OpenConnections: 3}})
+	handler := BuildMetricsHTTPHandler(readiness, metrics, fakeDBStatsProvider{stats: sql.DBStats{OpenConnections: 3}}, workload.NewLogger(io.Discard, ServiceName, "", ""))
 
 	assertProbe(t, handler, "/health", 200, "ok\n")
 	assertProbe(t, handler, "/ready", 503, "not ready\n")
 	assertProbeContains(t, handler, "/metrics", 200, "gitproxy_active_connections 1")
 	assertProbeContains(t, handler, "/metrics", 200, "go_goroutines")
 	assertProbeContains(t, handler, "/metrics", 200, `db_pool_open_connections{pool="runtime"} 3`)
+	assertProbeContains(t, handler, "/metrics", 200, "tetral_diagnostic_sink_failures_total 0")
 	readiness.MarkReady()
 	assertProbe(t, handler, "/ready", 200, "ready\n")
 }

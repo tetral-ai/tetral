@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -164,10 +163,6 @@ func applyRouterOptionDefaults(opts *routerOptions) {
 	if opts.slowRequestThreshold == 0 {
 		opts.slowRequestThreshold = DefaultSlowRequestThreshold
 	}
-}
-
-func defaultRouterLogger(writer io.Writer) *slog.Logger {
-	return workload.NewLogger(writer, "api", "", "")
 }
 
 // resolveAuthenticator picks the explicit authenticator supplied via
