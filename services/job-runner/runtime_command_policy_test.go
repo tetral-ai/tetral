@@ -123,9 +123,22 @@ func TestRuntimeCommandTrustRetirementDrainsAdmittedCall(t *testing.T) {
 	}
 }
 
+// runtimeCommandTimeoutKeys is the independent oracle for the operator-facing
+// per-method command attempt keys.
+var runtimeCommandTimeoutKeys = map[string]string{
+	"TETRAL_RUNTIME_ACCEPT_INPUT_TIMEOUT_MS":              "AcceptInput",
+	"TETRAL_RUNTIME_RECOVER_THREAD_TIMEOUT_MS":            "RecoverThread",
+	"TETRAL_RUNTIME_ACCEPT_AGENT_MAIL_TIMEOUT_MS":         "AcceptAgentMail",
+	"TETRAL_RUNTIME_ACCEPT_TASK_NOTIFICATION_TIMEOUT_MS":  "AcceptTaskNotification",
+	"TETRAL_RUNTIME_INTERRUPT_TIMEOUT_MS":                 "Interrupt",
+	"TETRAL_RUNTIME_RESOLVE_TOOL_CONFIRMATION_TIMEOUT_MS": "ResolveToolConfirmation",
+	"TETRAL_RUNTIME_APPLY_RUNTIME_CONFIG_TIMEOUT_MS":      "ApplyRuntimeConfig",
+	"TETRAL_RUNTIME_CLEANUP_SESSION_TIMEOUT_MS":           "CleanupSession",
+}
+
 func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {
 	p, err := RuntimeCommandPolicyFromEnv(func(key string) string {
-		if strings.HasPrefix(key, "TETRAL_RUNTIME_") {
+		if _, ok := runtimeCommandTimeoutKeys[key]; ok {
 			return "25"
 		}
 		return ""

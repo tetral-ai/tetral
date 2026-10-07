@@ -150,48 +150,92 @@ func TestPostgreSQLRuntimePodLossPreservesRequestForExactInterruptOwner(t *testi
 	}
 }
 
-func TestPostgreSQLRuntimePodLossSweepUsesClosedVisibilityPartition(t *testing.T) {
+// The census owns no loss decision by itself: a cached non-reusable state only
+// selects a candidate, and repair requires fresh loss evidence from the confirming
+// GET or an expired heartbeat under the same process classifier as delivery.
+func TestPostgreSQLRuntimePodLossSweepRequiresFreshLossEvidence(t *testing.T) {
+	type getFact string
+	const (
+		getAbsent          getFact = "absent"
+		getPresentDeleting getFact = "present-deleting"
+		getPresentNotReady getFact = "present-not-ready"
+		getPresentReusable getFact = "present-reusable"
+		getReplaced        getFact = "replaced"
+		getError           getFact = "error"
+	)
 	tests := []struct {
-		state enginekubernetes.BindingVisibilityState
-		ready bool
-		want  int
+		name         string
+		state        enginekubernetes.BindingVisibilityState
+		ready        bool
+		phase        string
+		get          getFact
+		expired      bool
+		wantRepaired int
+		wantGETs     int
+		wantErr      bool
 	}{
-		{enginekubernetes.BindingVisibilityAbsent, true, 1},
-		{enginekubernetes.BindingVisibilityDeleted, true, 1},
-		{enginekubernetes.BindingVisibilityUIDChanged, true, 1},
-		{enginekubernetes.BindingVisibilityIPChanged, true, 1},
-		{enginekubernetes.BindingVisibilityReusable, true, 0},
-		{enginekubernetes.BindingVisibilityNotReady, true, 0},
-		{enginekubernetes.BindingVisibilityNotServing, true, 0},
-		{enginekubernetes.BindingVisibilityTerminating, true, 0},
-		{enginekubernetes.BindingVisibilitySnapshotNotReady, false, 0},
+		{"cached deleted, Pod still deleting, fresh heartbeat", enginekubernetes.BindingVisibilityDeleted, true, runtimecontrol.ProcessDraining, getPresentDeleting, false, 0, 1, false},
+		{"cached deleted, Pod still deleting, expired heartbeat", enginekubernetes.BindingVisibilityDeleted, true, runtimecontrol.ProcessDraining, getPresentDeleting, true, 1, 1, false},
+		{"cached not ready, Pod absent, fresh heartbeat", enginekubernetes.BindingVisibilityNotReady, true, runtimecontrol.ProcessAccepting, getAbsent, false, 1, 1, false},
+		{"cached not ready, Pod reusable, expired heartbeat", enginekubernetes.BindingVisibilityNotReady, true, runtimecontrol.ProcessAccepting, getPresentReusable, true, 0, 1, false},
+		{"cached not serving, Pod not ready, fresh heartbeat", enginekubernetes.BindingVisibilityNotServing, true, runtimecontrol.ProcessAccepting, getPresentNotReady, false, 0, 1, false},
+		{"cached absent, Pod absent, fresh heartbeat", enginekubernetes.BindingVisibilityAbsent, true, runtimecontrol.ProcessAccepting, getAbsent, false, 1, 1, false},
+		{"cached UID changed, Pod replaced", enginekubernetes.BindingVisibilityUIDChanged, true, runtimecontrol.ProcessAccepting, getReplaced, false, 1, 1, false},
+		{"cached IP changed, Pod absent, fresh heartbeat", enginekubernetes.BindingVisibilityIPChanged, true, runtimecontrol.ProcessAccepting, getAbsent, false, 1, 1, false},
+		{"cached terminating, GET failed", enginekubernetes.BindingVisibilityTerminating, true, runtimecontrol.ProcessDraining, getError, true, 0, 1, true},
+		{"cached reusable and accepting", enginekubernetes.BindingVisibilityReusable, true, runtimecontrol.ProcessAccepting, getAbsent, true, 0, 0, false},
+		{"visibility snapshot not ready", enginekubernetes.BindingVisibilitySnapshotNotReady, false, runtimecontrol.ProcessAccepting, getAbsent, true, 0, 0, false},
 	}
 	for index, tc := range tests {
-		t.Run(string(tc.state), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			candidate := seedRuntimePodLossSweepSession(t, admin, index, "running")
+			age := "0 seconds"
+			if tc.expired {
+				age = "11 seconds"
+			}
+			if _, err := admin.ExecContext(context.Background(), `UPDATE runtime_processes SET phase=$2, reported_at=clock_timestamp()-$3::interval WHERE runtime_process_id=$1`, candidate.binding.RuntimeProcessID, tc.phase, age); err != nil {
+				t.Fatalf("seed process heartbeat: %v", err)
+			}
 			bound := boundRuntimePod(candidate.binding)
 			var logs bytes.Buffer
 			store := runtimePodLossSweepStore(t, runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 				return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(tc.ready, bound, tc.state)
 			})
 			resolver := store.TargetResolver.(KubernetesRuntimeTargetResolver)
-			if tc.want == 0 {
-				resolver.GetPod = func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
-					return &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: candidate.binding.PodUID, Running: true, IP: candidate.binding.PodIP}, nil
+			gets := 0
+			resolver.GetPod = func(_ context.Context, namespace, name string) (*enginekubernetes.PodObservation, error) {
+				gets++
+				pod := &enginekubernetes.PodObservation{Namespace: namespace, Name: name, UID: candidate.binding.PodUID, Running: true, IP: candidate.binding.PodIP}
+				switch tc.get {
+				case getAbsent:
+					return &enginekubernetes.PodObservation{Absent: true}, nil
+				case getPresentDeleting:
+					pod.Deleting = true
+				case getPresentReusable:
+					pod.Ready = true
+				case getReplaced:
+					pod.UID = "pod-uid-replacement"
+					pod.Ready = true
+				case getError:
+					return nil, fmt.Errorf("fresh Pod observation unavailable")
 				}
+				return pod, nil
 			}
 			store.TargetResolver = resolver
 			repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
-			if err != nil || repaired != tc.want {
-				t.Fatalf("visibility %s sweep = %d/%v; want %d/nil", tc.state, repaired, err, tc.want)
+			if (err != nil) != tc.wantErr || repaired != tc.wantRepaired {
+				t.Fatalf("sweep = %d/%v; want %d repaired, error %t", repaired, err, tc.wantRepaired, tc.wantErr)
+			}
+			if gets != tc.wantGETs {
+				t.Fatalf("confirming GETs = %d; want %d", gets, tc.wantGETs)
 			}
 			var bindingRows int
 			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, candidate.sessionID).Scan(&bindingRows); err != nil {
 				t.Fatalf("count visibility binding: %v", err)
 			}
-			if bindingRows != 1-tc.want {
-				t.Fatalf("visibility %s binding rows = %d; want %d", tc.state, bindingRows, 1-tc.want)
+			if bindingRows != 1-tc.wantRepaired {
+				t.Fatalf("binding rows = %d; want %d", bindingRows, 1-tc.wantRepaired)
 			}
 			var sessionStatus string
 			var errorEvents int
@@ -201,8 +245,8 @@ func TestPostgreSQLRuntimePodLossSweepUsesClosedVisibilityPartition(t *testing.T
 			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'`, candidate.sessionID).Scan(&errorEvents); err != nil {
 				t.Fatalf("count visibility errors: %v", err)
 			}
-			if tc.want == 0 && (sessionStatus != "idle" || errorEvents != 0) {
-				t.Fatalf("visibility %s changed turn status=%s errors=%d; want idle/0", tc.state, sessionStatus, errorEvents)
+			if tc.wantRepaired == 0 && (sessionStatus != "idle" || errorEvents != 0) {
+				t.Fatalf("unrepaired Session changed turn status=%s errors=%d; want idle/0", sessionStatus, errorEvents)
 			}
 			if !tc.ready {
 				records := decodeRuntimePodLossLogRecords(t, &logs)

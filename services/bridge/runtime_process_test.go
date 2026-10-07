@@ -149,6 +149,47 @@ func TestPostgreSQLRuntimeProcessLiveness(t *testing.T) {
 		t.Fatalf("current=%s err=%v", current, err)
 	}
 
+	t.Run("identity, process ID and report shape rejections write no registry rows", func(t *testing.T) {
+		const podUID = "pod-registry-rejections"
+		store := NewPostgreSQLBridgeAPIStore(storeClient)
+		runtimeIdentity := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: podUID}
+		valid := processRegistryRPCWithIdentity(t, store, runtimeIdentity, nil)
+		wrongAccount := processRegistryRPCWithIdentity(t, store, auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "mcp-connector"}, KubernetesPodUID: podUID}, nil)
+		missingPod := processRegistryRPCWithIdentity(t, store, auth.Identity{ServiceAccount: runtimeIdentity.ServiceAccount}, nil)
+		for name, client := range map[string]bridgev1.AgentRuntimeBridgeServiceClient{"wrong service account": wrongAccount, "missing Pod UID": missingPod} {
+			if _, err := client.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: "process-rejected"}); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("%s register: %v", name, err)
+			}
+			if _, err := client.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: "process-rejected", RegistrationReceipt: "receipt", Phase: accepting}); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("%s report: %v", name, err)
+			}
+		}
+		for name, id := range map[string]string{"empty": "", "129 bytes": strings.Repeat("p", 129), "leading space": " process", "NUL": "process\x00id", "newline": "process\nid"} {
+			if _, err := valid.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: id}); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("%s process ID register: %v", name, err)
+			}
+			if _, err := valid.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: id, RegistrationReceipt: "receipt", Phase: accepting}); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("%s process ID report: %v", name, err)
+			}
+		}
+		if _, err := valid.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: "process-rejected", RegistrationReceipt: "receipt", Phase: bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_UNSPECIFIED}); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("unspecified phase: %v", err)
+		}
+		if _, err := valid.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: "process-rejected", Phase: accepting}); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("empty receipt: %v", err)
+		}
+		var pods, processes int
+		if err := admin.QueryRow(`SELECT count(*) FROM runtime_process_pods WHERE pod_uid IN ($1, '')`, podUID).Scan(&pods); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.QueryRow(`SELECT count(*) FROM runtime_processes WHERE pod_uid IN ($1, '')`, podUID).Scan(&processes); err != nil {
+			t.Fatal(err)
+		}
+		if pods != 0 || processes != 0 {
+			t.Fatalf("rejected registry calls wrote pods=%d processes=%d", pods, processes)
+		}
+	})
+
 	t.Run("promotion waits for held process authority", func(t *testing.T) {
 		next := register(a, "process-next")
 		locked, release := make(chan struct{}), make(chan struct{})

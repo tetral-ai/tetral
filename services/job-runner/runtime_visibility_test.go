@@ -56,13 +56,26 @@ func TestRuntimeProcessVisibility(t *testing.T) {
 	for _, scenario := range []string{"absent", "changed UID", "same ready", "same deleting", "failure", "deadline"} {
 		t.Run("GET "+scenario, func(t *testing.T) {
 			binding := runtimecontrol.Binding{BindingID: "b", BindingGeneration: 1, Namespace: "ns", PodName: "pod", PodUID: "uid", PodIP: "10.0.0.1", RuntimeProcessID: "process"}
+			// Without a caller deadline the GET carries exactly its own two-second bound;
+			// the separate deadline scenario keeps a shorter caller deadline in force.
+			ctx := context.Background()
+			var callerDeadline time.Time
+			if scenario == "deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 20*time.Millisecond)
+				defer cancel()
+				callerDeadline, _ = ctx.Deadline()
+			}
+			var getDeadline time.Time
 			resolver := KubernetesRuntimeTargetResolver{GetPod: func(ctx context.Context, namespace, name string) (*kubernetes.PodObservation, error) {
 				if namespace != "ns" || name != "pod" {
 					t.Fatal("wrong GET scope")
 				}
-				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 2*time.Second {
-					t.Fatal("GET lacks two-second bound")
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					t.Fatal("GET lacks a deadline")
 				}
+				getDeadline = deadline
 				if scenario == "absent" {
 					return &kubernetes.PodObservation{Absent: true}, nil
 				}
@@ -82,9 +95,16 @@ func TestRuntimeProcessVisibility(t *testing.T) {
 				}
 				return pod, nil
 			}}
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-			defer cancel()
+			before := time.Now()
 			fact, err := resolver.confirmRuntimePod(ctx, binding)
+			after := time.Now()
+			if scenario == "deadline" {
+				if getDeadline.After(callerDeadline) {
+					t.Fatalf("GET deadline %s outlived caller deadline %s", getDeadline, callerDeadline)
+				}
+			} else if getDeadline.Before(before.Add(2*time.Second)) || getDeadline.After(after.Add(2*time.Second)) {
+				t.Fatalf("GET deadline %s outside two-second bound [%s, %s]", getDeadline, before.Add(2*time.Second), after.Add(2*time.Second))
+			}
 			if scenario == "failure" || scenario == "deadline" {
 				if err == nil {
 					t.Fatal("failed GET inferred death")

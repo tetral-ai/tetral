@@ -21,23 +21,27 @@ func runtimeLoadFixture(active int) string {
 
 func TestRuntimeLoadAdmissionValidation(t *testing.T) {
 	valid := runtimeLoadFixture(0)
-	for name, body := range map[string]string{
-		"missing":          strings.ReplaceAll(valid, "runtimepod_container_memory_limit_bytes 100\n", ""),
-		"duplicate":        valid + "runtimepod_active_sessions 0\n",
-		"labelled":         strings.ReplaceAll(valid, "active_sessions 0", "active_sessions{pod=\"x\"} 0"),
-		"NaN":              strings.ReplaceAll(valid, "usage_bytes 20", "usage_bytes NaN"),
-		"infinite":         strings.ReplaceAll(valid, "limit_bytes 100", "limit_bytes +Inf"),
-		"negative":         strings.ReplaceAll(valid, "active_sessions 0", "active_sessions -1"),
-		"fractional count": strings.ReplaceAll(valid, "active_sessions 0", "active_sessions .5"),
-		"no finite limit":  strings.ReplaceAll(valid, "limit_bytes 100", "limit_bytes 0"),
-		"full":             runtimeLoadFixture(8),
-		"memory cutoff":    strings.ReplaceAll(valid, "usage_bytes 20", "usage_bytes 80"),
-		"draining":         strings.ReplaceAll(valid, "accepting_commands 1", "accepting_commands 0"),
-		"not ready":        strings.ReplaceAll(valid, "ready 1", "ready 0"),
+	for name, tc := range map[string]struct{ body, reason string }{
+		"missing":          {strings.ReplaceAll(valid, "runtimepod_container_memory_limit_bytes 100\n", ""), "invalid_metrics"},
+		"duplicate":        {valid + "runtimepod_active_sessions 0\n", "invalid_metrics"},
+		"labelled":         {strings.ReplaceAll(valid, "active_sessions 0", "active_sessions{pod=\"x\"} 0"), "invalid_metrics"},
+		"NaN":              {strings.ReplaceAll(valid, "usage_bytes 20", "usage_bytes NaN"), "invalid_metrics"},
+		"infinite":         {strings.ReplaceAll(valid, "limit_bytes 100", "limit_bytes +Inf"), "invalid_metrics"},
+		"negative":         {strings.ReplaceAll(valid, "active_sessions 0", "active_sessions -1"), "invalid_metrics"},
+		"fractional count": {strings.ReplaceAll(valid, "active_sessions 0", "active_sessions .5"), "invalid_metrics"},
+		"no finite limit":  {strings.ReplaceAll(valid, "limit_bytes 100", "limit_bytes 0"), "invalid_metrics"},
+		"full":             {runtimeLoadFixture(8), "capacity_excluded"},
+		"memory cutoff":    {strings.ReplaceAll(valid, "usage_bytes 20", "usage_bytes 80"), "capacity_excluded"},
+		"draining":         {strings.ReplaceAll(valid, "accepting_commands 1", "accepting_commands 0"), "not_accepting"},
+		"not ready":        {strings.ReplaceAll(valid, "ready 1", "ready 0"), "not_accepting"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseRuntimeLoadReport(body, .8); err == nil {
+			_, err := ParseRuntimeLoadReport(tc.body, .8)
+			if err == nil {
 				t.Fatal("excluded report admitted a new binding")
+			}
+			if reason := runtimeLoadFailureReason(err); reason != tc.reason {
+				t.Fatalf("exclusion reason=%s want %s", reason, tc.reason)
 			}
 		})
 	}

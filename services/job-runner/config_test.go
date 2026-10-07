@@ -161,3 +161,69 @@ func TestLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
 		}
 	}
 }
+
+func TestJobRunnerConfigPinsRuntimeCommandTimeoutKeys(t *testing.T) {
+	for key, method := range runtimeCommandTimeoutKeys {
+		t.Run(key, func(t *testing.T) {
+			env := validJobRunnerConfigEnv()
+			env[key] = "1234"
+			cfg, err := JobRunnerConfigFromEnv(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, other := range runtimeCommandTimeoutKeys {
+				got, err := cfg.CommandPolicy.timeout(other)
+				want := 30 * time.Second
+				if other == method {
+					want = 1234 * time.Millisecond
+				}
+				if err != nil || got != want {
+					t.Fatalf("%s set %s timeout=%s/%v want %s", key, other, got, err, want)
+				}
+			}
+			for _, invalid := range []string{"0", "-1", "abc"} {
+				env[key] = invalid
+				if _, err := JobRunnerConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("%s=%q error=%v; want rejection naming the key", key, invalid, err)
+				}
+			}
+		})
+	}
+}
+
+func TestJobRunnerConfigPinsRuntimePlacementKeys(t *testing.T) {
+	env := validJobRunnerConfigEnv()
+	env["TETRAL_RUNTIME_LOAD_PROBE_TIMEOUT_MS"] = "500"
+	env["TETRAL_RUNTIME_PLACEMENT_TIMEOUT_MS"] = "1500"
+	env["TETRAL_RUNTIME_PLACEMENT_ROUNDS"] = "1"
+	env["TETRAL_RUNTIME_LOAD_MAX_BYTES"] = "131072"
+	env["TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF"] = "0.75"
+	cfg, err := JobRunnerConfigFromEnv(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := RuntimePlacementPolicy{ProbeTimeout: 500 * time.Millisecond, ProbeBudget: 1500 * time.Millisecond, Rounds: 1, MaxResponseBytes: 131072, MemoryCutoff: 0.75}
+	if cfg.PlacementPolicy != want {
+		t.Fatalf("placement policy=%+v want %+v", cfg.PlacementPolicy, want)
+	}
+	for _, invalid := range []map[string]string{
+		{"TETRAL_RUNTIME_PLACEMENT_ROUNDS": "0"},
+		{"TETRAL_RUNTIME_PLACEMENT_ROUNDS": "3"},
+		{"TETRAL_RUNTIME_PLACEMENT_ROUNDS": "x"},
+		{"TETRAL_RUNTIME_LOAD_MAX_BYTES": "0"},
+		{"TETRAL_RUNTIME_LOAD_MAX_BYTES": "262145"},
+		{"TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF": "0"},
+		{"TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF": "1.01"},
+		{"TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF": "NaN"},
+		{"TETRAL_RUNTIME_PLACEMENT_MEMORY_CUTOFF": "+Inf"},
+		{"TETRAL_RUNTIME_LOAD_PROBE_TIMEOUT_MS": "1500", "TETRAL_RUNTIME_PLACEMENT_TIMEOUT_MS": "1000"},
+	} {
+		env := validJobRunnerConfigEnv()
+		for key, value := range invalid {
+			env[key] = value
+		}
+		if _, err := JobRunnerConfigFromEnv(env); err == nil {
+			t.Fatalf("invalid placement settings %v accepted", invalid)
+		}
+	}
+}
