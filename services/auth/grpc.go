@@ -82,7 +82,7 @@ func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *E
 	case "native-mtls":
 		uri, uriErr := url.Parse(cfg.GRPCTLSEdgeClientURI)
 		if cfg.GRPCTLSCAPath == "" || cfg.GRPCTLSCertPath == "" || cfg.GRPCTLSKeyPath == "" || uriErr != nil || uri.Scheme != "spiffe" || uri.Host == "" || uri.Path != "/ns/envoy-gateway-system/sa/tetral-public-edge" || uri.User != nil || uri.RawQuery != "" || uri.Fragment != "" {
-			return nil, workload.NewConfigError("native Check transport requires complete credentials and edge role")
+			return nil, workload.NewConfigError("native Check transport requires " + EnvGRPCTLSEdgeClientURI + " to be spiffe://<trust-domain>/ns/envoy-gateway-system/sa/tetral-public-edge with complete " + EnvGRPCTLSCAPath + ", " + EnvGRPCTLSCertPath + " and " + EnvGRPCTLSKeyPath)
 		}
 		var err error
 		owner.credentials, err = transportsecurity.Open(ctx, transportsecurity.Config{CAPath: cfg.GRPCTLSCAPath, CertPath: cfg.GRPCTLSCertPath, KeyPath: cfg.GRPCTLSKeyPath, Purpose: "edge-check"})

@@ -86,7 +86,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if transport == "native-mtls" {
 		uri, err := url.Parse(peer)
 		if ca == "" || cert == "" || key == "" || err != nil || uri.Scheme != "spiffe" || uri.Host == "" || uri.Path != "/ns/envoy-gateway-system/sa/tetral-public-edge" || uri.User != nil || uri.RawQuery != "" || uri.Fragment != "" {
-			return Config{}, workload.NewConfigError("native-mtls requires complete Auth gRPC material and public edge client URI")
+			return Config{}, workload.NewConfigError("native-mtls requires " + EnvGRPCTLSEdgeClientURI + " to be spiffe://<trust-domain>/ns/envoy-gateway-system/sa/tetral-public-edge with complete " + EnvGRPCTLSCAPath + ", " + EnvGRPCTLSCertPath + " and " + EnvGRPCTLSKeyPath)
 		}
 	} else if ca != "" || cert != "" || key != "" || peer != "" {
 		return Config{}, workload.NewConfigError("plaintext Auth gRPC transport must not configure native TLS material")

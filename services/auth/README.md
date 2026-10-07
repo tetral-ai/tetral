@@ -272,9 +272,9 @@ the existing held native Check transaction completing during graceful drain.
 | `TETRAL_AUTH_HTTP_ADDR` | `:8080` | public routes plus `/health` and `/ready`; `/metrics` is `404` |
 | `TETRAL_AUTH_METRICS_ADDR` | `:8081` | must differ from HTTP and gRPC; `/metrics`, `/health`, `/ready` |
 | `TETRAL_AUTH_GRPC_ADDR` | `:9095` | separate Check and gRPC health listener |
-| `TETRAL_AUTH_GRPC_TRANSPORT` | `plaintext` | explicitly `plaintext` for standard mesh or `native-mtls` for hardened Auth/edge hop |
+| `TETRAL_AUTH_GRPC_TRANSPORT` | `plaintext` when unset | `plaintext` for the standard routed profile or `native-mtls` for the hardened Auth/edge hop |
 | `TETRAL_AUTH_GRPC_TLS_CA_PATH`, `TETRAL_AUTH_GRPC_TLS_CERT_PATH`, `TETRAL_AUTH_GRPC_TLS_KEY_PATH` | none | all required for `native-mtls`; rejected for plaintext |
-| `TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI` | none | exact configured SPIFFE public edge client role, required for `native-mtls` |
+| `TETRAL_AUTH_GRPC_TLS_EDGE_CLIENT_URI` | none | required for `native-mtls` and must be `spiffe://<trust-domain>/ns/envoy-gateway-system/sa/tetral-public-edge`; only the trust domain is configurable, unlike `TETRAL_HTTP_TLS_EDGE_CLIENT_URI`, which accepts any SPIFFE path |
 | `TETRAL_HTTP_TRANSPORT` | `plaintext` | public Auth HTTP only: `plaintext` or `native-mtls` |
 | `TETRAL_HTTP_TLS_CA_PATH`, `TETRAL_HTTP_TLS_CERT_PATH`, `TETRAL_HTTP_TLS_KEY_PATH`, `TETRAL_HTTP_TLS_EDGE_CLIENT_URI` | none | complete trust/leaf/edge role for native HTTP; metrics stay internal |
 | `TETRAL_AUTH_JWKS_CACHE_TTL_SECONDS` | 600 | integer 1–600 |
