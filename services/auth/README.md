@@ -116,21 +116,25 @@ is checked before connecting. Private, loopback and link-local addresses need
 explicit allowed CIDRs. TLS verifies hostname and configured trust. Issuer calls
 have a five-second deadline and one-MiB response limit. Invalid assertions use
 `401`; unavailable issuer dependencies use a safe `503` envelope.
-Cancelled or deadline-expired refresh callers retain their own context error,
-even when response reading or JSON/key validation also fails. Such a failed
-refresh is recorded as unavailable for subsequent live callers within the
-existing cooldown; another caller never inherits its predecessor's cancellation.
-A completed malformed response for a live caller remains invalid. Context
-classification is captured before the refresh owner cancels its temporary
-context to release resources.
+A refresh is bounded by that deadline and by its initiating caller's
+cancellation. When the initiating caller's own context ends before the keys
+load, that caller receives its own context error and the refresh is abandoned:
+Auth records no issuer failure, cooldown or unknown-key forced refresh, and
+joined and later callers start a new bounded refresh under their own context.
+Keys that loaded and validated are published even if the initiating caller has
+ended. Because an abandoned refresh does not consume the forced refresh, each
+cancelled exchange can start one aborted issuer request; the per-process
+exchange limits below bound that rate. Issuer timeouts, transport failures and
+invalid responses for a live caller are recorded, and a completed malformed
+response for a live caller remains invalid.
 
 Caches are partitioned by rule and trust revision, bounded to 128 entries with
 at most 16 concurrent refreshes. Known keys refresh after 90 percent of recorded
 validity, and outage fallback ends exactly at expiry. Unknown-key and failed
-cold/expired refreshes have a 30-second cooldown. Concurrent callers join one
-refresh; obsolete revisions cannot publish into the current cache. Shutdown
-cancels and joins verifier work. Verification supplies identity proof rather
-than workspace permission.
+cold/expired refreshes that a live caller completes have a 30-second cooldown.
+Concurrent callers join one refresh; obsolete revisions cannot publish into the
+current cache. Shutdown cancels and joins verifier work. Verification supplies
+identity proof rather than workspace permission.
 
 ### Derived and independent keys
 

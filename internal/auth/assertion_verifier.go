@@ -38,13 +38,25 @@ type cachedIssuer struct {
 	refreshAfter time.Time
 	lastForced   time.Time
 	lastAttempt  time.Time
-	refreshing   chan struct{}
+	refreshing   *issuerRefresh
 	lastError    error
+}
+
+// issuerRefresh is one in-flight issuer key load that concurrent callers join.
+// abandoned is written under AssertionVerifier.mu before done closes.
+type issuerRefresh struct {
+	done      chan struct{}
+	abandoned bool
 }
 
 // AssertionVerifier owns only registered issuer proof, never workspace authority.
 // The bounded cache is keyed by immutable rule/trust revision. Close cancels and
 // joins HTTP refreshes; waiting callers retain their own cancellation boundary.
+// A refresh runs under its initiating caller's context and the issuer budget.
+// When that caller's own context ends before the keys load, the refresh is
+// abandoned: it records no issuer failure, cooldown or forced-refresh use, and
+// joined callers start a new bounded refresh under their own contexts. Keys that
+// loaded and validated are published even if the initiating caller has ended.
 type AssertionVerifier struct {
 	mu        sync.Mutex
 	cache     map[issuerRevision]*cachedIssuer
@@ -56,6 +68,9 @@ type AssertionVerifier struct {
 	refreshes int
 	now       func() time.Time
 	keyTTL    time.Duration
+	// loadKeys is loadIssuerKeys; tests wrap it to end a caller's context at an
+	// exact load boundary.
+	loadKeys func(context.Context, FederationRule) (map[string]*rsa.PublicKey, error)
 }
 
 type AssertionVerifierConfig struct {
@@ -78,7 +93,7 @@ func NewAssertionVerifier(ctx context.Context) *AssertionVerifier {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &AssertionVerifier{cache: make(map[issuerRevision]*cachedIssuer), current: make(map[string]int64), ctx: ctx, cancel: cancel, now: time.Now, keyTTL: issuerKeyTTL}
+	return &AssertionVerifier{cache: make(map[issuerRevision]*cachedIssuer), current: make(map[string]int64), ctx: ctx, cancel: cancel, now: time.Now, keyTTL: issuerKeyTTL, loadKeys: loadIssuerKeys}
 }
 func (v *AssertionVerifier) Close() {
 	if v == nil {
@@ -191,152 +206,167 @@ func issuerCacheKey(rule FederationRule) issuerRevision {
 }
 func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid string) (*rsa.PublicKey, error) {
 	keyID := issuerCacheKey(rule)
-	v.mu.Lock()
-	if v.closed {
-		v.mu.Unlock()
-		return nil, &UnavailableError{}
-	}
-	// Evict previous revisions immediately. A refresh begun for one revision can
-	// never publish into a subsequent rule/trust revision's cache.
-	if current, exists := v.current[rule.ID]; exists && current > rule.Revision {
-		v.mu.Unlock()
-		return nil, &AuthenticationError{Message: "stale federation rule"}
-	}
-	if v.current[rule.ID] != rule.Revision {
-		for old := range v.cache {
-			if old.ID == rule.ID {
-				delete(v.cache, old)
-			}
-		}
-		if _, registered := v.current[rule.ID]; !registered && len(v.current) >= maxIssuerCacheEntries {
-			for id, revision := range v.current {
-				active := v.cache[issuerRevision{ID: id, Revision: revision}]
-				if active == nil || active.refreshing == nil {
-					delete(v.current, id)
-					break
-				}
-			}
-			if len(v.current) >= maxIssuerCacheEntries {
-				v.mu.Unlock()
-				return nil, &UnavailableError{}
-			}
-		}
-		v.current[rule.ID] = rule.Revision
-	}
-	entry := v.cache[keyID]
-	if entry == nil {
-		if len(v.cache) >= maxIssuerCacheEntries {
-			for id, old := range v.cache {
-				if old.refreshing == nil {
-					delete(v.cache, id)
-					break
-				}
-			}
-		}
-		if len(v.cache) >= maxIssuerCacheEntries {
+	// Each pass selects the current cache entry. A caller passes again only after
+	// joining a refresh its initiator abandoned, so it can lead a new one.
+	for {
+		v.mu.Lock()
+		if v.closed {
 			v.mu.Unlock()
 			return nil, &UnavailableError{}
 		}
-		entry = &cachedIssuer{}
-		v.cache[keyID] = entry
-	}
-	now := v.now()
-	known := entry.keys[kid]
-	if known != nil && now.Before(entry.refreshAfter) {
-		v.mu.Unlock()
-		return known, nil
-	}
-	if entry.refreshing != nil {
-		done := entry.refreshing
-		v.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-v.ctx.Done():
-			return nil, &UnavailableError{}
-		case <-done:
+		// Evict previous revisions immediately. A refresh begun for one revision can
+		// never publish into a subsequent rule/trust revision's cache.
+		if current, exists := v.current[rule.ID]; exists && current > rule.Revision {
+			v.mu.Unlock()
+			return nil, &AuthenticationError{Message: "stale federation rule"}
 		}
+		if v.current[rule.ID] != rule.Revision {
+			for old := range v.cache {
+				if old.ID == rule.ID {
+					delete(v.cache, old)
+				}
+			}
+			if _, registered := v.current[rule.ID]; !registered && len(v.current) >= maxIssuerCacheEntries {
+				for id, revision := range v.current {
+					active := v.cache[issuerRevision{ID: id, Revision: revision}]
+					if active == nil || active.refreshing == nil {
+						delete(v.current, id)
+						break
+					}
+				}
+				if len(v.current) >= maxIssuerCacheEntries {
+					v.mu.Unlock()
+					return nil, &UnavailableError{}
+				}
+			}
+			v.current[rule.ID] = rule.Revision
+		}
+		entry := v.cache[keyID]
+		if entry == nil {
+			if len(v.cache) >= maxIssuerCacheEntries {
+				for id, old := range v.cache {
+					if old.refreshing == nil {
+						delete(v.cache, id)
+						break
+					}
+				}
+			}
+			if len(v.cache) >= maxIssuerCacheEntries {
+				v.mu.Unlock()
+				return nil, &UnavailableError{}
+			}
+			entry = &cachedIssuer{}
+			v.cache[keyID] = entry
+		}
+		now := v.now()
+		known := entry.keys[kid]
+		if known != nil && now.Before(entry.refreshAfter) {
+			v.mu.Unlock()
+			return known, nil
+		}
+		if entry.refreshing != nil {
+			refresh := entry.refreshing
+			v.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-v.ctx.Done():
+				return nil, &UnavailableError{}
+			case <-refresh.done:
+			}
+			v.mu.Lock()
+			if refresh.abandoned {
+				v.mu.Unlock()
+				continue
+			}
+			key := entry.keys[kid]
+			valid := v.now().Before(entry.validUntil)
+			lastError := entry.lastError
+			v.mu.Unlock()
+			if key != nil && valid {
+				return key, nil
+			}
+			if lastError != nil {
+				return nil, lastError
+			}
+			return nil, &AuthenticationError{Message: "invalid assertion"}
+		}
+		if entry.lastError != nil && now.Before(entry.lastAttempt.Add(issuerUnknownKidCooldown)) {
+			lastError := entry.lastError
+			valid := now.Before(entry.validUntil)
+			v.mu.Unlock()
+			if known != nil && valid {
+				return known, nil
+			}
+			return nil, lastError
+		}
+		if known == nil && now.Before(entry.validUntil) && now.Before(entry.lastForced.Add(issuerUnknownKidCooldown)) {
+			lastError := entry.lastError
+			v.mu.Unlock()
+			if lastError != nil {
+				return nil, lastError
+			}
+			return nil, &AuthenticationError{Message: "invalid assertion"}
+		}
+		if v.refreshes >= 16 {
+			valid := now.Before(entry.validUntil)
+			v.mu.Unlock()
+			if known != nil && valid {
+				return known, nil
+			}
+			return nil, &UnavailableError{}
+		}
+		previousAttempt, previousForced := entry.lastAttempt, entry.lastForced
+		if known == nil && entry.keys != nil {
+			entry.lastForced = now
+		}
+		v.refreshes++
+		entry.lastAttempt = now
+		refresh := &issuerRefresh{done: make(chan struct{})}
+		entry.refreshing = refresh
+		v.work.Add(1)
+		v.mu.Unlock()
+		refreshCtx, cancel := context.WithTimeout(ctx, issuerHTTPTimeout)
+		stop := context.AfterFunc(v.ctx, cancel)
+		keys, err := v.loadKeys(refreshCtx, rule)
+		// Only a failed load can be abandoned. The issuer budget expiring or a
+		// shutdown leaves the caller's own context live and is a recorded failure.
+		callerEnded := err != nil && ctx.Err() != nil
+		stop()
+		cancel()
 		v.mu.Lock()
+		if err == nil && !v.closed && v.current[rule.ID] == rule.Revision && v.cache[keyID] == entry {
+			entry.keys = keys
+			entry.validUntil = v.now().Add(v.keyTTL)
+			entry.refreshAfter = v.now().Add(v.keyTTL * 9 / 10)
+		}
+		if callerEnded {
+			entry.lastAttempt, entry.lastForced = previousAttempt, previousForced
+			refresh.abandoned = true
+		} else {
+			entry.lastError = err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				entry.lastError = &UnavailableError{}
+			}
+		}
+		v.refreshes--
+		entry.refreshing = nil
+		close(refresh.done)
 		key := entry.keys[kid]
 		valid := v.now().Before(entry.validUntil)
-		lastError := entry.lastError
 		v.mu.Unlock()
+		v.work.Done()
+		if callerEnded {
+			return nil, ctx.Err()
+		}
 		if key != nil && valid {
 			return key, nil
 		}
-		if lastError != nil {
-			return nil, lastError
+		if err != nil {
+			return nil, err
 		}
 		return nil, &AuthenticationError{Message: "invalid assertion"}
 	}
-	if entry.lastError != nil && now.Before(entry.lastAttempt.Add(issuerUnknownKidCooldown)) {
-		lastError := entry.lastError
-		valid := now.Before(entry.validUntil)
-		v.mu.Unlock()
-		if known != nil && valid {
-			return known, nil
-		}
-		return nil, lastError
-	}
-	if known == nil && now.Before(entry.validUntil) && now.Before(entry.lastForced.Add(issuerUnknownKidCooldown)) {
-		lastError := entry.lastError
-		v.mu.Unlock()
-		if lastError != nil {
-			return nil, lastError
-		}
-		return nil, &AuthenticationError{Message: "invalid assertion"}
-	}
-	if v.refreshes >= 16 {
-		valid := now.Before(entry.validUntil)
-		v.mu.Unlock()
-		if known != nil && valid {
-			return known, nil
-		}
-		return nil, &UnavailableError{}
-	}
-	if known == nil && entry.keys != nil {
-		entry.lastForced = now
-	}
-	v.refreshes++
-	entry.lastAttempt = now
-	entry.refreshing = make(chan struct{})
-	done := entry.refreshing
-	v.work.Add(1)
-	v.mu.Unlock()
-	refreshCtx, cancel := context.WithTimeout(ctx, issuerHTTPTimeout)
-	stop := context.AfterFunc(v.ctx, cancel)
-	keys, err := loadIssuerKeys(refreshCtx, rule)
-	// Include post-fetch key validation in the refresh cancellation boundary.
-	// Read it before our unconditional cancel, which only releases resources.
-	if contextErr := refreshCtx.Err(); contextErr != nil {
-		err = contextErr
-	}
-	stop()
-	cancel()
-	v.mu.Lock()
-	if err == nil && !v.closed && v.current[rule.ID] == rule.Revision && v.cache[keyID] == entry {
-		entry.keys = keys
-		entry.validUntil = v.now().Add(v.keyTTL)
-		entry.refreshAfter = v.now().Add(v.keyTTL * 9 / 10)
-	}
-	entry.lastError = err
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		entry.lastError = &UnavailableError{}
-	}
-	v.refreshes--
-	entry.refreshing = nil
-	close(done)
-	key := entry.keys[kid]
-	valid := v.now().Before(entry.validUntil)
-	v.mu.Unlock()
-	v.work.Done()
-	if key != nil && valid {
-		return key, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return nil, &AuthenticationError{Message: "invalid assertion"}
 }
 
 func loadIssuerKeys(ctx context.Context, rule FederationRule) (map[string]*rsa.PublicKey, error) {

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"net/http"
@@ -419,38 +420,139 @@ func TestAssertionVerifierFailedRefreshCooldown(t *testing.T) {
 	}
 }
 
-func TestAssertionVerifierPreviousCallerCancellationIsolation(t *testing.T) {
+// joinSignalContext reports its first Done call. Verify reads Done only when a
+// caller waits on a joined refresh or derives its own refresh context, so while
+// the initiating caller is held at the issuer barrier the signal proves a join.
+type joinSignalContext struct {
+	context.Context
+	once   sync.Once
+	joined chan struct{}
+}
+
+func (c *joinSignalContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.joined) })
+	return c.Context.Done()
+}
+
+// boundsJoinLiveCaller starts a live caller and returns once it has joined the
+// refresh currently held at the issuer barrier.
+func boundsJoinLiveCaller(t *testing.T, verifier *AssertionVerifier, rule FederationRule, assertion string) <-chan error {
+	t.Helper()
+	base, cancel := context.WithCancel(context.Background())
+	ctx := &joinSignalContext{Context: base, joined: make(chan struct{})}
+	result := make(chan error, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		_, err := verifier.Verify(ctx, rule, assertion)
+		result <- err
+	}()
+	t.Cleanup(func() { cancel(); <-exited })
+	select {
+	case <-ctx.joined:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live caller did not join the in-flight refresh")
+	}
+	return result
+}
+
+// A refresh abandoned because its initiating caller's own context ended is not
+// issuer evidence. It records no failure, cooldown or forced-refresh use, and it
+// never discards keys that already loaded. Live failures keep their cooldown in
+// TestAssertionVerifierFailedRefreshCooldown.
+func TestAssertionVerifierCallerCancellationDoesNotRecordIssuerFailure(t *testing.T) {
 	for _, deadline := range []bool{false, true} {
-		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+		t.Run(fmt.Sprintf("joined caller retries/deadline=%t", deadline), func(t *testing.T) {
 			issuer := newControlledIssuer(t)
 			verifier, _ := boundsVerifier(t)
 			rule := boundsDirectRule(issuer)
 			assertion := signIssuerAssertion(t, issuer.key, "initial", rule, nil)
-			entered, release := boundsBlockIssuer(t, issuer, 1)
+			entered, release := boundsBlockIssuer(t, issuer, 2)
 			ctx, cancel := context.WithCancel(context.Background())
 			if deadline {
 				cancel()
 				ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 			}
 			t.Cleanup(cancel)
-			result := boundsVerifyBurst(ctx, t, verifier, rule, assertion, 1)
+			initiator := boundsVerifyBurst(ctx, t, verifier, rule, assertion, 1)
 			boundsWaitEntered(t, entered)
+			live := boundsJoinLiveCaller(t, verifier, rule, assertion)
+			if ctx.Err() != nil {
+				t.Fatal("initiating caller ended before the live caller joined its refresh")
+			}
 			if deadline {
 				<-ctx.Done()
 			} else {
 				cancel()
 			}
-			if err := boundsWaitResult(t, result); !errors.Is(err, ctx.Err()) {
-				t.Fatalf("initiating caller lost its cancellation: %T: %v", err, err)
+			if err := boundsWaitResult(t, initiator); !errors.Is(err, ctx.Err()) {
+				t.Fatalf("initiating caller lost its own context error: %T: %v", err, err)
 			}
+			// The joined live caller leads a new bounded refresh of its own.
+			boundsWaitEntered(t, entered)
 			release()
-			_, err := verifier.Verify(context.Background(), rule, assertion)
-			boundsAssertUnavailable(t, err)
-			if issuer.count("/keys") != 1 {
-				t.Fatal("subsequent live caller bypassed cancellation failure cooldown")
+			if err := boundsWaitResult(t, live); err != nil {
+				t.Fatalf("joined live caller inherited the abandoned refresh: %T: %v", err, err)
+			}
+			if got := issuer.count("/keys"); got != 2 {
+				t.Fatalf("abandoned refresh and its live retry reached the issuer %d times, want 2", got)
+			}
+			if _, err := verifier.Verify(context.Background(), rule, assertion); err != nil || issuer.count("/keys") != 2 {
+				t.Fatalf("later live caller did not verify from the published keys: %v", err)
 			}
 		})
 	}
+	// An abandoned forced refresh does not consume the unknown-kid forced
+	// refresh. The verifier clock stays inside the 30-second window that a
+	// recorded forced refresh would close for this kid.
+	t.Run("abandoned forced refresh keeps unknown-kid refresh", func(t *testing.T) {
+		issuer := newControlledIssuer(t)
+		verifier, _ := boundsVerifier(t)
+		rule := boundsDirectRule(issuer)
+		if _, err := verifier.Verify(context.Background(), rule, signIssuerAssertion(t, issuer.key, "initial", rule, nil)); err != nil {
+			t.Fatal(err)
+		}
+		issuer.mu.Lock()
+		issuer.keys["new-key-id"] = issuer.key
+		issuer.mu.Unlock()
+		assertion := signIssuerAssertion(t, issuer.key, "new-key-id", rule, nil)
+		entered, release := boundsBlockIssuer(t, issuer, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		initiator := boundsVerifyBurst(ctx, t, verifier, rule, assertion, 1)
+		boundsWaitEntered(t, entered)
+		cancel()
+		if err := boundsWaitResult(t, initiator); !errors.Is(err, context.Canceled) {
+			t.Fatalf("initiating caller lost its own cancellation: %T: %v", err, err)
+		}
+		release()
+		if _, err := verifier.Verify(context.Background(), rule, assertion); err != nil {
+			t.Fatalf("abandoned forced refresh consumed the unknown-kid refresh: %T: %v", err, err)
+		}
+		if got := issuer.count("/keys"); got != 3 {
+			t.Fatalf("live new-kid caller made %d forced requests, want exactly one", got-2)
+		}
+	})
+	t.Run("caller ends after keys load", func(t *testing.T) {
+		issuer := newControlledIssuer(t)
+		verifier, _ := boundsVerifier(t)
+		rule := boundsDirectRule(issuer)
+		assertion := signIssuerAssertion(t, issuer.key, "initial", rule, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		load := verifier.loadKeys
+		verifier.loadKeys = func(loadCtx context.Context, rule FederationRule) (map[string]*rsa.PublicKey, error) {
+			keys, err := load(loadCtx, rule)
+			cancel()
+			return keys, err
+		}
+		if _, err := verifier.Verify(ctx, rule, assertion); !errors.Is(err, context.Canceled) {
+			t.Fatalf("initiating caller lost its own cancellation: %T: %v", err, err)
+		}
+		if _, err := verifier.Verify(context.Background(), rule, assertion); err != nil || issuer.count("/keys") != 1 {
+			t.Fatalf("keys loaded before the initiating caller ended were discarded: %v", err)
+		}
+	})
 }
 
 func TestAssertionVerifierRecordedValidityOutageBoundary(t *testing.T) {
