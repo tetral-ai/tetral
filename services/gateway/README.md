@@ -1035,7 +1035,7 @@ limiter; logs never include credentials, SDK error bodies, schemas or tool resul
 
 | Suite | Proves |
 | --- | --- |
-| `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
+| `service.test.ts` | End-to-end `RunMcpTool`/`ListMcpTools`: caller auth and binding rejected before side effects, post-drain admission rejected with one `rejected` operation sample and no client work, claim/commit reservation flow, terminal-record uniqueness, manifest production and notify retries |
 | `auth.test.ts` | TokenReview admission of the Runtime tool execution and Bridge/Job Runner discovery identities; wrong methods and every other caller rejected |
 | `bounds.test.ts` | Request/response envelope validation |
 | `catalog.test.ts` | Registered adapters, exact endpoint normalization and rejection of unregistered endpoints |

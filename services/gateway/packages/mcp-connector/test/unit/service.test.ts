@@ -51,6 +51,22 @@ expect(await observed).toBeInstanceOf(Error);
     }
     logger.close();
     await service.shutdown(new Date(Date.now()+30));
+    // Post-drain admission records exactly one rejected sample per RPC and no
+    // other change, so relabeling as error or double counting is visible.
+    const operationCounts=(text:string)=>Object.fromEntries(text.split("\n")
+      .filter(line=>line.startsWith("tetral_operation_duration_seconds_count{")&&/operation="(ListMcpTools|RunMcpTool)"/.test(line))
+      .map(line=>[line.slice(0,line.lastIndexOf(" ")),Number(line.slice(line.lastIndexOf(" ")+1))]));
+    const countsBefore=operationCounts(service.metricsText());
+    expect(Object.keys(countsBefore).filter(series=>series.includes('outcome="rejected"'))).toEqual([]);
+    const callsBefore=client.calls.length;
+    await expect(service.listMcpTools(validListRequest(),new Metadata())).rejects.toMatchObject({code:status.UNAVAILABLE});
+    await expect(service.runMcpTool(validRunRequest(),new Metadata())).rejects.toMatchObject({code:status.UNAVAILABLE});
+    expect(client.calls).toHaveLength(callsBefore);
+    expect(operationCounts(service.metricsText())).toEqual({
+      ...countsBefore,
+      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="ListMcpTools",outcome="rejected"}':1,
+      'tetral_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="rejected"}':1,
+    });
   });
   test("surfaces configured-server resolution rejection from the client owner", async () => {
     const client = new RecordingMcpClient();
