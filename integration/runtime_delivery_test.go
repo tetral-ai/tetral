@@ -2,8 +2,6 @@ package integration
 
 import (
 	"context"
-	"errors"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -12,21 +10,16 @@ import (
 )
 
 type recordingRuntimeCommandSender struct {
-	result                   jobrunner.RuntimeDeliveryResult
-	results                  []jobrunner.RuntimeDeliveryResult
-	err                      error
-	targets                  []jobrunner.RuntimePodTarget
-	requests                 []proto.Message
-	observeInterruptDeadline bool
-	interruptDeadline        time.Time
+	result   jobrunner.RuntimeDeliveryResult
+	results  []jobrunner.RuntimeDeliveryResult
+	err      error
+	targets  []jobrunner.RuntimePodTarget
+	requests []proto.Message
 }
 
-type countingRuntimeCommandTokenSource struct {
-	calls int
-}
+type staticRuntimeCommandTokenSource struct{}
 
-func (s *countingRuntimeCommandTokenSource) Token(context.Context) (string, error) {
-	s.calls++
+func (staticRuntimeCommandTokenSource) Token(context.Context) (string, error) {
 	return "test-token", nil
 }
 
@@ -100,17 +93,7 @@ func (s *recordingRuntimeCommandSender) AcceptTaskNotification(_ context.Context
 	return &agentruntimev1.AcceptTaskNotificationResponse{Outcome: &agentruntimev1.AcceptTaskNotificationResponse_Accepted{Accepted: &agentruntimev1.AcceptTaskNotificationAccepted{}}}, nil
 }
 
-func (s *recordingRuntimeCommandSender) Interrupt(ctx context.Context, target jobrunner.RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
-	if s.observeInterruptDeadline {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			return nil, errors.New("interrupt context has no deadline")
-		}
-		s.interruptDeadline = deadline
-		s.targets = append(s.targets, target)
-		s.requests = append(s.requests, request)
-		return nil, context.DeadlineExceeded
-	}
+func (s *recordingRuntimeCommandSender) Interrupt(_ context.Context, target jobrunner.RuntimePodTarget, request *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error) {
 	result, err := s.record(target, request)
 	if err != nil || result.Status == "" {
 		return nil, err

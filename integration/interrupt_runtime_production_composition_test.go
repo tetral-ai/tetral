@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -36,7 +37,7 @@ import (
 
 type interruptRuntimeCompositionProcess struct {
 	command *exec.Cmd
-	output  bytes.Buffer
+	output  syncBuffer
 	port    int
 }
 
@@ -2176,7 +2177,7 @@ func completeInterruptCompositionOutputCapture(
 	client *dbconnect.Client,
 	queueStore *queue.PostgreSQLQueueStore,
 	leaseOwner string,
-	output *bytes.Buffer,
+	output fmt.Stringer,
 ) {
 	t.Helper()
 	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
@@ -2276,7 +2277,52 @@ func startInterruptRuntimeComposition(t *testing.T, tempDir, bridgeAddress, sess
 	return nil, interruptRuntimeCompositionPaths{}
 }
 
-func waitForCompositionFile(t *testing.T, path, description string, output *bytes.Buffer) {
+// compositionBarrierTimeout bounds one wait for a composition barrier or
+// worker result, and compositionJoinTimeout bounds the worker join after a
+// timeout cancels it. Both stay within the local composition budgets.
+const (
+	compositionBarrierTimeout = 30 * time.Second
+	compositionJoinTimeout    = 10 * time.Second
+)
+
+// awaitCompositionBarrier waits until a worker reaches a composition barrier.
+// On timeout it cancels the worker, joins it for at most
+// compositionJoinTimeout and fails with the child output, so an unreached
+// barrier cannot hang the test.
+func awaitCompositionBarrier(t *testing.T, reached <-chan struct{}, description string, cancel context.CancelFunc, done <-chan error, output fmt.Stringer) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-time.After(compositionBarrierTimeout):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(compositionJoinTimeout):
+		}
+		t.Fatalf("%s not reached within %s: %s", description, compositionBarrierTimeout, output.String())
+	}
+}
+
+// awaitCompositionWorker returns the worker result within
+// compositionBarrierTimeout. On timeout it cancels the worker, joins it for at
+// most compositionJoinTimeout and fails with the child output.
+func awaitCompositionWorker(t *testing.T, done <-chan error, description string, cancel context.CancelFunc, output fmt.Stringer) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(compositionBarrierTimeout):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(compositionJoinTimeout):
+		}
+		t.Fatalf("%s did not finish within %s: %s", description, compositionBarrierTimeout, output.String())
+		return nil
+	}
+}
+
+func waitForCompositionFile(t *testing.T, path, description string, output fmt.Stringer) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

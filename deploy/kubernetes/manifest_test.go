@@ -1916,7 +1916,7 @@ func TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests(t *tes
 	})
 }
 
-func TestKubernetesManifestGatewayServiceIsComposedFromServiceLocalManifests(t *testing.T) {
+func TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests(t *testing.T) {
 	for _, n := range []string{"provider-gateway", "mcp-connector"} {
 		files := []string{n + "/serviceaccount.yaml", n + "/deployment.yaml", n + "/service.yaml", n + "/networkpolicy.yaml"}
 		if n == "provider-gateway" {
@@ -1924,7 +1924,13 @@ func TestKubernetesManifestGatewayServiceIsComposedFromServiceLocalManifests(t *
 		}
 		requireServiceLocalManifestComposition(t, "gateway", n+".yaml", files)
 	}
+}
+
+func TestKubernetesManifestJobRunnerIsComposedFromServiceLocalManifests(t *testing.T) {
 	requireServiceLocalManifestComposition(t, "job-runner", "job-runner.yaml", []string{"serviceaccount.yaml", "deployment.yaml", "service.yaml", "networkpolicy.yaml"})
+}
+
+func TestKubernetesManifestWebConnectorIsComposedFromServiceLocalManifests(t *testing.T) {
 	requireServiceLocalManifestComposition(t, "web-connector", "web-connector.yaml", []string{"configmap.yaml", "serviceaccount.yaml", "deployment.yaml", "service.yaml", "networkpolicy.yaml"})
 }
 
@@ -1963,7 +1969,7 @@ func TestKubernetesManifestBridgeServiceIsComposedFromServiceLocalManifests(t *t
 	})
 }
 
-func TestKubernetesManifestBridgeRBACIsComposedFromServiceLocalManifests(t *testing.T) {
+func TestKubernetesManifestJobRunnerRBACIsComposedFromServiceLocalManifests(t *testing.T) {
 	requireServiceLocalManifestComposition(t, "job-runner", "job-runner-rbac.yaml", []string{
 		"rbac.yaml",
 	})
@@ -2047,15 +2053,15 @@ func internalGRPCTokenReviewGrants() []tokenReviewGrant {
 
 func TestKubernetesManifestRBACPermissionsAreExact(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
-	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
+	runnerRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
+	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
-	requireExactRBACRules(t, bridgeRole, []rbacRule{
+	requireExactRBACRules(t, runnerRole, []rbacRule{
 		{apiGroups: []string{""}, resources: []string{"pods"}, verbs: []string{"get", "list", "watch"}},
 		{apiGroups: []string{"discovery.k8s.io"}, resources: []string{"endpointslices"}, verbs: []string{"get", "list", "watch"}},
 	})
-	requireExactRBACSubjects(t, bridgeBinding, []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}})
-	requireExactRBACRoleRef(t, bridgeBinding, rbacRoleRef{
+	requireExactRBACSubjects(t, runnerBinding, []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}})
+	requireExactRBACRoleRef(t, runnerBinding, rbacRoleRef{
 		apiGroup: "rbac.authorization.k8s.io",
 		kind:     "Role",
 		name:     "job-runner-visibility",
@@ -2090,7 +2096,7 @@ func TestKubernetesManifestRBACPermissionsAreExact(t *testing.T) {
 
 func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
+	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
 	tests := []struct {
 		name     string
@@ -2099,8 +2105,8 @@ func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 		expected []rbacSubject
 	}{
 		{
-			name:     "bridge extra subject",
-			document: bridgeBinding,
+			name:     "job-runner extra subject",
+			document: runnerBinding,
 			extra:    "\n  - kind: ServiceAccount\n    name: api\n    namespace: tetral-system",
 			expected: []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}},
 		},
@@ -2131,7 +2137,7 @@ func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
 
 func TestKubernetesManifestRBACRulesRejectExtraPermissions(t *testing.T) {
 	documents := readManifestDocuments(t)
-	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
+	runnerRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
 	tokenReviewRole := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRole", internalGRPCTokenReviewGrants()[0].name)
 
 	tests := []struct {
@@ -2141,8 +2147,8 @@ func TestKubernetesManifestRBACRulesRejectExtraPermissions(t *testing.T) {
 		expected []rbacRule
 	}{
 		{
-			name:     "bridge secrets",
-			document: bridgeRole,
+			name:     "job-runner secrets",
+			document: runnerRole,
 			extra:    "\n  - apiGroups:\n      - \"\"\n    resources:\n      - secrets\n    verbs:\n      - get",
 			expected: []rbacRule{
 				{apiGroups: []string{""}, resources: []string{"pods"}, verbs: []string{"get", "list", "watch"}},
@@ -2296,20 +2302,20 @@ func TestKubernetesManifestAgentRuntimeNamespaceIsConsistent(t *testing.T) {
 	bridgePeerNamespace := requireSelectorValue(t, bridgePolicy, "kubernetes.io/metadata.name")
 	gatewayPeerNamespace := requireSelectorValue(t, gatewayPolicy, "kubernetes.io/metadata.name")
 
-	bridgeRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
-	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
-	roleNamespace := requireMetadataNamespace(t, bridgeRole)
-	bindingNamespace := requireMetadataNamespace(t, bridgeBinding)
+	runnerRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
+	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
+	roleNamespace := requireMetadataNamespace(t, runnerRole)
+	bindingNamespace := requireMetadataNamespace(t, runnerBinding)
 
 	declarations := map[string]string{
-		"bridge job-runner watch env":      watchNamespace,
-		"runtime ServiceAccount namespace": runtimeNamespace,
-		"bridge allowlist SA namespace":    bridgeServiceAccountNamespace,
-		"gateway allowlist SA namespace":   gatewayServiceAccountNamespace,
-		"bridge NetworkPolicy namespace":   bridgePeerNamespace,
-		"gateway NetworkPolicy namespace":  gatewayPeerNamespace,
-		"bridge RBAC Role namespace":       roleNamespace,
-		"bridge RBAC binding namespace":    bindingNamespace,
+		"job-runner watch env":              watchNamespace,
+		"runtime ServiceAccount namespace":  runtimeNamespace,
+		"bridge allowlist SA namespace":     bridgeServiceAccountNamespace,
+		"gateway allowlist SA namespace":    gatewayServiceAccountNamespace,
+		"bridge NetworkPolicy namespace":    bridgePeerNamespace,
+		"gateway NetworkPolicy namespace":   gatewayPeerNamespace,
+		"job-runner RBAC Role namespace":    roleNamespace,
+		"job-runner RBAC binding namespace": bindingNamespace,
 	}
 	const want = "tetral-agent-runtime"
 	for source, value := range declarations {
@@ -2322,7 +2328,7 @@ func TestKubernetesManifestAgentRuntimeNamespaceIsConsistent(t *testing.T) {
 // TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace proves every workload
 // resource pins metadata.namespace to the namespace the RBAC subjects assume. Without the
 // pin, applying the manifests with a different -n silently creates identities the RBAC does
-// not bind, so Bridge watches and internal gRPC TokenReview fail at runtime, not apply.
+// not bind, so Job Runner watches and internal gRPC TokenReview fail at runtime, not apply.
 func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.T) {
 	documents := readManifestDocuments(t)
 
@@ -2349,16 +2355,16 @@ func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.
 		t.Fatalf("checked %d workload documents; want %d", totalDocuments, expectedDocuments)
 	}
 
-	// Read the RBAC side from subjects[].namespace, NOT metadata.namespace: the Bridge
+	// Read the RBAC side from subjects[].namespace, NOT metadata.namespace: the Job Runner
 	// RoleBinding's metadata namespace is the watched Runtime namespace, while its subject
 	// lives in tetral-system.
-	bridgeBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
+	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
-	bridgeSubjects, err := parseRBACSubjects(bridgeBinding.text)
+	runnerSubjects, err := parseRBACSubjects(runnerBinding.text)
 	if err != nil {
-		t.Fatalf("%s %s/%s parse subjects: %v", bridgeBinding.file, bridgeBinding.kind, bridgeBinding.name, err)
+		t.Fatalf("%s %s/%s parse subjects: %v", runnerBinding.file, runnerBinding.kind, runnerBinding.name, err)
 	}
-	requireSubjectNamespaces(t, bridgeBinding, bridgeSubjects, map[string]string{"job-runner": "tetral-system"})
+	requireSubjectNamespaces(t, runnerBinding, runnerSubjects, map[string]string{"job-runner": "tetral-system"})
 
 	for _, grant := range internalGRPCTokenReviewGrants() {
 		tokenReviewBinding := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRoleBinding", grant.name)

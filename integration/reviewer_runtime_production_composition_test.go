@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -191,7 +190,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
-	var runtimeOutput bytes.Buffer
+	var runtimeOutput syncBuffer
 	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/reviewer-admission-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	command.Dir = "../services/agent-runtime"
 	command.Stdout = &runtimeOutput

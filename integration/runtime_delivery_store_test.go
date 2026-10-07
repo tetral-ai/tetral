@@ -19,6 +19,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -168,16 +170,16 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureSettlesSingleAttemptInpu
 		diagnostic string
 	}{
 		{name: "credential unavailable", suffix: "credential", lister: func(*testing.T) mcpmanifest.Lister {
-			return mcpmanifest.NewConnectorLister(connector.address, &countingRuntimeCommandTokenSource{})
+			return mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 		}, diagnostic: mcpmanifest.DiagnosticCredentialUnavailable},
 		{name: "server unavailable", suffix: "server", lister: func(*testing.T) mcpmanifest.Lister {
-			return mcpmanifest.NewConnectorLister(connector.address, &countingRuntimeCommandTokenSource{})
+			return mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 		}, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
 		{name: "discovery timeout", suffix: "timeout", lister: func(*testing.T) mcpmanifest.Lister {
-			return mcpmanifest.NewConnectorLister(connector.address, &countingRuntimeCommandTokenSource{})
+			return mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 		}, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
 		{name: "manifest invalid trailer", suffix: "invalid", lister: func(*testing.T) mcpmanifest.Lister {
-			return mcpmanifest.NewConnectorLister(connector.address, &countingRuntimeCommandTokenSource{})
+			return mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 		}, diagnostic: mcpmanifest.DiagnosticInvalid},
 		{name: "untyped unavailable transport", suffix: "transport_unavailable", lister: func(t *testing.T) mcpmanifest.Lister { return newUntypedFailureMCPManifestLister(t, codes.Unavailable) }, diagnostic: mcpmanifest.DiagnosticDiscoveryUnavailable},
 		{name: "untyped deadline transport", suffix: "transport_deadline", lister: func(t *testing.T) mcpmanifest.Lister {
@@ -782,7 +784,7 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 	})
 	enqueueExhaustionJob(t, queueStore, job, now)
 	deliveryStore := jobrunner.NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
-	deliveryStore.MCPManifestLister = mcpmanifest.NewConnectorLister(connector.address, &countingRuntimeCommandTokenSource{})
+	deliveryStore.MCPManifestLister = mcpmanifest.NewConnectorLister(connector.address, staticRuntimeCommandTokenSource{})
 	deliveryStore.TargetResolver = jobrunner.KubernetesRuntimeTargetResolver{Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{
 			Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_oauth_manifest", PodIP: "10.0.0.10",
@@ -1004,6 +1006,19 @@ func (f *oauthInitialManifestConnector) finish(t *testing.T) oauthInitialManifes
 	return stats
 }
 
+type failingMCPManifestTransportServer struct {
+	providergatewayv1.UnimplementedMcpConnectorServiceServer
+	code   codes.Code
+	values []string
+}
+
+func (s failingMCPManifestTransportServer) ListMcpTools(ctx context.Context, _ *providergatewayv1.ListMcpToolsRequest) (*providergatewayv1.ListMcpToolsResponse, error) {
+	if len(s.values) > 0 {
+		_ = grpc.SetTrailer(ctx, metadata.MD{mcpmanifest.FailureKindMetadataKey: s.values})
+	}
+	return nil, status.Error(s.code, "safe test failure")
+}
+
 func newUntypedFailureMCPManifestLister(t *testing.T, code codes.Code) mcpmanifest.Lister {
 	return newExactFailureMCPManifestLister(t, code, nil)
 }
@@ -1021,7 +1036,7 @@ func newExactFailureMCPManifestLister(t *testing.T, code codes.Code, values []st
 		server.Stop()
 		_ = listener.Close()
 	})
-	return mcpmanifest.NewConnectorLister(listener.Addr().String(), &countingRuntimeCommandTokenSource{})
+	return mcpmanifest.NewConnectorLister(listener.Addr().String(), staticRuntimeCommandTokenSource{})
 }
 
 type initialManifestFailureConnector struct {

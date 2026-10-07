@@ -1,6 +1,7 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1675,4 +1677,91 @@ func countMemoryVersions(t *testing.T, db *sql.DB, storeID string) int {
 		t.Fatalf("count memory versions: %v", err)
 	}
 	return count
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func mustLeaseBridgeQueueJob(t *testing.T, store *queue.PostgreSQLQueueStore, request queue.LeaseRequest) *queue.Job {
+	t.Helper()
+	jobs, err := store.Lease(context.Background(), request)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("lease Queue job = %#v/%v; want exactly one", jobs, err)
+	}
+	return jobs[0]
+}
+
+func seedActiveInterruptQueueCustody(
+	t *testing.T,
+	db *sql.DB,
+	sessionID string,
+	threadID string,
+	runtimeInputID string,
+	eventID string,
+	sequence int64,
+) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": runtimeInputID, "event_ids": []string{eventID},
+		"sequence_from": sequence, "sequence_to": sequence, "input_kind": "interrupt_control",
+	})
+	if err != nil {
+		t.Fatalf("marshal interrupt Queue custody: %v", err)
+	}
+	store := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(db))
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, Priority: 100,
+		MaxAttempts: queue.DefaultMaxAttempts, Now: time.Now().UTC().Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("seed active interrupt Queue custody: %v", err)
+	}
+}
+
+func enqueueInterruptExhaustionJob(
+	t *testing.T,
+	store *queue.PostgreSQLQueueStore,
+	sessionID string,
+	threadID string,
+	inputID string,
+	inputKind string,
+	eventID string,
+	sequence int64,
+	maxAttempts int,
+	now time.Time,
+) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": inputID, "event_ids": []string{eventID},
+		"sequence_from": sequence, "sequence_to": sequence, "input_kind": inputKind,
+	})
+	if err != nil {
+		t.Fatalf("marshal runtime input %s: %v", inputID, err)
+	}
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, inputID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: maxAttempts, Now: now,
+	}); err != nil {
+		t.Fatalf("enqueue runtime input %s: %v", inputID, err)
+	}
 }

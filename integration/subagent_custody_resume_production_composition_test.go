@@ -66,7 +66,7 @@ type closedThreadResumeCompositionResult struct {
 
 type closedThreadResumeRuntimeProcess struct {
 	command             *exec.Cmd
-	output              bytes.Buffer
+	output              syncBuffer
 	port                int
 	acceptResultPath    string
 	providerStartedPath string

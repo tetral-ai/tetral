@@ -411,9 +411,9 @@ func startTransportRuntimePodHarness(t *testing.T) int {
 	return port
 }
 
-// syncBuffer guards a child process's stderr. os/exec fills it from its own
-// goroutine while this test reads it for failure messages, so the two need a
-// lock between them.
+// syncBuffer guards a child process's output. os/exec fills it from its own
+// goroutine while tests read it for failure messages and readiness, so the two
+// need a lock between them.
 type syncBuffer struct {
 	mutex  sync.Mutex
 	buffer bytes.Buffer
@@ -429,4 +429,12 @@ func (b *syncBuffer) String() string {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	return b.buffer.String()
+}
+
+// Bytes returns a copy, so callers never share the buffer's backing array
+// with a concurrent writer.
+func (b *syncBuffer) Bytes() []byte {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return bytes.Clone(b.buffer.Bytes())
 }

@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -86,7 +85,7 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
 		t.Fatalf("write hot Thread Runtime input: %v", err)
 	}
-	var output bytes.Buffer
+	var output syncBuffer
 	command := exec.Command("bun", "packages/runtime-pod/test/fixtures/interrupt-closeout-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
 	command.Dir = "../services/agent-runtime"
 	command.Stdout = &output
@@ -122,8 +121,10 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 		Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})},
 		Config:    jobrunner.JobRunnerConfig{LeaseOwner: "hot-thread-isolation", MaxJobs: 2, LeaseDuration: time.Minute, HeartbeatInterval: time.Second},
 	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	runDone := make(chan error, 1)
-	go func() { runDone <- runner.RunOnce(context.Background()) }()
+	go func() { runDone <- runner.RunOnce(runCtx) }()
 	waitForCompositionFile(t, toolStartedPath, "Thread A Tool execution", &output)
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -143,7 +144,7 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='span.model_request_end'`, sessionID, threadB).Scan(&threadBEnds); err != nil || threadBEnds != 1 {
 		t.Fatalf("Thread B did not finish while Thread A Tool was blocked: ends=%d err=%v output=%s", threadBEnds, err, output.String())
 	}
-	if err := <-runDone; err != nil {
+	if err := awaitCompositionWorker(t, runDone, "concurrent Thread jobs", cancelRun, &output); err != nil {
 		t.Fatalf("run concurrent Thread jobs: %v; output=%s", err, output.String())
 	}
 
@@ -231,7 +232,7 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	}
 }
 
-func waitForJSONFile(t *testing.T, path string, target any, description string, output *bytes.Buffer) {
+func waitForJSONFile(t *testing.T, path string, target any, description string, output fmt.Stringer) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

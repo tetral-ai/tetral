@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -29,7 +28,7 @@ import (
 
 type cleanupCompositionProcess struct {
 	command    *exec.Cmd
-	output     bytes.Buffer
+	output     syncBuffer
 	port       int
 	effectPath string
 	closePath  string
@@ -378,12 +377,14 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 		}
 		sender := &countingCleanupSender{RuntimeCommandSender: jobrunner.NewRuntimePodCommandClient(taskNotificationRuntimeTokenSource{})}
 		runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{Store: barrierStore, Sender: sender}
+		runCtx, cancelRun := context.WithCancel(context.Background())
+		defer cancelRun()
 		done := make(chan error, 1)
-		go func() { done <- runner.RunOnce(context.Background()) }()
-		<-barrierStore.entered
+		go func() { done <- runner.RunOnce(runCtx) }()
+		awaitCompositionBarrier(t, barrierStore.entered, "cleanup pre-send authority barrier", cancelRun, done, &process.output)
 		newLease := reclaimCleanupLease(t, admin, queueStore, queueJobID, "cleanup-presend-winner")
 		close(barrierStore.release)
-		if err := <-done; err != nil {
+		if err := awaitCompositionWorker(t, done, "old pre-send cleanup worker", cancelRun, &process.output); err != nil {
 			t.Fatalf("old pre-send cleanup worker: %v", err)
 		}
 		if sender.calls.Load() != 0 {
@@ -404,12 +405,14 @@ func TestPostgreSQLCleanupTakeoverFencesBeforeSendAndAfterHostEffect(t *testing.
 			entered:              make(chan struct{}), release: make(chan struct{}), loseResponse: true,
 		}
 		runner.Deliverer = jobrunner.RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}
+		runCtx, cancelRun := context.WithCancel(context.Background())
+		defer cancelRun()
 		done := make(chan error, 1)
-		go func() { done <- runner.RunOnce(context.Background()) }()
-		<-sender.entered
+		go func() { done <- runner.RunOnce(runCtx) }()
+		awaitCompositionBarrier(t, sender.entered, "cleanup in-flight host effect barrier", cancelRun, done, &process.output)
 		newLease := reclaimCleanupLease(t, admin, queueStore, queueJobID, "cleanup-inflight-winner")
 		close(sender.release)
-		if err := <-done; err != nil {
+		if err := awaitCompositionWorker(t, done, "old in-flight cleanup worker", cancelRun, &process.output); err != nil {
 			t.Fatalf("old in-flight cleanup worker: %v", err)
 		}
 		if sender.lostResponses.Load() != 1 {

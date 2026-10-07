@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -210,4 +211,27 @@ func (f *separatedOwners) input(t *testing.T) (jobrunner.RuntimeJob, *queue.Job)
 		t.Fatal(err)
 	}
 	return jobrunner.RuntimeJob{JobID: row.ID, LeaseToken: row.LeaseToken, Kind: row.Kind, PartitionKey: row.PartitionKey, DedupeKey: row.DedupeKey, WorkspaceID: payload.WorkspaceID, SessionID: payload.SessionID, SessionThreadID: payload.ThreadID, RuntimeInputID: payload.InputID, EventIDs: payload.Events, SequenceFrom: payload.From, SequenceTo: payload.To, InputKind: payload.Kind, PayloadJSON: string(row.PayloadJSON), AttemptCount: int32(row.AttemptCount), MaxAttempts: int32(row.MaxAttempts)}, row
+}
+
+type staticWorkspaceLister []workspace.ID
+
+func (l staticWorkspaceLister) ListIDs(context.Context) ([]workspace.ID, error) {
+	return append([]workspace.ID(nil), l...), nil
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }

@@ -94,7 +94,7 @@ func (terminalBackgroundProvider) Release(context.Context, tetralsandbox.Release
 
 type runningTaskNotificationRuntime struct {
 	command *exec.Cmd
-	output  bytes.Buffer
+	output  syncBuffer
 	port    int
 }
 
