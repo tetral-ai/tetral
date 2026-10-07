@@ -1377,7 +1377,7 @@ func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
 		done <- RunJobRunnerLoop(ctx, runner, slog.New(slog.NewJSONHandler(buffer, nil)), nil)
 	}()
 	deadline := time.After(time.Second)
-	for !strings.Contains(buffer.String(), `"msg":"bridge.job_runner.poll_failed"`) {
+	for !strings.Contains(buffer.String(), `"msg":"job_runner.poll_failed"`) {
 		select {
 		case <-deadline:
 			t.Fatalf("job runner did not emit poll failure log: %s", buffer.String())
@@ -1398,13 +1398,13 @@ func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
 		t.Fatalf("job runner log leaked raw poll error: %s", logOutput)
 	}
 	for _, want := range []string{
-		`"msg":"bridge.job_runner.poll_failed"`,
-		`"operation":"bridge.job_runner.poll"`,
+		`"msg":"job_runner.poll_failed"`,
+		`"operation":"job_runner.poll"`,
 		`"event.kind":"poll_failed"`,
 		`"component":"` + ServiceNameJobRunner + `"`,
 		`"retryable":true`,
 		`"terminal":false`,
-		`"error.class":"bridge_job_runner_error"`,
+		`"error.class":"job_runner_error"`,
 		`"error.code":"poll_failed"`,
 		`"error.message_safe":"job runner poll failed"`,
 	} {

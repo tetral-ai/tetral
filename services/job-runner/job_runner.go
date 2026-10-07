@@ -162,13 +162,13 @@ func (r *JobRunner) RunOnce(ctx context.Context) error {
 
 func (r *JobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
 	if r == nil || r.Queue == nil {
-		return false, errors.New("bridge job runner queue client is required")
+		return false, errors.New("job runner queue client is required")
 	}
 	if r.Workspaces == nil {
-		return false, errors.New("bridge workspace lister is required")
+		return false, errors.New("job runner workspace lister is required")
 	}
 	if r.Deliverer == nil {
-		return false, errors.New("bridge runtime job deliverer is required")
+		return false, errors.New("job runner runtime job deliverer is required")
 	}
 	cfg := r.Config
 	if cfg.LeaseOwner == "" {
@@ -200,7 +200,7 @@ func (r *JobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
 			break
 		}
 		if workspaceID == "" {
-			sweepErrs = append(sweepErrs, errors.New("bridge discovered an empty workspace id"))
+			sweepErrs = append(sweepErrs, errors.New("job runner discovered an empty workspace id"))
 			continue
 		}
 		workspaceHadWork, err := r.runWorkspaceOnce(ctx, workspaceID.String(), cfg)
@@ -240,7 +240,7 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 	jobs := lease.GetJobs()
 	for _, job := range jobs {
 		if job.GetWorkspaceId() != workspaceID {
-			phaseErrs = append(phaseErrs, errors.New("bridge queue returned a cross-workspace job"))
+			phaseErrs = append(phaseErrs, errors.New("queue returned a cross-workspace job"))
 			return hadWork, errors.Join(phaseErrs...)
 		}
 	}
@@ -300,7 +300,7 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 	if job.Kind == queue.KindRuntimeInput {
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {
-			return errors.New("bridge runtime delivery finalization replayer is required")
+			return errors.New("job runner runtime delivery finalization replayer is required")
 		}
 		replayed, found, err := replayer.ReplayRuntimeDeliveryFinalization(ctx, job)
 		if err != nil {
@@ -519,7 +519,7 @@ func (r *JobRunner) logRuntimeJobAttempt(job RuntimeJob, preparationKind string,
 		return
 	}
 	defer func() { _ = recover() }()
-	r.Logger.Info("bridge.runtime_delivery.attempt",
+	r.Logger.Info("job_runner.runtime_delivery.attempt",
 		slog.String("operation", "runtime_delivery.attempt"),
 		slog.String("event.kind", "runtime_delivery_attempt"),
 		slog.String("component", ServiceNameJobRunner),
@@ -637,7 +637,7 @@ func (r *JobRunner) deferRuntimeConfig(ctx context.Context, job RuntimeJob) erro
 func (r *JobRunner) finalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
 	finalizer, ok := r.Deliverer.(RuntimeDeliveryFinalizer)
 	if !ok {
-		return RuntimeDeliveryResult{}, errors.New("bridge runtime delivery finalizer is required")
+		return RuntimeDeliveryResult{}, errors.New("job runner runtime delivery finalizer is required")
 	}
 	return finalizer.FinalizeRuntimeDelivery(ctx, job, result)
 }
@@ -736,7 +736,7 @@ func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job Runtim
 	})
 	if err != nil || !response.GetUpdated() {
 		cancelWork()
-		return workCtx, func() error { return nil }, errors.New("bridge queue lease lost before delivery")
+		return workCtx, func() error { return nil }, errors.New("queue lease lost before delivery")
 	}
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -760,7 +760,7 @@ func startJobRunnerHeartbeat(ctx context.Context, client QueueClient, job Runtim
 					return
 				}
 				if err != nil || !response.GetUpdated() {
-					heartbeatErr = errors.New("bridge queue lease lost")
+					heartbeatErr = errors.New("queue lease lost")
 					cancelWork()
 					cancelHeartbeat()
 					return
@@ -837,7 +837,7 @@ func DecodeRuntimeJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	case queue.KindSessionDeleteCleanup:
 		return decodeSessionDeleteCleanupJob(queueJob)
 	default:
-		return RuntimeJob{}, fmt.Errorf("queue job kind %q is not a Bridge runtime-facing job", queueJob.GetKind())
+		return RuntimeJob{}, fmt.Errorf("queue job kind %q is not a Job Runner runtime-facing job", queueJob.GetKind())
 	}
 }
 

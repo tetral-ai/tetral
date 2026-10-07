@@ -356,7 +356,7 @@ cleanup completes before the bounded diagnostic close.
 
 Queue wake notifications retain the established consumer-class payload `bridge`
 for Job Runner work. The Go name `ConsumerClassJobRunner` describes its current
-owner; changing the process owner does not migrate persisted or wire vocabulary.
+owner; changing the process owner does not rename the wire value.
 
 A notification disconnect emits a safe warning and bounded repeat summaries.
 The existing successful reconnect broadcasts its catch-up wake before emitting

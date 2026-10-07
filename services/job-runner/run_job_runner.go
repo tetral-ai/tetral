@@ -38,13 +38,13 @@ func runJobRunnerLoop(
 		wakeSnapshot := wake.Snapshot()
 		hadWork, err := runner.RunOnceWithActivity(ctx)
 		if err != nil && ctx.Err() == nil && logger != nil {
-			logger.Warn("bridge.job_runner.poll_failed",
-				slog.String("operation", "bridge.job_runner.poll"),
+			logger.Warn("job_runner.poll_failed",
+				slog.String("operation", "job_runner.poll"),
 				slog.String("event.kind", "poll_failed"),
 				slog.String("component", ServiceNameJobRunner),
 				slog.Bool("retryable", true),
 				slog.Bool("terminal", false),
-				slog.String("error.class", "bridge_job_runner_error"),
+				slog.String("error.class", "job_runner_error"),
 				slog.String("error.code", "poll_failed"),
 				slog.String("error.message_safe", "job runner poll failed"),
 			)

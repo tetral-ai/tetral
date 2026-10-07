@@ -127,7 +127,7 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 		return JobRunnerConfig{}, workload.NewConfigError("database pool config invalid: " + poolErr.Error())
 	}
 	if poolConfig.MaxOpenConns < 2 {
-		return JobRunnerConfig{}, workload.NewConfigError(dbconnect.EnvDBMaxOpenConns + " must be at least 2 for the bridge job runner")
+		return JobRunnerConfig{}, workload.NewConfigError(dbconnect.EnvDBMaxOpenConns + " must be at least 2 for the job runner")
 	}
 	var err error
 	if raw := env.Getenv(EnvJobRunnerLeaseDurationMS); raw != "" {

@@ -19,9 +19,9 @@ import (
 )
 
 // newTestLogger captures JSON log lines into writer through the production handler,
-// carrying the Bridge service identity tests assert against.
+// carrying the Job Runner service identity that owns Runtime Pod visibility.
 func newTestLogger(writer io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(writer, nil)).With(slog.String("service.name", "bridge"))
+	return slog.New(slog.NewJSONHandler(writer, nil)).With(slog.String("service.name", "job-runner"))
 }
 
 func TestWatcherCacheCandidateRules(t *testing.T) {
@@ -378,7 +378,7 @@ func TestWatcherCacheLogsRedactedFailure(t *testing.T) {
 			t.Fatalf("watch failure log leaked %q: %s", forbidden, logOutput)
 		}
 	}
-	for _, want := range []string{`"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"bridge"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"forbidden"`, `"error.class":"kubernetes_error"`, `"error.code":"forbidden"`, `"error.message_safe":"kubernetes watch failed"`} {
+	for _, want := range []string{`"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"kubernetes-visibility"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"forbidden"`, `"error.class":"kubernetes_error"`, `"error.code":"forbidden"`, `"error.message_safe":"kubernetes watch failed"`} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("watch failure log missing %s: %s", want, logOutput)
 		}
@@ -484,7 +484,7 @@ func endpointSliceWithAddressType(addressType discoveryv1.AddressType, endpoints
 
 func TestCacheActualFailureStormAndIndependentResourceRecovery(t *testing.T) {
 	var logs bytes.Buffer
-	logger := workload.NewLogger(&logs, "bridge", "local", "unit")
+	logger := workload.NewLogger(&logs, "job-runner", "local", "unit")
 	cache := NewWatcherCache("tetral-runtime", WithLogger(logger))
 	cache.ReplacePods(nil)
 	cache.ReplaceEndpointSlices(nil)
@@ -514,6 +514,11 @@ func TestCacheActualFailureStormAndIndependentResourceRecovery(t *testing.T) {
 	if strings.Count(body, `"event":"diagnostic.suppressed"`) != 2 || strings.Count(body, `"event":"kubernetes.watch.recovered"`) != 2 {
 		t.Fatalf("resource recoveries = %s", body)
 	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, `"event":"kubernetes.watch.recovered"`) && !strings.Contains(line, `"component":"kubernetes-visibility"`) {
+			t.Fatalf("recovery record lost the visibility component: %s", line)
+		}
+	}
 	cache.MarkFailure(WatchFailure{Resource: "pods", Status: "watch_closed"})
 	if strings.Count(logs.String(), `"event":"kubernetes.watch.failed"`) != 3 {
 		t.Fatal("new degradation was hidden after recovery")
@@ -525,7 +530,7 @@ type watcherDiagnosticFaultWriter struct{}
 
 func (watcherDiagnosticFaultWriter) Write([]byte) (int, error) { panic("diagnostic sink failed") }
 func TestCacheRecoverySurvivesDiagnosticSinkFault(t *testing.T) {
-	logger := workload.NewLogger(watcherDiagnosticFaultWriter{}, "bridge", "local", "unit")
+	logger := workload.NewLogger(watcherDiagnosticFaultWriter{}, "job-runner", "local", "unit")
 	cache := NewWatcherCache("tetral-runtime", WithLogger(logger))
 	cache.ReplacePods(nil)
 	cache.ReplaceEndpointSlices(nil)

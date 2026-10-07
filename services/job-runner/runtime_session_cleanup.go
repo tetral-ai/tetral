@@ -82,7 +82,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RuntimeCleanupDeliveryAuthority(ctx con
 		return RuntimeCleanupDeliveryAuthority{}, err
 	}
 	authority := RuntimeCleanupDeliveryAuthority{}
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_cleanup_delivery", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.authorize_cleanup_delivery", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -109,7 +109,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RescheduleBusyRuntimeCleanup(ctx contex
 		now = s.Clock().UTC()
 	}
 	settled := false
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.reschedule_busy_cleanup", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.reschedule_busy_cleanup", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanupExhaustion(ctx co
 		now = s.Clock().UTC()
 	}
 	outcome := RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_cleanup_exhaustion", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.finalize_cleanup_exhaustion", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -579,7 +579,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 		now = s.Clock().UTC()
 	}
 	outcome := RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.cleanup_settle", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.cleanup_settle", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -634,7 +634,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 	var state sessionDeleteCleanupState
 	var stale bool
 	var releaseComplete bool
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_settle", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.session_delete_cleanup_settle", func(tx *dbconnect.Tx) error {
 		if _, err := runtimecontrol.LockSessionRuntimeArbitrationTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -703,7 +703,7 @@ func sessionDeleteCleanupFinalAttempt(job RuntimeJob) bool {
 func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx context.Context, job RuntimeJob, now time.Time) (RuntimeDeliveryResult, error) {
 	pending := false
 	releaseIncomplete := false
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_sandbox_custody", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.session_delete_cleanup_sandbox_custody", func(tx *dbconnect.Tx) error {
 		var err error
 		releaseIncomplete, err = hasIncompleteSessionSandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID)
 		if err != nil || releaseIncomplete {
@@ -742,7 +742,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx
 	if pending {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_attachment_cleanup_pending", ErrorMessage: "sandbox attachment cleanup is not complete"}, nil
 	}
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_sandbox_rows", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.session_delete_cleanup_sandbox_rows", func(tx *dbconnect.Tx) error {
 		return deleteSessionSandboxRowsTx(ctx, tx, job.WorkspaceID, job.SessionID)
 	})
 	if err != nil {
@@ -766,7 +766,7 @@ func hasIncompleteSessionSandboxReleasesTx(ctx context.Context, tx *dbconnect.Tx
 
 func (s *PostgreSQLRuntimeDeliveryStore) deleteSessionSandboxAttachments(ctx context.Context, workspaceID string, sessionID string, now time.Time) (bool, error) {
 	var rowsToDelete []sessionCleanupAttachmentRow
-	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_claim", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "jobrunner.session_delete_cleanup_attachment_claim", func(tx *dbconnect.Tx) error {
 		rows, err := tx.Query(ctx,
 			`WITH candidates AS (
 				SELECT attachment.workspace_id, attachment.attachment_ref, attachment.blob_pointer, attachment.status
@@ -817,7 +817,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) deleteSessionSandboxAttachments(ctx con
 				return true, err
 			}
 		}
-		if err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_deleted", func(tx *dbconnect.Tx) error {
+		if err := s.Client.WithWorkspaceTx(ctx, workspaceID, "jobrunner.session_delete_cleanup_attachment_deleted", func(tx *dbconnect.Tx) error {
 			_, err := tx.Exec(ctx,
 				`UPDATE session_transient_attachments SET status='deleted', updated_at=$3
 				  WHERE workspace_id=$1 AND attachment_ref=$2 AND status='deleting'`,
@@ -829,7 +829,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) deleteSessionSandboxAttachments(ctx con
 		}
 	}
 	var remaining bool
-	err = s.Client.WithWorkspaceReadOnlyTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_remaining", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceReadOnlyTx(ctx, workspaceID, "jobrunner.session_delete_cleanup_attachment_remaining", func(tx *dbconnect.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT EXISTS (
 				SELECT 1 FROM session_transient_attachments AS attachment

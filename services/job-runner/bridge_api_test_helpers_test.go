@@ -193,7 +193,7 @@ func bridgeAcceptedMessageDeliveryPayload(t *testing.T, runtime *sql.DB, workspa
 	t.Helper()
 	client := dbconnect.NewClientForTesting(runtime)
 	var payloadJSON string
-	if err := client.WithWorkspaceTx(context.Background(), workspaceID, "agentruntimebridge.test_accepted_message_delivery_payload", func(tx *dbconnect.Tx) error {
+	if err := client.WithWorkspaceTx(context.Background(), workspaceID, "jobrunner.test_accepted_message_delivery_payload", func(tx *dbconnect.Tx) error {
 		var err error
 		payloadJSON, err = acceptedMessageCommandPayloadTx(context.Background(), tx, RuntimeJob{
 			Kind:            queue.KindRuntimeInput,

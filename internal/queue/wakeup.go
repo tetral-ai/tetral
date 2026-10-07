@@ -17,7 +17,9 @@ import (
 
 const (
 	NotificationChannel = "tetral_queue_wakeup"
-	// The established notification payload is retained for existing listeners.
+	// ConsumerClassJobRunner is the wake payload for Job Runner work. The wire
+	// value keeps its established name when process ownership moves; Queue
+	// producers and the Job Runner listener share this constant.
 	ConsumerClassJobRunner   = "bridge"
 	ConsumerClassSandbox     = "sandbox"
 	listenerReconnectBase    = 100 * time.Millisecond

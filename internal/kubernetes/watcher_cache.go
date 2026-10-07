@@ -13,6 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// watcherDiagnosticComponent names this shared visibility cache in its watch
+// records. The owning workload is identified by the logger's service.name.
+const watcherDiagnosticComponent = "kubernetes-visibility"
+
 type WatcherCache struct {
 	mutex                sync.Mutex
 	namespace            string
@@ -188,7 +192,7 @@ func (c *WatcherCache) MarkFailure(failure WatchFailure) {
 		c.logger.Warn("kubernetes.watch.failed",
 			slog.String("operation", "kubernetes_watch"),
 			slog.String("event.kind", "kubernetes.watch.failed"),
-			slog.String("component", "bridge"),
+			slog.String("component", watcherDiagnosticComponent),
 			slog.String("kubernetes.resource", failure.Resource),
 			slog.String("kubernetes.namespace", failure.Namespace),
 			slog.String("kubernetes.name", safeKubernetesIdentifier(failure.Name)),
@@ -207,7 +211,7 @@ func (c *WatcherCache) logWatchRecovery(resource string) {
 		return
 	}
 	defer func() { _ = recover() }()
-	c.logger.Info("kubernetes.watch.recovered", slog.String("operation", "kubernetes_watch"), slog.String("kubernetes.resource", resource), slog.String("outcome", "recovered"), slog.String("recovery.event", "kubernetes.watch.failed"), slog.String("recovery.resource", resource))
+	c.logger.Info("kubernetes.watch.recovered", slog.String("operation", "kubernetes_watch"), slog.String("component", watcherDiagnosticComponent), slog.String("kubernetes.resource", resource), slog.String("outcome", "recovered"), slog.String("recovery.event", "kubernetes.watch.failed"), slog.String("recovery.resource", resource))
 }
 
 // Ready answers from the synced/stale/failed flags alone, without building the candidate

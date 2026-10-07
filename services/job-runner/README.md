@@ -30,17 +30,21 @@ contents and connection credentials are excluded from diagnostic records.
 
 `TETRAL_DB_MAX_OPEN_CONNS` defaults to 20 and must be at least 2. One connection
 belongs to the Queue listener; at least one remains for business transactions.
-Queue insertion and wakeup share a transaction. The notification's persisted
-consumer value remains `bridge` for compatibility; the Go owner identifier is
-`ConsumerClassJobRunner`. Hints carry no work: reconnect triggers catch-up and
-bounded polling remains the fallback for a lost or coalesced hint.
+Queue insertion and wakeup share a transaction. The notification payload for
+Job Runner work is the transient wire value `bridge`, which Queue producers and
+this listener share through `ConsumerClassJobRunner`. Hints carry no work:
+reconnect triggers catch-up and bounded polling remains the fallback for a lost
+or coalesced hint.
 
-Boot keys retain `TETRAL_BRIDGE_JOB_RUNNER_*` names for compatibility. The
-diagnostic workload name is `job-runner`; the default Queue lease owner remains
-`bridge-job-runner`. Runtime and MCP outbound calls use projected internal gRPC
-audience credentials. Kubernetes visibility uses its separate Kubernetes API
-audience credential. Runner receives Blob credentials for Session cleanup and
-no Sandbox provider credentials.
+Configuration and wire identifiers keep their established names when process
+ownership moves: boot keys use `TETRAL_BRIDGE_JOB_RUNNER_*` names and the
+default Queue lease owner is `bridge-job-runner`. Diagnostics name the owner:
+records carry `service.name` `job-runner`, the poll and delivery-attempt events
+use the `job_runner.` prefix, and transaction labels use `jobrunner.*`. Runtime
+and MCP outbound calls use projected internal gRPC audience credentials.
+Kubernetes visibility uses its separate Kubernetes API audience credential.
+Runner receives Blob credentials for Session cleanup and no Sandbox provider
+credentials.
 
 ## Binding, repair and cleanup
 

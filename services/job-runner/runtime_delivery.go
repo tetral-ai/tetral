@@ -677,7 +677,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RuntimeInputDeliveryAuthority(ctx conte
 		return RuntimeInputDeliveryAuthority{}, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "agent mail delivery authority binding is invalid", Retryable: false}
 	}
 	authority := RuntimeInputDeliveryAuthority{}
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_runtime_input_delivery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.authorize_runtime_input_delivery", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -825,7 +825,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 	}
 	var plan RuntimeCommandPlan
 	var initialMCPManifestToolsets []mcpmanifest.ToolsetConfig
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.prepare_runtime_command", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.prepare_runtime_command", func(tx *dbconnect.Tx) error {
 		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -1026,7 +1026,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) InterruptDeliveryAuthority(ctx context.
 		now = s.Clock().UTC()
 	}
 	var authority RuntimeInterruptDeliveryAuthority
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.authorize_interrupt_delivery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.authorize_interrupt_delivery", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -1101,7 +1101,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 		now = s.Clock().UTC()
 	}
 	queueLeaseSettled := false
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -1197,7 +1197,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeInputRejection(ctx contex
 		now = s.Clock().UTC()
 	}
 	converted := false
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.prepare_runtime_input_rejection", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.prepare_runtime_input_rejection", func(tx *dbconnect.Tx) error {
 		var inboxStatus, inboxKind string
 		err := tx.QueryRow(ctx,
 			`SELECT status, input_kind
@@ -1287,7 +1287,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 		now = s.Clock().UTC()
 	}
 	finalized := RuntimeDeliveryResult{}
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_runtime_delivery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.finalize_runtime_delivery", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -1464,7 +1464,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 		now = s.Clock().UTC()
 	}
 	finalized := RuntimeDeliveryResult{}
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_runtime_recovery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.finalize_runtime_recovery", func(tx *dbconnect.Tx) error {
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
@@ -1821,7 +1821,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context
 		now = s.Clock().UTC()
 	}
 	var acceptance mcpmanifest.Acceptance
-	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_mcp_manifest_delivery", func(tx *dbconnect.Tx) error {
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.finalize_mcp_manifest_delivery", func(tx *dbconnect.Tx) error {
 		if err := mcpmanifest.AcquireAcceptanceLockTx(ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName); err != nil {
 			return err
 		}
@@ -1869,7 +1869,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 	}
 	var result RuntimeDeliveryResult
 	var found bool
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.replay_runtime_delivery_finalization", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.replay_runtime_delivery_finalization", func(tx *dbconnect.Tx) error {
 		switch job.InputKind {
 		case "interrupt_control":
 			if job.JobID == "" || job.LeaseToken == "" || job.PartitionKey == "" || job.DedupeKey == "" || job.SequenceTo <= 0 {
@@ -1960,7 +1960,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeMalformedRuntimeInputCustody(
 	}
 	var canonical RuntimeJob
 	outcome := MalformedRuntimeInputCustodyResult{}
-	err := s.Client.WithWorkspaceTx(ctx, lease.WorkspaceID, "agentruntimebridge.finalize_malformed_runtime_input", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, lease.WorkspaceID, "jobrunner.finalize_malformed_runtime_input", func(tx *dbconnect.Tx) error {
 		var kind, partitionKey, dedupeKey, queueStatus, leaseToken string
 		var leaseCurrent bool
 		var attemptCount, maxAttempts int32
@@ -2692,7 +2692,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifestsWithListTimeo
 			continue
 		}
 		var acceptance mcpmanifest.Acceptance
-		if err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.enqueue_initial_mcp_manifest", func(tx *dbconnect.Tx) error {
+		if err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.enqueue_initial_mcp_manifest", func(tx *dbconnect.Tx) error {
 			var err error
 			acceptance, err = mcpmanifest.CaptureInitialAcceptanceTx(
 				ctx, tx, job.WorkspaceID, job.SessionID, toolset, manifest, now,
@@ -2717,7 +2717,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) captureInitialMCPManifestFailure(
 	now time.Time,
 ) (mcpmanifest.Acceptance, error) {
 	var acceptance mcpmanifest.Acceptance
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.capture_initial_mcp_manifest_failure", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.capture_initial_mcp_manifest_failure", func(tx *dbconnect.Tx) error {
 		var err error
 		acceptance, err = mcpmanifest.CaptureInitialUnreadyTx(ctx, tx, job.WorkspaceID, job.SessionID, toolset, diagnostic, now)
 		return err
@@ -2939,7 +2939,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ActivateRuntimeRecovery(ctx context.Con
 		now = s.Clock().UTC()
 	}
 	var plan RuntimeCommandPlan
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.activate_runtime_recovery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.activate_runtime_recovery", func(tx *dbconnect.Tx) error {
 		active, terminal, err := validateRuntimeRecoveryAuthorityTx(ctx, tx, job)
 		if err != nil {
 			return err

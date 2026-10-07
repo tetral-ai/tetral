@@ -18,7 +18,7 @@ type RuntimeInboxEventRefsExceededError struct {
 
 func (e *RuntimeInboxEventRefsExceededError) Error() string {
 	return fmt.Sprintf(
-		"bridge job runner startup: workspace %q runtime inbox row %q exceeds %d event references",
+		"job runner startup: workspace %q runtime inbox row %q exceeds %d event references",
 		e.WorkspaceID,
 		e.RuntimeInputID,
 		queue.MaxRuntimeInputEventRefsPerJob,
@@ -30,10 +30,10 @@ func (e *RuntimeInboxEventRefsExceededError) Error() string {
 // each bounded row check remains inside the existing RLS-scoped transaction.
 func ValidateRuntimeInboxEventRefBounds(ctx context.Context, client *dbconnect.Client, workspaces WorkspaceLister) error {
 	if client == nil {
-		return errors.New("bridge runtime inbox startup check database client is required")
+		return errors.New("job runner runtime inbox startup check database client is required")
 	}
 	if workspaces == nil {
-		return errors.New("bridge runtime inbox startup check workspace lister is required")
+		return errors.New("job runner runtime inbox startup check workspace lister is required")
 	}
 	workspaceIDs, err := workspaces.ListIDs(ctx)
 	if err != nil {
@@ -41,10 +41,10 @@ func ValidateRuntimeInboxEventRefBounds(ctx context.Context, client *dbconnect.C
 	}
 	for _, workspaceID := range workspaceIDs {
 		if workspaceID == "" {
-			return errors.New("bridge runtime inbox startup check discovered an empty workspace id")
+			return errors.New("job runner runtime inbox startup check discovered an empty workspace id")
 		}
 		var runtimeInputID string
-		err := client.WithWorkspaceReadOnlyTx(ctx, workspaceID.String(), "agentruntimebridge.validate_runtime_inbox_event_refs", func(tx *dbconnect.Tx) error {
+		err := client.WithWorkspaceReadOnlyTx(ctx, workspaceID.String(), "jobrunner.validate_runtime_inbox_event_refs", func(tx *dbconnect.Tx) error {
 			err := tx.QueryRow(ctx,
 				`SELECT runtime_input_id
 				   FROM session_runtime_inbox

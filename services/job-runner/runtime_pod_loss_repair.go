@@ -132,7 +132,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) runtimePodLossCensus(ctx context.Contex
 	err := s.Client.WithWorkspaceReadOnlyRepeatableReadTx(
 		ctx,
 		workspaceID,
-		"agentruntimebridge.runtime_pod_loss_census",
+		"jobrunner.runtime_pod_loss_census",
 		func(tx *dbconnect.Tx) error {
 			cursorSessionID := ""
 			var cursorGeneration int64

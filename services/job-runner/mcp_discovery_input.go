@@ -110,7 +110,7 @@ func requireQueuedMCPDiscoveryInputTx(ctx context.Context, tx *dbconnect.Tx, job
 
 func (s *PostgreSQLRuntimeDeliveryStore) reserveMCPDiscoveryAttempt(ctx context.Context, job RuntimeJob, budget time.Duration) (mcpInputDiscoveryAttempt, error) {
 	var attempt mcpInputDiscoveryAttempt
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.reserve_mcp_discovery", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.reserve_mcp_discovery", func(tx *dbconnect.Tx) error {
 		if err := mcpDiscoveryInputAuthorityTx(ctx, tx, job); err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) discoverUserInputMCP(ctx context.Contex
 			}
 			if err == nil {
 				var acceptance mcpmanifest.Acceptance
-				commitErr := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.accept_input_mcp_discovery", func(tx *dbconnect.Tx) error {
+				commitErr := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.accept_input_mcp_discovery", func(tx *dbconnect.Tx) error {
 					if err := mcpDiscoveryInputAuthorityTx(ctx, tx, job); err != nil {
 						return err
 					}
@@ -215,7 +215,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) discoverUserInputMCP(ctx context.Contex
 					"workspace.id", job.WorkspaceID, "session.id", job.SessionID, "runtime_input.id", job.RuntimeInputID,
 					"mcp.server.name", toolset.MCPServerName, "mcp.failure.kind", diagnostic, "attempt", attempt.number)
 			}
-			if err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.record_mcp_discovery_failure", func(tx *dbconnect.Tx) error {
+			if err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.record_mcp_discovery_failure", func(tx *dbconnect.Tx) error {
 				if err := mcpDiscoveryInputAuthorityTx(ctx, tx, job); err != nil {
 					return err
 				}
@@ -239,7 +239,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) discoverUserInputMCP(ctx context.Contex
 // together prevents a retry from reporting success or replaying a failed input.
 func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.Context, job RuntimeJob, toolset mcpmanifest.ToolsetConfig, diagnostic string) error {
 	recovered := false
-	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finish_mcp_discovery_failure", func(tx *dbconnect.Tx) error {
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.finish_mcp_discovery_failure", func(tx *dbconnect.Tx) error {
 		if err := mcpDiscoveryInputAuthorityTx(ctx, tx, job); err != nil {
 			return err
 		}
