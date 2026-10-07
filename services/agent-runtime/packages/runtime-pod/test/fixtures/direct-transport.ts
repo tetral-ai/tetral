@@ -2,7 +2,7 @@
  * fences. This local fixture does not exercise Kubernetes TokenReview itself. */
 import { readFile } from "node:fs/promises";
 import { createRuntimePodApp } from "../../src/app.js";
-import { hardenedRoutingSecretsReady } from "../../src/routing-proxy.js";
+import { waitForRoutingProxy } from "../../src/routing-proxy.js";
 import { DefaultBridgeMethodPolicies } from "../../src/bridge-policy.js";
 import type { RuntimePodConfig } from "../../src/config.js";
 import type { RuntimeSessionRunHost } from "../../src/runtime-service.js";
@@ -52,22 +52,9 @@ const app = createRuntimePodApp({
   tokenReviewClient: { createTokenReview: async ({ token }) => ({ authenticated: token === "fixture-runner", audiences: ["tetral-internal-grpc"], username: "system:serviceaccount:tetral-system:job-runner" }) },
   commandRunHost: host,
   cleanupRunHost: { handleCleanupSession: async (scope) => ({ ok: true, sessionId: scope.sessionId, cleaned: true }) },
-  bootstrap: { runtime: async () => {
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      try {
-        const readiness = await fetch("http://127.0.0.1:9901/ready", { signal: AbortSignal.timeout(500) });
-        await readiness.body?.cancel();
-        if (readiness.ok) {
-          if (input.profile !== "hardened") return;
-          const secrets = await fetch("http://127.0.0.1:9901/stats?format=json&filter=^sds\\.tetral\\.runtime\\.direct_(leaf|validation)\\.update_success$", { signal: AbortSignal.timeout(500) });
-          if (secrets.ok && hardenedRoutingSecretsReady(await secrets.json())) return;
-        }
-      } catch { /* bounded startup observation */ }
-      await Bun.sleep(100);
-    }
-    throw new Error("mandatory local proxy is unavailable");
-  } },
+  // The production gate runs against the fixture Envoy, whose admin port serves
+  // both readiness and SDS statistics.
+  bootstrap: { runtime: () => waitForRoutingProxy(input.profile, { readiness: "http://127.0.0.1:9901/ready", stats: "http://127.0.0.1:9901" }, 3000) },
 });
 let ready = false;
 const control = Bun.serve({ hostname: "0.0.0.0", port: 8888, fetch: async (request) => {

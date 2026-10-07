@@ -1419,6 +1419,29 @@ describe("Runtime Pod command entrypoint", () => {
 		}
 	});
 
+	test("production startup gates on the routing proxy for the configured transport profile", async () => {
+		const profiles: unknown[] = [];
+		const dependencies = await buildRuntimePodCommandDependencies({
+			config: { ...validConfig(), transportProfile: "hardened" },
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				routingProxyReady: async (profile) => {
+					profiles.push(profile);
+					throw new Error("routing proxy fixture stops startup");
+				},
+			},
+		});
+		try {
+			await expect(dependencies.app.start()).rejects.toThrow(
+				"runtime pod startup failed",
+			);
+			expect(profiles).toEqual(["hardened"]);
+		} finally {
+			await dependencies.app.shutdown().catch(() => undefined);
+			await dependencies.coreHosts.close();
+		}
+	});
+
 	test("production startup validates inbound TokenReview reviewer token and CA material before readiness", async () => {
 		for (const scenario of [
 			{ name: "missing reviewer token", token: "missing", ca: "valid" },

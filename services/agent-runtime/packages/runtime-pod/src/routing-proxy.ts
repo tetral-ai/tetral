@@ -1,8 +1,25 @@
+/** Local endpoints of the routing proxy attached to this Pod. */
+export interface RoutingProxyEndpoints {
+  /** Proxy readiness URL. */
+  readonly readiness: string;
+  /** Envoy admin base URL that serves `/stats`. */
+  readonly stats: string;
+}
+
+/** The fixed production endpoints: the Istio agent readiness port and the Envoy admin port. */
+export const routingProxyEndpoints: RoutingProxyEndpoints = Object.freeze({
+  readiness: "http://127.0.0.1:15021/healthz/ready",
+  stats: "http://127.0.0.1:15000",
+});
+
 /** Both named SDS resources must have accepted initial resources before admission. */
-export async function hardenedRoutingListenerReady(timeoutMs: number): Promise<boolean> {
+export async function hardenedRoutingListenerReady(
+  timeoutMs: number,
+  statsBase: string = routingProxyEndpoints.stats,
+): Promise<boolean> {
   try {
     const response = await fetch(
-      "http://127.0.0.1:15000/stats?format=json&filter=^sds\\.tetral\\.runtime\\.direct_(leaf|validation)\\.update_success$",
+      `${statsBase}/stats?format=json&filter=^sds\\.tetral\\.runtime\\.direct_(leaf|validation)\\.update_success$`,
       {
         signal: AbortSignal.timeout(timeoutMs),
       },
@@ -68,22 +85,29 @@ export function hardenedRoutingSecretsReady(parsed: unknown): boolean {
 /**
  * Startup depends on the routed proxy attached to this Pod, with a fixed local readiness target:
  * it waits at most 30 seconds for `127.0.0.1:15021/healthz/ready` and, in the hardened profile,
- * for both direct-listener SDS resources reported by the local admin endpoint.
+ * for both direct-listener SDS resources reported by the local admin endpoint. Production always
+ * uses these endpoints and deadline; they are parameters only so local fixtures can run this
+ * same gate against their own proxy.
  */
 export async function waitForRoutingProxy(
   profile: "standard-routed" | "hardened" = "standard-routed",
+  endpoints: RoutingProxyEndpoints = routingProxyEndpoints,
+  deadlineMs = 30_000,
 ): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("http://127.0.0.1:15021/healthz/ready", {
+      const response = await fetch(endpoints.readiness, {
         signal: AbortSignal.timeout(Math.min(1000, deadline - Date.now())),
       });
       await response.body?.cancel();
       if (
         response.ok &&
         (profile !== "hardened" ||
-          (await hardenedRoutingListenerReady(Math.min(1000, Math.max(1, deadline - Date.now())))))
+          (await hardenedRoutingListenerReady(
+            Math.min(1000, Math.max(1, deadline - Date.now())),
+            endpoints.stats,
+          )))
       )
         return;
     } catch {
