@@ -477,12 +477,13 @@ func separatedServiceContractChange(paths []string) bool {
 
 // integrationInputChange reports non-Go inputs that integration compositions
 // render or execute, which Go import traversal cannot see: the direct Runtime
-// TLS fixture renders deploy/helm/tetral, the OIDC SDK composition runs the
-// integration/testdata/oidc-* Bun driver, and every local NATS broker projects
-// its client policy from the NATS release values.
+// TLS and Envoy Gateway fixtures render deploy/helm/tetral, the Envoy Gateway
+// translation reads the deploy/envoy-gateway prerequisite resources, the OIDC
+// SDK composition runs the integration/testdata/oidc-* Bun driver, and every
+// local NATS broker projects its client policy from the NATS release values.
 func integrationInputChange(paths []string) bool {
 	for _, path := range paths {
-		for _, prefix := range []string{"deploy/helm/tetral/", "integration/testdata/oidc-"} {
+		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/", "integration/testdata/oidc-"} {
 			if strings.HasPrefix(path, prefix) {
 				return true
 			}

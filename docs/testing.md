@@ -97,11 +97,17 @@ Runtime pod and Provider Gateway `test/fixtures/` directories.
 Each selects the durable Go compositions and both TypeScript consumers, even
 when the changed fixture has no Go import edge.
 Service-owned `k8s/` changes select deployment evidence, including the raw
-manifest invariants, Helm rendering tests and Helm lint. Helm chart changes
-under `deploy/helm/tetral/` also select the integration package, because its
-direct Runtime TLS composition renders that chart. OIDC SDK driver changes
-under `integration/testdata/oidc-*` likewise select the integration package,
-because `TestOIDCKeycloakSDK` executes that Bun driver. Changes to
+manifest invariants, Helm rendering tests and Helm lint. Deployment evidence
+also runs the tests of the nested `integration/envoy-gateway-secret-helper`
+module with the Go toolchain that `deploy/dependencies.lock.json` selects; the
+root package listing excludes nested modules, so no Go profile reaches them,
+and a change confined to that module selects deployment evidence. Helm chart
+changes under `deploy/helm/tetral/` also select the integration package,
+because its direct Runtime TLS and Envoy Gateway compositions render that
+chart. Changes under `deploy/envoy-gateway/` likewise select the integration
+package, because the Envoy Gateway translation reads its GatewayClass. OIDC SDK
+driver changes under `integration/testdata/oidc-*` select the integration
+package too, because `TestOIDCKeycloakSDK` executes that Bun driver. Changes to
 `deploy/nats/values.yaml` or `values-hardened.yaml` select the integration and
 `internal/testinfra` packages, because the runner's broker and the integration
 TLS cluster project their client policy from those values. Unknown ownership

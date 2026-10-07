@@ -728,7 +728,7 @@
       "kind": "deployment",
       "profiles": ["affected", "full"],
       "dependencies": ["bun-workspaces"],
-      "paths": ["deploy/**", "services/*/k8s/**"]
+      "paths": ["deploy/**", "services/*/k8s/**", "integration/envoy-gateway-secret-helper/**"]
     },
     {
       "id": "sandbox-image",

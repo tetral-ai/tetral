@@ -109,6 +109,50 @@ func TestAffectedTranslatorChangesExecuteNestedGraphSecurity(t *testing.T) {
 	}
 }
 
+// A change confined to the nested SecretType helper module selects deployment
+// evidence, whose commands run the helper's own tests with the locked toolchain.
+func TestAffectedSecretHelperChangesRunNestedModuleTests(t *testing.T) {
+	root := repositoryRootForTest(t)
+	lock, err := loadEdgeDependencyLock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"integration/envoy-gateway-secret-helper/main_test.go", "integration/envoy-gateway-secret-helper/go.mod"} {
+		t.Run(path, func(t *testing.T) {
+			revision := Revision{ChangedPaths: []string{path}}
+			selections, err := affectedSelections(root, inventory, &revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if revision.FullFallbackCause != "" {
+				t.Fatalf("helper change fell back to Full: %s", revision.FullFallbackCause)
+			}
+			plan, err := SelectPlan(Plan{Profile: ProfileAffected, Revision: revision, Selections: selections}, []string{"deployment"}, 0, 1)
+			if err != nil || len(plan.Selections) != 1 {
+				t.Fatalf("helper change omitted deployment evidence: %v", err)
+			}
+			commands, err := commandsForSelection(plan, plan.Selections[0], root, t.TempDir(), DependencyAuditChanged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for _, command := range commands {
+				if command.WorkingDir == "integration/envoy-gateway-secret-helper" && slices.Equal(command.Arguments, []string{"go", "test", "-mod=readonly", "-count=1", "./..."}) &&
+					slices.Equal(command.Environment, []string{"GOTOOLCHAIN=" + lock.Gateway.SecretHelper.Toolchain}) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("Affected deployment evidence runs the nested helper tests %d times", count)
+			}
+		})
+	}
+}
+
 func TestHostNetworkFixtureRejectsConflictingNetworkControls(t *testing.T) {
 	for _, spec := range []ContainerSpec{
 		{HostNetwork: true, Network: "bridge"}, {HostNetwork: true, NetworkContainer: &DockerContainer{}},

@@ -236,8 +236,11 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 }
 
 type commandSpec struct {
-	Arguments         []string
-	WorkingDir        string
+	Arguments  []string
+	WorkingDir string
+	// Environment entries replace same-named variables of the isolated
+	// process environment for this command only.
+	Environment       []string
 	Artifact          string
 	Kind              string
 	RejectSkip        bool
@@ -340,9 +343,20 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 			{Arguments: []string{"./scripts/check-sdk-compatibility-traceability.sh"}},
 		}, nil
 	case "deployment":
+		lock, err := loadEdgeDependencyLock(root)
+		if err != nil {
+			return nil, err
+		}
+		toolchain := lock.Gateway.SecretHelper.Toolchain
+		if toolchain == "" {
+			return nil, errors.New("edge dependency lock names no SecretType helper toolchain")
+		}
 		return []commandSpec{
 			{Arguments: []string{"go", "test", "-count=1", "./deploy/kubernetes", "./deploy/helm", "./deploy/istio", "./deploy/nats"}},
 			{Arguments: []string{"helm", "lint", "deploy/helm/tetral"}},
+			// The nested SecretType helper module is outside the root package
+			// listing; its tests run with the toolchain the lock selects.
+			{Arguments: []string{"go", "test", "-mod=readonly", "-count=1", "./..."}, WorkingDir: "integration/envoy-gateway-secret-helper", Environment: []string{"GOTOOLCHAIN=" + toolchain}},
 		}, nil
 	case "security":
 		commands := []commandSpec{
@@ -434,6 +448,10 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	}
 	descendantRegistry := filepath.Join(outputDir, "descendants-"+sanitizeArtifact(group)+"-"+fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(spec.Arguments, "\x00"))))[:12]+".txt")
 	environment = append(withoutEnvironmentVariable(environment, descendantRegistryEnv), descendantRegistryEnv+"="+descendantRegistry)
+	for _, entry := range spec.Environment {
+		name, _, _ := strings.Cut(entry, "=")
+		environment = append(withoutEnvironmentVariable(environment, name), entry)
+	}
 	artifactPath := ""
 	if spec.Artifact != "" {
 		artifactPath = filepath.Join(outputDir, spec.Artifact)

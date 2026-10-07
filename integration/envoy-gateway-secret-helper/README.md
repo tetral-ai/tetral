@@ -37,6 +37,11 @@ Safe failure diagnostics contain only the constant failing stage. The owning
 local edge fixture serves the original CLI resources plus these missing Secrets;
 it never reconstructs route policy or changes the pinned CLI.
 
+Tests: `TestUnusedControlPlaneTLSFailure` and `TestUpstreamProxyDrainArguments`
+run in the repository's deployment evidence with the Go toolchain the Engine
+dependency lock selects, because the root package listing excludes this
+nested module.
+
 Native test prerequisites verify the official `egctl` archive and version,
 build this module with `-mod=readonly`, and own cleanup. The Engine dependency
 lock declares the exact helper module/version/toolchain. Both module and symbol

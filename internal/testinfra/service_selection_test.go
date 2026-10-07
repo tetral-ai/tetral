@@ -163,21 +163,35 @@ func TestSeparatedServiceManifestSelectionExecutesRawAndHelmInvariants(t *testin
 			t.Errorf("%s omitted deployment evidence", changed)
 		}
 	}
-	commands, err := commandsForSelection(Plan{}, Selection{Group: "deployment"}, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+	root := repositoryRootForTest(t)
+	lock, err := loadEdgeDependencyLock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands, err := commandsForSelection(Plan{}, Selection{Group: "deployment"}, root, t.TempDir(), DependencyAuditChanged)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var raw, rendered, issuer, lint bool
+	helper := 0
 	for _, command := range commands {
 		if len(command.Arguments) >= 2 && slices.Equal(command.Arguments[:2], []string{"go", "test"}) {
 			raw = raw || slices.Contains(command.Arguments, "./deploy/kubernetes")
 			rendered = rendered || slices.Contains(command.Arguments, "./deploy/helm")
 			issuer = issuer || slices.Contains(command.Arguments, "./deploy/istio")
+			// The nested SecretType helper module is outside the root package
+			// listing, so deployment evidence runs its tests with the locked toolchain.
+			if command.WorkingDir == "integration/envoy-gateway-secret-helper" {
+				helper++
+				if !slices.Equal(command.Environment, []string{"GOTOOLCHAIN=" + lock.Gateway.SecretHelper.Toolchain}) {
+					t.Fatalf("secret helper tests toolchain environment=%v want the locked %s", command.Environment, lock.Gateway.SecretHelper.Toolchain)
+				}
+			}
 		}
 		lint = lint || slices.Equal(command.Arguments, []string{"helm", "lint", "deploy/helm/tetral"})
 	}
-	if !raw || !rendered || !issuer || !lint {
-		t.Fatalf("deployment execution raw=%v rendered=%v issuer=%v lint=%v; all are required", raw, rendered, issuer, lint)
+	if !raw || !rendered || !issuer || !lint || helper != 1 {
+		t.Fatalf("deployment execution raw=%v rendered=%v issuer=%v lint=%v helper=%d; all are required once", raw, rendered, issuer, lint, helper)
 	}
 }
 
