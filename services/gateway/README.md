@@ -65,8 +65,10 @@ thread role, and visibility from its loaded identity.
 Fragment starts, deltas, ends, and streamed tool arguments stay inside Gateway's
 private normalized union. The assembler checks their lifecycle, immutable tool
 names, completion uniqueness, Unicode scalars, final metadata, and successful EOF.
-Finish cannot hide an open text/reasoning block or tool input awaiting its complete
-call. A provider attempt closes the credential failover fence at its first private
+Streamed tool argument bytes count against the live retained-content budget until
+their complete call arrives; Gateway keeps no argument copy, and the SDK's
+complete call JSON is the authoritative input. Finish cannot hide an open
+text/reasoning block or tool input awaiting its complete call. A provider attempt closes the credential failover fence at its first private
 normalized event, even when the assembler has emitted no complete frame yet.
 
 Text IDs are allocated on first nonempty content; empty text blocks produce no
@@ -362,7 +364,10 @@ it preserves the stated invariants and passes the named suites.
   recorded content, step results and stream tees are absent. Completed content
   and record counts are diagnostics, not request-lifetime rejection rules.
   `providers/block-assembler.ts` coalesces text/reasoning segments and bounds live
-  content, open blocks, identities, segments and request-wide reasoning. Existing
+  content, open blocks, identities, segments and request-wide reasoning. Live
+  content includes streamed Tool arguments until their complete call arrives;
+  compatible adapters may retain their copy until stream release, so this charge
+  bounds in-flight arguments rather than measuring SDK retention. Existing
   canonical per-block, Tool and metadata bounds still apply. Required metadata
   overflow fails explicitly rather than silently dropping a signature.
 - **HTTP ownership.** `providers/transport.ts` uses pinned official Undici's public

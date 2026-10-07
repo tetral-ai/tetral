@@ -57,9 +57,10 @@ describe("Gateway complete block ownership",()=>{
   const {assembler,send}=setup({bounds:{coalesceCodeUnits:8,maxSegments:2}}); send({type:"text-start",id:"t"}); for(let i=0;i<16;i++) send({type:"text-delta",id:"t",delta:"a"}); expect(assembler.resources.segments).toBe(2); expect(send({type:"text-end",id:"t"})[0]?.textComplete?.text).toBe("a".repeat(16)); expect(assembler.resources.segments).toBe(0);
   send({type:"text-start",id:"u"}); for(let i=0;i<16;i++) send({type:"text-delta",id:"u",delta:"b"}); expect(()=>send({type:"text-delta",id:"u",delta:"c"})).toThrow(ProviderAssemblyLimitError);
  });
- test("tool input is not retained twice and completion needs closed lifecycle",()=>{
-  const {assembler,send}=setup(); send({type:"tool-input-start",id:"call",name:"Search"},{type:"tool-input-delta",id:"call",delta:"x".repeat(100000)}); expect(assembler.resources.retainedBytes).toBe(2); expect(()=>send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})).toThrow(ProviderIncompleteStreamError);
-  send({type:"tool-input-end",id:"call"}); expect(send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})[0]?.toolCallComplete).toEqual({modelToolCallId:"call",name:"Search",inputJson:'{"q":"x"}',providerMetadataJson:"{}"}); expect(()=>send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})).toThrow(ProviderIncompleteStreamError);
+ test("streamed tool input stays charged once until its complete call and completion needs closed lifecycle",()=>{
+  // 100000 streamed argument bytes plus the 2-byte empty metadata object.
+  const {assembler,send}=setup(); send({type:"tool-input-start",id:"call",name:"Search"},{type:"tool-input-delta",id:"call",delta:"x".repeat(100000)}); expect(assembler.resources.retainedBytes).toBe(100002); expect(()=>send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})).toThrow(ProviderIncompleteStreamError);
+  send({type:"tool-input-end",id:"call"}); expect(send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})[0]?.toolCallComplete).toEqual({modelToolCallId:"call",name:"Search",inputJson:'{"q":"x"}',providerMetadataJson:"{}"}); expect(assembler.resources.retainedBytes).toBe(0); expect(()=>send({type:"tool-call",id:"call",name:"Search",input:{q:"x"}})).toThrow(ProviderIncompleteStreamError);
  });
  test("closed identities stay unique and finish cannot hide open content",()=>{
   const {send}=setup(); send({type:"text-start",id:"t"},{type:"text-end",id:"t"}); expect(()=>send({type:"text-start",id:"t"})).toThrow(ProviderIncompleteStreamError); const other=setup(); other.send({type:"text-start",id:"open"}); expect(()=>other.send({type:"finish",finishReason:"stop"})).toThrow(ProviderIncompleteStreamError);
@@ -116,22 +117,31 @@ describe("Gateway private fragment lifecycle rejection", () => {
 
 
 describe("streamed tool argument accounting",()=>{
- test("counts streamed arguments before completion without retaining a second payload",()=>{
+ test("charges streamed arguments to the live budget until completion without retaining a second payload",()=>{
   const {assembler,send}=setup();
   send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:"    {}"});
-  expect(assembler.resources).toMatchObject({cumulativeContentBytes:6,retainedBytes:2,segments:0});
+  // Six streamed argument bytes plus the 2-byte empty metadata object.
+  expect(assembler.resources).toMatchObject({cumulativeContentBytes:6,retainedBytes:8,segments:0});
   send({type:"tool-input-end",id:"call"});
   expect(send({type:"tool-call",id:"call",name:"Read",input:{}})[0]?.toolCallComplete?.inputJson).toBe("{}");
   expect(assembler.resources.retainedBytes).toBe(0);
   assembler.release();expect(assembler.resources.cumulativeContentBytes).toBe(0);
  });
- test("processed Tool argument bytes do not consume the live assembly budget",()=>{
-  const {assembler,send}=setup({bounds:{maxRetainedBytes:2}});
-  send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:"    "});
-  send({type:"tool-input-delta",id:"call",delta:" {}"},{type:"tool-input-end",id:"call"});
-  expect(assembler.resources).toMatchObject({cumulativeContentBytes:7,retainedBytes:2});
+ test("streamed Tool arguments exactly at the live budget complete and release their charge",()=>{
+  const {assembler,send}=setup({bounds:{maxRetainedBytes:64}});
+  send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:" ".repeat(60)+"{}"});
+  expect(assembler.resources).toMatchObject({cumulativeContentBytes:62,retainedBytes:64});
+  send({type:"tool-input-end",id:"call"});
   expect(send({type:"tool-call",id:"call",name:"Read",input:{}})[0]?.toolCallComplete?.inputJson).toBe("{}");
   expect(assembler.resources.retainedBytes).toBe(0);
+ });
+ test("streamed Tool arguments one byte over the live budget fail as retained bytes",()=>{
+  const {send}=setup({bounds:{maxRetainedBytes:64}});
+  send({type:"tool-input-start",id:"call",name:"Read"});
+  let failure:unknown;
+  try { send({type:"tool-input-delta",id:"call",delta:" ".repeat(61)+"{}"}); } catch (error) { failure=error; }
+  expect(failure).toBeInstanceOf(ProviderAssemblyLimitError);
+  expect((failure as ProviderAssemblyLimitError).reason).toBe("retained_bytes");
  });
  test("split Unicode arguments count joined UTF8 and reject incomplete scalars",()=>{
   const {assembler,send}=setup();send({type:"tool-input-start",id:"call",name:"Read"},{type:"tool-input-delta",id:"call",delta:'{"q":"\ud83d'},{type:"tool-input-delta",id:"call",delta:'\ude00"}'},{type:"tool-input-end",id:"call"});

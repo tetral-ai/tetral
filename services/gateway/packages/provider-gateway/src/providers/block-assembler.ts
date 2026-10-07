@@ -46,7 +46,7 @@ export class ProviderIncompleteStreamError extends Error {
   }
 }
 export class ProviderAssemblyLimitError extends Error {
-  constructor(readonly reason: "retained_bytes" | "cumulative_bytes" | "open_blocks" | "identities" | "segments" | "text_bytes" | "reasoning_budget" | "metadata_bytes") {
+  constructor(readonly reason: "retained_bytes" | "open_blocks" | "identities" | "segments" | "text_bytes" | "reasoning_budget" | "metadata_bytes") {
     super("provider stream resource limit exceeded");
     this.name = "ProviderAssemblyLimitError";
   }
@@ -208,12 +208,18 @@ export class ProviderBlockAssembler {
   private toolInput(fragment: { readonly id: string; readonly name: string; readonly text: string; readonly metadataJson: string }, ended: boolean): void {
     const block = this.tools.get(fragment.id);
     if (block === undefined || block.ended || block.name !== fragment.name) throw this.incomplete("tool_input");
-    // The SDK retains the streamed arguments and also supplies complete JSON.
-    // Charge both copies without keeping another argument string here.
+    // The SDK adapter, not Gateway, retains the streamed argument text until it
+    // emits the complete call or the stream is released. Those bytes count
+    // toward the live retained-content budget until the complete call arrives;
+    // compatible adapters may keep their copy until stream release, so this
+    // bounds in-flight arguments rather than measuring SDK retention. Gateway
+    // keeps no argument string. cumulativeContentBytes is a diagnostic counter
+    // that is never compared to a limit.
     const previous = block.accounting.rawBytes;
     block.accounting.append(fragment.text);
     if (ended) block.accounting.finish();
-    this.cumulativeContentBytes += block.accounting.rawBytes - previous;
+    const added = block.accounting.rawBytes - previous;
+    this.retainedBytes += added; this.cumulativeContentBytes += added;
     const metadata = mergeMetadata(block.metadata, parseMetadata(fragment.metadataJson));
     const size = jsonBytes(metadata); this.retainedBytes += size - block.metadataBytes;
     block.metadata = metadata; block.metadataBytes = size; block.ended = ended; this.check();
@@ -227,7 +233,7 @@ export class ProviderBlockAssembler {
     const metadata = mergeMetadata(prior?.metadata ?? {}, parseMetadata(call.metadataJson));
     const metadataJson = JSON.stringify(metadata);
     if (!validProviderMetadataJson(metadataJson)) throw new ProviderAssemblyLimitError("metadata_bytes");
-    if (prior !== undefined) { this.tools.delete(call.id); this.retainedBytes -= prior.metadataBytes; }
+    if (prior !== undefined) { this.tools.delete(call.id); this.retainedBytes -= prior.metadataBytes + prior.accounting.rawBytes; }
     this.cumulativeContentBytes += encoder.encode(call.inputJson).byteLength + encoder.encode(metadataJson).byteLength;
     this.contentStarted = true; this.check();
     return this.frame({ type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE,
