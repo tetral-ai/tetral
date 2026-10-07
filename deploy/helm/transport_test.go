@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -294,8 +295,27 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 			}
 		}
 	}
-	renderChart(t, helm, chart, "lifecycle.queueDrainMs=25000")
+	renderChart(t, helm, chart, "lifecycle.queueDrainMs=20000")
 	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=20000")
+}
+
+// git-proxy's process deadline equals its drain grace; the Pod grace adds a five-second signal
+// margin so the bounded shutdown diagnostic and database close run before the kubelet kills it.
+func TestGitProxyPodGraceReservesSignalMargin(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
+	for _, profile := range []string{"standard-routed", "hardened"} {
+		objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile))
+		deployment := objects["apps/v1|Deployment|tetral-system|git-proxy"]
+		drain, err := strconv.Atoi(transportEnv(t, deployment)["TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS"])
+		if err != nil {
+			t.Fatalf("%s git-proxy drain grace: %v", profile, err)
+		}
+		grace := fmt.Sprint(transportAt(t, deployment, "spec", "template", "spec", "terminationGracePeriodSeconds"))
+		if grace != strconv.Itoa(drain+5) {
+			t.Fatalf("%s git-proxy Pod grace=%s want drain grace %d plus 5", profile, grace, drain)
+		}
+	}
 }
 
 func TestProviderGatewayUsesScopedRouting(t *testing.T) {
@@ -429,16 +449,18 @@ func TestQueueAndWebDeploymentJoinBudget(t *testing.T) {
 		values []string
 		reason string
 	}{
-		{[]string{"lifecycle.queueDrainMs=25000", "lifecycle.cancelJoinMs=5001"}, "Queue drain and cancellation join must fit 30s"},
-		{[]string{"transport.profile=hardened", "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Hardened Queue drain and cancellation join must fit 25s"},
+		{[]string{"lifecycle.queueDrainMs=25000", "lifecycle.cancelJoinMs=5000"}, "Queue drain and cancellation join must fit 25s"},
+		{[]string{"lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Queue drain and cancellation join must fit 25s"},
+		{[]string{"transport.profile=hardened", "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Queue drain and cancellation join must fit 25s"},
 		{[]string{"lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Web drain and cancellation join must fit 25s"},
 		{[]string{"transport.profile=hardened", "lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5001"}, "Web drain and cancellation join must fit 25s"},
 	} {
 		requireRenderError(t, helm, chart, append(append([]string{}, base...), entry.values...), entry.reason)
 	}
-	renderChart(t, helm, chart, "lifecycle.queueDrainMs=25000", "lifecycle.cancelJoinMs=5000")
+	renderChart(t, helm, chart, "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5000")
 	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=20000", "lifecycle.cancelJoinMs=5000")
-	// The hardened allowance follows the configured join rather than a5s copy.
+	// Both profiles' allowance follows the configured join rather than a5s copy.
+	renderChart(t, helm, chart, "lifecycle.queueDrainMs=24000", "lifecycle.cancelJoinMs=1000")
 	renderChart(t, helm, chart, "transport.profile=hardened", "lifecycle.queueDrainMs=24000", "lifecycle.cancelJoinMs=1000")
 	renderChart(t, helm, chart, "lifecycle.webDrainMs=20000", "lifecycle.cancelJoinMs=5000")
 }

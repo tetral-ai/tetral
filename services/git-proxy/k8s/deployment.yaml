@@ -24,7 +24,7 @@ spec:
     spec:
       serviceAccountName: git-proxy
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 1800
+      terminationGracePeriodSeconds: 1805
       containers:
         - name: git-proxy
           image: ghcr.io/tetral-ai/tetral:0.0.0-dev

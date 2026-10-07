@@ -129,9 +129,11 @@ introduce one.
 
 On SIGTERM: readiness flips false, the listener stops accepting, in-flight
 transfers run to completion within `DefaultDrainGraceSeconds`, then the process
-exits. New connections after SIGTERM are refused. Deployment sets
-`terminationGracePeriodSeconds >= DRAIN_GRACE_SECONDS`, so a rolling deploy
-never truncates a clone/push that fits the window. Sandboxes must be able to
+exits. New connections after SIGTERM are refused. The process deadline equals
+`DRAIN_GRACE_SECONDS`, and the Deployment's `terminationGracePeriodSeconds` is
+`DRAIN_GRACE_SECONDS` plus a five-second signal margin (1805 seconds), so a
+rolling deploy never truncates a clone/push that fits the window and the bounded
+shutdown diagnostic and database close run before the kubelet kills the process. Sandboxes must be able to
 reach the proxy host for git to work at all: a sandbox environment configured
 with a `cidr_allow_list` must include the proxy's published CIDR, or git is
 unavailable in that sandbox — documented behavior, not a defect.

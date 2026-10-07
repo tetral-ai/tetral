@@ -1498,7 +1498,7 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 
 	requireContains(t, deployment, "automountServiceAccountToken: false")
 	requireContains(t, deployment, "replicas: 2")
-	requireContains(t, deployment, "terminationGracePeriodSeconds: 1800")
+	requireContains(t, deployment, "terminationGracePeriodSeconds: 1805")
 	for envName, want := range map[string]string{ // #nosec G101 -- Kubernetes fixture env values, not credentials.
 		"TETRAL_GIT_PROXY_HTTP_ADDR":           ":8080",
 		"TETRAL_GIT_PROXY_METRICS_ADDR":        ":8081",

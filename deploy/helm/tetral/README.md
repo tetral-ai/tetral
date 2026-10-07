@@ -455,13 +455,14 @@ sets the final phase's per-Bridge-attempt cap through
 milliseconds and is clipped by the method, caller and remaining settlement
 deadline. It can exceed the total settlement phase and adds no time to Pod grace.
 Queue and Web receive the configured
-`cancelJoinMs` through `TETRAL_CANCEL_JOIN_TIMEOUT_MS`. Queue drain plus join must
-fit 30 seconds in the standard profile or 25 seconds in the hardened profile,
-which reserves five seconds for proxy shutdown. Web drain plus join must fit
-25 seconds in both profiles, preserving a five-second proxy margin. Queue and
+`cancelJoinMs` through `TETRAL_CANCEL_JOIN_TIMEOUT_MS`. Queue and Web drain plus
+join must each fit 25 seconds in both profiles, preserving a five-second
+signal/proxy margin. Queue and
 Web retain their typed drain maxima of 25 and 20 seconds respectively; a shorter
-configured join can increase the hardened Queue drain within those bounds.
-Both retain a 30-second Pod grace. Runner's default
+configured join can increase the Queue drain within those bounds.
+Both retain a 30-second Pod grace. git-proxy's Pod grace is its drain grace
+(`TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS`, 1800 seconds) plus a five-second
+signal margin. Runner's default
 30-second drain and five-second cancellation join fit its 45-second grace with
 five seconds each for resource joins and proxy drain. Provider Gateway and MCP
 retain separate 30-second business drains and configurable five-second forced

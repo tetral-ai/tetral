@@ -107,7 +107,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 		return Config{}, err
 	}
 	if drainMS <= 0 || drainMS > 25000 {
-		return Config{}, workload.NewConfigError(EnvDrainTimeoutMS + " must be between 1 and 25000 milliseconds, leaving join time inside the 30-second Pod grace")
+		return Config{}, workload.NewConfigError(EnvDrainTimeoutMS + " must be between 1 and 25000 milliseconds, leaving cancellation join time inside the 25-second application allocation")
 	}
 	joinMS, err := nonNegativeOrDefault(env.Getenv("TETRAL_CANCEL_JOIN_TIMEOUT_MS"), 5000, "TETRAL_CANCEL_JOIN_TIMEOUT_MS")
 	if err != nil {
@@ -117,12 +117,11 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if profile != "" && profile != "standard-routed" && profile != "hardened" {
 		return Config{}, workload.NewConfigError("TETRAL_TRANSPORT_PROFILE must be standard-routed or hardened")
 	}
-	applicationMS := 30000
-	if profile == "hardened" || env.Getenv("TETRAL_ROUTING_PROXY_REQUIRED") == "true" {
-		applicationMS -= 5000
-	}
+	// Both profiles keep five seconds of the 30-second Pod grace for signal delivery and proxy
+	// shutdown, so the process deadline (drain plus join) always runs before the kubelet kills it.
+	const applicationMS = 25000
 	if joinMS <= 0 || joinMS > applicationMS-drainMS {
-		return Config{}, workload.NewConfigError("queue drain and cancellation join exceed the Pod application shutdown allocation")
+		return Config{}, workload.NewConfigError("queue drain and cancellation join must fit the 25-second application allocation inside the 30-second Pod grace")
 	}
 	return Config{
 		HTTPAddress:            httpAddress,

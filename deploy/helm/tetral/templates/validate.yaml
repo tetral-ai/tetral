@@ -83,5 +83,4 @@ that silently permits more than the default did.
 {{- if gt (int .Values.lifecycle.webDrainMs) 20000 }}{{ fail "Web drain must remain within its typed 20s limit" }}{{ end }}
 {{- if gt (add (int .Values.lifecycle.webDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Web drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}
 {{- if gt (int .Values.lifecycle.queueDrainMs) 25000 }}{{ fail "Queue drain must remain within its typed 25s limit" }}{{ end }}
-{{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 30000 }}{{ fail "Queue drain and cancellation join must fit 30s standard application allocation" }}{{ end }}
-{{- if and (eq .Values.transport.profile "hardened") (gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000) }}{{ fail "Hardened Queue drain and cancellation join must fit 25s application allocation, reserving 5s proxy margin" }}{{ end }}
+{{- if gt (add (int .Values.lifecycle.queueDrainMs) (int .Values.lifecycle.cancelJoinMs)) 25000 }}{{ fail "Queue drain and cancellation join must fit 25s application allocation, reserving 5s signal/proxy margin in 30s Pod grace" }}{{ end }}

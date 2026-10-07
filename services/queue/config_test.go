@@ -49,8 +49,8 @@ func TestQueueLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
 		profile, drain, join string
 		valid                bool
 	}{
-		{"standard-routed", "2000", "3000", true}, {"standard-routed", "25000", "5000", true}, {"standard-routed", "25000", "5001", false},
-		{"hardened", "20000", "5000", true}, {"hardened", "20001", "5000", false}, {"hardened", "2000", "0", false},
+		{"standard-routed", "2000", "3000", true}, {"standard-routed", "20000", "5000", true}, {"standard-routed", "25000", "5000", false}, {"standard-routed", "20001", "5000", false},
+		{"hardened", "20000", "5000", true}, {"hardened", "20001", "5000", false}, {"hardened", "24000", "1000", true}, {"hardened", "2000", "0", false},
 		{"standard-routed", "2000", "9223372036854775807", false},
 		{"unknown", "2000", "3000", false},
 	} {
@@ -61,12 +61,6 @@ func TestQueueLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
 		if tc.valid && tc.join == "3000" && cfg.CancelJoinTimeout != 3*time.Second {
 			t.Fatal("join configuration lost")
 		}
-	}
-}
-
-func TestQueueExplicitProxyReservesJoinAllocation(t *testing.T) {
-	if _, err := ConfigFromEnv(configEnv{EnvDrainTimeoutMS: "20001", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000", "TETRAL_ROUTING_PROXY_REQUIRED": "true"}); err == nil {
-		t.Fatal("explicit proxy was omitted from shutdown allocation")
 	}
 }
 
