@@ -13,6 +13,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -40,9 +41,9 @@ func TestPostgreSQLToolSettlementReplayTransactions(t *testing.T) {
 			if err != nil || len(born.Data) != 1 {
 				t.Fatalf("owning public confirmation service=%v/%v", born, err)
 			}
-			request := bridgeToolSettlementRequestForTest(f.scope, bridgeCompletedToolSettlementForTest(toolID, "fixture-result"))
+			request := sessionfixture.BridgeToolSettlementRequestForTest(f.scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "fixture-result"))
 			if variant == "late-success-after-error" {
-				request.Settlement = bridgeErrorToolSettlementForTest(toolID, "fixed terminal error")
+				request.Settlement = sessionfixture.BridgeErrorToolSettlementForTest(toolID, "fixed terminal error")
 			}
 			fault := &contentSettlementResponseFault{BridgeAPIServer: NewBridgeAPIServer(f.store), lose: variant == "committed-response-loss"}
 			client, _ := startSandboxProductionBoundaryBridgeClient(t, fault, f.scope.Binding.TargetPodUid)
@@ -96,7 +97,7 @@ func TestPostgreSQLToolSettlementReplayTransactions(t *testing.T) {
 			}
 			if variant == "changed-completed-outcome" || variant == "late-success-after-error" {
 				changed := proto.Clone(request).(*bridgev1.SettleToolResultRequest)
-				changed.Settlement = bridgeCompletedToolSettlementForTest(toolID, "late changed success")
+				changed.Settlement = sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "late changed success")
 				if response, err := second.SettleToolResult(ctx, changed); status.Code(err) != codes.AlreadyExists || response != nil {
 					t.Fatalf("changed terminal settlement=%v/%v", response, err)
 				}

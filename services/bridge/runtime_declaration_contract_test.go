@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -199,11 +200,11 @@ func TestRuntimeToolProjectionEnforcesCanonicalExecutionInputBound(t *testing.T)
 	if len(exact) != runtimecontrol.RuntimeToolInputJSONMaxBytes {
 		t.Fatalf("exact canonical execution input bytes = %d", len(exact))
 	}
-	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", exact, "allow", "sandbox_execute")); err != nil {
+	if _, err := normalizeRuntimeToolDeclaration(sessionfixture.BridgeToolDeclarationForTest("call", "apply_patch", exact, "allow", "sandbox_execute")); err != nil {
 		t.Fatalf("exact canonical execution input rejected: %v", err)
 	}
 	over := `{"patch":"` + strings.Repeat("x", runtimecontrol.RuntimeToolInputJSONMaxBytes-len(`{"patch":""}`)+1) + `"}`
-	if _, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "apply_patch", over, "allow", "sandbox_execute")); status.Code(err) != codes.InvalidArgument {
+	if _, err := normalizeRuntimeToolDeclaration(sessionfixture.BridgeToolDeclarationForTest("call", "apply_patch", over, "allow", "sandbox_execute")); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("oversized canonical execution input error = %v; want InvalidArgument", err)
 	}
 }
@@ -384,7 +385,7 @@ func TestRuntimeDeclarationStringifyPreservesSpansAndSeparatorEscapes(t *testing
 // Raw execution/provider tokens participate in custody identity, while provider
 // context decodes duplicate keys and keeps json.Number spellings for storage.
 func TestPreparedToolDeclarationPreservesRawIdentityAndDecodedContext(t *testing.T) {
-	declaration := bridgeToolDeclarationForTest("call", "read", `{"n":-0,"a":2,"\u0061":1.00,"large":9007199254740993,"e":1e+00}`, "allow", "sandbox_execute")
+	declaration := sessionfixture.BridgeToolDeclarationForTest("call", "read", `{"n":-0,"a":2,"\u0061":1.00,"large":9007199254740993,"e":1e+00}`, "allow", "sandbox_execute")
 	prepared, err := normalizeRuntimeToolDeclaration(declaration)
 	if err != nil {
 		t.Fatal(err)
@@ -414,7 +415,7 @@ func TestPreparedToolDeclarationPreservesRawIdentityAndDecodedContext(t *testing
 	}
 }
 func TestPreparedToolContextOwnsDecodedReasoningAndInput(t *testing.T) {
-	declaration := bridgeToolDeclarationForTest("call", "read", `{"x":{"y":1}}`, "allow", "sandbox_execute")
+	declaration := sessionfixture.BridgeToolDeclarationForTest("call", "read", `{"x":{"y":1}}`, "allow", "sandbox_execute")
 	declaration.LeadingReasoning = []*bridgev1.RuntimeContextReasoning{{Text: "original", ProviderMetadataJson: bridgeString(`{"x":{"y":2}}`)}}
 	prepared, err := normalizeRuntimeToolDeclaration(declaration)
 	if err != nil {
@@ -515,7 +516,7 @@ func TestPreparedToolDeclarationDigestEncodingEquivalence(t *testing.T) {
 	}
 	for _, v := range vectors {
 		t.Run(v.name, func(t *testing.T) {
-			d := bridgeToolDeclarationForTest("call", "read", v.input, "allow", "sandbox_execute")
+			d := sessionfixture.BridgeToolDeclarationForTest("call", "read", v.input, "allow", "sandbox_execute")
 			d.DistinctProviderInputJson = v.provider
 			if v.reasoning {
 				metadata := `{"signature":"opaque\u2028\\u2029","nested":{"key":"\u2029"}}`
@@ -590,7 +591,7 @@ func TestPreparedToolDeclarationDigestEncodingEquivalence(t *testing.T) {
 	}
 
 	t.Run("fresh_owner_but_unowned_or_changed_envelope", func(t *testing.T) {
-		prepared, err := normalizeRuntimeToolDeclaration(bridgeToolDeclarationForTest("call", "read", `{"x":1}`, "allow", "sandbox_execute"))
+		prepared, err := normalizeRuntimeToolDeclaration(sessionfixture.BridgeToolDeclarationForTest("call", "read", `{"x":1}`, "allow", "sandbox_execute"))
 		if err != nil {
 			t.Fatal("normalize valid owner")
 		}

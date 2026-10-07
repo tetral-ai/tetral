@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -134,9 +135,9 @@ func TestContentTransportLimits(t *testing.T) {
 	for i, vector := range vectors {
 		t.Run(vector.name, func(t *testing.T) {
 			session, thread, binding := "sesn_content_size_"+vector.name, "sthr_content_size_"+vector.name, "bind_content_size_"+vector.name
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, "content-pod")
-			scope := bridgeAPIScope(session, thread, binding, 1, "content-pod")
+			scope := sessionfixture.BridgeAPIScope(session, thread, binding, 1, "content-pod")
 			seedBridgeAPIRequestStart(t, store, scope, "start", "content-request", "agent_provider_request", 0)
 			before := contentTransportDurableCounts(t, admin, session)
 			eventID := fmt.Sprintf("evt_%032x", i+1)
@@ -222,7 +223,7 @@ func TestContentTransportLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = conn.Close() }()
-		scope := bridgeAPIScope("sesn_content_size_at-text-limit", "sthr_content_size_at-text-limit", "bind_content_size_at-text-limit", 1, "content-pod")
+		scope := sessionfixture.BridgeAPIScope("sesn_content_size_at-text-limit", "sthr_content_size_at-text-limit", "bind_content_size_at-text-limit", 1, "content-pod")
 		base, err := proto.Marshal(&bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "raw-semantic-invalid", EventType: "session.status_running"})
 		if err != nil {
 			t.Fatal(err)

@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -52,7 +53,7 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 		bindingID = "bind_narrow_context"
 		podUID    = "pod_narrow_context"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
 	if _, err := admin.Exec(`INSERT INTO session_messages (
@@ -69,10 +70,10 @@ func TestLoadContextReturnsDirectNarrowContextFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	workload.RequirePrivilege(t, "skill_versions", "SELECT", func() error {
-		_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
+		_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 		return err
 	})
-	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
+	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 	if err != nil {
 		t.Fatalf("LoadContext: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 		podUID    = "pod_context_recovery_lease"
 		sourceID  = "evt_context_recovery_lease"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -130,7 +131,7 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 		t.Fatalf("lease recovery Queue job = %#v/%v", leased, err)
 	}
 	request := &bridgev1.LoadContextRequest{
-		Scope:         bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope:         sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 		SourceEventId: sourceID,
 		RecoveryLeaseRef: &bridgev1.RecoveryLeaseRef{
 			JobId: leased[0].ID, LeaseToken: leased[0].LeaseToken,
@@ -162,7 +163,7 @@ func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testin
 		bindingID = "bind_terminal_context"
 		podUID    = "pod_terminal_context"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -233,7 +234,7 @@ func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {
 		bindingID = "bind_bad_narrow_context"
 		podUID    = "pod_bad_narrow_context"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.Exec(`INSERT INTO session_messages (
 		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,created_at,updated_at
@@ -243,7 +244,7 @@ func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("bad-context-test-signing-key")
-	_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
+	_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("LoadContext error = %v; want FailedPrecondition", err)
 	}

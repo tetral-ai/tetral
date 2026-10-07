@@ -18,6 +18,7 @@ import (
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -167,9 +168,9 @@ func seedAwaitExecutionNotificationFixture(t *testing.T, store *PostgreSQLBridge
 	threadID := "thr_exec_notify_" + suffix
 	bindingID := "bind_exec_notify_" + suffix
 	podUID := "pod_exec_notify_" + suffix
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableOrdinaryToolUseForTest(
 		t, store, scope, "mreq_exec_notify_"+suffix, "call_exec_notify_"+suffix,
 		"exec_command", `{"cmd":"printf ok"}`,
@@ -369,7 +370,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionWakesOnResultNotification(
 	tracer := &bridgeExecutionQueryTracer{}
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "wake")
-	seedReadySandboxForSharedToolExecution(t, admin, scope.GetWorkspaceId(), scope.GetSessionId())
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, scope.GetWorkspaceId(), scope.GetSessionId())
 	startAwaitExecutionResultListener(t, store, tracer)
 
 	// Drive the accepted Queue job through the real runner and terminal writer.
@@ -816,7 +817,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 	// advances.
 	otherWritten, err := storeOne.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_exec_notify_fanout_other_tool", ModelRequestId: "mreq_exec_notify_fanout",
-		ToolDeclaration: bridgeToolDeclarationWithRouteForTest("call_exec_notify_fanout_other", "exec_command", `{"cmd":"printf other"}`, "allow"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest("call_exec_notify_fanout_other", "exec_command", `{"cmd":"printf other"}`, "allow"),
 	})
 	if err != nil || otherWritten.GetCommitted() == nil {
 		t.Fatalf("write sibling durable Tool use: response=%#v err=%v", otherWritten, err)

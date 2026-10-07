@@ -9,6 +9,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestManifestServerSetIsSubsetOfColdToolPolicyMCPToolsets(t *testing.T) {
@@ -16,8 +17,8 @@ func TestManifestServerSetIsSubsetOfColdToolPolicyMCPToolsets(t *testing.T) {
 	const agentConfig = `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[],"mcp_servers":[],"skills":[],"metadata":{}}`
 	const installedConfig = `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"},{"type":"url","name":"unused","url":"https://unused.example/mcp/"}]}`
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_manifest_policy_subset")
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, agentConfig)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_manifest_policy_subset")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, agentConfig)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions SET installed_tools_json = $1 WHERE workspace_id = 'default' AND id = $2`, installedConfig, sessionID); err != nil {
 		t.Fatalf("seed installed tool policy: %v", err)

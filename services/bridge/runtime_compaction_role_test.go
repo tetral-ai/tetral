@@ -7,6 +7,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -18,19 +19,19 @@ func TestPostgreSQLBridgeCompactionRoleCommitsCheckpointAndConsumesPrefix(t *tes
 		}
 		t.Run(name, func(t *testing.T) {
 			_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			seedBridgeAPISession(t, admin, "default", "sesn_compaction_role", "thr_main")
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_compaction_role", "thr_main")
 			seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_compaction_role", "bind_compaction_role", 1, "pod_compaction_role")
 			workload := storagetest.OpenWorkloadDB(t, admin, "bridge")
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(workload.DB))
 			ctx := context.Background()
-			scope := bridgeAPIScope("sesn_compaction_role", "thr_main", "bind_compaction_role", 1, "pod_compaction_role")
+			scope := sessionfixture.BridgeAPIScope("sesn_compaction_role", "thr_main", "bind_compaction_role", 1, "pod_compaction_role")
 			running, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rw_running", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
 			if err != nil || running.GetCommitted() == nil {
 				t.Fatalf("start turn: %v, %v", running, err)
 			}
 			var prefix *bridgev1.PrefixConsumptionDraft
 			if child {
-				seedBridgeAPIChildThread(t, admin, "default", scope.SessionId, "thr_main", "thr_child")
+				sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", scope.SessionId, "thr_main", "thr_child")
 				if _, err := admin.Exec(`INSERT INTO session_thread_context_prefixes
 					(workspace_id,session_id,child_thread_id,parent_thread_id,parent_boundary_event_id,entries_json,created_at)
 					VALUES ('default',$1,'thr_child','thr_main',$2,'[]',now())`, scope.SessionId, running.GetCommitted().GetEventId()); err != nil {
@@ -47,7 +48,7 @@ func TestPostgreSQLBridgeCompactionRoleCommitsCheckpointAndConsumesPrefix(t *tes
 			request := &bridgev1.WriteRequestEndRequest{
 				Scope: scope, RuntimeWriteId: "rw_end", ModelRequestId: "mreq_compaction_role", FinishReason: "end_turn", UsageJson: `{}`,
 				ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "compacted"},
-				CompactionContext:        bridgeTextContextDeltaForTest("retained summary"), CompactedThroughMessageSequence: &boundary,
+				CompactionContext:        sessionfixture.BridgeTextContextDeltaForTest("retained summary"), CompactedThroughMessageSequence: &boundary,
 				CompactionEventPayloadJson: `{"type":"agent.thread_context_compacted"}`, PrefixConsumption: prefix,
 			}
 			workload.RequirePrivilege(t, "session_thread_context_prefixes", "UPDATE", func() error {

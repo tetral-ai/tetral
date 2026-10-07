@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -22,11 +23,11 @@ import (
 
 func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "termination_replay_binding")
-	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	scope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 	const committedInputID = "rin_termination_replay_binding"
 	seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, fixture.threadID,
 		"evt_termination_replay_input", 1, "user.message", `{"content":[{"type":"text","text":"settled"}]}`)
-	seedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID,
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID,
 		committedInputID, "messages", `["evt_termination_replay_input"]`, "accepted",
 		fixture.bindingID, fixture.podUID, 1, 1)
 	commitInputsRequest := &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: committedInputID}
@@ -59,7 +60,7 @@ func TestPostgreSQLRuntimeTerminationReceiptOwnsReplayAfterUnbinding(t *testing.
 		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
 	}
 	const deliveryID = "mail_termination_replay_binding"
-	seedAgentMailCustody(t, fixture.admin, fixture.sessionID, fixture.threadID, deliveryID, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
+	sessionfixture.SeedAgentMailCustody(t, fixture.admin, fixture.sessionID, fixture.threadID, deliveryID, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
 	const cleanupJobID = "cleanup_termination_replay_binding"
 	if _, err := fixture.admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_status
@@ -220,7 +221,7 @@ func newCloseoutSentinelFixture(t *testing.T, suffix string) closeoutSentinelFix
 	threadID := "thr_closeout_" + suffix
 	bindingID := "bind_closeout_" + suffix
 	podUID := "pod_uid_closeout_" + suffix
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	return closeoutSentinelFixture{

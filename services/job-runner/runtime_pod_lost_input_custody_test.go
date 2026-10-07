@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
@@ -39,10 +40,10 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 				jobID          = "qjob_pod_loss_active"
 			)
 			now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_queue_active", 1, "user.message", `{"type":"user.message"}`)
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_active"]`, test.inboxStatus, bindingID, podUID, 1, 1)
 
 			queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 			request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
@@ -137,11 +138,11 @@ func TestPostgreSQLRuntimePodLossLeavesExhaustedInterruptForCurrentLeaseTerminal
 		jobID          = "qjob_lost_interrupt"
 	)
 	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["evt_lost_interrupt_barrier"]`, "delivering", oldBindingID, oldPodUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["evt_lost_interrupt_barrier"]`, "delivering", oldBindingID, oldPodUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), queue.RetryPolicy{
 		BaseDelay: time.Second, MaxDelay: time.Second, MaxAttempts: 2,
@@ -221,9 +222,9 @@ func TestPostgreSQLRuntimePodLossReplacesOnlyAcknowledgedQueueCustody(t *testing
 		originalJobID  = "qjob_pod_loss_acked"
 	)
 	now := time.Date(2026, 8, 10, 13, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_acked"]`, "accepted", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_acked"]`, "accepted", bindingID, podUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
@@ -293,8 +294,8 @@ func TestPostgreSQLRuntimeDeliveryAcknowledgesReclaimedJobAlreadyAcceptedByLiveB
 		jobID          = "qjob_reclaimed_live"
 	)
 	now := time.Date(2026, 8, 10, 13, 30, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://example.test/mcp"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://example.test/mcp"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json =
 		'{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://example.test/mcp"}]}'
 		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
@@ -302,7 +303,7 @@ func TestPostgreSQLRuntimeDeliveryAcknowledgesReclaimedJobAlreadyAcceptedByLiveB
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_reclaimed_live_binding", 1, "user.message", `{"content":[{"type":"text","text":"accepted"}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_reclaimed_live_binding"]`, "accepted", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_reclaimed_live_binding"]`, "accepted", bindingID, podUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", sessionID, runtimecontrol.AcceptedRuntimeInput{
@@ -366,9 +367,9 @@ func TestPostgreSQLRuntimePodLossRejectsDeliveringInputWithoutActiveQueueCustody
 		bindingID      = "bind_pod_loss_queue_missing"
 		podUID         = "pod_pod_loss_queue_missing"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_missing"]`, "delivering", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["evt_pod_loss_queue_missing"]`, "delivering", bindingID, podUID, 1, 1)
 
 	client := dbconnect.NewClientForTesting(runtime)
 	err := client.WithWorkspaceTx(context.Background(), "default", "test.runtime_pod_loss_missing_queue_custody", func(tx *dbconnect.Tx) error {

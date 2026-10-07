@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 )
@@ -26,7 +27,7 @@ func seedCompletionMailSentAt(
 ) {
 	t.Helper()
 	eventID := "evt_" + deliveryID
-	messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "sender", deliveryID))
+	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "sender", deliveryID))
 	seedBridgeAPIEvent(
 		t,
 		db,
@@ -36,7 +37,7 @@ func seedCompletionMailSentAt(
 		eventID,
 		sequence,
 		"agent.thread_message_sent",
-		bridgeInterAgentSentEventJSON(
+		sessionfixture.BridgeInterAgentSentEventJSON(
 			t,
 			deliveryID,
 			sourceThreadID,
@@ -63,7 +64,7 @@ func seedCompletionMailSentAt(
 	if err != nil {
 		t.Fatalf("parse completion mail creation time: %v", err)
 	}
-	seedAgentMailCustody(t, db, sessionID, targetThreadID, deliveryID, created)
+	sessionfixture.SeedAgentMailCustody(t, db, sessionID, targetThreadID, deliveryID, created)
 }
 
 func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
@@ -77,8 +78,8 @@ func TestPostgreSQLAgentMailPrepareLocksSessionBeforeInbox(t *testing.T) {
 		delivery  = "delivery_agent_mail_lock_order"
 	)
 	now := time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedCompletionMailSentAt(t, admin, sessionID, mainID, childID, delivery, 1, "2026-01-01T00:00:00Z")
 

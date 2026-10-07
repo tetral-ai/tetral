@@ -11,6 +11,7 @@ import (
 	kubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	runtimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -54,9 +55,9 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 			store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 			sessions := []string{"sesn_worker_drain_a2", "sesn_worker_successor_a2"}
 			for _, session := range sessions {
-				seedBridgeAPISession(t, admin, "default", session, "thr_"+session)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", session, "thr_"+session)
 				seedBridgeAPIRuntimeBinding(t, admin, "default", session, "bind_"+session, 1, "pod_old")
-				seedRuntimePodLostStatusFence(t, admin, session, "bind_"+session, 1)
+				sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, "bind_"+session, 1)
 			}
 			if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'`); err != nil {
 				t.Fatal(err)

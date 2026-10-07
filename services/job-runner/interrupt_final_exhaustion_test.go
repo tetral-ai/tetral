@@ -9,6 +9,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
@@ -24,10 +25,10 @@ func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *tes
 		eventID   = "evt_interrupt_stale_finalizer"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
 
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, now)
@@ -94,7 +95,7 @@ func TestPostgreSQLJobRunnerLosingInterruptLeaseBeforeReplayCannotCancelMessages
 		messageEvent   = "evt_interrupt_stale_runner_message"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEvent, 3, "user.message", `{"content":[{"type":"text","text":"before interrupt"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -165,7 +166,7 @@ func TestPostgreSQLInterruptLeaseLossAfterReplayStopsBeforePreparationAndSend(t 
 		inputID   = "rin_interrupt_post_replay_lease_loss"
 		eventID   = "evt_interrupt_post_replay_lease_loss"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
@@ -248,14 +249,14 @@ func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSibl
 		interruptEvent  = "evt_child_interrupt_final_exhaustion"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_child_interrupt_final_created", 1,
 		"session.thread_created", `{"type":"session.thread_created","parent_thread_id":"`+mainThreadID+`","source_tool_use_event_id":"evt_child_interrupt_final_spawn"}`)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
-	scope := bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	scope := sessionfixture.BridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 		SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id IN ($2,$3)`,
@@ -318,9 +319,9 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 		eventID   = "evt_malformed_interrupt_terminal"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -399,9 +400,9 @@ func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *t
 		eventID   = "evt_interrupt_post_plan_takeover"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), "evt_interrupt_post_plan_turn")
+	seedBridgeAPIOpenDurableTurn(t, admin, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), "evt_interrupt_post_plan_turn")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 2, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -541,9 +542,9 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 		followerID  = "rin_invalid_final_interrupt_follower"
 		followerEvt = "evt_invalid_final_interrupt_follower"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, followerEvt, 2, "user.message", `{"content":[{"type":"text","text":"wait behind interrupt"}]}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
@@ -631,9 +632,9 @@ func TestPostgreSQLMalformedInterruptFinalizationRollbackPreservesExactLease(t *
 		inputID   = "rin_malformed_interrupt_rollback"
 		eventID   = "evt_malformed_interrupt_rollback"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -684,9 +685,9 @@ func TestPostgreSQLMalformedInterruptResponseLossReplaysTerminalResult(t *testin
 		inputID   = "rin_malformed_interrupt_replay"
 		eventID   = "evt_malformed_interrupt_replay"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,

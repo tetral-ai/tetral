@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func settleBridgeAPIBackgroundTask(t *testing.T, admin *sql.DB, sessionID string, taskID string, terminalStatus string, resultJSON string) {
@@ -48,7 +49,7 @@ func TestRuntimeTaskNotificationPayloadAcceptsSandboxFailureEnvelope(t *testing.
 
 func TestPostgreSQLRuntimeDeliveryReplayKeepsGenuineTaskNotificationExhaustionTerminal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_task_exhaustion", "thr_task_exhaustion")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_task_exhaustion", "thr_task_exhaustion")
 	job := RuntimeJob{
 		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: "sesn_task_exhaustion",
 		SessionThreadID: "thr_task_exhaustion", RuntimeInputID: "task_notification:task_exhaustion", InputKind: "task_notification",

@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -56,7 +57,7 @@ func newSeparatedOwners(t *testing.T, suffix string, mcp bool) *separatedOwners 
 	if mcp {
 		seedMCPFamilySession(t, admin, f.sessionID, f.threadID, "claude")
 	} else {
-		seedBridgeAPISession(t, admin, "default", f.sessionID, f.threadID)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", f.sessionID, f.threadID)
 	}
 	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, f.sessionID); err != nil {
 		t.Fatalf("seed Session runtime-status invariant: %v", err)

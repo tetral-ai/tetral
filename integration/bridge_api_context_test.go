@@ -9,6 +9,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -24,8 +25,8 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 		firstRequestID = "mreq_closed_retry_first"
 		retryRequestID = "mreq_closed_retry_success"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_closed_retry_child_created", 1,
 		"session.thread_created", `{"type":"session.thread_created","parent_thread_id":"`+parentThreadID+`","source_tool_use_event_id":"evt_closed_retry_spawn"}`)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
@@ -33,7 +34,7 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 	store.RuntimeBindingTokenHMACKey = []byte("closed-retry-context-signing-key")
 	acceptedAt := time.Date(2026, 8, 22, 4, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }
-	scope := bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
 
 	running, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_closed_retry_running",
@@ -76,7 +77,7 @@ func TestLoadContextClosedRetryRetainsOwningRunningFactAcrossReschedule(t *testi
 	actorClient := startActorProductionBridge(t, runtimeDB)
 	closeChildThroughProductionInterrupt(
 		t, runtimeDB, admin, actorClient, bridgeAddress,
-		bridgeAPIScope(sessionID, parentThreadID, bindingID, 1, podUID),
+		sessionfixture.BridgeAPIScope(sessionID, parentThreadID, bindingID, 1, podUID),
 		sessionID, parentThreadID, childThreadID, bindingID, podUID, "evt_closed_retry_close",
 	)
 	var wantIdleID string

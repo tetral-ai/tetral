@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -25,7 +26,7 @@ func TestPostgreSQLThreadInterruptBarrierDefersExactInflightCustody(t *testing.T
 		interruptID      = "rin_interrupt_barrier_inflight_control"
 		interruptEventID = "evt_interrupt_barrier_inflight_control"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 2, "user.message", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 3, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -112,7 +113,7 @@ func TestPostgreSQLSupersededInterruptSettlesItsExactQueueLease(t *testing.T) {
 		activeID  = "rin_superseded_interrupt_active"
 		staleID   = "rin_superseded_interrupt_stale"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_superseded_interrupt_active", 1, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_superseded_interrupt_stale", 2, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
@@ -196,7 +197,7 @@ func TestPostgreSQLThreadInterruptBarrierIgnoresLockedTerminalHistory(t *testing
 		activeID  = "rin_interrupt_barrier_bounded_history_active"
 		activeEvt = "evt_interrupt_barrier_bounded_history_active"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, activeEvt, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,

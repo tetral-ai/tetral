@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -115,7 +116,7 @@ func TestMCPInputRecoveryInstallsThroughRealRuntimeAndReachesConnector(t *testin
 
 	bridge := agentruntimebridge.NewPostgreSQLBridgeAPIStore(store.Client)
 	bridge.RuntimeBindingTokenHMACKey = []byte("manifest-recovery-binding-token-key")
-	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(job.SessionID, job.SessionThreadID, "bind_discovery", 1, "pod_discovery")})
+	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(job.SessionID, job.SessionThreadID, "bind_discovery", 1, "pod_discovery")})
 	if err != nil {
 		t.Fatal(err)
 	}

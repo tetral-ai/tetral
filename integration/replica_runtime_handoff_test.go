@@ -31,6 +31,7 @@ import (
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -846,7 +847,7 @@ func assertHandoffLateWriteFence(t *testing.T, admin *sql.DB, endpoint replicaBr
 	if err := admin.QueryRow(`SELECT count(*),(SELECT count(*) FROM session_runtime_handoff_threads WHERE session_id=$1 AND disposition='recover') FROM session_events WHERE session_id=$1`, session).Scan(&beforeEvents, &beforeWakes); err != nil {
 		t.Fatal(err)
 	}
-	response, err := endpoint.Client.WriteEvent(replicaRuntimeContext(context.Background(), "old"), &bridgev1.WriteEventRequest{Scope: bridgeAPIScope(session, thread, binding, generation, "pod_old"), RuntimeWriteId: "rwrite_late_old_generation", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
+	response, err := endpoint.Client.WriteEvent(replicaRuntimeContext(context.Background(), "old"), &bridgev1.WriteEventRequest{Scope: sessionfixture.BridgeAPIScope(session, thread, binding, generation, "pod_old"), RuntimeWriteId: "rwrite_late_old_generation", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
 	if err != nil || response.GetStale() == nil {
 		t.Fatalf("late old write=%v err=%v", response, err)
 	}
@@ -873,9 +874,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		startHandoffResultListener(t, store)
 		sessions := []string{"sesn_replica_a1", "sesn_replica_a2", "sesn_replica_c", "sesn_replica_b"}
 		for _, session := range sessions {
-			seedBridgeAPISession(t, admin, "default", session, "thr_"+session)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, "thr_"+session)
 			seedHandoffRuntimeBinding(t, admin, session, "bind_"+session, 1, "pod_old")
-			seedRuntimePodLostStatusFence(t, admin, session, "bind_"+session, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, "bind_"+session, 1)
 		}
 		if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'`); err != nil {
 			t.Fatal(err)
@@ -954,7 +955,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if err := admin.QueryRow(`SELECT event_id FROM session_events WHERE session_id=$1 AND type='session.status_running' ORDER BY sequence DESC LIMIT 1`, sessions[0]).Scan(&originalTurnID); err != nil {
 			t.Fatal(err)
 		}
-		seedReadySandboxForSharedToolExecution(t, admin, "default", sessions[3])
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", sessions[3])
 		appendHandoffMessage(t, client, sessions[3], "initial_b")
 		deliverAttachmentRuntimeInput(t, runtimeDB, admin, old.port, sessions[3], "runtime-pod-0", "pod_old")
 		waitHandoffCondition(t, "B accepted Sandbox execution", func() bool {
@@ -977,7 +978,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			return err == nil && strings.Contains(string(raw), `"accepting":false`)
 		})
 		const fresh = "sesn_replica_d"
-		seedBridgeAPISession(t, admin, "default", fresh, "thr_"+fresh)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", fresh, "thr_"+fresh)
 		if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, fresh); err != nil {
 			t.Fatal(err)
 		}
@@ -1152,9 +1153,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		client := dbconnect.NewClientForTesting(runtimeDB)
 		const session = "sesn_queued_a1"
 		const thread = "thr_queued_a1"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedHandoffRuntimeBinding(t, admin, session, "bind_queued", 1, "pod_old")
-		seedRuntimePodLostStatusFence(t, admin, session, "bind_queued", 1)
+		sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, "bind_queued", 1)
 		if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'`); err != nil {
 			t.Fatal(err)
 		}
@@ -1201,21 +1202,21 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 	t.Run("idle main waits for active child checkpoint", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session, main, binding = "sesn_child_idle_a1", "thr_idle_main", "bind_child_idle"
-		seedBridgeAPISession(t, admin, "default", session, main)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, main)
 		seedHandoffRuntimeBinding(t, admin, session, binding, 1, "pod_old")
-		seedRuntimePodLostStatusFence(t, admin, session, binding, 1)
+		sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, binding, 1)
 		if _, err := admin.Exec(`UPDATE session_runtime_status SET status='idle' WHERE session_id=$1`, session); err != nil {
 			t.Fatal(err)
 		}
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 		store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		startHandoffOutputCaptures(t, runtimeDB)
 		startHandoffResultListener(t, store)
 		endpoint := serveReplicaBridge(t, store, map[string]string{"old": "pod_old", "new": "pod_new"}, nil)
 		old := startHandoffRuntimeChild(t, endpoint.Address, "pod_old", "process_pod_old", "old", false, []map[string]any{{"sessionId": session, "sessionThreadId": main, "bindingId": binding, "bindingGeneration": 1}})
 		next := startHandoffRuntimeChild(t, endpoint.Address, "pod_new", "process_pod_new", "new", true, nil)
-		parentScope := bridgeAPIScope(session, main, binding, 1, "pod_old")
+		parentScope := sessionfixture.BridgeAPIScope(session, main, binding, 1, "pod_old")
 		const senderModel = "mreq_idle_main_send"
 		source := writeDurableOrdinaryToolUseForTest(t, store, parentScope, senderModel, "call_spawn_child", "spawn_agent", `{"task_name":"active-child","agent_type":"worker","prompt":"held original child input"}`)
 		var senderMessageSequence int64
@@ -1232,7 +1233,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if err != nil || (ended.GetCommitted() == nil && ended.GetDuplicate() == nil) {
 			t.Fatalf("main original sender End=%v err=%v", ended, err)
 		}
-		settled, err := endpoint.Client.SettleToolResult(replicaRuntimeContext(context.Background(), "old"), bridgeToolSettlementRequestForTest(parentScope, bridgeCompletedToolSettlementForTest(source, "original child mail delivered")))
+		settled, err := endpoint.Client.SettleToolResult(replicaRuntimeContext(context.Background(), "old"), sessionfixture.BridgeToolSettlementRequestForTest(parentScope, sessionfixture.BridgeCompletedToolSettlementForTest(source, "original child mail delivered")))
 		if err != nil || settled.GetCommitted() == nil {
 			t.Fatalf("main mail source settlement=%v err=%v", settled, err)
 		}
@@ -1330,17 +1331,17 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 	t.Run("concurrent main input and child recovery create one binding", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session, main, child, binding = "sesn_competing_child_b", "thr_competing_main", "thr_competing_child", "bind_competing"
-		seedBridgeAPISession(t, admin, "default", session, main)
-		seedBridgeAPIChildThread(t, admin, "default", session, main, child)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, main)
+		sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", session, main, child)
 		seedHandoffRuntimeBinding(t, admin, session, binding, 1, "pod_old")
-		seedRuntimePodLostStatusFence(t, admin, session, binding, 1)
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, binding, 1)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		startHandoffOutputCaptures(t, runtimeDB)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 		store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 		startHandoffResultListener(t, store)
 		endpoint := serveReplicaBridge(t, store, map[string]string{"old": "pod_old", "new": "pod_new"}, nil)
-		scope := bridgeAPIScope(session, child, binding, 1, "pod_old")
+		scope := sessionfixture.BridgeAPIScope(session, child, binding, 1, "pod_old")
 		const model = "mreq_competing_child_read"
 		tool := writeDurableOrdinaryToolUseForTest(t, store, scope, model, "call_competing_read", "Read", `{"file_path":"/workspace/input.txt"}`)
 		var sequence int64
@@ -1401,9 +1402,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		t.Run("selected process death "+commitBoundary, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			const session, thread, binding = "sesn_release_death_a1", "thr_release_death", "bind_release_death"
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedHandoffRuntimeBinding(t, admin, session, binding, 1, "pod_old")
-			seedRuntimePodLostStatusFence(t, admin, session, binding, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, binding, 1)
 			store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 			store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 			startHandoffResultListener(t, store)
@@ -1523,15 +1524,15 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			client := dbconnect.NewClientForTesting(runtimeDB)
 			session, thread := "sesn_review_"+scenario+"_"+strings.ReplaceAll(stage, "-", "_"), "thr_review_"+scenario+"_"+strings.ReplaceAll(stage, "-", "_")
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedHandoffRuntimeBinding(t, admin, session, "bind_review", 1, "pod_old")
-			seedRuntimePodLostStatusFence(t, admin, session, "bind_review", 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, "bind_review", 1)
 			unrelatedReviewerID := "thr_unrelated_" + strings.ReplaceAll(stage, "-", "_") + "_" + scenario
-			seedBridgeAPIInternalReviewerThread(t, admin, "default", session, thread, unrelatedReviewerID)
+			sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", session, thread, unrelatedReviewerID)
 			if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1'`); err != nil {
 				t.Fatal(err)
 			}
-			seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+			sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 			startHandoffOutputCaptures(t, runtimeDB)
 			store := bridge.NewPostgreSQLBridgeAPIStore(client)
 			store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
@@ -1739,9 +1740,9 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		t.Run("handoff diagnostic sink "+mode, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			session, thread := "sesn_sink_"+mode, "thr_sink_"+mode
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedHandoffRuntimeBinding(t, admin, session, "bind_sink", 1, "pod_old")
-			seedRuntimePodLostStatusFence(t, admin, session, "bind_sink", 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, "bind_sink", 1)
 			store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 			store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 			endpoint := serveReplicaBridge(t, store, map[string]string{"old": "pod_old"}, nil)
@@ -1780,13 +1781,13 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 	t.Run("selected container restart retains Pod UID and fences old binding", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session, thread, binding, pod = "sesn_container_restart_b", "thr_container_restart", "bind_container_restart", "pod_same"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedHandoffRuntimeBinding(t, admin, session, binding, 1, pod)
-		seedRuntimePodLostStatusFence(t, admin, session, binding, 1)
+		sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, binding, 1)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 		store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 		startHandoffResultListener(t, store)
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		startHandoffOutputCaptures(t, runtimeDB)
 		observed := &handoffObservedBridgeStore{BridgeAPIStore: store}
 		endpoint := serveReplicaBridge(t, observed, map[string]string{"one": pod, "two": pod}, nil)
@@ -1795,7 +1796,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		originalWrite := &bridgev1.WriteEventRequest{Scope: bridgeAPIScope(session, thread, binding, 1, pod), RuntimeWriteId: "rwrite_before_container_restart", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}
+		originalWrite := &bridgev1.WriteEventRequest{Scope: sessionfixture.BridgeAPIScope(session, thread, binding, 1, pod), RuntimeWriteId: "rwrite_before_container_restart", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}
 		original, err := endpoint.Client.WriteEvent(replicaRuntimeContext(context.Background(), "one"), originalWrite)
 		if err != nil || original.GetCommitted() == nil {
 			t.Fatalf("first container write=%v err=%v", original, err)

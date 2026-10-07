@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -34,8 +35,8 @@ func TestPostgreSQLMalformedAgentMailReplacementPassesReplayAndDelivers(t *testi
 		podUID     = "pod_agent_mail_replacement"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedCompletionMailSentAt(t, admin, sessionID, mainID, childID, deliveryID, 1, now.Format(time.RFC3339Nano))
 
@@ -114,7 +115,7 @@ func (s *committingAgentMailSender) AcceptAgentMail(
 	if err != nil {
 		return nil, err
 	}
-	scope := bridgeAPIScope(
+	scope := sessionfixture.BridgeAPIScope(
 		request.GetSessionId(),
 		request.GetSessionThreadId(),
 		request.GetBindingId(),
@@ -163,18 +164,18 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 		lateID    = "agent_mail:a_pod_loss_late"
 		taskID    = "task_m_pod_loss_middle"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_early", 1, "user.message", `{"content":[{"type":"text","text":"first"}]}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", bridgeInterAgentMessageJSON(
-		t, "a_pod_loss_late", threadID, "evt_pod_loss_mail_source", bridgePublicMessageJSONForTest(t, "third"),
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", sessionfixture.BridgeInterAgentMessageJSON(
+		t, "a_pod_loss_late", threadID, "evt_pod_loss_mail_source", sessionfixture.BridgePublicMessageJSONForTest(t, "third"),
 	))
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "evt_pod_loss_task_source")
 	taskResult := `{"task_id":"task_m_pod_loss_middle","source_tool_use_event_id":"evt_pod_loss_task_source","status":"completed","stdout":{"text":"second","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":0}`
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", taskResult)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, earlyID, "messages", `["evt_pod_loss_early"]`, "accepted", bindingID, podUID, 1, 1)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, middleID, "task_notification", `[]`, "accepted", bindingID, podUID, 0, 0)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, lateID, "agent_mail", `["evt_pod_loss_late"]`, "accepted", bindingID, podUID, 2, 2)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, earlyID, "messages", `["evt_pod_loss_early"]`, "accepted", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, middleID, "task_notification", `[]`, "accepted", bindingID, podUID, 0, 0)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, lateID, "agent_mail", `["evt_pod_loss_late"]`, "accepted", bindingID, podUID, 2, 2)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
 		SET created_at = CASE runtime_input_id
 		  WHEN $1 THEN '2026-08-10T10:00:00Z'::timestamptz
@@ -220,7 +221,7 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 		t.Fatalf("replacement Queue order = %v; want mixed-kind Inbox creation order [%s %s %s]", ordered, earlyID, middleID, lateID)
 	}
 	runtimeClient := dbconnect.NewClientForTesting(runtime)
-	replacementScope := declareReplacementScope(t, runtimeClient, runtimeClient, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID))
+	replacementScope := declareReplacementScope(t, runtimeClient, runtimeClient, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID))
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
 		SET status='accepted',binding_id=$2,binding_generation=$4,target_pod_uid=$3
 		WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementScope.GetBinding().GetBindingId(), replacementScope.GetBinding().GetTargetPodUid(), replacementScope.GetBinding().GetBindingGeneration()); err != nil {
@@ -235,7 +236,7 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	}); err != nil {
 		t.Fatalf("commit first replacement input: %v", err)
 	}
-	if response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(t, scope, middleID)); err != nil || response.GetCommitted() == nil {
+	if response, err := store.CommitTaskNotificationResult(context.Background(), sessionfixture.BridgeTaskNotificationRequestForTest(t, scope, middleID)); err != nil || response.GetCommitted() == nil {
 		t.Fatalf("commit middle replacement input: %v", err)
 	}
 	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
@@ -300,15 +301,15 @@ func TestPostgreSQLRuntimePodLossReplacementCommitsTheSameAcceptedInputOnce(t *t
 		originalJobID  = "qjob_pl_commit"
 	)
 	now := time.Date(2026, 8, 11, 3, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET status='idle'
 		WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
 		t.Fatalf("seed pre-running Runtime status: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"continue after replacement"}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["`+eventID+`"]`, "accepted", oldBindingID, oldPodUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "messages", `["`+eventID+`"]`, "accepted", oldBindingID, oldPodUID, 1, 1)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	request := queue.EnqueueRequest{WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput, PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID), DedupeKey: queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, runtimeInputID), PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"` + threadID + `","runtime_input_id":"` + runtimeInputID + `","event_ids":["` + eventID + `"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`), Now: now}
 	request.ID = originalJobID

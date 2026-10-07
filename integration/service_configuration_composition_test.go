@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 )
@@ -27,7 +28,7 @@ func TestPostgreSQLSeparatedOwnersRuntimeConfiguration(t *testing.T) {
 				agent = `{"name":"original","model":"anthropic/claude-opus-4-8","system":"Operate as the session specialist.","tools":[{"type":"tetral_agent_toolset","family":"gpt"}],"mcp_servers":[],"skills":[]}`
 				installed = `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}`
 			}
-			seedBridgeAPIAgentConfig(t, f.admin, "default", f.sessionID, agent)
+			sessionfixture.SeedBridgeAPIAgentConfig(t, f.admin, "default", f.sessionID, agent)
 			f.sql(t, `UPDATE sessions SET approval_mode='approve_for_me',config_generation=7,installed_tools_json=$1 WHERE workspace_id='default' AND id=$2`, installed, f.sessionID)
 			if name == "configured" {
 				for _, memory := range []struct{ id, state string }{{"memstore_runtime_config", "attached"}, {"memstore_detached", "detached_at"}, {"memstore_deleting", "delete_requested_at"}} {

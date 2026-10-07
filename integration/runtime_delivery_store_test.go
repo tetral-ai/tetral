@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -50,9 +51,9 @@ func TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission(t
 		bindingID      = "bind_child_recovery_parent_closing"
 		podUID         = "pod_child_recovery_parent_closing"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, parentThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, parentThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentThreadID, childThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_child_recovery_parent_closing_created", 1, "session.thread_created",
 		`{"type":"session.thread_created","parent_thread_id":"`+parentThreadID+`","source_tool_use_event_id":"evt_child_recovery_parent_closing_spawn"}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, recoverySource, 2, "session.thread_status_rescheduled", `{}`)
@@ -62,9 +63,9 @@ func TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission(t
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, closeSource); err != nil {
 		t.Fatalf("make close source public: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainThreadID, closeSource)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainThreadID, closeSource)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 		t.Fatalf("seed Session state: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSkipsMailAfterParentCloseAdmission(t
 
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	admitted, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, mainThreadID, bindingID, 1, podUID), SourceToolUseEventId: closeSource,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, mainThreadID, bindingID, 1, podUID), SourceToolUseEventId: closeSource,
 		TargetChildThreadId: parentThreadID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	})
 	if err != nil || admitted.GetCommitted() == nil {
@@ -238,7 +239,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureSettlesSingleAttemptInpu
 			if readiness != "unready" || diagnostic != test.diagnostic || inboxStatus != "dead_lettered" || inputQueueStatus != queue.StatusDeadLettered {
 				t.Fatalf("manifest/Inbox/Queue = %s/%s %s/%s; want unready/%s dead_lettered/dead_lettered", readiness, diagnostic, inboxStatus, inputQueueStatus, test.diagnostic)
 			}
-			assertRuntimeMCPManifestQueueJob(t, admin, "default", sessionID, "github", 1)
+			sessionfixture.AssertRuntimeMCPManifestQueueJob(t, admin, "default", sessionID, "github", 1)
 			var manifestJobs, sessionErrors int
 			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
 				WHERE workspace_id='default' AND kind='runtime_config_update'
@@ -409,8 +410,8 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPFailureRacesManifestNotificatio
 func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_manifest_composition"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thrd_"+sessionID)
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thrd_"+sessionID)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions
 		SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}'
 		WHERE workspace_id = 'default' AND id = $1`, sessionID); err != nil {
@@ -468,7 +469,7 @@ func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *t
 	}
 
 	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
 	})
 	if err != nil {
 		t.Fatalf("load replacement Runtime context: %v", err)
@@ -763,9 +764,9 @@ func TestPostgreSQLInitialMCPRefreshReachesRuntimeWithReadyToolCatalog(t *testin
 		eventID   = "evt_oauth_initial_manifest"
 		inputID   = "rin_oauth_initial_manifest"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_oauth_manifest", 1, "pod_oauth_manifest")
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 		t.Fatalf("seed installed MCP toolset: %v", err)
 	}
@@ -1112,7 +1113,7 @@ func (f *initialManifestFailureConnector) finish(t *testing.T) initialManifestFa
 
 func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_delivery", "thr_bridge_task_delivery")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_task_delivery", "thr_bridge_task_delivery")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_delivery", "bind_bridge_task_delivery", 1, "pod_uid_task_delivery")
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", "sesn_bridge_task_delivery", "thr_bridge_task_delivery", "bind_bridge_task_delivery", "task_bridge_delivery", "sevt_tool_delivery")
 	storedResult := fmt.Sprintf(
@@ -1201,7 +1202,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 	assertNoTaskOutputPaths(t, plan.AcceptTask.GetNotificationJson())
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = store.Clock
-	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), sessionfixture.BridgeTaskNotificationRequestForTest(
 		t,
 		observedAttemptScope(job, plan.AttemptedBinding),
 		job.RuntimeInputID,
@@ -1235,7 +1236,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		interruptEventID = "sevt_bridge_interrupt_replay_fence"
 		messageEventID   = "sevt_bridge_interrupt_replay_successor"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEventID, 2, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEventID, 3, "user.message", `{"content":[{"type":"text","text":"new turn"}]}`)
@@ -1293,7 +1294,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 	sender := &receiptGatedInterruptSender{
 		recordingRuntimeCommandSender: &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}},
 		store:                         apiStore,
-		scope:                         bridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"),
+		scope:                         sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_interrupt_replay_fence", 1, "pod_uid_interrupt_replay_fence"),
 		inputID:                       interruptJob.RuntimeInputID,
 	}
 	candidate := enginekubernetes.BindingCandidate{
@@ -1362,7 +1363,7 @@ func TestPostgreSQLJobRunnerReplaysIdleInterruptReceiptBeforeAckAndFollowerDeliv
 		t.Fatalf("receipt lease = %s attempt %d; want interrupt %s attempt 2", receiptLease.ID, receiptLease.AttemptCount, interruptJob.JobID)
 	}
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(receiptLease),
+		Scope: sender.scope, RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(receiptLease),
 	})
 	if err != nil || committed.GetCommitted() == nil {
 		t.Fatalf("commit late closeout before retry = %#v/%v", committed, err)

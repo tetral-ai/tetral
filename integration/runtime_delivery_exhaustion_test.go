@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -26,7 +27,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 		bindingID = "bind_exhaustion_boundary"
 		podUID    = "pod_exhaustion_boundary"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIRuntimeInput(
 		t, admin, "default", sessionID, threadID,
@@ -35,7 +36,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-exhaustion-boundary-key!")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: "rin_exhaustion_message",
 	})
@@ -51,7 +52,7 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 		t, admin, "default", sessionID, threadID,
 		"evt_exhaustion_delivery", 2, "user.message", `{"content":[{"type":"text","text":"exhaust"}]}`,
 	)
-	seedBridgeAPIRuntimeInbox(
+	sessionfixture.SeedBridgeAPIRuntimeInbox(
 		t, admin, "default", sessionID, threadID,
 		"rin_exhaustion_delivery", "messages", `["evt_exhaustion_delivery"]`,
 		"accepted", bindingID, podUID, 2, 2,
@@ -98,7 +99,7 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentQueuedInboxFinalizationLineariz
 	const sessionID = "sesn_exhaust_concurrent_event"
 	const threadID = "thr_exhaust_concurrent_event"
 	const eventID = "evt_exhaust_concurrent_event"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 30, 0, time.UTC) }

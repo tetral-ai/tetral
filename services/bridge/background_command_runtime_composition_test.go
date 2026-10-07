@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -60,9 +61,9 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		podUID      = "pod_background_abort_composition"
 		taskID      = "task_background_abort_composition"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := NewPostgreSQLBridgeAPIStore(client)
 	startAwaitExecutionResultListener(t, store, nil)
@@ -86,7 +87,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 	}
 
 	const startRequestID = "mreq_background_start_composition"
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_background_start_request", startRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	startInputPath := filepath.Join(t.TempDir(), "background-start.json")
 	startInput, err := json.Marshal(map[string]any{
@@ -185,7 +186,7 @@ func runPostgreSQLRuntimeAbortBackgroundCommand(t *testing.T, naturalCompletion 
 		Scope: scope, RuntimeWriteId: "rwrite_background_start_end", ModelRequestId: startRequestID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", AssistantMessageSequence: bridgeAPIInt64(startMessageSequence),
+			Disposition: "completed", AssistantMessageSequence: sessionfixture.BridgeAPIInt64(startMessageSequence),
 			ToolUseEventIds: []string{startResult.ToolUseEventID},
 		},
 	}); err != nil || response.GetCommitted() == nil {

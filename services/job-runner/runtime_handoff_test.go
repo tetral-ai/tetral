@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -18,9 +19,9 @@ func TestPostgreSQLRuntimeHandoffRecoveryExactSourceAndLease(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	seedBridgeAPISession(t, admin, "default", "session_handoff", "thread_handoff")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "session_handoff", "thread_handoff")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "session_handoff", "binding_old", 1, "pod_old")
-	seedRuntimePodLostStatusFence(t, admin, "session_handoff", "binding_old", 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, "session_handoff", "binding_old", 1)
 	seedBridgeAPIEvent(t, admin, "default", "session_handoff", "thread_handoff", "turn-open", 1, "session.status_running", "{}")
 	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: "pod_old", ID: "process_pod_old"}
 	var receipt string

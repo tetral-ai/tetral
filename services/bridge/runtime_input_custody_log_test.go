@@ -8,6 +8,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -24,8 +25,8 @@ func TestPostgreSQLChildCloseAdmissionParksQueuedTaskNotificationAndCancelsQueue
 		inputID   = "task_notification:task_close_park"
 	)
 	now := time.Date(2026, 8, 11, 4, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
@@ -43,7 +44,7 @@ func TestPostgreSQLChildCloseAdmissionParksQueuedTaskNotificationAndCancelsQueue
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_close_park_queued")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}
 	first, err := store.AdmitChildInterrupt(context.Background(), request)

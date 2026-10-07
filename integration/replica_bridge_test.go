@@ -27,6 +27,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -139,16 +140,16 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 	t.Run("Core rejoins pending capture after three actual wait expiries", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session, thread, binding, pod = "sesn_core_capture_rejoin", "thr_core_capture_rejoin", "bind_core_capture", "pod_core_capture"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, pod)
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		provider := &heldCoreCaptureProvider{handoffCaptureProvider: handoffCaptureProvider{bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{}}, release: make(chan struct{})}
 		t.Cleanup(provider.finish)
 		startHandoffOutputCapturesWithProvider(t, runtimeDB, provider)
 		store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 		observed := &coreCaptureRejoinStore{BridgeAPIStore: store}
 		endpoint := serveReplicaBridge(t, observed, map[string]string{"runtime": pod}, nil)
-		request := bridgeAPIFinishIdleRequest(t, admin, bridgeAPIScope(session, thread, binding, 1, pod), "turn_core_capture_original", `{"type":"end_turn"}`)
+		request := bridgeAPIFinishIdleRequest(t, admin, sessionfixture.BridgeAPIScope(session, thread, binding, 1, pod), "turn_core_capture_original", `{"type":"end_turn"}`)
 		child := startReplicaFinishIdleCoreChild(t, endpoint.Address, bridgeChildRequest(t, request))
 		// Returned Bridge waits do not establish independent Sandbox worker dispatch.
 		waitHandoffCondition(t, "original capture provider entered", func() bool { return provider.calls.Load() >= 1 })
@@ -194,7 +195,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 	})
 	t.Run("lost declaration response and exact retired fences", func(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_replica", "thr_bridge_replica")
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_replica", "thr_bridge_replica")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_replica", "bind_bridge_replica", 1, "pod_replica")
 		var lost atomic.Bool
 		_, addresses := replicaBridgePair(t, runtimeDB, "pod_replica", func(_ context.Context, method string, _ any) error {
@@ -203,7 +204,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			}
 			return nil
 		})
-		request := &bridgev1.WriteEventRequest{Scope: bridgeAPIScope("sesn_bridge_replica", "thr_bridge_replica", "bind_bridge_replica", 1, "pod_replica"), RuntimeWriteId: "receipt-replica-original", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}
+		request := &bridgev1.WriteEventRequest{Scope: sessionfixture.BridgeAPIScope("sesn_bridge_replica", "thr_bridge_replica", "bind_bridge_replica", 1, "pod_replica"), RuntimeWriteId: "receipt-replica-original", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}
 		conflict := proto.Clone(request).(*bridgev1.WriteEventRequest)
 		conflict.PayloadJson = `{"type":"session.status_running","conflict":true}`
 		stale := proto.Clone(request).(*bridgev1.WriteEventRequest)
@@ -235,7 +236,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session = "sesn_bridge_execution_rejoin"
 		const thread = "thr_bridge_execution_rejoin"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", session, "bind_execution", 1, "pod_execution")
 		var lost atomic.Bool
 		store, addresses := replicaBridgePair(t, runtimeDB, "pod_execution", func(_ context.Context, method string, _ any) error {
@@ -244,7 +245,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 			}
 			return nil
 		})
-		scope := bridgeAPIScope(session, thread, "bind_execution", 1, "pod_execution")
+		scope := sessionfixture.BridgeAPIScope(session, thread, "bind_execution", 1, "pod_execution")
 		toolID := writeDurableOrdinaryToolUseForTest(t, store, scope, "request_execution", "call_execution", "Read", `{"file_path":"/workspace/input.txt"}`)
 		accepted := bridgeChildRequest(t, &bridgev1.AcceptSandboxExecutionRequest{Scope: scope, ToolUseEventId: toolID})
 		awaited := bridgeChildRequest(t, &bridgev1.AwaitSandboxExecutionRequest{Scope: scope, ToolUseEventId: toolID})
@@ -271,9 +272,9 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		t.Run("background receipt "+method+" rejoins exact operation", func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			session, thread, binding, task := "sesn_"+method, "thr_"+method, "bind_"+method, "task_"+method
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, "pod_background")
-			seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+			sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 			gates := map[string]*replicaBackgroundAdmissionGate{
 				"original_poll":         newReplicaBackgroundAdmissionGate(),
 				"original_stdin":        newReplicaBackgroundAdmissionGate(),
@@ -281,7 +282,7 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 				"original_control_poll": newReplicaBackgroundAdmissionGate(),
 			}
 			store, addresses := replicaBackgroundBridgePair(t, runtimeDB, "pod_background", gates)
-			scope := bridgeAPIScope(session, thread, binding, 1, "pod_background")
+			scope := sessionfixture.BridgeAPIScope(session, thread, binding, 1, "pod_background")
 			chars := ""
 			if method == "sendCommandInput" {
 				chars = "hello\n"
@@ -373,16 +374,16 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		const session = "sesn_replica_memory"
 		const thread = "thr_replica_memory"
 		const memoryStore = "memstore_replica_memory"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", session, "bind_memory", 1, "pod_memory")
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		for _, statement := range []string{`INSERT INTO memory_stores(workspace_id,memory_store_id,name,created_at,updated_at) VALUES('default','memstore_replica_memory','memory',now(),now())`, `INSERT INTO session_resources(workspace_id,session_id,resource_id,type,created_at,updated_at) VALUES('default','sesn_replica_memory','res_memory','memory_store',now(),now())`, `INSERT INTO session_memory_store_resources(workspace_id,session_id,resource_id,memory_store_id,access,name,mount_path) VALUES('default','sesn_replica_memory','res_memory','memstore_replica_memory','read_write','memory','/mnt/memory/replica')`} {
 			if _, err := admin.Exec(statement); err != nil {
 				t.Fatal(err)
 			}
 		}
 		store, addresses := replicaBridgePair(t, runtimeDB, "pod_memory", nil)
-		scope := bridgeAPIScope(session, thread, "bind_memory", 1, "pod_memory")
+		scope := sessionfixture.BridgeAPIScope(session, thread, "bind_memory", 1, "pod_memory")
 		toolID := writeDurableOrdinaryToolUseForTest(t, store, scope, "request_memory", "call_memory", "memory", `{"action":"create","path":"notes/replica.md","content":"original durable mutation"}`)
 		request := bridgeChildRequest(t, &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolID})
 		child := startReplicaBridgeChild(t, addresses, []map[string]any{bridgeChildAction("memory_expired", 0, "runMemory", request, 200, codes.DeadlineExceeded), bridgeChildAction("memory_rejoin", 1, "runMemory", request, 5000), bridgeChildAction("memory_replay", 0, "runMemory", request, 5000)})
@@ -416,11 +417,11 @@ func TestPostgreSQLReplicaBridgeRecovery(t *testing.T) {
 		runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		const session = "sesn_bridge_capture_rejoin"
 		const thread = "thr_bridge_capture_rejoin"
-		seedBridgeAPISession(t, admin, "default", session, thread)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", session, "bind_capture", 1, "pod_capture")
-		seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+		sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 		_, addresses := replicaBridgePair(t, runtimeDB, "pod_capture", nil)
-		scope := bridgeAPIScope(session, thread, "bind_capture", 1, "pod_capture")
+		scope := sessionfixture.BridgeAPIScope(session, thread, "bind_capture", 1, "pod_capture")
 		request := bridgeAPIFinishIdleRequest(t, admin, scope, "durable_capture_original", `{"reason":"done"}`)
 		child := startReplicaBridgeChild(t, addresses, []map[string]any{bridgeChildAction("capture_expired", 0, "finishIdle", bridgeChildRequest(t, request), 80, codes.DeadlineExceeded), bridgeChildAction("capture_rejoin", 1, "finishIdle", bridgeChildRequest(t, request), 5000)})
 		bridgeChildResult(t, child, "capture_expired")

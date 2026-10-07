@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -60,7 +61,7 @@ func (tracer *loadContextQueryTracer) snapshot() []loadContextQueryInvocation {
 
 func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_closed_plan_background", "thr_closed_plan_background")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_closed_plan_background", "thr_closed_plan_background")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 		visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
@@ -78,7 +79,7 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 	for _, historySize := range []int{64, 8192} {
 		sessionID := fmt.Sprintf("sesn_closed_plan_%d", historySize)
 		threadID := fmt.Sprintf("thr_closed_plan_%d", historySize)
-		seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+		sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 		bindingID := fmt.Sprintf("bind_closed_plan_%d", historySize)
 		podUID := fmt.Sprintf("pod_closed_plan_%d", historySize)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
@@ -143,7 +144,7 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(tracedDB))
 		store.RuntimeBindingTokenHMACKey = []byte("closed-turn-plan-key")
 		loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-			Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+			Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 		})
 		if err != nil {
 			t.Fatalf("full LoadContext %d: %v", historySize, err)

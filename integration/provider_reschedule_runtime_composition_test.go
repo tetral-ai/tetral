@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
@@ -45,9 +46,9 @@ func TestPostgreSQLGatewaySemanticTimeoutReschedulesAndLaterInputContinues(t *te
 		bindingID = "bind_provider_timeout_production"
 		podUID    = "pod_provider_timeout_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-production-signing-key")
@@ -156,9 +157,9 @@ func TestPostgreSQLGatewaySemanticTimeoutWaitsForToolSettlementBeforeRetry(t *te
 		bindingID = "bind_provider_timeout_tool"
 		podUID    = "pod_provider_timeout_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	store.RuntimeBindingTokenHMACKey = []byte("provider-timeout-tool-signing-key")
@@ -270,9 +271,9 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 			threadID := "sthr_provider_failure_" + suffix
 			bindingID := "bind_provider_failure_" + suffix
 			podUID := "pod_provider_failure_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 			client := dbconnect.NewClientForTesting(runtimeDB)
 			store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 			store.RuntimeBindingTokenHMACKey = []byte("provider-failure-production-signing-key")
@@ -938,15 +939,15 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 		durableTurnID  = "evt_recovered_binding_active_turn"
 		modelRequestID = "mreq_recovered_binding_reschedule"
 	)
-	oldBinding := runtimePodLostBinding(sessionID, oldBindingID, 1)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	oldBinding := sessionfixture.RuntimePodLostBinding(sessionID, oldBindingID, 1)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldBinding.PodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("recovered-binding-termination-signing-key")
 	acceptedAt := time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }
-	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
+	oldScope := sessionfixture.BridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, durableTurnID)
 	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_recovered_binding_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
@@ -1053,7 +1054,7 @@ func TestPostgreSQLReplacementRuntimeTerminationReplaysReceiptWithoutResidency(t
 	if storedStatus != "idle" || storedBindingID.Valid || storedBindingGeneration.Valid || runningEventsAfter != runningEventsBefore || terminationOperations != 1 || liveBindings != 0 {
 		t.Fatalf("terminal residency status/binding/generation/running Events/operations/live bindings = %s/%v/%v/%d/%d/%d; want idle/null/null/%d/1/0", storedStatus, storedBindingID, storedBindingGeneration, runningEventsAfter, terminationOperations, liveBindings, runningEventsBefore)
 	}
-	newScope := bridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
+	newScope := sessionfixture.BridgeAPIScope(sessionID, threadID, newBindingID, newBindingGeneration, newPodUID)
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	if replay, replayErr := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: newScope, RuntimeWriteId: durableTurnID, FailureJson: failureJSON,
@@ -1085,7 +1086,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		modelRequestID    = "mreq_provider_reschedule_original"
 		modelToolCallID   = "call_provider_reschedule_original"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_provider_reschedule_user", "sevt_provider_reschedule_user", 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
 		SET data_json='{"parts":[{"type":"text","text":"read the original file"}]}'
@@ -1117,7 +1118,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 		t.Fatalf("seed provider reschedule audit history: %v", err)
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	listenerTracer := &bridgeExecutionQueryTracer{}
 	tracedRuntime := storagetest.OpenRuntimeRoleDBWithTracer(t, runtimeDB, listenerTracer)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(tracedRuntime))
@@ -1125,7 +1126,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	store.RuntimeBindingTokenHMACKey = []byte("provider-reschedule-recovery-signing-key")
 	acceptedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }
-	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
+	oldScope := sessionfixture.BridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, oldScope, "evt_provider_reschedule_historical_turn")
 	seedBridgeAPIRequestStart(t, store, oldScope, "rwrite_provider_reschedule_historical_start", historicalID, runtimecontrol.RequestKindAgentProviderRequest, 1)
 	historical, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
@@ -1162,13 +1163,13 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if message, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_partial", ModelRequestId: modelRequestID,
 		PreallocatedEventId: proto.String("evt_00000000000000000000000000000008"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"discarded partial text"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("discarded partial text"),
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("discarded partial text"),
 	}); err != nil || message.GetCommitted() == nil {
 		t.Fatalf("write failed request partial text: response=%#v err=%v", message, err)
 	}
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: oldScope, RuntimeWriteId: "rwrite_provider_reschedule_tool", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest(modelToolCallID, "Read", `{"path":"original.txt"}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(modelToolCallID, "Read", `{"path":"original.txt"}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || toolUse.GetCommitted() == nil {
 		t.Fatalf("write original Tool Use: response=%#v err=%v", toolUse, err)
@@ -1484,7 +1485,7 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	go func() {
 		captureSettled <- settleOutputCaptureGenerationForTest(admin, sessionID, "evt_provider_reschedule_durable_turn", 1, "staged")
 	}()
-	newScope := bridgeAPIScope(
+	newScope := sessionfixture.BridgeAPIScope(
 		sessionID, threadID, preloaded.Command.BindingID, preloaded.Command.BindingGeneration, newPodUID,
 	)
 	settleSandboxExecutionForHotReceiptProof(t, runtimeDB, admin, newScope, toolUse.GetCommitted().GetEventId(),
@@ -1647,8 +1648,8 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		taskName       = "recovery-worker"
 		prompt         = "finish the durable task"
 	)
-	oldBinding := runtimePodLostBinding(sessionID, oldBindingID, 1)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	oldBinding := sessionfixture.RuntimePodLostBinding(sessionID, oldBindingID, 1)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_reschedule_user", "sevt_subagent_reschedule_user", 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
 		SET data_json='{"parts":[{"type":"text","text":"spawn the durable worker"}]}'
@@ -1656,10 +1657,10 @@ func TestPostgreSQLProviderRescheduleColdCarriesCreatedSubagentWithoutRecreation
 		t.Fatalf("seed subagent reschedule user context: %v", err)
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldBinding.PodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("subagent-reschedule-recovery-signing-key")
-	oldScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
+	oldScope := sessionfixture.BridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldBinding.PodUID)
 	toolRunnerResult := runSubagentProductionComposition(
 		t, agentruntimebridge.NewBridgeAPIServer(store), sessionID, threadID, oldBindingID, 1, oldBinding.PodUID, taskName, prompt, "all",
 	)
@@ -1848,14 +1849,14 @@ func TestPostgreSQLPodLossAfterRetryStartSettlesConsumedReschedule(t *testing.T)
 		retryID     = "mreq_consumed_reschedule_retry"
 		durableTurn = "evt_consumed_reschedule_turn"
 	)
-	binding := runtimePodLostBinding(sessionID, bindingID, 1)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	acceptedAt := time.Date(2026, 8, 19, 14, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return acceptedAt }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurn)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_consumed_reschedule_original_start", originalID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	if ended, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{

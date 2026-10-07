@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -241,7 +242,7 @@ func TestPostgreSQLSeparatedOwnersResourceLifecycle(t *testing.T) {
 			if _, found, err := f.runner.ReplayRuntimeDeliveryFinalization(f.ctx, job); err != nil || !found {
 				t.Fatalf("durable input finalization replay=%t/%v", found, err)
 			}
-			request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_sink_receipt", ModelRequestId: "mreq_sink", EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_sink"}`, RequestKind: "agent_provider_request", ContextThroughMessageSequence: bridgeAPIInt64(1)}
+			request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_sink_receipt", ModelRequestId: "mreq_sink", EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_sink"}`, RequestKind: "agent_provider_request", ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(1)}
 			receipt, err := f.bridge.WriteEvent(f.ctx, request)
 			if err != nil || receipt.GetCommitted() == nil {
 				t.Fatalf("sink fault durable Bridge receipt=%v/%v", receipt, err)

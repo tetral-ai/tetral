@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -43,8 +44,8 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 		inputID   = "task_notification:task_close_lease"
 	)
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_task_close_lease_source")
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"task_id":"task_close_lease","source_tool_use_event_id":"evt_task_close_lease_source","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
@@ -75,7 +76,7 @@ func runTaskNotificationCloseLeaseRace(t *testing.T, admissionFirst bool) {
 	}
 
 	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_task_close_lease_close")
-	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	parentScope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
 	admitRequest := &bridgev1.AdmitChildInterruptRequest{

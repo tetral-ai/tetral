@@ -26,6 +26,7 @@ import (
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -333,7 +334,7 @@ func TestPostgreSQLRuntimePodLossSweepIncludesAcceptedInputBeforeRunningStatus(t
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	candidate := seedRuntimePodLossSweepSession(t, admin, 23, "idle")
 	const runtimeInputID = "rin_pod_loss_pre_running_accept"
-	seedBridgeAPIRuntimeInbox(
+	sessionfixture.SeedBridgeAPIRuntimeInbox(
 		t,
 		admin,
 		"default",
@@ -791,13 +792,13 @@ func seedRuntimePodLossSweepSession(t *testing.T, db *sql.DB, index int, runtime
 	podName := fmt.Sprintf("runtime-pod-sweep-%03d", index)
 	podUID := fmt.Sprintf("pod-uid-sweep-%03d", index)
 	podIP := fmt.Sprintf("10.44.%d.%d", (index/250)%250, index%250+1)
-	seedBridgeAPISession(t, db, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, db, "default", sessionID, threadID)
 	var bindingGeneration int64
 	if err := db.QueryRowContext(context.Background(), `SELECT nextval('session_runtime_binding_generation_seq')`).Scan(&bindingGeneration); err != nil {
 		t.Fatalf("allocate sweep binding generation: %v", err)
 	}
 	seedBridgeAPIRuntimeBinding(t, db, "default", sessionID, bindingID, bindingGeneration, podUID)
-	seedRuntimePodLostStatusFence(t, db, sessionID, bindingID, bindingGeneration)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, db, sessionID, bindingID, bindingGeneration)
 	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_bindings
 		SET agent_runtime_pod_name=$2, agent_runtime_pod_uid=$3, agent_runtime_pod_ip=$4
 		WHERE workspace_id='default' AND session_id=$1`, sessionID, podName, podUID, podIP); err != nil {

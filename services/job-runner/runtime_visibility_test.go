@@ -12,6 +12,7 @@ import (
 	kubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestRuntimeProcessVisibility(t *testing.T) {
@@ -123,9 +124,9 @@ func TestRuntimeProcessVisibility(t *testing.T) {
 
 func TestPostgreSQLRuntimeProcessVisibilityRechecksReport(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "visibility-race", "visibility-thread")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "visibility-race", "visibility-thread")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "visibility-race", "visibility-binding", 1, "visibility-pod")
-	seedRuntimePodLostStatusFence(t, admin, "visibility-race", "visibility-binding", 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, "visibility-race", "visibility-binding", 1)
 	if _, err := admin.Exec(`UPDATE runtime_processes SET reported_at=clock_timestamp()-interval '11 seconds' WHERE runtime_process_id='process_visibility-pod'`); err != nil {
 		t.Fatal(err)
 	}

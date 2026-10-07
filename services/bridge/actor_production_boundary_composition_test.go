@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -193,7 +194,7 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 			threadID := "thr_subagent_fork_" + suffix
 			bindingID := "bind_subagent_fork_" + suffix
 			podUID := "pod_subagent_fork_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_fork_"+suffix, "evt_subagent_fork_"+suffix, 1)
 			if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
@@ -227,7 +228,7 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 				t.Fatalf("decode selected prefix: %v", err)
 			}
 			loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope: runtimecontrol.ScopeForThread(bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
+				Scope: runtimecontrol.ScopeForThread(sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), childID),
 			})
 			if err != nil {
 				t.Fatalf("cold-load selected prefix: %v", err)
@@ -252,7 +253,7 @@ func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(
 		bindingID = "bind_subagent_prompt_bound"
 		podUID    = "pod_subagent_prompt_bound"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -287,8 +288,8 @@ func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) 
 		bindingID = "bind_nested_subagent"
 		podUID    = "pod_nested_subagent"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 		SET task_name='durable-parent',title='durable-parent',agent_type='worker'
@@ -317,8 +318,8 @@ func TestPostgreSQLNestedSubagentOpeningUsesDurableSourceTaskName(t *testing.T) 
 		Scan(&openingPayload); err != nil {
 		t.Fatalf("read nested opening provenance: %v", err)
 	}
-	if testJSONPathString(t, openingPayload, "source_thread_id") != parentID ||
-		testJSONPathString(t, openingPayload, "source_task_name") != "durable-parent" {
+	if sessionfixture.JSONPathString(t, openingPayload, "source_thread_id") != parentID ||
+		sessionfixture.JSONPathString(t, openingPayload, "source_task_name") != "durable-parent" {
 		t.Fatalf("nested opening provenance = %s", openingPayload)
 	}
 }
@@ -356,7 +357,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		mailSourceID   = "evt_actor_production_mail"
 		mailContent    = "inspect the target-owned durable envelope"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,created_at,updated_at
@@ -371,11 +372,11 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, spawnRequestID, spawnSourceID); err != nil {
 		t.Fatalf("authorize durable spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnSourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, spawnRequestID, spawnSourceID, "call_actor_production_spawn", "spawn_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnSourceID)
 
 	client := startActorProductionBridge(t, runtime)
-	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	parentScope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	spawnRequest := &bridgev1.CreateSubagentThreadRequest{
 		Scope: parentScope, SourceToolUseEventId: spawnSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}
@@ -413,8 +414,8 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, repeatedRequestID, repeatedSourceID); err != nil {
 		t.Fatalf("authorize repeated durable spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, repeatedRequestID, repeatedSourceID, "call_actor_production_spawn_repeated", "spawn_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, repeatedSourceID)
 	if repeated, err := client.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
 		Scope: parentScope, SourceToolUseEventId: repeatedSourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "inspect the target-owned durable envelope", ParentMessageSequences: []int64{1},
 	}); status.Code(err) != codes.AlreadyExists || repeated != nil {
@@ -447,7 +448,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		t.Fatalf("replayed child prefix/census = %s children:%d operations:%d events:%d prefixes:%d inbox:%d queue:%d",
 			replayPrefixEntries, children, operations, createdEvents, prefixes, runtimeInputs, queuedJobs)
 	}
-	childScope := bridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
+	childScope := sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID)
 	firstLoaded, err := client.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: childScope})
 	if err != nil {
 		t.Fatalf("cold-load child first provider context: %v", err)
@@ -468,7 +469,7 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, mailSourceID); err != nil {
 		t.Fatalf("authorize durable mail source: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, mailSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, mailSourceID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(mailSourceID, childID)
 	delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: parentScope, DeliveryId: deliveryID, TargetThreadId: childID, SourceToolUseEventId: mailSourceID, Content: mailContent,
@@ -588,10 +589,10 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 		bindingID = "bind_reviewer_production"
 		podUID    = "pod_reviewer_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	client := startActorProductionBridge(t, runtime)
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 
 	firstRequest := &bridgev1.EnsureApprovalReviewerTrunkRequest{Scope: scope, EnsureOperationId: "ensure_reviewer_manager_1"}
 	first, err := client.EnsureApprovalReviewerTrunk(context.Background(), firstRequest)
@@ -652,7 +653,7 @@ func TestReviewerTrunkSuccessionAndSidecarReplayAcrossGeneratedGRPCAndPostgreSQL
 	if err != nil || admissionReplay.GetDuplicate().GetRuntimeInputId() != reviewInputID {
 		t.Fatalf("replay review-keyed input admission = %#v/%v", admissionReplay, err)
 	}
-	reviewerScope := bridgeAPIScope(sessionID, sidecarID, bindingID, 1, podUID)
+	reviewerScope := sessionfixture.BridgeAPIScope(sessionID, sidecarID, bindingID, 1, podUID)
 	committedInput, err := client.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: reviewerScope, RuntimeInputId: reviewInputID,
 		ApprovalReviewText: []string{"review the bounded approval evidence"},

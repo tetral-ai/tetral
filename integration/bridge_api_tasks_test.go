@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -55,7 +56,7 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 		inputID   = "task_notification:task_rejection_reclaim"
 	)
 	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_reclaim")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
@@ -64,7 +65,7 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_reclaim'`, sessionID); err != nil {
 		t.Fatalf("corrupt durable task source: %v", err)
 	}
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
+	sessionfixture.SeedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
 	if err != nil {
@@ -82,7 +83,7 @@ func TestPostgreSQLJobRunnerReclaimsRejectedTaskNotificationAndACKsWithoutRuntim
 		t.Fatalf("lease task notification Queue job = %#v/%v", leased, err)
 	}
 	request := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
 	}
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := bridgeStore.CommitTaskNotificationResult(context.Background(), request)
@@ -130,7 +131,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 		inputID   = "task_notification:task_rejection_acceptance"
 	)
 	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, "sevt_task_rejection_acceptance")
 	storedResult := `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
@@ -139,7 +140,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 		WHERE workspace_id='default' AND session_id=$1 AND event_id='sevt_task_rejection_acceptance'`, sessionID); err != nil {
 		t.Fatalf("corrupt durable task source: %v", err)
 	}
-	seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
+	sessionfixture.SeedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, inputID, bindingID, podUID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueue, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(workspace.DefaultID, sessionID, threadID, taskID, now)
 	if err != nil {
@@ -161,7 +162,7 @@ func TestPostgreSQLTaskNotificationRejectionBeforeAcceptanceFinalizationACKsOwne
 		t.Fatalf("decode task notification Queue job: %v", err)
 	}
 	request := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
 	}
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := apiStore.CommitTaskNotificationResult(context.Background(), request)

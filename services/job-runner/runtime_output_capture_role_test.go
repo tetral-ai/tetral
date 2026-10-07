@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 // Capture cleanup runs in Job Runner after the independent Sandbox release.
@@ -184,7 +185,7 @@ func TestPostgreSQLInstalledJobRunnerDeletesOutputCaptureCustody(t *testing.T) {
 func seedRunnerCaptureCleanup(t *testing.T, admin *sql.DB, workspaceID, sessionID, state string, now time.Time) {
 	t.Helper()
 	threadID := "thr_" + sessionID
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	statements := []struct {
 		query string
 		args  []any

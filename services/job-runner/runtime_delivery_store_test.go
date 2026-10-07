@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
@@ -39,7 +40,7 @@ func TestPrepareRuntimeRecoveryRequiresExactLiveQueueLeaseBeforeMutation(t *test
 		threadID  = "thr_recovery_lease_fence"
 		sourceID  = "evt_recovery_lease_fence"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	queueStore := queue.NewPostgreSQLStore(client)
@@ -111,7 +112,7 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 		threadID  = "thr_recovery_reclaimed"
 		sourceID  = "evt_recovery_reclaimed"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
@@ -240,7 +241,7 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 		sourceA   = "evt_recovery_exhausted_a"
 		sourceB   = "evt_recovery_exhausted_b"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceA, 1, "session.status_rescheduled", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceB, 2, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
@@ -324,12 +325,12 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			sourceID := "evt_child_recovery_source_" + suffix
 			bindingID := "bind_child_recovery_" + suffix
 			podUID := "pod_child_recovery_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, "evt_child_recovery_created_"+suffix, 1, "session.thread_created",
 				`{"type":"session.thread_created","parent_thread_id":"`+mainThreadID+`","source_tool_use_event_id":"evt_child_recovery_spawn_`+suffix+`"}`)
 			if testCase.activeSibling {
-				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingThreadID)
+				sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingThreadID)
 			} else if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 				SET role='approval_reviewer', visibility='internal', task_name=NULL
 				WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childThreadID); err != nil {
@@ -337,7 +338,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			}
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, sourceID, 2, "session.thread_status_rescheduled", `{}`)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 			if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 				t.Fatalf("seed child recovery Session state: %v", err)
 			}
@@ -483,8 +484,8 @@ func (l *expiringMCPManifestLister) ListMCPTools(ctx context.Context, request mc
 
 func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAndRedrivesGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_initial_mcp", "thr_bridge_initial_mcp")
-	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_initial_mcp", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_initial_mcp", "thr_bridge_initial_mcp")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_initial_mcp", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}' WHERE workspace_id = 'default' AND id = 'sesn_bridge_initial_mcp'`); err != nil {
 		t.Fatalf("seed durable initial MCP config: %v", err)
 	}
@@ -532,7 +533,7 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCaptureAdvancesInputAnd
 	if len(sender.requests) != 2 || sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest).GetMcpManifest().GetGeneration() != 1 || sender.requests[1].(*agentruntimev1.AcceptInputRequest).GetRuntimeInputId() != job.RuntimeInputID {
 		t.Fatalf("runtime commands = %#v; want manifest installation followed by the original input", sender.requests)
 	}
-	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_initial_mcp", "github", 1)
+	sessionfixture.AssertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_initial_mcp", "github", 1)
 	var operationRuntimeInputID string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT runtime_input_id
@@ -691,7 +692,7 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 		threadID    = "thr_job_runner_initial_mcp"
 		eventID     = "evt_job_runner_initial_mcp"
 	)
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}' WHERE workspace_id = $1 AND id = $2`, workspaceID, sessionID); err != nil {
 		t.Fatalf("seed durable initial MCP config: %v", err)
 	}
@@ -786,7 +787,7 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 func TestInitialMCPManifestListUsesFreshRPCOnlyDeadline(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_mcp_list_deadline"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_mcp_list_deadline")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_mcp_list_deadline")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}]}' WHERE workspace_id = 'default' AND id = $1`, sessionID); err != nil {
 		t.Fatalf("seed deadline MCP toolsets: %v", err)
 	}
@@ -850,9 +851,9 @@ func TestRuntimeConfigDeliveryRebuildsTheColdBootstrapAgentSettings(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			seedBridgeAPISession(t, admin, "default", test.sessionID, "thr_"+test.sessionID)
-			seedBridgeAPIAgentConfig(t, admin, "default", test.sessionID, test.agentConfig)
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", test.sessionID, "memstore_runtime_config")
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", test.sessionID, "thr_"+test.sessionID)
+			sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", test.sessionID, test.agentConfig)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", test.sessionID, "memstore_runtime_config")
 			if _, err := admin.ExecContext(context.Background(),
 				`UPDATE session_memory_store_resources
 				    SET name = 'Project notes', instructions = 'Preserve this guidance.'
@@ -931,8 +932,8 @@ func TestRuntimeConfigDeliveryRebuildsTheColdBootstrapAgentSettings(t *testing.T
 func TestRuntimeConfigDeliveryRebuildsManifestWithoutConsultingToolPolicy(t *testing.T) {
 	const sessionID = "sesn_manifest_single_row"
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_manifest_single_row")
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_manifest_single_row")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{
 		"name":"agent",
 		"model":"anthropic/claude-opus-4-8",
 		"tools":[],
@@ -1013,7 +1014,7 @@ func TestRuntimeConfigDeliveryRebuildsSupersededManifestAtTheCurrentGeneration(t
 
 func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationTerminalDuplicateIsStale(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_delivery_terminal_dup", "thr_bridge_task_delivery_terminal_dup")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_task_delivery_terminal_dup", "thr_bridge_task_delivery_terminal_dup")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_delivery_terminal_dup", "bind_bridge_task_delivery_terminal_dup", 1, "pod_uid_task_delivery_terminal_dup")
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", "sesn_bridge_task_delivery_terminal_dup", "thr_bridge_task_delivery_terminal_dup", "bind_bridge_task_delivery_terminal_dup", "task_bridge_delivery_terminal_dup", "sevt_tool_delivery_terminal_dup")
 	if _, err := admin.ExecContext(context.Background(),
@@ -1053,7 +1054,7 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationTerminalDuplicateIsStale(
 
 func TestPostgreSQLRuntimeDeliveryStoreMarksInboxAcceptedAfterRuntimeAccepts(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_accept", "thr_bridge_inbox_accept")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_accept", "thr_bridge_inbox_accept")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inbox_accept", "bind_bridge_inbox_accept", 1, "pod_uid_inbox_accept")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_accept", "thr_bridge_inbox_accept", "sevt_inbox_accept", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 
@@ -1106,7 +1107,7 @@ func TestPostgreSQLRuntimeDeliveryStoreWithoutResolverFailsClosed(t *testing.T) 
 		bindingID = "bind_resolver_required"
 		podUID    = "pod_uid_resolver_required"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_resolver_required", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090, nil)
@@ -1139,7 +1140,7 @@ func TestPostgreSQLRuntimeDeliveryStoreWithoutResolverFailsClosed(t *testing.T) 
 		t.Fatalf("inbox after refused preparation = %q; want queued", inboxStatus)
 	}
 
-	binding := runtimePodLostBinding(sessionID, bindingID, 1)
+	binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
 	binding.PodUID, binding.RuntimeProcessID = podUID, "process_"+podUID
 	err = store.Client.WithWorkspaceTx(context.Background(), "default", "jobrunner.test_cleanup_target", func(tx *dbconnect.Tx) error {
 		_, err := store.cleanupTargetProvenGone(context.Background(), tx, RuntimeJob{Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID, CleanupJobID: "cleanup_resolver_required"}, cleanupSessionClaim{
@@ -1157,7 +1158,7 @@ func TestPostgreSQLRuntimeDeliveryStorePersistsDistinctInboxesForChunkedBacklog(
 		sessionID = "sesn_bridge_chunked_backlog"
 		threadID  = "thr_bridge_chunked_backlog"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_chunked_backlog", 1, "pod_uid_chunked_backlog")
 	eventIDs := make([]string, queue.MaxRuntimeInputEventRefsPerJob+1)
 	for index := range eventIDs {
@@ -1233,7 +1234,7 @@ func TestAcceptedMessageCommandPayloadAvoidsHTMLExpansionAtTheAdmissionLimit(t *
 		threadID  = "thr_bridge_escape_fuse"
 		eventID   = "sevt_bridge_escape_fuse"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 
 	const bodyCap = 1 << 20
 	prefix := `{"content":[{"type":"text","text":"`
@@ -1272,7 +1273,7 @@ func TestAcceptedMessageCommandPayloadAvoidsHTMLExpansionAtTheAdmissionLimit(t *
 
 func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_accept_fence", "thr_bridge_inbox_accept_fence")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_accept_fence", "thr_bridge_inbox_accept_fence")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inbox_accept_fence", "bind_bridge_inbox_accept_fence", 1, "pod_uid_inbox_accept_fence")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_accept_fence", "thr_bridge_inbox_accept_fence", "sevt_inbox_accept_fence", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 
@@ -1360,7 +1361,7 @@ func TestPostgreSQLRuntimeDeliveryStoreAgentMailAcceptanceDoesNotRegressCommitte
 		inputID   = "rin_message_committed_control"
 		eventID   = "evt_message_committed_control"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"control"}]}`)
 	job := RuntimeJob{
@@ -1394,7 +1395,7 @@ func TestPostgreSQLRuntimeDeliveryStoreAgentMailAcceptanceDoesNotRegressCommitte
 
 func TestPostgreSQLRuntimeDeliveryStoreRejectsRuntimeInboxPayloadConflict(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inbox_conflict", "bind_bridge_inbox_conflict", 1, "pod_uid_inbox_conflict")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict", "sevt_inbox_conflict_one", 1, "user.message", `{"content":[{"type":"text","text":"one"}]}`)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inbox_conflict", "thr_bridge_inbox_conflict", "sevt_inbox_conflict_two", 2, "user.message", `{"content":[{"type":"text","text":"two"}]}`)
@@ -1447,9 +1448,9 @@ func TestPostgreSQLRuntimeDeliveryStoreRejectsRuntimeInboxPayloadConflict(t *tes
 
 func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery")
-	seedBridgeAPIOpenDurableTurn(t, admin, bridgeAPIScope("sesn_bridge_control_delivery", "thr_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery"), "sevt_control_delivery_run")
+	seedBridgeAPIOpenDurableTurn(t, admin, sessionfixture.BridgeAPIScope("sesn_bridge_control_delivery", "thr_bridge_control_delivery", "bind_bridge_control_delivery", 1, "pod_uid_control_delivery"), "sevt_control_delivery_run")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_interrupt_control", 2, "user.interrupt", `{}`)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_control_delivery", "thr_bridge_control_delivery", "sevt_confirmation_control", 3, "user.tool_confirmation", `{"tool_use_id":"sevt_tool_control","result":"deny","deny_message":"not now"}`)
 
@@ -1523,7 +1524,7 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsControlPayloadsFromSourceEvents(t *
 
 func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_resolve", "thr_bridge_resolve")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_resolve", "thr_bridge_resolve")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_resolve", "thr_bridge_resolve", "evt_bridge_resolve", 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
 
 	candidate := enginekubernetes.BindingCandidate{
@@ -1582,7 +1583,7 @@ func TestPostgreSQLRuntimeDeliveryStoreClaimsBindingFromKubernetesVisibility(t *
 
 func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopRejection(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_runtime_rejected", "bind_bridge_runtime_rejected", 1, "pod_uid_runtime_rejected")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected", "evt_bridge_runtime_rejected", 1, "user.message", `{"type":"user.message","content":[{"type":"text","text":"hello"}]}`)
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)

@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -142,7 +143,7 @@ func runContentProcessRecovery(t *testing.T, spec contentCrashCase) {
 	apiDB, sandboxDB := workloads.OpenWorkload(t, "api", nil), workloads.OpenWorkload(t, "sandbox", nil)
 	runnerDB := workloads.OpenWorkload(t, "job_runner", nil)
 	session, thread, binding, pod := id.New("sesn_"), id.New("thr_"), id.New("bind_"), id.New("pod_")
-	seedBridgeAPISession(t, admin, "default", session, thread)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 	// Consume the same generation sequence as placement so the seeded owner
 	// cannot collide with the first real successor's generation.
 	var originalGeneration int64
@@ -150,9 +151,9 @@ func runContentProcessRecovery(t *testing.T, spec contentCrashCase) {
 		t.Fatal(err)
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, originalGeneration, pod)
-	seedRuntimePodLostStatusFence(t, admin, session, binding, originalGeneration)
-	seedBridgeAPIAgentConfig(t, admin, "default", session, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}],"skills":[],"metadata":{}}`)
-	seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, session, binding, originalGeneration)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", session, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 	if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1',agent_runtime_pod_name='content-runtime' WHERE session_id=$1`, session); err != nil {
 		t.Fatal(err)
 	}

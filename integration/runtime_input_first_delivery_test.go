@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -36,9 +37,9 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 		bindingID = "bind_first_queued_delivery"
 		podUID    = "pod_first_queued_delivery"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 
 	client := dbconnect.NewClientForTesting(runtime)
 	attachmentStore := blob.NewFakeBlobStore()
@@ -144,7 +145,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	apiStore.AttachmentBlobStore = attachmentStore
 	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-hot-cold-composition-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_attachment_hot_cold_run")
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          scope,
@@ -359,9 +360,9 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 		bindingID = "bind_first_queued_exhaustion"
 		podUID    = "pod_first_queued_exhaustion"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
 	attachmentStore := blob.NewFakeBlobStore()
 	seedBridgeAPIFileAttachment(t, admin, attachmentStore, "file_first_queued_exhaustion", "exhausted.png", "image/png", "exhausted")
@@ -454,7 +455,7 @@ func TestPostgreSQLJobRunnerTerminalizesProducerQueuedMessageBeforeFirstClaim(t 
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 2, podUID)
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-terminal-cold-load-key-32")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
 	loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("cold load terminal media input: %v", err)

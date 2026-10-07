@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -46,10 +47,10 @@ func TestPostgreSQLAbnormalContentRetentionCold(t *testing.T) {
 			if sequence != 3 {
 				t.Fatalf("current Assistant sequence=%d", sequence)
 			}
-			seedReadySandboxForSharedToolExecution(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId)
+			sessionfixture.SeedReadySandboxForSharedToolExecution(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId)
 			sibling := contentRetentionTool(t, f, "call-sibling", "/workspace/sibling.txt", "unrelated-sibling-reason", "sibling-signature")
 			contentRetentionExecute(t, f, sibling, "sibling-result")
-			if _, err := f.store.SettleToolResult(f.ctx, bridgeToolSettlementRequestForTest(f.scope, bridgeCompletedToolSettlementForTest(sibling, "sibling-result"))); err != nil {
+			if _, err := f.store.SettleToolResult(f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(f.scope, sessionfixture.BridgeCompletedToolSettlementForTest(sibling, "sibling-result"))); err != nil {
 				t.Fatal(err)
 			}
 			selected := contentRetentionTool(t, f, "call-read-note", "/workspace/note.txt", "reason-before-tool", "fixture-signature-tool")
@@ -96,7 +97,7 @@ func TestPostgreSQLAbnormalContentRetentionCold(t *testing.T) {
 			if !reflect.DeepEqual(terminalLoad.ToolRouteView, pending.ToolRouteView) {
 				t.Fatal("unconsumed terminal result changed the recovery route")
 			}
-			request := bridgeToolSettlementRequestForTest(f.scope, bridgeCompletedToolSettlementForTest(selected, "fixture-note"))
+			request := sessionfixture.BridgeToolSettlementRequestForTest(f.scope, sessionfixture.BridgeCompletedToolSettlementForTest(selected, "fixture-note"))
 			if variant == "committed-result-ack-loss" {
 				fault := &contentSettlementResponseFault{BridgeAPIServer: NewBridgeAPIServer(f.store), lose: true}
 				client, _ := startSandboxProductionBoundaryBridgeClient(t, fault, f.scope.Binding.TargetPodUid)

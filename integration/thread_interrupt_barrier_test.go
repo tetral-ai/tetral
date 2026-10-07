@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -29,7 +30,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsLateMessageCommit(t *testing.T) 
 		messageID   = "rin_interrupt_barrier_message"
 		interruptID = "rin_interrupt_barrier_control"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIRuntimeInput(t, admin, "default", sessionID, threadID, messageID, bindingID, podUID, "evt_interrupt_barrier_message")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_control", 2, "user.interrupt", `{}`)
@@ -42,7 +43,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsLateMessageCommit(t *testing.T) 
 
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: messageID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: messageID,
 	})
 	if err != nil || response.GetBarrierStale() == nil {
 		t.Fatalf("late CommitInputs = %#v/%v; want barrier stale", response, err)
@@ -69,10 +70,10 @@ func TestPostgreSQLThreadInterruptBarrierMakesLateToolSettlementStale(t *testing
 		interruptID    = "rin_interrupt_barrier_tool_control"
 		interruptEvent = "evt_interrupt_barrier_tool_control"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{},"evaluated_permission":"allow"}`)
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, requestID, toolUseID, "call_interrupt_barrier_tool", "exec_command")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, requestID, toolUseID, "call_interrupt_barrier_tool", "exec_command")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 2, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, jobrunner.RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -82,8 +83,8 @@ func TestPostgreSQLThreadInterruptBarrierMakesLateToolSettlementStale(t *testing
 	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, interruptID, interruptEvent, 2)
 
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
-		bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+	response, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
+		sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUseID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{}},
@@ -122,20 +123,20 @@ func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *te
 			podUID := "pod_tool_interrupt_" + suffix
 			modelRequestID := "mreq_tool_interrupt_" + suffix
 			toolUseID := "evt_tool_interrupt_use_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 			bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_tool_interrupt_start_"+suffix, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
-			sequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+			sequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, sequence, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
 			if _, err := admin.ExecContext(ctx, `UPDATE session_events SET model_request_id=$2,projection_json=$3
 				WHERE workspace_id='default' AND event_id=$1`, toolUseID, modelRequestID, `{"model_tool_call_id":"call_`+suffix+`"}`); err != nil {
 				t.Fatalf("stamp Tool Use provider identity: %v", err)
 			}
-			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, "call_"+suffix, "Read")
-			seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+			sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, "call_"+suffix, "Read")
+			sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
 			if accepted, err := bridgeStore.AcceptSandboxExecution(ctx, &bridgev1.AcceptSandboxExecutionRequest{Scope: scope, ToolUseEventId: toolUseID}); err != nil || accepted.GetCommitted() == nil {
 				t.Fatalf("accept Tool execution = %#v/%v", accepted, err)
 			}
@@ -145,7 +146,7 @@ func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *te
 				WHERE workspace_id='default' AND tool_use_event_id=$1`, toolUseID, terminalResult, runtimecontrol.Sha256Hex(terminalResult)); err != nil {
 				t.Fatalf("stage terminal Tool result: %v", err)
 			}
-			settleRequest := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseID, "done"))
+			settleRequest := sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUseID, "done"))
 			eventStore := sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 			eventService := sessionevent.NewService(eventStore)
 
@@ -242,7 +243,7 @@ func TestPostgreSQLToolSettlementAndInterruptBirthConvergeBothWinnerOrders(t *te
 					ToolUseEventIds: []string{toolUseID},
 				},
 				InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
-					RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(leased[0]),
+					RuntimeInputId: interruptJob.RuntimeInputID, InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(leased[0]),
 				},
 			})
 			if err != nil || ended.GetCommitted() == nil {
@@ -305,7 +306,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsSuccessorStartAndChildLifecycle(
 		interruptID    = "rin_interrupt_barrier_lifecycle"
 		interruptEvent = "evt_interrupt_barrier_lifecycle"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, jobrunner.RuntimeJob{
@@ -314,14 +315,14 @@ func TestPostgreSQLThreadInterruptBarrierRejectsSuccessorStartAndChildLifecycle(
 		EventIDs: []string{interruptEvent}, SequenceFrom: 1, SequenceTo: 1,
 	})
 	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, interruptID, interruptEvent, 1)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 
 	started, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_interrupt_barrier_successor_start",
 		ModelRequestId: "mreq_interrupt_barrier_successor", EventType: "span.model_request_start",
 		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_interrupt_barrier_successor"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 	})
 	if err != nil || started.GetStale() == nil {
 		t.Fatalf("successor Request Start = %#v/%v; want barrier stale", started, err)
@@ -352,7 +353,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsInternalToolRepair(t *testing.T)
 		bindingID = "bind_interrupt_barrier_internal_repair"
 		podUID    = "pod_interrupt_barrier_internal_repair"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_internal_repair", 1, "user.interrupt", `{}`)
 	seedRuntimeInboxBirthForJob(t, admin, jobrunner.RuntimeJob{
@@ -362,7 +363,7 @@ func TestPostgreSQLThreadInterruptBarrierRejectsInternalToolRepair(t *testing.T)
 	})
 	seedActiveInterruptQueueCustody(t, runtime, sessionID, threadID, "rin_interrupt_barrier_internal_repair", "evt_interrupt_barrier_internal_repair", 1)
 	request := &bridgev1.CommitInternalToolRepairRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope:          sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 		ModelRequestId: "mreq_interrupt_barrier_internal_repair", ModelToolCallId: "call_interrupt_barrier_internal_repair",
 		ToolName: "unknown_tool", CanonicalInputJson: `{}`,
 		RepairKey: "internal_invalid_tool_3739ecf5202cc30f8a0b05a24f670596b528dd917bea6796f30e0b1323ea1789",
@@ -392,7 +393,7 @@ func TestPostgreSQLColdLoadRemainsAvailableWhileInterruptBarrierIsActive(t *test
 		bindingID = "bind_interrupt_barrier_cold_load"
 		podUID    = "pod_interrupt_barrier_cold_load"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_barrier_cold_message", 1, "user.message", `{"content":[{"type":"text","text":"durable before interrupt"}]}`)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_interrupt_barrier_cold", "evt_interrupt_barrier_cold_message", 1)
@@ -406,7 +407,7 @@ func TestPostgreSQLColdLoadRemainsAvailableWhileInterruptBarrierIsActive(t *test
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("interrupt-barrier-cold-load-key")
 	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 	})
 	if err != nil || response.GetRuntimeBindingToken() == "" ||
 		!strings.Contains(response.GetContextJson(), `"messageSequence":1`) ||

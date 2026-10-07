@@ -22,6 +22,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -96,9 +97,9 @@ func TestPostgreSQLBackgroundReceiptBindingCut(t *testing.T) {
 	scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "review_background_cut")
 	const task = "task_review_background_cut"
 	const tool = "evt_review_background_cut"
-	seedBridgeAPIEvent(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, nextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_review_background_cut","chars":"once"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_review_background_cut","chars":"once"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIToolDeclarationProjection(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, "call_review_background_cut", "write_stdin", `{"session_id":"task_review_background_cut","chars":"once"}`, "background_command")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool)
 	seedBridgeAPIBackgroundTask(t, admin, "default", scope.SessionId, scope.SessionThreadId, scope.Binding.BindingId, task, "evt_review_background_source")
 	tracer := &bridgeExecutionQueryTracer{}
 	traced := newAwaitNotificationTracedStore(t, runtime, tracer)
@@ -161,7 +162,7 @@ func TestPostgreSQLMemoryReceiptBindingCut(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "review_memory_cut")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_review_cut")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_review_cut")
 	request := durableMemoryRequestForTest(t, admin, scope, "evt_review_memory", `{"action":"create","path":"notes/replay.md","content":"original"}`)
 	first, err := store.RunMemory(context.Background(), request)
 	if err != nil || first.GetCommitted() == nil {
@@ -231,9 +232,9 @@ func TestPostgreSQLBackgroundReceiptConsumersBindingRace(t *testing.T) {
 				scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "receipt_consumer")
 				const task = "task_receipt_consumer"
 				const tool = "evt_receipt_consumer"
-				seedBridgeAPIEvent(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, nextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_receipt_consumer","chars":"once"},"evaluated_permission":"allow"}`)
+				seedBridgeAPIEvent(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_receipt_consumer","chars":"once"},"evaluated_permission":"allow"}`)
 				seedBridgeAPIToolDeclarationProjection(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool, "call_receipt_consumer", "write_stdin", `{"session_id":"task_receipt_consumer","chars":"once"}`, "background_command")
-				seedBridgeAPIAllowedToolRoute(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool)
+				sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", scope.SessionId, scope.SessionThreadId, tool)
 				seedBridgeAPIBackgroundTask(t, admin, "default", scope.SessionId, scope.SessionThreadId, scope.Binding.BindingId, task, "evt_receipt_source")
 				tracer := &bridgeExecutionQueryTracer{}
 				traced := newAwaitNotificationTracedStore(t, runtime, tracer)
@@ -379,8 +380,8 @@ func TestPostgreSQLMemoryProjectionReceiptBindingRace(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "memory_projection_receipt")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_projection_receipt")
-			seedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
+			sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_projection_receipt")
+			sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
 			request := durableMemoryRequestForTest(t, admin, scope, "evt_memory_projection_receipt", `{"action":"create","path":"notes/replay.md","content":"original"}`)
 			tracer := &bridgeExecutionQueryTracer{}
 			traced := newAwaitNotificationTracedStore(t, runtime, tracer)
@@ -502,8 +503,8 @@ func TestPostgreSQLMemoryProjectionMissingReceiptKeepsBoundScopeError(t *testing
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope, _ := seedAwaitExecutionNotificationFixture(t, store, admin, "memory_missing_receipt")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_missing_receipt")
-	seedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", scope.SessionId, "memory_missing_receipt")
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", scope.SessionId)
 	request := durableMemoryRequestForTest(t, admin, scope, "evt_memory_missing_receipt", `{"action":"create","path":"notes/missing.md","content":"original"}`)
 	tracer := &bridgeExecutionQueryTracer{}
 	rpc := processRegistryRPCWithStore(t, newAwaitNotificationTracedStore(t, runtime, tracer), scope.Binding.TargetPodUid, nil)

@@ -8,17 +8,18 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/encryption"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestPostgreSQLMCPServerResolutionPreservesCredentialScope(t *testing.T) {
 	h := newMCPDurableComposition(t)
-	seedBridgeAPISession(t, h.admin, "default", "sesn_mcp_other", "thr_mcp_other")
+	sessionfixture.SeedBridgeAPISession(t, h.admin, "default", "sesn_mcp_other", "thr_mcp_other")
 	if _, err := h.admin.Exec(`UPDATE sessions SET installed_tools_json=(SELECT installed_tools_json FROM sessions WHERE workspace_id='default' AND id='sesn_mcp_durable'),vault_ids_json='[]' WHERE workspace_id='default' AND id='sesn_mcp_other'`); err != nil {
 		t.Fatal(err)
 	}
-	seedBridgeAPISession(t, h.admin, "workspace_mcp_other", "sesn_mcp_w2", "thr_mcp_w2")
+	sessionfixture.SeedBridgeAPISession(t, h.admin, "workspace_mcp_other", "sesn_mcp_w2", "thr_mcp_w2")
 	seedBridgeAPIRuntimeBinding(t, h.admin, "default", "sesn_mcp_other", "bind_mcp_other", 1, "pod_mcp_durable")
-	otherScope := bridgeAPIScope("sesn_mcp_other", "thr_mcp_other", "bind_mcp_other", 1, "pod_mcp_durable")
+	otherScope := sessionfixture.BridgeAPIScope("sesn_mcp_other", "thr_mcp_other", "bind_mcp_other", 1, "pod_mcp_durable")
 	seedBridgeAPIRequestStart(t, h.store, otherScope, "rwrite_mcp_other_start", "mreq_mcp_durable", "agent_provider_request", 0)
 	for _, identity := range []struct{ workspace, session, vault, credential, adapter string }{
 		{"default", "sesn_mcp_other", "vlt_mcp_s2", "cred_mcp_s2_slack", "slack"},

@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -115,7 +116,7 @@ func TestPostgreSQLCompletionMailWakeAcceptsEveryStaleRecipientArm(t *testing.T)
 					t.Fatalf("seed absent-session workspace: %v", err)
 				}
 			} else {
-				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 				test.mutate(t, admin, sessionID, threadID)
 			}
 			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
@@ -171,13 +172,13 @@ func TestPostgreSQLCompletionMailFinalizationRechecksTerminalRecipientFences(t *
 			threadID := "thrd_completion_mail_finalize_stale_" + suffix
 			childID := "thrd_completion_mail_finalize_stale_child_" + suffix
 			deliveryID := "delivery_completion_mail_finalize_stale_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
-			messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
+			messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "completion"))
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_completion_mail_finalize_stale_sent_"+suffix, 1,
 				"agent.thread_message_sent",
-				bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
-			seedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+				sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "sevt_completion_mail_finalize_stale_"+suffix, messageJSON))
+			sessionfixture.SeedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_"+suffix, 1, "pod_"+suffix)
 			store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }

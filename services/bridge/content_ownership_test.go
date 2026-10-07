@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -33,7 +34,7 @@ func TestPostgreSQLRuntimeContentOwnershipValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			declaration := bridgeToolDeclarationForTest("call-ownership", "Read", `{"file_path":"fixture-sensitive-content"}`, "ask", "sandbox_execute")
+			declaration := sessionfixture.BridgeToolDeclarationForTest("call-ownership", "Read", `{"file_path":"fixture-sensitive-content"}`, "ask", "sandbox_execute")
 			tool, err := f.store.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: f.scope, RuntimeWriteId: "tool", ModelRequestId: "request", ToolDeclaration: declaration})
 			if err != nil {
 				t.Fatal(err)

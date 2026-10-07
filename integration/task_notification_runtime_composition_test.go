@@ -26,6 +26,7 @@ import (
 	internalsandbox "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -354,7 +355,7 @@ func TestPostgreSQLTaskNotificationSettlesAcrossProducerRuntimeAndBridge(t *test
 		sourceID  = "evt_task_composition_source"
 	)
 	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -571,12 +572,12 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 		initialSequence = int64(10)
 	)
 	now := time.Now().UTC()
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	baseStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	baseStore.RuntimeBindingTokenHMACKey = []byte("task-request-start-race-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, baseStore, scope, "rwrite_task_source_start", "mreq_"+sourceID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, taskID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -593,7 +594,7 @@ func TestPostgreSQLTaskNotificationWaitsBehindCommittedRequestStart(t *testing.T
 		Scope: scope, RuntimeWriteId: "rwrite_task_source_end", ModelRequestId: "mreq_" + sourceID,
 		FinishReason: "tool-calls", UsageJson: `{}`,
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{
-			Disposition: "completed", AssistantMessageSequence: bridgeAPIInt64(sourceAssistantSequence),
+			Disposition: "completed", AssistantMessageSequence: sessionfixture.BridgeAPIInt64(sourceAssistantSequence),
 			ToolUseEventIds: []string{sourceID},
 		},
 	}); err != nil || response.GetCommitted() == nil {

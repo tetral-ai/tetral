@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -25,7 +26,7 @@ import (
 func handoffFixture(t *testing.T) (*PostgreSQLBridgeAPIStore, *sql.DB, bridgev1.AgentRuntimeBridgeServiceClient, *bridgev1.ReleaseRuntimeBindingRequest) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_handoff", "thr_handoff")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_handoff", "thr_handoff")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_handoff", "bind_handoff", 1, "pod_handoff")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	rpc := processRegistryRPCWithStore(t, store, "pod_handoff", nil)
@@ -62,7 +63,7 @@ func TestPostgreSQLRuntimeHandoffCheckpoint(t *testing.T) {
 	for _, kind := range []string{"open provider", "unowned tool", "uncommitted reviewer"} {
 		t.Run(kind, func(t *testing.T) {
 			_, admin, rpc, request := handoffFixture(t)
-			seedBridgeAPIInternalReviewerThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_review")
+			sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_review")
 			switch kind {
 			case "open provider":
 				seedBridgeAPIEvent(t, admin, "default", "sesn_handoff", "thr_review", "evt_open", 1, "span.model_request_start", "{}")
@@ -85,7 +86,7 @@ func TestPostgreSQLRuntimeHandoffCheckpoint(t *testing.T) {
 	}
 	t.Run("all threads immutable continuation", func(t *testing.T) {
 		_, admin, rpc, request := handoffFixture(t)
-		seedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_child")
+		sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_child")
 		if _, err := admin.Exec(`UPDATE session_threads SET status='running' WHERE id='thr_child'`); err != nil {
 			t.Fatal(err)
 		}
@@ -161,7 +162,7 @@ func TestPostgreSQLRuntimeHandoffResponseLossReplacementReplay(t *testing.T) {
 
 func TestPostgreSQLRuntimeRetiredProcessReceiptFence(t *testing.T) {
 	store, admin, rpc, _ := handoffFixture(t)
-	scope := bridgeAPIScope("sesn_handoff", "thr_handoff", "bind_handoff", 1, "pod_handoff")
+	scope := sessionfixture.BridgeAPIScope("sesn_handoff", "thr_handoff", "bind_handoff", 1, "pod_handoff")
 	request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-running", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}
 	first, err := store.WriteEvent(context.Background(), request)
 	if err != nil {
@@ -254,7 +255,7 @@ func TestPostgreSQLRuntimeHandoffOrdinaryInputCustody(t *testing.T) {
 				for _, custody := range []string{"accepted", "delivering"} {
 					inputID := kind + ":" + custody
 					threadID := "thread_" + kind + "_" + custody
-					seedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", threadID)
+					sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", threadID)
 					eventIDs, _ := json.Marshal([]string{"event_" + inputID})
 					input := runtimecontrol.AcceptedRuntimeInput{SessionThreadID: threadID, RuntimeInputID: inputID, InputKind: kind, EventIDsJSON: string(eventIDs), SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true}}
 					enqueue, err := runtimecontrol.RuntimeInputEnqueueRequest("default", "sesn_handoff", input, time.Now())
@@ -353,7 +354,7 @@ func TestPostgreSQLRuntimeHandoffDiagnosticsReachProcessSink(t *testing.T) {
 	if _, err := rpc.ReleaseRuntimeBinding(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("accepting release=%v", err)
 	}
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_diagnostic_child")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_handoff", "thr_handoff", "thr_diagnostic_child")
 	if _, err := admin.Exec(`INSERT INTO session_runtime_inbox(workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,status,event_ids_json,sequence_from,sequence_to,binding_id,binding_generation,target_pod_uid,created_at,updated_at) VALUES('default','sesn_handoff','thr_handoff','input_diagnostic','messages','accepted','["event_diagnostic"]',1,1,'bind_handoff',1,'pod_handoff',clock_timestamp(),clock_timestamp())`); err != nil {
 		t.Fatal(err)
 	}

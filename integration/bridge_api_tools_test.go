@@ -6,6 +6,7 @@ import (
 
 	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
@@ -69,7 +70,7 @@ func writeDurableOrdinaryToolUseForTest(
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, "agent_provider_request", 0)
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_tool", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, "allow"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest(modelToolCallID, toolName, inputJSON, "allow"),
 	})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("write durable ordinary Tool use: response=%#v err=%v", response, err)

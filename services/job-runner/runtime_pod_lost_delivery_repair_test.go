@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
@@ -146,7 +147,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			if resultCount != 1 || !strings.Contains(resultPayload, tc.wantResultText) {
 				t.Fatalf("parent results=%d payload=%s; want exactly one containing %q", resultCount, resultPayload, tc.wantResultText)
 			}
-			got, ok := testJSONPathValue(t, resultPayload, "is_error").(bool)
+			got, ok := sessionfixture.JSONPathValue(t, resultPayload, "is_error").(bool)
 			if !ok || got != tc.wantResultError {
 				t.Fatalf("parent result is_error=%v payload=%s; want %v", got, resultPayload, tc.wantResultError)
 			}
@@ -252,10 +253,10 @@ func seedRuntimePodLostDeliveryFixture(
 		now:            time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 	}
 	bindingID := fmt.Sprintf("bind_pod_loss_delivery_%d", index)
-	fixture.binding = runtimePodLostBinding(fixture.sessionID, bindingID, int64(index+2))
-	seedBridgeAPISession(t, db, "default", fixture.sessionID, fixture.parentThreadID)
+	fixture.binding = sessionfixture.RuntimePodLostBinding(fixture.sessionID, bindingID, int64(index+2))
+	sessionfixture.SeedBridgeAPISession(t, db, "default", fixture.sessionID, fixture.parentThreadID)
 	seedBridgeAPIRuntimeBinding(t, db, "default", fixture.sessionID, bindingID, fixture.binding.BindingGeneration, fixture.binding.PodUID)
-	seedRuntimePodLostStatusFence(t, db, fixture.sessionID, bindingID, fixture.binding.BindingGeneration)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, db, fixture.sessionID, bindingID, fixture.binding.BindingGeneration)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_threads (
 			workspace_id, id, session_id, parent_thread_id, role, visibility, status,
@@ -275,7 +276,7 @@ func seedRuntimePodLostDeliveryFixture(
 	}
 	toolPayload := fmt.Sprintf(`{"type":"agent.tool_use","name":%q,"input":{"task_name":"worker"},"evaluated_permission":"allow"}`, toolName)
 	seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, fixture.toolUseEventID, sequence, "agent.tool_use", toolPayload, "public", true)
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t,
 		db,
 		"default",
@@ -286,16 +287,16 @@ func seedRuntimePodLostDeliveryFixture(
 		"call_"+fixture.toolUseEventID,
 		toolName,
 	)
-	seedBridgeAPIAllowedToolRoute(t, db, "default", fixture.sessionID, fixture.parentThreadID, fixture.toolUseEventID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, db, "default", fixture.sessionID, fixture.parentThreadID, fixture.toolUseEventID)
 	sequence++
 	if withSent {
-		messageJSON := bridgePublicMessageJSONForTest(t, "hello worker")
-		sentPayload := bridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
+		messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, "hello worker")
+		sentPayload := sessionfixture.BridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
-		seedAgentMailCustody(t, db, fixture.sessionID, fixture.childThreadID, fixture.deliveryID, fixture.now)
+		sessionfixture.SeedAgentMailCustody(t, db, fixture.sessionID, fixture.childThreadID, fixture.deliveryID, fixture.now)
 		sequence++
 		if withReceived {
-			receivedPayload := bridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)
+			receivedPayload := sessionfixture.BridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)
 			receivedEventID := runtimecontrol.StableRuntimeID("agent_mail_received_event", "default", fixture.sessionID, fixture.childThreadID, fixture.deliveryID)
 			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, receivedEventID, 1, "agent.thread_message_received", receivedPayload, "public", true)
 			if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_inbox

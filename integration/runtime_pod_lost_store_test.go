@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -50,16 +51,16 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 		podUID         = "pod_pod_loss_terminal_retention"
 		modelRequestID = "mreq_pod_loss_terminal_retention"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("pod-loss-terminal-retention-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_pod_loss_retention_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_pod_loss_retention_tool", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest(
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(
 			"call_pod_loss_retention", "Read", `{"file_path":"README.md"}`, "allow", "sandbox_execute",
 		),
 	})
@@ -67,9 +68,9 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 		t.Fatalf("commit terminal retention Tool Use: %#v/%v", toolUse, err)
 	}
 	toolUseEventID := toolUse.GetCommitted().GetEventId()
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	settled, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
-		bridgeCompletedToolSettlementForTest(toolUseEventID, "terminal before pod loss"),
+		sessionfixture.BridgeCompletedToolSettlementForTest(toolUseEventID, "terminal before pod loss"),
 	))
 	if err != nil || settled.GetCommitted() == nil {
 		t.Fatalf("settle terminal retention Tool: %#v/%v", settled, err)
@@ -204,10 +205,10 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 
 func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplacement(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss")
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "thr_bridge_pod_loss_closed")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "thr_bridge_pod_loss_closed")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old")
-	seedRuntimePodLostStatusFence(t, admin, "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -225,7 +226,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed lost request events: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t,
 		admin,
 		"default",
@@ -247,7 +248,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	attachment := createBridgeTransientAttachmentForTest(
 		t, admin, attachmentStore,
-		bridgeAPIScope("sesn_bridge_pod_loss", "thr_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_pod_loss", "thr_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old"),
 		"attachment_pod_loss", "evt_pod_loss_tool", []byte("pod-loss-attachment"),
 	)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments
@@ -344,7 +345,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed closed request with running tool: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t,
 		admin,
 		"default",
@@ -501,7 +502,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	); err != nil {
 		t.Fatalf("read replacement binding scope: %v", err)
 	}
-	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: bridgeAPIScope(
+	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(
 		"sesn_bridge_pod_loss", "thr_bridge_pod_loss", replacementBindingID, replacementGeneration, replacementPodUID,
 	)})
 	if err != nil {
@@ -538,7 +539,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if executionState != "running" || storedResult.Valid {
 		t.Fatalf("pod-loss execution = %q/%v; want unchanged running record", executionState, storedResult)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
 		t.Fatalf("pod-loss attachment status = %q; want preserved staged attachment", got)
 	}
 	var inboxStatus string
@@ -576,10 +577,10 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			modelRequestID := "mreq_pod_loss_approval_" + suffix
 			toolUseEventID := "evt_pod_loss_approval_tool_" + suffix
 			bindingID := "bind_pod_loss_approval_" + suffix
-			binding := runtimePodLostBinding(sessionID, bindingID, 1)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
-			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 			if _, err := admin.ExecContext(context.Background(),
 				`INSERT INTO session_events (
 					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -600,7 +601,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			); err != nil {
 				t.Fatalf("seed pending-approval request: %v", err)
 			}
-			seedBridgeAPIDurableToolMessage(
+			sessionfixture.SeedBridgeAPIDurableToolMessage(
 				t, admin, "default", sessionID, threadID, modelRequestID,
 				toolUseEventID, "tool-call-pod-loss-approval-"+suffix, "Write",
 			)
@@ -699,9 +700,9 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			}}
 			settle := func(scope *bridgev1.RuntimeScope) {
 				t.Helper()
-				response, settleErr := apiStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+				response, settleErr := apiStore.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 					scope,
-					bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
+					sessionfixture.BridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel"),
 				))
 				if settleErr != nil || response.GetCommitted() == nil {
 					t.Fatalf("settle Tool route under replacement custody = %#v/%v; want committed", response, settleErr)
@@ -710,7 +711,7 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			sender := &settlingRecoveryCommandClient{RuntimePodCommandClient: fixtureRuntimeCommandClient(t, providerRecoveryTokenSource{})}
 			if testCase.settleBeforeWake {
 				sender.beforeRecover = func(request *agentruntimev1.RecoverThreadRequest) error {
-					settle(bridgeAPIScope(sessionID, threadID, request.GetBindingId(), request.GetBindingGeneration(), request.GetTargetPodUid()))
+					settle(sessionfixture.BridgeAPIScope(sessionID, threadID, request.GetBindingId(), request.GetBindingGeneration(), request.GetTargetPodUid()))
 					return nil
 				}
 			}

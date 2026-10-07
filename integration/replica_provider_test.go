@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 )
 
@@ -181,9 +182,9 @@ func testReplicaProviderContinuation(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID, threadID, bindingID, podUID = "sesn_replica_provider_core", "sthr_replica_provider_core", "bind_replica_provider_core", "pod_replica_provider_core"
 	const signingKey = "replica-provider-binding-key-at-least-32-bytes"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	store := bridge.NewPostgreSQLBridgeAPIStore(client)
 	store.RuntimeBindingTokenHMACKey = []byte(signingKey)

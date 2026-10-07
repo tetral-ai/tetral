@@ -9,6 +9,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -39,11 +40,11 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 		inputID   = "rin_interrupt_receipt_exhaustion_race"
 		eventID   = "evt_interrupt_receipt_exhaustion_race"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.interrupt", `{"type":"user.interrupt"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, 1, 1)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, inputID, "interrupt_control", eventID, 1, 1, time.Now().UTC().Add(-time.Minute))
 	leased := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
@@ -57,8 +58,8 @@ func runInterruptReceiptExhaustionRace(t *testing.T, receiptFirst bool) {
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	commitRequest := &bridgev1.CommitInputsRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
-		InterruptLeaseRef: bridgeInterruptLeaseRef(leased),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), RuntimeInputId: inputID,
+		InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(leased),
 	}
 
 	blocker, err := admin.BeginTx(context.Background(), nil)
@@ -170,12 +171,12 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		reviewID       = "arvw_interrupt_final_exhaustion"
 	)
 	now := time.Now().UTC().Add(-time.Minute)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, monitorID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, threadID, reviewerID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, monitorID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, threadID, reviewerID)
 	reviewerAdmission, err := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).AdmitApprovalReviewInput(
 		context.Background(),
 		&bridgev1.AdmitApprovalReviewInputRequest{Scope: scope, ReviewerThreadId: reviewerID, ReviewId: reviewID},
@@ -203,7 +204,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, toolUseEventID, requestID); err != nil {
 		t.Fatalf("seed unresolved Tool visibility: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, requestID, toolUseEventID, "call_interrupt_final_exhaustion", "exec_command")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, requestID, toolUseEventID, "call_interrupt_final_exhaustion", "exec_command")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, "evt_interrupt_final_exhaustion_sibling_request", 1,
 		"span.model_request_start", `{"type":"span.model_request_start","model_request_id":"`+siblingRequest+`"}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -218,7 +219,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, siblingTool, siblingRequest); err != nil {
 		t.Fatalf("seed sibling unresolved Tool visibility: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, siblingRequest, siblingTool, "call_interrupt_final_exhaustion_sibling", "exec_command")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, siblingRequest, siblingTool, "call_interrupt_final_exhaustion_sibling", "exec_command")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, monitorID, siblingEvent, 1, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedRuntimeInboxBirthForJob(t, admin, jobrunner.RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: monitorID, RuntimeInputID: siblingInput,

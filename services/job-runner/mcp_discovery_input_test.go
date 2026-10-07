@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
@@ -247,7 +248,7 @@ func TestMCPInputDiscoveryLeaseReclaimKeepsSpentAttempts(t *testing.T) {
 
 func TestMCPInputDiscoveryFailurePreservesOtherActiveThread(t *testing.T) {
 	store, admin, job := newInputDiscoveryFixture(t)
-	seedBridgeAPIChildThread(t, admin, "default", job.SessionID, job.SessionThreadID, "thr_other")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", job.SessionID, job.SessionThreadID, "thr_other")
 	if _, err := admin.Exec(`UPDATE session_threads SET status='running' WHERE id='thr_other'`); err != nil {
 		t.Fatal(err)
 	}

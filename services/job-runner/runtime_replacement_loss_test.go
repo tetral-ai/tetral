@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestPostgreSQLRuntimePromotedReplacementRetainsLossAuthority(t *testing.T) {
@@ -28,11 +29,11 @@ func TestPostgreSQLRuntimePromotedReplacementRetainsLossAuthority(t *testing.T) 
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			seedBridgeAPISession(t, admin, "default", "replacement-session", "replacement-thread")
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", "replacement-session", "replacement-thread")
 			seedBridgeAPIRuntimeBinding(t, admin, "default", "replacement-session", "replacement-binding", 1, "replacement-pod")
-			seedRuntimePodLostStatusFence(t, admin, "replacement-session", "replacement-binding", 1)
+			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, "replacement-session", "replacement-binding", 1)
 			seedBridgeAPIEvent(t, admin, "default", "replacement-session", "replacement-thread", "replacement-event", 1, "user.message", `{"type":"user.message"}`)
-			seedBridgeAPIRuntimeInbox(t, admin, "default", "replacement-session", "replacement-thread", "replacement-input", "messages", `["replacement-event"]`, "accepted", "replacement-binding", "replacement-pod", 1, 1)
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", "replacement-session", "replacement-thread", "replacement-input", "messages", `["replacement-event"]`, "accepted", "replacement-binding", "replacement-pod", 1, 1)
 			request, err := runtimecontrol.RuntimeInputEnqueueRequest("default", "replacement-session", runtimecontrol.AcceptedRuntimeInput{
 				SessionThreadID: "replacement-thread", RuntimeInputID: "replacement-input", InputKind: "messages", EventIDsJSON: `["replacement-event"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true},
 			}, time.Now())

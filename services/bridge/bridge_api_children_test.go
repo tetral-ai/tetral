@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -33,7 +34,7 @@ func TestDurablePrefixIncludesAcknowledgedFailedAndRescheduledAssistantParts(t *
 		sessionID = "sesn_prefix_sealed_only"
 		threadID  = "thr_prefix_sealed_only"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
 	) VALUES
@@ -110,8 +111,8 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		requestID = "mreq_live_spawn_fences"
 		validID   = "evt_live_spawn_fences_valid"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, validID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"worker","agent_type":"worker","fork_turns":"all"},"evaluated_permission":"ask"}`)
@@ -120,7 +121,7 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$3`, sessionID, requestID, validID); err != nil {
 		t.Fatalf("authorize valid live spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, requestID, validID, "call_live_spawn_fences", "spawn_agent")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, requestID, validID, "call_live_spawn_fences", "spawn_agent")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
@@ -153,7 +154,7 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 		t.Fatalf("authorize other-thread source: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := func(sourceID, taskName string, candidateScope *bridgev1.RuntimeScope) *bridgev1.CreateSubagentThreadRequest {
 		return &bridgev1.CreateSubagentThreadRequest{
 			Scope: candidateScope, SourceToolUseEventId: sourceID, TaskName: taskName, AgentType: "worker", InitialPrompt: "perform the delegated task",
@@ -162,7 +163,7 @@ func TestCreateSubagentThreadPreservesLiveToolAdmissionFences(t *testing.T) {
 	for name, candidate := range map[string]*bridgev1.CreateSubagentThreadRequest{
 		"wrong Tool name":            request("evt_live_spawn_fences_wrong_name", "worker", scope),
 		"wrong Tool type":            request("evt_live_spawn_fences_wrong_type", "worker", scope),
-		"stale scope":                request(validID, "worker", bridgeAPIScope(sessionID, parentID, bindingID, 2, podUID)),
+		"stale scope":                request(validID, "worker", sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 2, podUID)),
 		"source from another Thread": request("evt_live_spawn_fences_other_thread", "worker", scope),
 	} {
 		if response, err := store.CreateSubagentThread(context.Background(), candidate); err == nil || response != nil {
@@ -246,7 +247,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			bindingID := "bind_spawn_prefix_" + name
 			podUID := "pod_spawn_prefix_" + name
 			modelRequestID := "mreq_spawn_prefix_" + name
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_spawn_prefix_"+name, "evt_spawn_prefix_user_"+name, 1)
 			if _, err := admin.Exec(`UPDATE session_messages SET data_json='{"parts":[{"type":"text","text":"prior-user"}]}' WHERE session_id=$1 AND sequence=1`, sessionID); err != nil {
@@ -254,7 +255,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 			store.RuntimeBindingTokenHMACKey = []byte("child-content-test-binding-key")
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_prefix_start_"+name, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 1)
 			writeText := func(requestID, writeID, eventID, text string) {
 				t.Helper()
@@ -268,7 +269,7 @@ func TestPostgreSQLSubagentPrefixExcludesSourceAssistantBeforeAndAfterRequestEnd
 			inputJSON := `{"task_name":"worker","agent_type":"worker","fork_turns":"all"}`
 			toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_spawn_prefix_tool_" + name, ModelRequestId: modelRequestID,
-				ToolDeclaration: bridgeToolDeclarationForTest("call_spawn_prefix_"+name, "spawn_agent", inputJSON, "allow", "child_create"),
+				ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call_spawn_prefix_"+name, "spawn_agent", inputJSON, "allow", "child_create"),
 			})
 			if err != nil || toolUse.GetCommitted() == nil {
 				t.Fatalf("write source spawn Tool Use = %#v/%v", toolUse, err)
@@ -338,14 +339,14 @@ func TestPostgreSQLCreateSubagentThreadAcceptsMechanicallyValidRuntimeAgentType(
 		bindingID = "bind_spawn_declared_agent_type"
 		podUID    = "pod_spawn_declared_agent_type"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_spawn_declared_type_start", "mreq_spawn_declared_type", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_spawn_declared_type_tool", ModelRequestId: "mreq_spawn_declared_type",
-		ToolDeclaration: bridgeToolDeclarationForTest(
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(
 			"call_spawn_declared_type", "spawn_agent",
 			`{"task_name":"planner","agent_type":"worker","fork_turns":"none"}`, "allow", "child_create",
 		),
@@ -371,7 +372,7 @@ func TestPostgreSQLCreateSubagentThreadAcceptsMechanicallyValidRuntimeAgentType(
 }
 
 func TestActorBoundaryDiagnosticsAreBoundedAndFailOpen(t *testing.T) {
-	scope := bridgeAPIScope("sesn_actor_diagnostic", "thr_actor_diagnostic", "bind_actor_diagnostic", 1, "pod_actor_diagnostic")
+	scope := sessionfixture.BridgeAPIScope("sesn_actor_diagnostic", "thr_actor_diagnostic", "bind_actor_diagnostic", 1, "pod_actor_diagnostic")
 	logActorBoundaryRejected(
 		slog.New(panicSlogHandler{}), scope, "create_subagent_thread", strings.Repeat("x", 129), "validate",
 		status.Error(codes.InvalidArgument, "private rejection detail"),
@@ -407,18 +408,18 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 		bindingID = "bind_control_operation_identity"
 		podUID    = "pod_control_operation_identity"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"provider-owned-different"}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public' WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make control source public: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	request := &bridgev1.AdmitChildInterruptRequest{
 		Scope: scope, SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
 		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
@@ -446,7 +447,7 @@ func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T)
 	if _, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: scope, ControlOperationId: sourceID}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("AwaitChildInterrupt accepted source Tool identity: %v", err)
 	}
-	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	siblingScope := sessionfixture.BridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
 	if response, err := store.AwaitChildInterrupt(context.Background(), &bridgev1.AwaitChildInterruptRequest{Scope: siblingScope, ControlOperationId: operationID}); status.Code(err) != codes.FailedPrecondition || response != nil {
 		t.Fatalf("sibling caller awaited another parent's control = %#v/%v; want FailedPrecondition", response, err)
 	}
@@ -477,8 +478,8 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 		podUID    = "pod_atomic_agent_mail"
 		content   = "run the isolated verification"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+childID+`","message":"`+content+`"}}`)
@@ -486,7 +487,7 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make mail Tool source public: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	listener := bufconn.Listen(1024 * 1024)
@@ -501,7 +502,7 @@ func TestPostgreSQLDeliverInterAgentMailIsAtomicAcrossGeneratedGRPCAndConcurrent
 	t.Cleanup(func() { _ = connection.Close() })
 	client := bridgev1.NewAgentRuntimeBridgeServiceClient(connection)
 	request := &bridgev1.DeliverInterAgentMailRequest{
-		Scope:      bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
+		Scope:      sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
 		DeliveryId: runtimecontrol.AgentMailDeliveryID(sourceID, childID), TargetThreadId: childID,
 		SourceToolUseEventId: sourceID, Content: content,
 	}
@@ -571,8 +572,8 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 		podUID    = "pod_atomic_agent_mail_rollback"
 		content   = "this delivery must roll back"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+childID+`","message":"`+content+`"}}`)
@@ -580,7 +581,7 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make mail Tool source public: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_atomic_agent_mail_queue_birth() RETURNS trigger AS $$
 		BEGIN RAISE EXCEPTION 'injected atomic agent mail Queue failure'; END; $$ LANGUAGE plpgsql;
 		CREATE TRIGGER fail_atomic_agent_mail_queue_birth BEFORE INSERT ON queue_jobs
@@ -590,7 +591,7 @@ func TestPostgreSQLDeliverInterAgentMailQueueFailureRollsBackAllMailState(t *tes
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceID, childID)
 	if _, err := store.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), DeliveryId: deliveryID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), DeliveryId: deliveryID,
 		TargetThreadId: childID, SourceToolUseEventId: sourceID, Content: content,
 	}); err == nil {
 		t.Fatal("DeliverInterAgentMail succeeded despite injected Queue failure")
@@ -626,25 +627,25 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		lateSourceID  = "evt_interrupt_actor_late_mail"
 		childSourceID = "evt_interrupt_actor_late_child"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, preSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, preSourceID, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"committed before interrupt"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, mainID), "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"external sibling mail waits"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateSourceID, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be rejected"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, childSourceID, nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
+	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, childSourceID, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID), "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be rejected"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, preSourceID)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, lateSourceID)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, childSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, preSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, lateSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, siblingID, childSourceID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
-	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	mainScope := sessionfixture.BridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	siblingScope := sessionfixture.BridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
 	preRequest := &bridgev1.DeliverInterAgentMailRequest{
 		Scope: mainScope, DeliveryId: runtimecontrol.AgentMailDeliveryID(preSourceID, siblingID), TargetThreadId: siblingID,
 		SourceToolUseEventId: preSourceID, Content: "committed before interrupt",
@@ -652,7 +653,7 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 	if response, err := store.DeliverInterAgentMail(context.Background(), preRequest); err != nil || response.GetCommitted() == nil {
 		t.Fatalf("pre-interrupt mail = %#v/%v; want committed", response, err)
 	}
-	interruptSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID)
+	interruptSequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, siblingID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, "evt_interrupt_actor_control", interruptSequence, "user.interrupt", `{}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,
@@ -716,16 +717,16 @@ func TestPostgreSQLDeclaredChildControlOwnsExactTargetActionAndExpansion(t *test
 		bindingID       = "bind_declared_child_control"
 		podUID          = "pod_declared_child_control"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, interruptRootID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, interruptRootID, interruptLeafID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, closeRootID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, closeRootID, closeLeafID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, resumeTargetID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, interruptRootID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, interruptRootID, interruptLeafID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, closeRootID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, closeRootID, closeLeafID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, resumeTargetID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 
 	seedSource := func(sourceID, toolName string, sequence int64) string {
 		t.Helper()
@@ -735,7 +736,7 @@ func TestPostgreSQLDeclaredChildControlOwnsExactTargetActionAndExpansion(t *test
 			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 			t.Fatalf("publish declared child-control source: %v", err)
 		}
-		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+		sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 		return sourceID
 	}
 	interruptSource := seedSource("evt_declared_interrupt", "interrupt_agent", 1)
@@ -813,9 +814,9 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 		bindingID = "bind_durable_resume"
 		podUID    = "pod_durable_resume"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, otherID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"provider-owned-different"}}`)
@@ -823,14 +824,14 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 		t.Fatalf("make resume Tool source public: %v", err)
 	}
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='closed_for_runtime',closed_at='2026-01-01T00:00:00Z'
 		WHERE workspace_id='default' AND session_id=$1 AND id IN ($2,$3)`, sessionID, childID, otherID); err != nil {
 		t.Fatalf("close resume target: %v", err)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.MarkChildThreadActiveRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
 	}
 	response, err := store.MarkChildThreadActive(context.Background(), request)
 	if err != nil || response.GetCommitted().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
@@ -873,7 +874,7 @@ func TestPostgreSQLMarkChildThreadActiveUsesRuntimeDeclaredTarget(t *testing.T) 
 			WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
 			t.Fatalf("make %s resume Tool source public: %v", test.status, err)
 		}
-		seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+		sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 		if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status=$3,closed_at='2026-01-01T00:00:00Z'
 			WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID, test.status); err != nil {
 			t.Fatalf("set resume target %s: %v", test.status, err)
@@ -923,12 +924,12 @@ func TestPostgreSQLAdmitApprovalReviewInputSerializesConcurrentReplayWithoutQueu
 		bindingID  = "bind_reviewer_admission"
 		podUID     = "pod_reviewer_admission"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
 	}
 
 	responses := make([]*bridgev1.AdmitApprovalReviewInputResponse, 2)
@@ -1007,13 +1008,13 @@ func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterrup
 		bindingID  = "bind_reviewer_admission_barrier_replay"
 		podUID     = "pod_reviewer_admission_barrier_replay"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, siblingID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
 	}
 
 	committed, err := store.AdmitApprovalReviewInput(context.Background(), request)
@@ -1034,7 +1035,7 @@ func TestPostgreSQLAdmitApprovalReviewInputResolvesCommittedReplayBeforeInterrup
 			replay, err, committed.GetCommitted().GetRuntimeInputId())
 	}
 	wrongSourceRequest := &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope: bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
 	}
 	if wrongSource, err := store.AdmitApprovalReviewInput(context.Background(), wrongSourceRequest); status.Code(err) != codes.FailedPrecondition || wrongSource != nil {
 		t.Fatalf("Reviewer admission replay from sibling source = %#v/%v; want FailedPrecondition with no receipt", wrongSource, err)
@@ -1056,8 +1057,8 @@ func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t
 		bindingID  = "bind_reviewer_admission_interrupt"
 		podUID     = "pod_reviewer_admission_interrupt"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
@@ -1071,7 +1072,7 @@ func TestPostgreSQLAdmitApprovalReviewInputRejectsInterruptFirstWithoutCustody(t
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope:            bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
+		Scope:            sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
 		ReviewerThreadId: reviewerID, ReviewId: "arvw_reviewer_admission_interrupt_first",
 	})
 	if err != nil || response.GetStale() == nil {
@@ -1096,7 +1097,7 @@ func TestPostgreSQLReviewerEnsureRejectsInterruptFirstWithTypedStale(t *testing.
 		podUID      = "pod_reviewer_ensure_interrupt"
 		interruptID = "rin_reviewer_ensure_interrupt"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
 		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
@@ -1109,7 +1110,7 @@ func TestPostgreSQLReviewerEnsureRejectsInterruptFirstWithTypedStale(t *testing.
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	server := BridgeAPIServer{store: store}
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	trunk, err := server.EnsureApprovalReviewerTrunk(context.Background(), &bridgev1.EnsureApprovalReviewerTrunkRequest{
 		Scope: scope, EnsureOperationId: "aprv_ensure_interrupt_first",
 	})
@@ -1148,11 +1149,11 @@ func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically
 		interruptID      = "rin_reviewer_admission_first_interrupt"
 		interruptEventID = "evt_reviewer_admission_first_interrupt"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	admissionRequest := &bridgev1.AdmitApprovalReviewInputRequest{
 		Scope: scope, ReviewerThreadId: reviewerID, ReviewId: "arvw_reviewer_admission_first_interrupt",
 	}
@@ -1162,7 +1163,7 @@ func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically
 	}
 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, interruptEventID, 1, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, parentID, interruptID, "interrupt_control",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, parentID, interruptID, "interrupt_control",
 		`["`+interruptEventID+`"]`, "accepted", bindingID, podUID, 1, 1)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, parentID, interruptID, "interrupt_control", interruptEventID, 1, queue.DefaultMaxAttempts, time.Now().UTC())
@@ -1171,7 +1172,7 @@ func TestPostgreSQLInterruptCommitCancelsAdmissionFirstReviewerCustodyAtomically
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
 	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: scope, RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+		Scope: scope, RuntimeInputId: interruptID, InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(interruptLease),
 	})
 	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
 		t.Fatalf("interrupt closeout after Reviewer admission = %#v/%v; want committed", committed, err)
@@ -1209,27 +1210,27 @@ func TestPostgreSQLTargetedInterruptCancelsOnlyItsReviewerCustody(t *testing.T) 
 		interruptID     = "rin_reviewer_targeted_interrupt"
 		interruptEvent  = "evt_reviewer_targeted_interrupt"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, mainReviewerID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, childID, childReviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, mainReviewerID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, childID, childReviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	mainAdmission, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope: bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID), ReviewerThreadId: mainReviewerID, ReviewId: "arvw_reviewer_targeted_main",
+		Scope: sessionfixture.BridgeAPIScope(sessionID, mainID, bindingID, 1, podUID), ReviewerThreadId: mainReviewerID, ReviewId: "arvw_reviewer_targeted_main",
 	})
 	if err != nil || mainAdmission.GetCommitted() == nil {
 		t.Fatalf("admit main Reviewer custody: %#v/%v", mainAdmission, err)
 	}
 	childAdmission, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
-		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), ReviewerThreadId: childReviewerID, ReviewId: "arvw_reviewer_targeted_child",
+		Scope: sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID), ReviewerThreadId: childReviewerID, ReviewId: "arvw_reviewer_targeted_child",
 	})
 	if err != nil || childAdmission.GetCommitted() == nil {
 		t.Fatalf("admit child Reviewer custody: %#v/%v", childAdmission, err)
 	}
 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, interruptEvent, 1, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, interruptID, "interrupt_control",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, interruptID, "interrupt_control",
 		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 1, 1)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childID, interruptID, "interrupt_control", interruptEvent, 1, queue.DefaultMaxAttempts, time.Now().UTC())
@@ -1238,8 +1239,8 @@ func TestPostgreSQLTargetedInterruptCancelsOnlyItsReviewerCustody(t *testing.T) 
 		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
 	})
 	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: interruptID,
-		InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: interruptID,
+		InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(interruptLease),
 	})
 	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
 		t.Fatalf("targeted child interrupt closeout = %#v/%v", committed, err)

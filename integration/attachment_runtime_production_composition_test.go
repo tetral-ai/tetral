@@ -24,6 +24,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -68,9 +69,9 @@ func TestPostgreSQLAttachmentRequestStartLostACKReplaysBeforeSingleProviderInvoc
 		podUID    = "pod_attachment_start_lost_ack"
 		fileID    = "file_attachment_start_lost_ack"
 	)
-	seedBridgeAPISession(t, admin, string(workspace.DefaultID), sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, string(workspace.DefaultID), sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, string(workspace.DefaultID), sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	attachmentStore := blob.NewFakeBlobStore()
 	sourceEventID, runtimeInputID := birthAttachmentRuntimeInput(t, admin, client, attachmentStore, sessionID, fileID)
@@ -107,9 +108,9 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 		podUID    = "pod_attachment_post_start_pod_loss"
 		fileID    = "file_attachment_post_start_pod_loss"
 	)
-	seedBridgeAPISession(t, admin, string(workspace.DefaultID), sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, string(workspace.DefaultID), sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, string(workspace.DefaultID), sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	attachmentStore := blob.NewFakeBlobStore()
 	sourceEventID, runtimeInputID := birthAttachmentRuntimeInput(t, admin, client, attachmentStore, sessionID, fileID)
@@ -142,10 +143,10 @@ func TestPostgreSQLAttachmentPostStartPodLossColdLoadsWithoutSecondProviderInvoc
 	}
 
 	second, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 2, "pod_attachment_post_start_replacement"),
+		Scope:          sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, "pod_attachment_post_start_replacement"),
 		RuntimeWriteId: "rwrite_attachment_post_start_second", ModelRequestId: "mreq_attachment_post_start_second",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: sourceEventID, FileId: fileID}},
 	})
 	if status.Code(err) != codes.AlreadyExists || second != nil {

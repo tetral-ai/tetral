@@ -8,6 +8,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -32,11 +33,11 @@ func TestPostgreSQLChildControlAdmissionAndParentRequestEndSerializeBothOrders(t
 			podUID := "pod_child_end_" + suffix
 			modelRequestID := "mreq_child_end_" + suffix
 			sourceID := "evt_child_end_tool_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 			seedBridgeAPIRequestStart(t, store, scope, "rwrite_child_end_start_"+suffix, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 			seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, sourceID)
 

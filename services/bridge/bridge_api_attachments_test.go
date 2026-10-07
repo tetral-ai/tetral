@@ -20,19 +20,20 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReadsActiveBlobWithScope(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_resolve", "thr_bridge_attachment_resolve")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_resolve", "thr_bridge_attachment_resolve")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_resolve", "bind_bridge_attachment_resolve", 1, "pod_uid_attachment_resolve")
 
 	blobStore := blob.NewFakeBlobStore()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_attachment_resolve", "thr_bridge_attachment_resolve", "bind_bridge_attachment_resolve", 1, "pod_uid_attachment_resolve")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_resolve", "thr_bridge_attachment_resolve", "bind_bridge_attachment_resolve", 1, "pod_uid_attachment_resolve")
 	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_resolve")
 	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_resolve_write_1", "sevt_attachment_resolve", []byte("image-bytes"))
 
@@ -100,14 +101,14 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReadsActiveBlobWithSc
 
 func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReturnsUnavailableForInactiveRowsWithoutBlobRead(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc_resolve", "thr_bridge_attachment_gc_resolve")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc_resolve", "thr_bridge_attachment_gc_resolve")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_gc_resolve", "bind_bridge_attachment_gc_resolve", 1, "pod_uid_attachment_gc_resolve")
 
 	blobStore := &countingGetBlobStore{inner: blob.NewFakeBlobStore()}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_attachment_gc_resolve", "thr_bridge_attachment_gc_resolve", "bind_bridge_attachment_gc_resolve", 1, "pod_uid_attachment_gc_resolve")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_gc_resolve", "thr_bridge_attachment_gc_resolve", "bind_bridge_attachment_gc_resolve", 1, "pod_uid_attachment_gc_resolve")
 	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_gc_resolve")
 	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_gc_resolve", "sevt_attachment_gc_resolve", []byte("image-bytes"))
 
@@ -158,12 +159,12 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentReturnsUnavailableFor
 
 func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentClassifiesAdapterOutageAndOversizedStoredBlob(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_taxonomy", "thr_bridge_attachment_taxonomy")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_taxonomy", "thr_bridge_attachment_taxonomy")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_taxonomy", "bind_bridge_attachment_taxonomy", 1, "pod_uid_attachment_taxonomy")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_attachment_taxonomy", "thr_bridge_attachment_taxonomy", "bind_bridge_attachment_taxonomy", 1, "pod_uid_attachment_taxonomy")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_taxonomy", "thr_bridge_attachment_taxonomy", "bind_bridge_attachment_taxonomy", 1, "pod_uid_attachment_taxonomy")
 	request := &bridgev1.ResolveTransientAttachmentRequest{
 		Scope: scope, AttachmentRef: "att_taxonomy",
 	}
@@ -219,13 +220,13 @@ func seedBridgeTransientAttachmentSourceToolForTest(t *testing.T, admin *sql.DB,
 
 func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidArgument(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 1, "pod_uid_attachment_stale_scope")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
 	store.FileBlobStore = blob.NewFakeBlobStore()
-	scope := bridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 2, "pod_uid_attachment_stale_scope")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 2, "pod_uid_attachment_stale_scope")
 	pair := &bridgev1.FileAttachmentPair{
 		SourceEventId: "sevt_attachment_stale_scope",
 		FileId:        "file_attachment_stale_scope",
@@ -261,14 +262,14 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 
 func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndConsumedAfterStateCommit(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc", "thr_bridge_attachment_gc")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc", "thr_bridge_attachment_gc")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_gc", "bind_bridge_attachment_gc", 1, "pod_uid_attachment_gc")
 
 	blobStore := blob.NewFakeBlobStore()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_attachment_gc", "thr_bridge_attachment_gc", "bind_bridge_attachment_gc", 1, "pod_uid_attachment_gc")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_gc", "thr_bridge_attachment_gc", "bind_bridge_attachment_gc", 1, "pod_uid_attachment_gc")
 	expired := createBridgeTransientAttachmentForTest(t, store, scope, "gc_expired", "sevt_gc_expired", []byte("expired"))
 	consumed := createBridgeTransientAttachmentForTest(t, store, scope, "gc_consumed", "sevt_gc_consumed", []byte("consumed"))
 	fresh := createBridgeTransientAttachmentForTest(t, store, scope, "gc_fresh", "sevt_gc_fresh", []byte("fresh"))
@@ -345,19 +346,19 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndC
 	if result.Marked != 2 || result.Deleted != 2 || result.Failed != 0 || checkedStateBeforeDelete != 2 {
 		t.Fatalf("gc result = %+v checked=%d; want two committed-before-delete removals", result, checkedStateBeforeDelete)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, expired.GetAttachmentRef()); got != "deleted" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, expired.GetAttachmentRef()); got != "deleted" {
 		t.Fatalf("expired status = %q; want deleted", got)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, consumed.GetAttachmentRef()); got != "deleted" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, consumed.GetAttachmentRef()); got != "deleted" {
 		t.Fatalf("consumed status = %q; want deleted", got)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, fresh.GetAttachmentRef()); got != "active" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, fresh.GetAttachmentRef()); got != "active" {
 		t.Fatalf("fresh status = %q; want active", got)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, protectedStaged.GetAttachmentRef()); got != "staged" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, protectedStaged.GetAttachmentRef()); got != "staged" {
 		t.Fatalf("unconsumed execution attachment status = %q; want staged", got)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, protectedUploading.GetAttachmentRef()); got != "uploading" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, protectedUploading.GetAttachmentRef()); got != "uploading" {
 		t.Fatalf("unconsumed execution attachment status = %q; want uploading", got)
 	}
 	if _, ok := blobStore.Bytes(transientAttachmentBlobPointer(scope, fresh.GetAttachmentRef())); !ok {
@@ -372,14 +373,14 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndC
 
 func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsRetriesDeleteFailures(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc_retry", "thr_bridge_attachment_gc_retry")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_attachment_gc_retry", "thr_bridge_attachment_gc_retry")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_gc_retry", "bind_bridge_attachment_gc_retry", 1, "pod_uid_attachment_gc_retry")
 
 	blobStore := blob.NewFakeBlobStore()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_attachment_gc_retry", "thr_bridge_attachment_gc_retry", "bind_bridge_attachment_gc_retry", 1, "pod_uid_attachment_gc_retry")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_gc_retry", "thr_bridge_attachment_gc_retry", "bind_bridge_attachment_gc_retry", 1, "pod_uid_attachment_gc_retry")
 	attachment := createBridgeTransientAttachmentForTest(t, store, scope, "gc_retry", "sevt_gc_retry", []byte("retry"))
 	blobStore.SetDeleteHook(func(context.Context, string) error {
 		return errors.New("delete unavailable")
@@ -392,7 +393,7 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsRetriesDeleteFailu
 	if first.Marked != 1 || first.Deleted != 0 || first.Failed != 1 {
 		t.Fatalf("first gc result = %+v; want retryable delete failure", first)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleting" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleting" {
 		t.Fatalf("failed delete status = %q; want deleting", got)
 	}
 	if _, ok := blobStore.Bytes(transientAttachmentBlobPointer(scope, attachment.GetAttachmentRef())); !ok {
@@ -406,7 +407,7 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsRetriesDeleteFailu
 	if second.Marked != 1 || second.Deleted != 1 || second.Failed != 0 {
 		t.Fatalf("second gc result = %+v; want retried delete success", second)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
 		t.Fatalf("retried delete status = %q; want deleted", got)
 	}
 }
@@ -456,14 +457,14 @@ func (b *joiningGCBlobStore) Delete(ctx context.Context, _ string) error {
 }
 func TestPostgreSQLTransientAttachmentGCStopJoinsBeforePoolClose(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_gc_join", "thr_gc_join")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_gc_join", "thr_gc_join")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_gc_join", "bind_gc_join", 1, "pod_gc_join")
 	client := dbconnect.NewClientForTesting(runtime)
 	store := NewPostgreSQLBridgeAPIStore(client)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) }
 	blocking := &joiningGCBlobStore{BlobStore: blob.NewFakeBlobStore(), entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{})}
 	store.AttachmentBlobStore = blocking
-	created := createBridgeTransientAttachmentForTest(t, store, bridgeAPIScope("sesn_gc_join", "thr_gc_join", "bind_gc_join", 1, "pod_gc_join"), "gc_join", "evt_gc_join", []byte("expired"))
+	created := createBridgeTransientAttachmentForTest(t, store, sessionfixture.BridgeAPIScope("sesn_gc_join", "thr_gc_join", "bind_gc_join", 1, "pod_gc_join"), "gc_join", "evt_gc_join", []byte("expired"))
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments SET expires_at='2026-01-01T11:00:00Z' WHERE workspace_id='default' AND attachment_ref=$1`, created.GetAttachmentRef()); err != nil {
 		t.Fatalf("expire GC fixture: %v", err)
 	}

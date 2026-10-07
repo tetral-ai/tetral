@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -291,7 +292,7 @@ func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndCold
 		t.Fatalf("readiness-only row = tools=%v etag=%v generation=%d readiness=%q diagnostic=%q", toolsJSON, etag, generation, readiness, diagnostic.String)
 	}
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_first_over", "thr_mcp_first_over", "bind_mcp_first_over", 1, "pod_mcp_first_over"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext readiness-only row: %v", err)
@@ -374,7 +375,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 	store.MCPManifestLister = lister
 
 	first, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_1", 1, "pod_mcp_cold_1"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext first binding: %v", err)
@@ -402,7 +403,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReplaysLatestManifestForReplacementB
 		t.Fatalf("replace runtime binding: %v", err)
 	}
 	second, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
+		Scope: sessionfixture.BridgeAPIScope("sesn_mcp_cold", "thr_mcp_cold", "bind_mcp_cold_2", 2, "pod_mcp_cold_2"),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext replacement binding: %v", err)
@@ -486,7 +487,7 @@ func TestPostgreSQLMCPManifestChangeRejectsTerminatedSessionWithoutCustody(t *te
 		sessionID = "sesn_mcp_manifest_terminated"
 		threadID  = "thr_mcp_manifest_terminated"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='terminated'
 		WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 		t.Fatalf("terminate MCP Session: %v", err)

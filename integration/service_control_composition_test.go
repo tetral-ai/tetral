@@ -22,6 +22,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -33,7 +34,7 @@ import (
 
 func separatedDeclareTool(t *testing.T, f *separatedOwners, scope *bridgev1.RuntimeScope, requestID, call, permission string) string {
 	t.Helper()
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_" + call, ModelRequestId: requestID, ToolDeclaration: bridgeToolDeclarationForTest(call, "Read", `{"file_path":"README.md"}`, permission, "sandbox_execute")})
+	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_" + call, ModelRequestId: requestID, ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(call, "Read", `{"file_path":"README.md"}`, permission, "sandbox_execute")})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual tool declaration=%v/%v", response, err)
 	}
@@ -93,7 +94,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				f := newSeparatedOwners(t, "settle_"+thread+"_"+first, false)
 				scope := f.declare(t)
 				if thread == "child" {
-					seedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_racing_child")
+					sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_racing_child")
 					scope.SessionThreadId = "thr_racing_child"
 				}
 				separatedActiveFence(t, f, scope)
@@ -105,7 +106,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					t.Fatal("racing declaration has already accepted execution")
 				}
 				// A sibling has separate durable owners whose identities must survive.
-				seedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_preserved_sibling")
+				sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_preserved_sibling")
 				sibling := proto.Clone(scope).(*bridgev1.RuntimeScope)
 				sibling.SessionThreadId = "thr_preserved_sibling"
 				seedBridgeAPIRequestStart(t, f.bridge, sibling, "rwrite_sibling_start", "mreq_sibling", runtimecontrol.RequestKindAgentProviderRequest, 0)
@@ -142,7 +143,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				}
 				results := make(chan outcome, 2)
 				settle := func(ctx context.Context) error {
-					response, err := f.bridge.SettleToolResult(ctx, bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolID, "settled-before-loss")))
+					response, err := f.bridge.SettleToolResult(ctx, sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "settled-before-loss")))
 					results <- outcome{owner: "settlement", settlement: response, err: err}
 					return nil
 				}
@@ -208,7 +209,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					t.Fatal("loss did not retire the binding before replacement")
 				}
 				factsBeforeFence := []int{f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1`, f.sessionID), f.count(t, `SELECT count(*) FROM session_bridge_operations WHERE session_id=$1`, f.sessionID), f.count(t, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1`, f.sessionID)}
-				lateProbe, lateProbeErr := f.bridge.SettleToolResult(f.ctx, bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolID, "late-probe")))
+				lateProbe, lateProbeErr := f.bridge.SettleToolResult(f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "late-probe")))
 				t.Logf("old_scope_fence committed=%t stale=%t status=%s", lateProbe.GetCommitted() != nil, lateProbe.GetStale() != nil, status.Code(lateProbeErr))
 				if lateProbeErr != nil || lateProbe.GetStale() == nil {
 					t.Fatalf("old binding must produce typed stale, got %v/%v", lateProbe, lateProbeErr)
@@ -239,7 +240,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					if err != nil || awaited.GetCompleted().GetResultJson() != terminal.ResultJSON {
 						t.Fatalf("replacement durable result read=%v/%v", awaited, err)
 					}
-					settlement := bridgeToolSettlementRequestForTest(replacement, bridgeCompletedToolSettlementForTest(toolID, "settled-after-replacement"))
+					settlement := sessionfixture.BridgeToolSettlementRequestForTest(replacement, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "settled-after-replacement"))
 					completed, err := f.bridge.SettleToolResult(f.ctx, settlement)
 					if err != nil || completed.GetCommitted() == nil {
 						t.Fatalf("replacement literal terminal settlement=%v/%v", completed, err)
@@ -295,7 +296,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				if bytes, _ := json.Marshal(cold); !strings.Contains(string(bytes), toolID) || !strings.Contains(string(bytes), "runtime_pod_lost") {
 					t.Fatal("replacement cold context lost original pair or loss boundary")
 				}
-				late, lateErr := f.bridge.SettleToolResult(f.ctx, bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolID, "late-forbidden")))
+				late, lateErr := f.bridge.SettleToolResult(f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "late-forbidden")))
 				if lateErr != nil || late.GetStale() == nil {
 					t.Fatalf("old binding typed stale=%v/%v", late, lateErr)
 				}
@@ -357,7 +358,7 @@ func TestPostgreSQLSeparatedOwnersCustodyReplay(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = conn.Close() })
 		client := bridgev1.NewAgentRuntimeBridgeServiceClient(conn)
-		request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_rpc_lost", ModelRequestId: "mreq_rpc_lost", EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_rpc_lost"}`, ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest}
+		request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rwrite_rpc_lost", ModelRequestId: "mreq_rpc_lost", EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_rpc_lost"}`, ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest}
 		if _, err := client.WriteEvent(f.ctx, request); status.Code(err) != codes.Unavailable {
 			t.Fatalf("committed response loss=%v", err)
 		}
@@ -411,7 +412,7 @@ func TestPostgreSQLSeparatedOwnersCustodyReplay(t *testing.T) {
 		other := *f
 		other.sessionID = "sesn_unrelated_custody"
 		other.threadID = "thr_unrelated_custody"
-		seedBridgeAPISession(t, f.admin, "default", other.sessionID, other.threadID)
+		sessionfixture.SeedBridgeAPISession(t, f.admin, "default", other.sessionID, other.threadID)
 		other.sql(t, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, other.sessionID)
 		otherJob, otherLease := other.input(t)
 		f.sql(t, `UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE id=$1`, otherJob.JobID)
@@ -444,13 +445,13 @@ func TestPostgreSQLSeparatedOwnersCustodyReplay(t *testing.T) {
 					f := newSeparatedOwners(t, fmt.Sprintf("custody_interrupt_%t_%t", child, interruptFirst), false)
 					scope := f.declare(t)
 					if child {
-						seedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_interrupt_child")
+						sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.threadID, "thr_interrupt_child")
 						scope.SessionThreadId = "thr_interrupt_child"
 					}
 					seedBridgeAPIRequestStart(t, f.bridge, scope, "rwrite_interrupt_start", "mreq_interrupt", runtimecontrol.RequestKindAgentProviderRequest, 0)
 					toolID := separatedDeclareTool(t, f, scope, "mreq_interrupt", "call_interrupt", "allow")
 					settle := func() {
-						response, err := f.bridge.SettleToolResult(f.ctx, bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolID, "settled-before-interrupt")))
+						response, err := f.bridge.SettleToolResult(f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolID, "settled-before-interrupt")))
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -542,7 +543,7 @@ func (p *separatedSandboxProvider) ExecuteTool(ctx context.Context, request tetr
 // custody, execution authorization and terminal settlement use their owners.
 func separatedExecuteSandbox(t *testing.T, f *separatedOwners, scope *bridgev1.RuntimeScope, toolID, resultJSON string) int {
 	t.Helper()
-	seedReadySandboxForSharedToolExecution(t, f.admin, "default", f.sessionID)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, f.admin, "default", f.sessionID)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

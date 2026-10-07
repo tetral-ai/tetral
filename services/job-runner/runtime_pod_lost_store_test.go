@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) {
@@ -22,8 +23,8 @@ func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) 
 		childThreadID  = "thr_runtime_repair_thread_scope_child"
 		modelRequestID = "mreq_runtime_repair_shared"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -56,7 +57,7 @@ func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) 
 		starts, err := runtimecontrol.RuntimeTerminationOpenRequestStartsTx(
 			context.Background(),
 			tx,
-			bridgeAPIScope(sessionID, mainThreadID, "bind_unused", 1, "pod_unused"),
+			sessionfixture.BridgeAPIScope(sessionID, mainThreadID, "bind_unused", 1, "pod_unused"),
 		)
 		if err != nil {
 			return err
@@ -78,9 +79,9 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 		modelRequestID = "mreq_mcp_pod_loss"
 		toolUseEventID = "evt_mcp_pod_loss_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_pod_loss", 1, "pod_mcp_pod_loss")
-	seedRuntimePodLostStatusFence(t, admin, sessionID, "bind_mcp_pod_loss", 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, "bind_mcp_pod_loss", 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -98,7 +99,7 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	); err != nil {
 		t.Fatalf("seed MCP pod-loss events: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, "call_mcp_pod_loss", "spawn_agent")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, "call_mcp_pod_loss", "spawn_agent")
 	binding := runtimecontrol.Binding{BindingID: "bind_mcp_pod_loss", BindingGeneration: 1, PodUID: "pod_mcp_pod_loss"}
 	repaired, err := runRuntimePodLostRepairTransaction(
 		context.Background(), runtime, sessionID, binding, time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
@@ -193,8 +194,8 @@ func TestRuntimePodLossDetectsInternalApprovalReviewerToolUse(t *testing.T) {
 		modelRequestID = "mreq_reviewer_pod_loss"
 		toolUseEventID = "evt_reviewer_pod_loss_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainThreadID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainThreadID, reviewerID)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -213,7 +214,7 @@ func TestRuntimePodLossDetectsInternalApprovalReviewerToolUse(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed reviewer pod-loss events: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, reviewerID, modelRequestID,
 		toolUseEventID, "call_reviewer_pod_loss", "Read",
 	)
@@ -240,7 +241,7 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 		otherID   = "thr_pod_loss_closed_result_other"
 		toolUseID = "evt_pod_loss_closed_result_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_threads (
 			workspace_id, id, session_id, parent_thread_id, role, visibility, status,
@@ -260,7 +261,7 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 	); err != nil {
 		t.Fatalf("stamp Tool Use request identity: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_closed_result_identity", toolUseID, "call_closed_result_identity", "Read")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_closed_result_identity", toolUseID, "call_closed_result_identity", "Read")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, otherID, "evt_pod_loss_wrong_family_result", 1, "agent.mcp_tool_result",
 		`{"type":"agent.mcp_tool_result","mcp_tool_use_id":"`+toolUseID+`","is_error":false}`)
 
@@ -285,9 +286,9 @@ func TestRuntimePodLossUsesDurablePrivateRequestKind(t *testing.T) {
 		threadID       = "thr_compaction_pod_loss"
 		modelRequestID = "mreq_compaction_pod_loss"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_compaction_pod_loss", 1, "pod_compaction_pod_loss")
-	seedRuntimePodLostStatusFence(t, admin, sessionID, "bind_compaction_pod_loss", 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, "bind_compaction_pod_loss", 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -336,12 +337,12 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		siblingModelRequestID = "mreq_pod_loss_sibling_approval"
 		bindingID             = "bind_pod_loss_multiple_approvals"
 	)
-	binding := runtimePodLostBinding(sessionID, bindingID, 1)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, idleSiblingThreadID)
+	binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, idleSiblingThreadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_runtime_status
 		    SET status = 'idle', running_since = NULL
@@ -374,7 +375,7 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed multiple pending approvals request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, threadID, modelRequestID,
 		"evt_pod_loss_multiple_tool_pending", "tool-call-pod-loss-multiple-pending", "Write",
 	)
@@ -449,7 +450,7 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed sibling approval request: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, siblingThreadID, siblingModelRequestID,
 		"evt_pod_loss_sibling_tool", "tool-call-pod-loss-sibling", "Write",
 	)
@@ -577,9 +578,9 @@ func TestRuntimePodLossRejectsMissingPrivateRequestKind(t *testing.T) {
 		sessionID = "sesn_missing_kind_pod_loss"
 		threadID  = "thr_missing_kind_pod_loss"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_missing_kind_pod_loss", 1, "pod_missing_kind_pod_loss")
-	seedRuntimePodLostStatusFence(t, admin, sessionID, "bind_missing_kind_pod_loss", 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, "bind_missing_kind_pod_loss", 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,

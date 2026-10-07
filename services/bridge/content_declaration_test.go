@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -45,9 +46,9 @@ func newContentDeclarationFixture(t *testing.T) contentDeclarationFixture {
 func seedContentDeclarationScope(t *testing.T, admin, runtimeDB *sql.DB, workspaceID string) contentDeclarationFixture {
 	t.Helper()
 	sessionID, threadID, bindingID, podUID := id.New("sesn_"), id.New("thr_"), id.New("bind_"), id.New("pod_")
-	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	scope.WorkspaceId = workspaceID
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)

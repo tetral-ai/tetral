@@ -21,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -31,8 +32,8 @@ func TestPostgreSQLMCPManifestCapacityClassificationAcrossBridgeAndGateway(t *te
 	}
 	gatewayRoot := filepath.Clean(filepath.Join("..", "gateway"))
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_mcp_capacity", "thr_mcp_capacity")
-	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_mcp_capacity", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_mcp_capacity", "thr_mcp_capacity")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", "sesn_mcp_capacity", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json =
 		'{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}'
 		WHERE workspace_id='default' AND id='sesn_mcp_capacity'`); err != nil {
@@ -109,8 +110,8 @@ func TestPostgreSQLMCPManifestAckLossReplaysThroughGatewayRetry(t *testing.T) {
 	}
 
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_mcp_ack_loss", "thr_mcp_ack_loss")
-	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_mcp_ack_loss", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_mcp_ack_loss", "thr_mcp_ack_loss")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", "sesn_mcp_ack_loss", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions
 		SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}'
 		WHERE workspace_id = 'default' AND id = 'sesn_mcp_ack_loss'`); err != nil {

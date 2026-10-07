@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -31,8 +32,8 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 		inputID   = "task_notification:task_accept_park_log"
 	)
 	now := time.Date(2026, 8, 11, 1, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_accept_park_log_task")
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"status":"completed","stdout":{"text":"canary-secret-payload","truncated":false},"stderr":{"text":"","truncated":false}}`)
@@ -73,7 +74,7 @@ func TestPostgreSQLAcceptanceTimeTaskNotificationParkingLogsCommittedCustody(t *
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_accept_park_log_close")
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)
@@ -122,8 +123,8 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 		inputID   = "task_notification:task_prepare_park"
 	)
 	now := time.Date(2026, 8, 11, 2, 0, 0, 0, time.UTC)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, childID, bindingID, taskID, "evt_prepare_park_task")
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
@@ -154,7 +155,7 @@ func TestPostgreSQLPrepareTaskNotificationParksQueuedCustodyBeforeRuntimeResolut
 	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, parentID, "evt_prepare_park_close")
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := apiStore.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: source,
 		TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
 	}); err != nil {
 		t.Fatalf("admit close fence: %v", err)

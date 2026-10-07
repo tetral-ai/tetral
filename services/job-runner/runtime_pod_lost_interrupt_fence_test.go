@@ -10,6 +10,7 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -22,7 +23,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				sessionID := "sesn_pod_loss_interrupt_" + suffix
 				mainThreadID := "thrd_pod_loss_interrupt_main_" + suffix
 				targetThreadID := mainThreadID
-				seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
 				if role == "child" {
 					targetThreadID = "thrd_pod_loss_interrupt_child_" + suffix
 					if _, err := admin.ExecContext(context.Background(),
@@ -35,7 +36,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					}
 				}
 				bindingID := "bind_pod_loss_interrupt_" + suffix
-				binding := runtimePodLostBinding(sessionID, bindingID, 1)
+				binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
 				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
 				runtimeStatus := "running"
 				if role == "child" {
@@ -71,7 +72,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					receivedEventID := "sevt_inter_agent_above_" + suffix
 					seedBridgeAPIEvent(t, admin, "default", sessionID, targetThreadID, receivedEventID, 3, "agent.thread_message_received", `{"delivery_id":"`+deliveryID+`"}`)
 					if state == "committed_inter_agent_above" {
-						seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "committed", bindingID, binding.PodUID, 3, 3)
+						sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, targetThreadID, "agent_mail:"+deliveryID, "agent_mail", `[`+fmt.Sprintf("%q", receivedEventID)+`]`, "committed", bindingID, binding.PodUID, 3, 3)
 					}
 				}
 				otherThreadID := "thrd_pod_loss_interrupt_other_" + suffix
@@ -158,12 +159,12 @@ func TestPostgreSQLRuntimePodLossRepairsSiblingWithoutClosingInterruptedThread(t
 		siblingReq      = "mreq_pod_loss_mixed_sibling"
 		siblingTool     = "evt_pod_loss_mixed_sibling_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, interruptedID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingID)
-	binding := runtimePodLostBinding(sessionID, bindingID, 1)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, interruptedID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, siblingID)
+	binding := sessionfixture.RuntimePodLostBinding(sessionID, bindingID, 1)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
 		SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id IN ($2,$3)`,
 		sessionID, interruptedID, siblingID); err != nil {
@@ -192,7 +193,7 @@ func TestPostgreSQLRuntimePodLossRepairsSiblingWithoutClosingInterruptedThread(t
 			sessionID, request.toolID, request.requestID); err != nil {
 			t.Fatalf("seed mixed pod-loss Tool Use: %v", err)
 		}
-		seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, request.threadID, request.requestID, request.toolID, request.callID, "Read")
+		sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, request.threadID, request.requestID, request.toolID, request.callID, "Read")
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, interruptedID, interruptEvent, 3, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedRuntimeInboxBirthForJob(t, admin, RuntimeJob{

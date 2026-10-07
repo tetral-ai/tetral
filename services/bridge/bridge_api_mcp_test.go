@@ -26,6 +26,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -39,11 +40,11 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 		modelRequest = "mreq_mcp_tool_failure_composition"
 		modelCall    = "call_mcp_tool_failure_composition"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-tool-failure-composition-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_tool_failure_use", ModelRequestId: modelRequest,
@@ -119,7 +120,7 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 		len(composed.DeclaredError) == 0 {
 		t.Fatalf("MCP failure composition = %+v; want one actionable non-retryable Tool settlement", composed)
 	}
-	request := bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+	request := sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
 		Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.DeclaredError)}},
 	})
@@ -127,15 +128,15 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 	if err != nil {
 		t.Fatalf("commit MCP Tool Result: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, committed, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, committed, "committed")
 	replayed, err := store.SettleToolResult(context.Background(), proto.Clone(request).(*bridgev1.SettleToolResultRequest))
 	if err != nil {
 		t.Fatalf("replay MCP Tool Result settlement: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
-	if _, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
+	if _, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
-		bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "different"),
+		sessionfixture.BridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "different"),
 	)); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting MCP Tool Result settlement = %v; want AlreadyExists", err)
 	}
@@ -184,11 +185,11 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
 		bindingID = "bind_mcp_in_flight_error"
 		podUID    = "pod_mcp_in_flight_error"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-in-flight-error-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claim, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_in_flight_error",
@@ -198,7 +199,7 @@ func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
 	}
 
 	const errorJSON = `{"type":"runtime_invalid_sequence","message":"durable MCP error settlement","retryable":false}`
-	settled, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
+	settled, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
 		ToolUseEventId: toolUseEventID,
 		Outcome: &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{
 			ErrorJson: errorJSON,
@@ -255,10 +256,10 @@ func TestPostgreSQLMCPUncertaintySettlesWithoutResultAlias(t *testing.T) {
 		threadID     = "thr_mcp_uncertain_without_result_alias"
 		modelRequest = "mreq_mcp_uncertain_without_result_alias"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_mcp_uncertain", 1, "pod_mcp_uncertain")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_uncertain_start", modelRequest, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_uncertain_use", ModelRequestId: modelRequest,
@@ -268,12 +269,12 @@ func TestPostgreSQLMCPUncertaintySettlesWithoutResultAlias(t *testing.T) {
 		t.Fatalf("write MCP Tool Use: %v", err)
 	}
 	message := "The MCP tool execution is still in progress. Check the external service before retrying."
-	errorSettlement := bridgeErrorToolSettlementForTest(toolUse.GetCommitted().GetEventId(), message)
-	result, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, errorSettlement))
+	errorSettlement := sessionfixture.BridgeErrorToolSettlementForTest(toolUse.GetCommitted().GetEventId(), message)
+	result, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, errorSettlement))
 	if err != nil {
 		t.Fatalf("write MCP uncertainty = %#v/%v", result, err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, result, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, result, "committed")
 
 	var durableResults int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
@@ -288,8 +289,8 @@ func TestPostgreSQLMCPUncertaintySettlesWithoutResultAlias(t *testing.T) {
 
 func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest", "thr_bridge_mcp_manifest")
-	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_mcp_manifest", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest", "thr_bridge_mcp_manifest")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_mcp_manifest", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}' WHERE workspace_id = 'default' AND id = 'sesn_bridge_mcp_manifest'`); err != nil {
 		t.Fatalf("seed durable MCP config: %v", err)
 	}
@@ -325,7 +326,7 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 	if response.GetCommitted() == nil {
 		t.Fatalf("McpManifestChanged = %#v; want committed", response)
 	}
-	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 1)
+	sessionfixture.AssertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 1)
 
 	// The caller may lose the committed ACK after dispatch. Replaying the exact
 	// desired identity must recover durable evidence without another list,
@@ -343,7 +344,7 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 	if _, err := store.McpManifestChanged(context.Background(), changed); err != nil {
 		t.Fatalf("McpManifestChanged changed etag: %v", err)
 	}
-	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 2)
+	sessionfixture.AssertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 2)
 	if len(lister.requests) != 2 {
 		t.Fatalf("lister calls = %d; want 2 after changed etag", len(lister.requests))
 	}
@@ -351,8 +352,8 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGe
 
 func TestPostgreSQLBridgeAPIStoreMcpManifestChangedUsesSessionRuntimeAgentConfig(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_runtime_agent", "thr_bridge_mcp_runtime_agent")
-	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_mcp_runtime_agent", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":true,"permission_policy":{"type":"always_allow"}}}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_runtime_agent", "thr_bridge_mcp_runtime_agent")
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_mcp_runtime_agent", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":true,"permission_policy":{"type":"always_allow"}}}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions
 		    SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}'
@@ -382,7 +383,7 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedUsesSessionRuntimeAgentConfig
 		t.Fatalf("McpManifestChanged: %v", err)
 	}
 
-	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_runtime_agent", "github", 1)
+	sessionfixture.AssertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_runtime_agent", "github", 1)
 	var toolsJSON string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT tools_json FROM session_mcp_manifests
@@ -417,7 +418,7 @@ func TestFilterMCPManifestCollisionsUsesOnlyPinnedFamilyTools(t *testing.T) {
 
 func TestPostgreSQLBridgeAPIStoreMcpManifestChangedRejectsMismatchedEtag(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest_mismatch", "thr_bridge_mcp_manifest_mismatch")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest_mismatch", "thr_bridge_mcp_manifest_mismatch")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.MCPManifestLister = &recordingMCPManifestLister{results: []mcpmanifest.ListResult{{
 		ManifestETag: "etag_other",
@@ -438,12 +439,12 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedRejectsMismatchedEtag(t *test
 
 func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_tool", "thr_bridge_mcp_tool")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_tool", "thr_bridge_mcp_tool")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_tool", "bind_bridge_mcp_tool", 1, "pod_uid_mcp_tool")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_mcp_tool", "thr_bridge_mcp_tool", "bind_bridge_mcp_tool", 1, "pod_uid_mcp_tool")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_mcp_tool", "thr_bridge_mcp_tool", "bind_bridge_mcp_tool", 1, "pod_uid_mcp_tool")
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claim := &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_tool",
@@ -556,8 +557,8 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultIdentityIncludesThread(t *testing.
 		mainID    = "thr_bridge_mcp_thread_identity_main"
 		childID   = "thr_bridge_mcp_thread_identity_child"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -567,7 +568,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultIdentityIncludesThread(t *testing.
 		childID: `{"response":{"status":1,"result_text":"child","attachments":[]},"content_items":1,"refresh_triggered":false}`,
 	}
 	for threadID, resultJSON := range results {
-		scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
+		scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
 		toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 		claim := &bridgev1.ClaimMcpToolResultRequest{
 			Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_" + threadID,
@@ -604,14 +605,14 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultIdentityIncludesThread(t *testing.
 
 func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_media", "thr_bridge_mcp_media")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_media", "thr_bridge_mcp_media")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
 
 	blobStore := blob.NewFakeBlobStore()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_mcp_media", "thr_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_mcp_media", "thr_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_media_start", "mreq_mcp_media", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
@@ -744,12 +745,12 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		t.Fatalf("active attachment replay = %#v; want byte-identical %q", activeReplay, refsOnlyJSON)
 	}
 
-	resultWrite := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "[MCP attachment: plot.png]"))
+	resultWrite := sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "[MCP attachment: plot.png]"))
 	resultEvent, err := store.SettleToolResult(context.Background(), resultWrite)
 	if err != nil {
 		t.Fatalf("SettleToolResult MCP result: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, resultEvent, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, resultEvent, "committed")
 	var resultStatus string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT mcp_claim_status
@@ -777,7 +778,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err != nil {
 		t.Fatalf("SettleToolResult MCP result replay: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, replayedResult, "duplicate")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, replayedResult, "duplicate")
 	var resultEventID string
 	var committedResultPayload string
 	if err := admin.QueryRowContext(context.Background(),
@@ -788,7 +789,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	).Scan(&resultEventID, &committedResultPayload); err != nil {
 		t.Fatalf("read committed MCP result before changed replay: %v", err)
 	}
-	changedResultWrite := bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "changed after consumption"))
+	changedResultWrite := sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUse.GetCommitted().GetEventId(), "changed after consumption"))
 	if _, err := store.SettleToolResult(context.Background(), changedResultWrite); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("SettleToolResult consumed MCP result with changed outcome err = %v; want AlreadyExists", err)
 	}
@@ -865,7 +866,7 @@ func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T)
 		bindingID = "bind_mcp_media_commit_race"
 		podUID    = "pod_mcp_media_commit_race"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	blobStore := &commitBarrierBlobStore{
 		FakeBlobStore: blob.NewFakeBlobStore(),
@@ -874,7 +875,7 @@ func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T)
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claimID := "claim_mcp_media_commit_race"
 	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
@@ -954,7 +955,7 @@ func TestPostgreSQLMCPMediaCommitRaceCleansTheDefinitiveReplayBlob(t *testing.T)
 
 func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUnknown(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
 
 	if _, err := admin.ExecContext(context.Background(), `CREATE TABLE mcp_commit_probe (
@@ -979,7 +980,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUn
 	blobStore := blob.NewFakeBlobStore()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blobStore
-	scope := bridgeAPIScope("sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_mcp_commit_unknown", "thr_bridge_mcp_commit_unknown", "bind_bridge_mcp_commit_unknown", 1, "pod_uid_mcp_commit_unknown")
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	claimID := "claim_mcp_commit_unknown"
 	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
@@ -1019,7 +1020,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultPreservesBlobWhenCommitOutcomeIsUn
 
 func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_claim_race", "bind_bridge_mcp_claim_race", 1, "pod_uid_mcp_claim_race")
 
 	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
@@ -1028,7 +1029,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultConcurrentClaimLease(t *testing.T)
 		store.Clock = func() time.Time { return base }
 		return store
 	}
-	scope := bridgeAPIScope("sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race", "bind_bridge_mcp_claim_race", 1, "pod_uid_mcp_claim_race")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_mcp_claim_race", "thr_bridge_mcp_claim_race", "bind_bridge_mcp_claim_race", 1, "pod_uid_mcp_claim_race")
 	toolUseEventID := writeDurableMCPToolUseForTest(t, newStore(), scope)
 	claim := func(claimID string) *bridgev1.ClaimMcpToolResultRequest {
 		return &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: claimID}
@@ -1111,7 +1112,7 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *tes
 			toolUseID := "evt_mcp_permission_" + suffix
 			modelRequestID := "mreq_mcp_permission_" + suffix
 			modelToolCallID := "call_mcp_permission_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_mcp_permission_"+suffix, 1, "pod_mcp_permission_"+suffix)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.mcp_tool_use",
 				`{"name":"github_search","mcp_server_name":"github","input":{"query":"tetral"},"evaluated_permission":"`+testCase.evaluatedPermission+`"}`)
@@ -1121,9 +1122,9 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *tes
 			); err != nil {
 				t.Fatalf("stamp MCP permission model request: %v", err)
 			}
-			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "github_search")
+			sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "github_search")
 			if testCase.evaluatedPermission == "allow" {
-				seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+				sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
 			}
 			if testCase.approvalStatus != "" {
 				var approvalDecision any
@@ -1144,7 +1145,7 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *tes
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, "bind_mcp_permission_"+suffix, 1, "pod_mcp_permission_"+suffix),
+				Scope:          sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_mcp_permission_"+suffix, 1, "pod_mcp_permission_"+suffix),
 				ToolUseEventId: toolUseID,
 				ClaimId:        "claim_mcp_permission_" + suffix,
 			})
@@ -1170,13 +1171,13 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimEnforcesDurablePermissionHandoff(t *tes
 
 func TestPostgreSQLBridgeAPIStoreMCPToolResultClaimLease(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_lease", "thr_bridge_mcp_lease")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_lease", "thr_bridge_mcp_lease")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_mcp_lease", "bind_bridge_mcp_lease", 1, "pod_uid_mcp_lease")
 
 	base := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return base }
-	scope := bridgeAPIScope("sesn_bridge_mcp_lease", "thr_bridge_mcp_lease", "bind_bridge_mcp_lease", 1, "pod_uid_mcp_lease")
+	scope := sessionfixture.BridgeAPIScope("sesn_bridge_mcp_lease", "thr_bridge_mcp_lease", "bind_bridge_mcp_lease", 1, "pod_uid_mcp_lease")
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_mcp_lease_first",
@@ -1230,12 +1231,12 @@ func TestPostgreSQLBridgeAPIStoreExpiredMCPClaimTakeoverRevalidatesRoute(t *test
 		bindingID = "bind_mcp_takeover_route"
 		podUID    = "pod_mcp_takeover_route"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return now }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 
 	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
@@ -1279,10 +1280,10 @@ func TestPostgreSQLBridgeAPIStoreMCPOperationsReturnTypedStaleCustody(t *testing
 		bindingID = "bind_mcp_typed_stale"
 		podUID    = "pod_mcp_typed_stale"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	stale := bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
+	stale := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, podUID)
 
 	claimed, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{Scope: stale, ToolUseEventId: "evt_mcp", ClaimId: "claim_stale"})
 	if err != nil || claimed.GetStale() == nil {
@@ -1304,12 +1305,12 @@ func TestPostgreSQLBridgeAPIStoreMCPClaimUsesDurableToolFactsAndFencesTakeover(t
 		bindingID = "bind_mcp_durable_claim"
 		podUID    = "pod_mcp_durable_claim"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return now }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 
 	firstClaim := &bridgev1.ClaimMcpToolResultRequest{
@@ -1393,10 +1394,10 @@ func TestPostgreSQLBridgeAPIStoreMCPRelinquishReleasesOnlyExactClaimAndReplays(t
 		bindingID = "bind_mcp_relinquish"
 		podUID    = "pod_mcp_relinquish"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 
 	firstClaim := &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: toolUseEventID, ClaimId: "claim_relinquish_first"}
@@ -1462,10 +1463,10 @@ func TestPostgreSQLBridgeAPIStoreMCPRelinquishReleasesOnlyExactClaimAndReplays(t
 
 func TestPostgreSQLBridgeAPIStoreMCPClaimRejectsNonAuthoritativeTarget(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_mcp_target", "thr_mcp_target")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_mcp_target", "thr_mcp_target")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_mcp_target", "bind_mcp_target", 1, "pod_mcp_target")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_mcp_target", "thr_mcp_target", "bind_mcp_target", 1, "pod_mcp_target")
+	scope := sessionfixture.BridgeAPIScope("sesn_mcp_target", "thr_mcp_target", "bind_mcp_target", 1, "pod_mcp_target")
 	if _, err := store.ClaimMcpToolResult(context.Background(), &bridgev1.ClaimMcpToolResultRequest{
 		Scope: scope, ToolUseEventId: "evt_missing_mcp_target", ClaimId: "claim_missing_mcp_target",
 	}); status.Code(err) != codes.FailedPrecondition {

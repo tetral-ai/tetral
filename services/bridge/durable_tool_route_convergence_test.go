@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,11 +28,11 @@ func TestPostgreSQLMemoryEffectRequiresExactExecutableRoute(t *testing.T) {
 		podUID    = "pod_memory_route_gate"
 		storeID   = "memstore_memory_route_gate"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_memory_route_gate", "call_memory_route_gate", "memory",
 		`{"action":"create","path":"route.md","content":"owned"}`)
 	request := &bridgev1.RunMemoryRequest{Scope: scope, ToolUseEventId: toolUseID}
@@ -74,8 +75,8 @@ func TestPostgreSQLMemoryEffectRequiresExactExecutableRoute(t *testing.T) {
 		t.Fatalf("delete route: %v", err)
 	}
 	assertRejectedWithoutEffect("missing", scope)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
-	assertRejectedWithoutEffect("stale binding", bridgeAPIScope(sessionID, threadID, bindingID, 2, podUID))
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, threadID, toolUseID)
+	assertRejectedWithoutEffect("stale binding", sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 2, podUID))
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET status='resolved',result_event_id='evt_conflicting_route_result' WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseID); err != nil {
 		t.Fatalf("make conflicting resolved route: %v", err)
 	}
@@ -103,11 +104,11 @@ func TestPostgreSQLActorEffectsUseExecutableRouteGate(t *testing.T) {
 			childID := "thr_actor_route_child_" + suffix
 			bindingID := "bind_actor_route_" + suffix
 			podUID := "pod_actor_route_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 			input := fmt.Sprintf(`{"task_name":"task_%s"}`, childID)
 			if toolName == "send_message" {
 				input = fmt.Sprintf(`{"task_name":"task_%s","message":"blocked"}`, childID)
@@ -166,11 +167,11 @@ func TestPostgreSQLActorEffectsRejectExecutableCapabilitySubstitution(t *testing
 			childID := "thr_actor_capability_child_" + suffix
 			bindingID := "bind_actor_capability_" + suffix
 			podUID := "pod_actor_capability_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, parentID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_actor_capability_"+suffix, "call_actor_capability_"+suffix, "list_agents", `{}`)
 			var responseNonNil bool
 			var err error
@@ -233,10 +234,10 @@ func TestPostgreSQLSandboxEffectRejectsExecutableCapabilitySubstitution(t *testi
 			threadID := "thr_sandbox_capability_" + suffix
 			bindingID := "bind_sandbox_capability_" + suffix
 			podUID := "pod_sandbox_capability_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_sandbox_capability_"+suffix, "call_sandbox_capability_"+suffix, toolName, `{}`)
 
 			response, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
@@ -267,21 +268,21 @@ func TestPostgreSQLToolSettlementClosesExactRouteAtomically(t *testing.T) {
 			threadID := "thr_settlement_route_" + decision
 			bindingID := "bind_settlement_route_" + decision
 			podUID := "pod_settlement_route_" + decision
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_settlement_route_"+decision, "call_settlement_route_"+decision, "Read", `{"path":"owned.txt"}`)
 			if decision == "deny" {
 				if _, err := admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET decision='deny' WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseID); err != nil {
 					t.Fatalf("deny settlement route: %v", err)
 				}
 			}
-			settlement := bridgeCompletedToolSettlementForTest(toolUseID, "done")
+			settlement := sessionfixture.BridgeCompletedToolSettlementForTest(toolUseID, "done")
 			if decision == "deny" {
-				settlement = bridgeErrorToolSettlementForTest(toolUseID, "policy denied")
+				settlement = sessionfixture.BridgeErrorToolSettlementForTest(toolUseID, "policy denied")
 			}
-			request := bridgeToolSettlementRequestForTest(scope, settlement)
+			request := sessionfixture.BridgeToolSettlementRequestForTest(scope, settlement)
 			if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_exact_route_settlement() RETURNS trigger AS $$ BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql;
 				CREATE TRIGGER fail_exact_route_settlement BEFORE UPDATE ON session_pending_tool_uses
 				FOR EACH ROW EXECUTE FUNCTION fail_exact_route_settlement()`); err != nil {
@@ -362,10 +363,10 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 			threadID := "thr_nonsettleable_" + routeState
 			bindingID := "bind_nonsettleable_" + routeState
 			podUID := "pod_nonsettleable_" + routeState
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 			toolUseID := writeDurableOrdinaryToolUseForTest(t, store, scope, "mreq_nonsettleable_"+routeState, "call_nonsettleable_"+routeState, "Read", `{"path":"owned.txt"}`)
 			switch routeState {
 			case "missing":
@@ -381,7 +382,7 @@ func TestPostgreSQLToolSettlementRejectsNonsettleableRoutesWithoutResult(t *test
 					t.Fatalf("make cancelled settlement route: %v", err)
 				}
 			}
-			response, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(toolUseID, "unowned")))
+			response, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(toolUseID, "unowned")))
 			if status.Code(err) != codes.FailedPrecondition || response != nil {
 				t.Fatalf("%s settlement = %#v/%v; want FailedPrecondition", routeState, response, err)
 			}

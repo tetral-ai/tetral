@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -26,7 +27,7 @@ func TestPostgreSQLBridgeAPIStoreResolvesFileAttachmentMetadataWithoutReadingBlo
 		threadID  = "thr_bridge_file_metadata"
 		eventID   = "sevt_bridge_file_metadata"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_file_metadata", 1, "pod_bridge_file_metadata")
 	blobStore := &countingGetBlobStore{inner: blob.NewFakeBlobStore()}
 	seedBridgeAPIFileAttachment(t, admin, blobStore.inner, "file_bridge_metadata_image", "image.png", "image/png", "image")
@@ -37,7 +38,7 @@ func TestPostgreSQLBridgeAPIStoreResolvesFileAttachmentMetadataWithoutReadingBlo
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.FileBlobStore = blobStore
-	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_file_metadata", 1, "pod_bridge_file_metadata")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_file_metadata", 1, "pod_bridge_file_metadata")
 	response, err := store.ResolveFileAttachmentMetadata(context.Background(), &bridgev1.ResolveFileAttachmentMetadataRequest{
 		Scope: scope,
 		Attachments: []*bridgev1.FileAttachmentPair{
@@ -105,7 +106,7 @@ func TestPostgreSQLBridgeAPIStoreResolvesFileAttachmentMetadataWithoutReadingBlo
 	} {
 		t.Run(name, func(t *testing.T) {
 			if name == "event outside thread" {
-				seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, "thr_bridge_file_metadata_other")
+				sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, "thr_bridge_file_metadata_other")
 				seedBridgeAPIEvent(t, admin, "default", sessionID, "thr_bridge_file_metadata_other", pair.GetSourceEventId(), 1, "user.message",
 					`{"content":[{"type":"document","source":{"type":"file","file_id":"file_bridge_metadata_doc"}}]}`)
 			}
@@ -130,7 +131,7 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 		eventID   = "sevt_bridge_file_chunk"
 		fileID    = "file_bridge_chunk"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_file_chunk", 1, "pod_bridge_file_chunk")
 	inner := blob.NewFakeBlobStore()
 	seedBridgeAPIFileAttachment(t, admin, inner, fileID, "chunk.txt", "text/plain", "0123456789")
@@ -139,7 +140,7 @@ func TestPostgreSQLBridgeAPIStoreReadsBoundedOffsetFileAttachmentChunks(t *testi
 	rangeStore := &rangeRecordingBlobStore{inner: inner}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.FileBlobStore = rangeStore
-	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_file_chunk", 1, "pod_bridge_file_chunk")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_file_chunk", 1, "pod_bridge_file_chunk")
 	request := &bridgev1.ReadFileAttachmentChunkRequest{
 		Scope: scope, Attachment: &bridgev1.FileAttachmentPair{SourceEventId: eventID, FileId: fileID},
 		Offset: 2, Length: 4,
@@ -199,8 +200,8 @@ func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(
 		eventID  = "sevt_bridge_attachment_scope_cross"
 		fileID   = "file_bridge_attachment_scope_b"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionA, threadA)
-	seedBridgeAPISession(t, admin, "default", sessionB, "thr_bridge_attachment_scope_b")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionA, threadA)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionB, "thr_bridge_attachment_scope_b")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionA, binding, 1, podUID)
 	inner := blob.NewFakeBlobStore()
 	seedBridgeAPIFileAttachment(t, admin, inner, fileID, "private.png", "image/png", "private")
@@ -211,14 +212,14 @@ func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionA, threadA, eventID, 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"`+fileID+`"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionA, threadA, "rin_bridge_attachment_scope_cross", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionA, threadA, "rin_bridge_attachment_scope_cross", "messages",
 		`["`+eventID+`"]`, "accepted", binding, podUID, 1, 1)
 
 	rangeStore := &rangeRecordingBlobStore{inner: inner}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.FileBlobStore = rangeStore
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-attachment-scope-token-key")
-	scope := bridgeAPIScope(sessionA, threadA, binding, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionA, threadA, binding, 1, podUID)
 	pair := &bridgev1.FileAttachmentPair{SourceEventId: eventID, FileId: fileID}
 
 	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
@@ -263,7 +264,7 @@ func TestPostgreSQLBridgeFileAttachmentScopeCannotBypassHotColdOrBlobBoundaries(
 	started, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_scope_cross",
 		ModelRequestId: "mreq_bridge_attachment_scope_cross", EventType: "span.model_request_start",
-		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: bridgeAPIInt64(0),
+		PayloadJson: `{"type":"span.model_request_start"}`, ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0),
 		RequestKind: runtimecontrol.RequestKindAgentProviderRequest, ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{pair},
 	})
 	if status.Code(err) != codes.InvalidArgument || started != nil {
@@ -288,12 +289,12 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttach
 		sessionID = "sesn_bridge_file_pending"
 		threadID  = "thr_bridge_file_pending"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_file_pending", 1, "pod_bridge_file_pending")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-file-pending-token-key-32")
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
-	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_file_pending", 1, "pod_bridge_file_pending")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_file_pending", 1, "pod_bridge_file_pending")
 	transient := createBridgeTransientAttachmentForTest(t, store, scope, "file_pending_transient", "sevt_file_pending_tool", []byte("transient"))
 
 	for _, file := range []struct {
@@ -320,11 +321,11 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesCommittedUnconsumedFileAttach
 		  AND event_id IN ('sevt_file_pending_first', 'sevt_file_pending_later', 'sevt_file_pending_missing')`, sessionID, threadID); err != nil {
 		t.Fatalf("mark attachment inputs processed: %v", err)
 	}
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_first", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_first", "messages",
 		`["sevt_file_pending_first"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 1, 1)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_later", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_later", "messages",
 		`["sevt_file_pending_later"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 3, 3)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_missing", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_pending_missing", "messages",
 		`["sevt_file_pending_missing"]`, "committed", "bind_bridge_file_pending", "pod_bridge_file_pending", 4, 4)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 0, &bridgev1.FileAttachmentPair{
 		SourceEventId: "sevt_file_pending_first", FileId: "file_pending_consumed",
@@ -384,7 +385,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRequiresUnambiguousCommittedMessageC
 		bindingID = "bind_bridge_file_authority"
 		podUID    = "pod_bridge_file_authority"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-file-authority-token-key")
@@ -415,16 +416,16 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRequiresUnambiguousCommittedMessageC
 			t.Fatalf("mark %s event processed: %v", testCase.name, err)
 		}
 		if testCase.status != "" {
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_"+testCase.name,
+			sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_"+testCase.name,
 				testCase.inputKind, `[`+strconv.Quote(eventID)+`]`, testCase.status, bindingID, podUID,
 				testCase.sequence, testCase.sequence)
 		}
 	}
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_conflict",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_file_authority_conflict",
 		"rejection", `["sevt_file_authority_conflicting"]`, "committed", bindingID, podUID, 5, 5)
 
 	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 	})
 	if err != nil {
 		t.Fatalf("LoadContext attachment authority: %v", err)
@@ -447,8 +448,8 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 		otherThreadID = "thr_bridge_file_plan_other"
 		eventID       = "sevt_bridge_file_plan_media"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, otherThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, otherThreadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_file_plan"}}]}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
@@ -457,7 +458,7 @@ func TestPendingFileAttachmentQueryUsesMediaBoundedCommittedCustodyLookups(t *te
 		sessionID, threadID, eventID); err != nil {
 		t.Fatalf("mark media input processed: %v", err)
 	}
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_plan_media", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_plan_media", "messages",
 		`["sevt_bridge_file_plan_media"]`, "committed", "bind_bridge_file_plan", "pod_bridge_file_plan", 1, 1)
 	if _, err := admin.ExecContext(context.Background(), `WITH ids AS (
 		SELECT value, CASE WHEN value = 0 THEN 'file_bridge_file_plan' ELSE 'file_bridge_file_plan_' || value::text END AS file_id
@@ -614,31 +615,31 @@ func TestPostgreSQLBridgeAPIStoreRejectsConsumptionWhenFileRowIsMissing(t *testi
 		threadID  = "thr_bridge_file_missing_consumption"
 		eventID   = "sevt_bridge_file_missing_consumption"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message",
 		`{"content":[{"type":"document","source":{"type":"file","file_id":"file_missing_consumption"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_consumption", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_consumption", "messages",
 		`["`+eventID+`"]`, "committed", "bind_bridge_file_missing_consumption", "pod_bridge_file_missing_consumption", 1, 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_bridge_file_missing_hot", 2, "user.message",
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_missing_hot"}}]}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_hot", "messages",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_file_missing_hot", "messages",
 		`["sevt_bridge_file_missing_hot"]`, "accepted", "bind_bridge_file_missing_consumption", "pod_bridge_file_missing_consumption", 2, 2)
 	hot, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
+		Scope:          sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
 		RuntimeInputId: "rin_bridge_file_missing_hot",
 	})
 	if err != nil || hot.GetCommitted() == nil || len(hot.GetCommitted().GetContext().GetPendingAttachmentJson()) != 0 {
 		t.Fatalf("CommitInputs missing file projection = %#v/%v; want committed with no attachment", hot, err)
 	}
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
+		Scope:          sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_bridge_file_missing_consumption", 1, "pod_bridge_file_missing_consumption"),
 		RuntimeWriteId: "rwrite_bridge_file_missing_consumption",
 		ModelRequestId: "mreq_bridge_file_missing_consumption",
 		EventType:      "span.model_request_start", PayloadJson: `{"type":"span.model_request_start"}`,
-		ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
+		ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: runtimecontrol.RequestKindAgentProviderRequest,
 		ConsumedFileAttachments: []*bridgev1.FileAttachmentPair{{SourceEventId: eventID, FileId: "file_missing_consumption"}},
 	})
 	if status.Code(err) != codes.InvalidArgument || response != nil {

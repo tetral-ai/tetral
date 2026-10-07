@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -239,7 +240,7 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			}}
 			sessionID := "diagnostics-" + scenario
 			threadID := "thread-" + scenario
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "source-"+scenario, 1, "session.status_rescheduled", "{}")
 			if _, e := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, sessionID); e != nil {
 				t.Fatal(e)
@@ -431,7 +432,7 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				}
 				sessionID := "sesn_diag_" + kindLabel + "_" + stateLabel
 				threadID := "thread-" + sessionID
-				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 				candidate := candidates[0]
 				if bindingState == "existing_reuse" {
 					seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "binding-"+sessionID, 1, candidate.PodUID)
@@ -440,12 +441,12 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				q := queue.NewPostgreSQLStore(client)
 				if inputKind == "agent_mail" {
 					childID := "child-" + sessionID
-					seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
+					sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, childID)
 					deliveryID := "delivery-" + sessionID
-					messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "PRIVATE_SENTINEL"))
+					messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "PRIVATE_SENTINEL"))
 					seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "sent-"+sessionID, 1, "agent.thread_message_sent",
-						bridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "source-"+sessionID, messageJSON))
-					seedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Now())
+						sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, threadID, "", "source-"+sessionID, messageJSON))
+					sessionfixture.SeedAgentMailCustody(t, admin, sessionID, threadID, deliveryID, time.Now())
 				} else {
 					taskID := "task-" + sessionID
 					seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, "", taskID, "source-"+sessionID)

@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -19,7 +20,7 @@ import (
 
 func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inter_agent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
 	const (
 		sourceToolUseEventID = "evt_bridge_inter_agent_send"
@@ -28,11 +29,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	)
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_thr_bridge_inter_agent_child","message":"hello child"}}`)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", sourceToolUseEventID)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("inter-agent-context-test-key-32b")
-	parentScope := bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", childThreadID)
+	parentScope := sessionfixture.BridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", childThreadID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceToolUseEventID, childThreadID)
 	now := time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return now }
@@ -46,7 +47,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if delivered.GetCommitted() == nil {
 		t.Fatalf("delivery outcome = %+v; want committed", delivered)
 	}
-	childScope := bridgeAPIScope("sesn_bridge_inter_agent", childThreadID, "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
+	childScope := sessionfixture.BridgeAPIScope("sesn_bridge_inter_agent", childThreadID, "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
 	runtimeInputID := runtimecontrol.CompletionRuntimeInputID(deliveryID)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
@@ -131,7 +132,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		t.Fatalf("decode inter-agent context: %v", err)
 	}
 	if len(loaded.Messages) != 1 || loaded.Messages[0].ContextKind != "user" || len(loaded.Messages[0].Parts) != 1 ||
-		testJSONPathString(t, string(loaded.Messages[0].Parts[0]), "type") != "text" {
+		sessionfixture.JSONPathString(t, string(loaded.Messages[0].Parts[0]), "type") != "text" {
 		t.Fatalf("loaded inter-agent context = %s; want one user text entry", loadResponse.GetContextJson())
 	}
 	var receivedEventID string
@@ -149,8 +150,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		t.Fatalf("read received event: %v", err)
 	}
 	if receivedVisibility != "public" || !receivedSessionVisible ||
-		testJSONPathString(t, receivedPayloadJSON, "source_thread_id") != "thr_bridge_inter_agent_parent" ||
-		testJSONPathString(t, receivedPayloadJSON, "source_tool_use_event_id") != sourceToolUseEventID {
+		sessionfixture.JSONPathString(t, receivedPayloadJSON, "source_thread_id") != "thr_bridge_inter_agent_parent" ||
+		sessionfixture.JSONPathString(t, receivedPayloadJSON, "source_tool_use_event_id") != sourceToolUseEventID {
 		t.Fatalf("received event = visibility %s sessionVisible %v payload %s; want public parent attribution", receivedVisibility, receivedSessionVisible, receivedPayloadJSON)
 	}
 	if !strings.Contains(receivedPayloadJSON, `"source_task_name":null`) {
@@ -168,8 +169,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		    AND payload_json::jsonb ->> 'delivery_id' = $1`, deliveryID).Scan(&sentPayloadJSON); err != nil {
 		t.Fatalf("read sent event: %v", err)
 	}
-	if testJSONPathString(t, sentPayloadJSON, "target_thread_id") != childThreadID ||
-		testJSONPathString(t, sentPayloadJSON, "target_task_name") != "task_"+childThreadID {
+	if sessionfixture.JSONPathString(t, sentPayloadJSON, "target_thread_id") != childThreadID ||
+		sessionfixture.JSONPathString(t, sentPayloadJSON, "target_task_name") != "task_"+childThreadID {
 		t.Fatalf("sent event payload = %s; want target child ID and callable task_name", sentPayloadJSON)
 	}
 	assertDurableInterAgentPublicContent(t, sentPayloadJSON, content)

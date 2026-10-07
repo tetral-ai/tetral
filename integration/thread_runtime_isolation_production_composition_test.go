@@ -17,6 +17,7 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -33,10 +34,10 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 		bindingID = "bind_hot_thread_isolation"
 		podUID    = "pod_hot_thread_isolation"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadA)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadA, threadB)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadA)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadA, threadB)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadA, "evt_hot_thread_a", 1, "user.message", `{"content":[{"type":"text","text":"hold thread A"}]}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadB, "evt_hot_thread_b", 1, "user.message", `{"content":[{"type":"text","text":"complete thread B"}]}`)
 	jobs := []jobrunner.RuntimeJob{
@@ -149,7 +150,7 @@ func TestPostgreSQLJobRunnerExecutesSiblingThreadsInOneRuntimeSession(t *testing
 	}
 
 	followupEventID := "evt_hot_thread_a_followup"
-	followupSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadA)
+	followupSequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadA)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadA, followupEventID, followupSequence, "user.message", `{"content":[{"type":"text","text":"join existing run"}]}`)
 	followup := jobrunner.RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadA,

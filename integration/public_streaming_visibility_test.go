@@ -21,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	eventstream "github.com/tetral-ai/tetral/services/event-stream"
@@ -423,7 +424,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 		f.thinkingWithID(t, request, thinking)
 		var ids []string
 		for n, text := range texts {
-			parts := bridgeTextContextDeltaForTest(text.Text).Parts
+			parts := sessionfixture.BridgeTextContextDeltaForTest(text.Text).Parts
 			if n == 0 {
 				parts = append([]*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: reasoning.Text, ProviderMetadataJson: bridgeString(reasoning.ProviderMetadataJson)}}}}, parts...)
 			}

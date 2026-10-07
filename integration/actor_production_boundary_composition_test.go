@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -139,7 +140,7 @@ func TestPostgreSQLThreadLoopToolRunnerCreatesOneAuthorizedSubagentAfterLostACK(
 		podUID    = "pod_subagent_toolrunner"
 		taskName  = "production-worker"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_toolrunner_user", "evt_subagent_toolrunner_user", 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
@@ -255,7 +256,7 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 		taskName  = "child-control-target"
 		spawnID   = "evt_child_control_spawn"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("child-control-rejoin-key")
@@ -266,10 +267,10 @@ func TestPostgreSQLChildControlExhaustionRejoinsParentToolResult(t *testing.T) {
 		WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, spawnID); err != nil {
 		t.Fatalf("authorize child control spawn source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_child_control_spawn", spawnID, "call_child_control_spawn", "spawn_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_child_control_spawn", spawnID, "call_child_control_spawn", "spawn_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, spawnID)
 	created, err := store.CreateSubagentThread(context.Background(), &bridgev1.CreateSubagentThreadRequest{
-		Scope: bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: spawnID,
+		Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: spawnID,
 		TaskName: taskName, AgentType: "worker", InitialPrompt: "perform child work", ParentMessageSequences: []int64{1},
 	})
 	if err != nil || created.GetCommitted().GetChildThreadId() == "" {

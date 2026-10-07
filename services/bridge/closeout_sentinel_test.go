@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -41,7 +42,7 @@ func TestCloseoutSentinelTaxonomyPreservesGRPCStatus(t *testing.T) {
 
 func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "typed_stale")
-	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	scope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 	modelRequestID := "mreq_" + fixture.sessionID
 	seedBridgeAPIRequestStart(t, fixture.store, scope, "rwrite_start_"+fixture.sessionID, modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	if _, err := fixture.admin.ExecContext(context.Background(),
@@ -80,7 +81,7 @@ func TestBridgeAPIServerReturnsClosedStaleResultsForSupersededCloseouts(t *testi
 
 func TestPostgreSQLRuntimeTerminationRejectsAbsentResidencyRowAtomically(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "termination_absent_residency")
-	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	scope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 	running, err := fixture.store.WriteEvent(context.Background(), closeoutWriteEventRequest(scope, "rwrite_termination_absent_residency"))
 	if err != nil || running.GetCommitted() == nil {
 		t.Fatalf("open durable Runtime turn = %#v/%v", running, err)
@@ -119,7 +120,7 @@ func TestPostgreSQLRuntimeTerminationRejectsAbsentResidencyRowAtomically(t *test
 func TestBridgeAPIServerKeepsStructuralFailureOutOfStaleUnion(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "structural")
 	response, err := fixture.server.WriteEvent(context.Background(), closeoutWriteEventRequest(
-		bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
+		sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
 		"",
 	))
 	if response != nil || status.Code(err) != codes.InvalidArgument {
@@ -132,15 +133,15 @@ func TestBridgeAPIServerMapsInputSettlementScopeSupersessionToTypedStale(t *test
 		for _, staleKind := range []string{"binding_generation", "pod_uid", "session_deleted"} {
 			t.Run(rpc+"/"+staleKind, func(t *testing.T) {
 				fixture := newCloseoutSentinelFixture(t, rpc+"_"+staleKind)
-				scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+				scope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
 				inputID := "rin_" + fixture.sessionID
 				if rpc == "commit_inputs" {
 					seedBridgeAPIEvent(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, "evt_"+fixture.sessionID, 1, "user.message", `{"content":[{"type":"text","text":"stale"}]}`)
-					seedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, "messages",
+					sessionfixture.SeedBridgeAPIRuntimeInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, "messages",
 						`["evt_`+fixture.sessionID+`"]`, "accepted", fixture.bindingID, fixture.podUID, 1, 1)
 				} else {
 					inputID = "task_notification:task_" + fixture.sessionID
-					seedBridgeAPITaskNotificationInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, fixture.bindingID, fixture.podUID)
+					sessionfixture.SeedBridgeAPITaskNotificationInbox(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, inputID, fixture.bindingID, fixture.podUID)
 				}
 				switch staleKind {
 				case "binding_generation":
@@ -183,7 +184,7 @@ func TestBridgeAPIServerMapsInputSettlementScopeSupersessionToTypedStale(t *test
 
 func TestBridgeAPIServerDoesNotClassifyMalformedInputSettlementsAsStale(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "input_structural_control")
-	scope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 2, fixture.podUID)
+	scope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 2, fixture.podUID)
 	if response, err := fixture.server.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope}); response != nil || status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("malformed CommitInputs = %#v/%v; want InvalidArgument", response, err)
 	}
@@ -209,7 +210,7 @@ func TestCloseoutTerminalChildSentinel(t *testing.T) {
 	err := client.WithWorkspaceTx(context.Background(), "default", "closeout.terminal_child", func(tx *dbconnect.Tx) error {
 		return updateChildThreadStatusTx(
 			context.Background(), tx,
-			bridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID),
+			sessionfixture.BridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID),
 			"idle", fixture.store.now(),
 		)
 	})
@@ -237,7 +238,7 @@ func newCloseoutSentinelFixture(t *testing.T, suffix string) closeoutSentinelFix
 	threadID := "thr_closeout_" + suffix
 	bindingID := "bind_closeout_" + suffix
 	podUID := "pod_uid_closeout_" + suffix
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	return closeoutSentinelFixture{

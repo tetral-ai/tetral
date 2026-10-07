@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
@@ -19,7 +20,7 @@ import (
 func TestSessionDeleteCleanupDrainsUnadoptedOutputCaptureBeforeRemovingReceipt(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_delete_output_capture"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_output_capture")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_output_capture")
 	now := time.Date(2026, 7, 31, 20, 0, 0, 0, time.UTC)
 	if _, err := admin.Exec(`INSERT INTO sandbox_output_capture_operations (
 		workspace_id, session_id, session_thread_id, finish_idle_write_id, capture_generation,
@@ -179,7 +180,7 @@ func TestSessionDeleteCleanupSupersedesFailedDisplacedSandboxRelease(t *testing.
 		sessionID = "sesn_delete_failed_release"
 		cleanupID = "delcln_delete_failed_release"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_failed_release")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_failed_release")
 	now := time.Date(2026, 7, 31, 20, 0, 0, 0, time.UTC)
 	if _, err := admin.Exec(`UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2
 		WHERE workspace_id='default' AND id=$1`, sessionID, cleanupID); err != nil {
@@ -239,7 +240,7 @@ func TestSessionDeleteCleanupFinalAttemptDoesNotCreateReleaseSuccessor(t *testin
 		sessionID = "sesn_delete_final_release"
 		cleanupID = "delcln_delete_final_release"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_final_release")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_final_release")
 	now := time.Date(2026, 7, 31, 21, 0, 0, 0, time.UTC)
 	if _, err := admin.Exec(`UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2
 		WHERE workspace_id='default' AND id=$1`, sessionID, cleanupID); err != nil {
@@ -291,7 +292,7 @@ func TestSessionDeleteCleanupRetainsUnresolvedHandleCreation(t *testing.T) {
 		sessionID = "sesn_delete_unresolved_create"
 		cleanupID = "delcln_delete_unresolved_create"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_unresolved_create")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_unresolved_create")
 	now := time.Date(2026, 7, 31, 21, 30, 0, 0, time.UTC)
 	if _, err := admin.Exec(`UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2
 		WHERE workspace_id='default' AND id=$1`, sessionID, cleanupID); err != nil {
@@ -341,7 +342,7 @@ func TestSessionDeleteCleanupRetainsUnresolvedHandleCreation(t *testing.T) {
 func TestPostgreSQLRuntimeDeliveryStoreDeletedSessionSilentlyStalesOrdinaryJobs(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_bridge_deleted_job_gate"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_bridge_deleted_job_gate")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, "thr_bridge_deleted_job_gate")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted' WHERE id=$1`, sessionID); err != nil {
 		t.Fatalf("mark session deleted: %v", err)
 	}
@@ -371,9 +372,9 @@ func TestPostgreSQLSessionDeleteRevokesPausedRuntimeWorkerBeforeDurableEffects(t
 		bindingID = "bind_delete_paused_worker"
 		podUID    = "pod_delete_paused_worker"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='idle' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 		t.Fatalf("mark paused-worker Session idle: %v", err)
 	}

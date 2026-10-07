@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -133,7 +134,7 @@ func testToolDeclarationReplay(t *testing.T, afterEnd bool) {
 		t.Fatal("historical call rejection changed old durable state")
 	}
 	childID := id.New("thr_")
-	seedBridgeAPIChildThread(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId, childID)
+	sessionfixture.SeedBridgeAPIChildThread(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId, childID)
 	childScope := proto.Clone(current.Scope).(*bridgev1.RuntimeScope)
 	childScope.SessionThreadId = childID
 	seedBridgeAPIRequestStart(t, other, childScope, "other-thread-start", "request-other-thread", runtimecontrol.RequestKindAgentProviderRequest, 0)

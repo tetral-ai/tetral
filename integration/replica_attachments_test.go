@@ -27,6 +27,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -38,7 +39,7 @@ func TestPostgreSQLReplicaAttachmentReads(t *testing.T) {
 	newBlob := replicaMinIOStores(t)
 	firstBlob, secondBlob := newBlob(), newBlob()
 	const sessionID, threadID, bindingID, podUID = "sesn_replica_attachment", "sthr_replica_attachment", "bind_replica_attachment", "pod_replica_attachment"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	const chunk = 8 * 1024 * 1024
 	bytes := make([]byte, chunk+17)
@@ -54,7 +55,7 @@ func TestPostgreSQLReplicaAttachmentReads(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results(workspace_id,session_id,session_thread_id,tool_use_event_id,tool_kind,normalized_input_hash,tool_name,input_json,ack_status,result_json,model_tool_call_id,execution_state,execution_attempt_generation,result_digest,created_at,updated_at) VALUES('default',$1,$2,'sevt_replica_transient','sandbox_tool','fixture-hash','view_image','{}','committed','{"status":"success"}','call_replica_transient','terminal_unconsumed',1,'fixture-digest',now(),now())`, sessionID, threadID); err != nil {
 		t.Fatal(err)
 	}
-	createBridgeTransientAttachmentForTest(t, admin, transientStore, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), "replica_transient", "sevt_replica_transient", []byte("independent-transient-bytes"))
+	createBridgeTransientAttachmentForTest(t, admin, transientStore, sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID), "replica_transient", "sevt_replica_transient", []byte("independent-transient-bytes"))
 	for _, variant := range []string{"transient", "assembled", "scope", "deleted", "malformed", "short", "abort", "deadline", "shutdown"} {
 		t.Run(variant, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)

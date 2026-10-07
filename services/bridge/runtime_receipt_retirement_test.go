@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -57,7 +58,7 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope, sandboxTool := seedAwaitExecutionNotificationFixture(t, store, admin, "retiredreceipts")
 	podUID := scope.GetBinding().GetTargetPodUid()
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", scope.GetSessionId(), "memory_retired_receipts")
+	sessionfixture.SeedBridgeAPIWritableMemoryStore(t, admin, "default", scope.GetSessionId(), "memory_retired_receipts")
 	memoryRequest := durableMemoryRequestForTest(t, admin, scope, "evt_retired_memory", `{"action":"create","path":"notes/replay.md","content":"original"}`)
 	client := processRegistryRPC(t, dbconnect.NewClientForTesting(runtime), podUID)
 	memoryFirst, err := client.RunMemory(context.Background(), memoryRequest)
@@ -73,9 +74,9 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 	// and precedes the 30s result wait; deadline expiry alone is not admission.
 	const task = "task_retired_stdin"
 	const stdinTool = "evt_retired_stdin"
-	seedBridgeAPIEvent(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool, nextBridgeAPIEventSequenceForTest(t, admin, scope.GetSessionId(), scope.GetSessionThreadId()), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_retired_stdin","chars":"once"},"evaluated_permission":"allow"}`)
+	seedBridgeAPIEvent(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool, sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, scope.GetSessionId(), scope.GetSessionThreadId()), "agent.tool_use", `{"name":"write_stdin","input":{"session_id":"task_retired_stdin","chars":"once"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIToolDeclarationProjection(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool, "call_retired_stdin", "write_stdin", `{"session_id":"task_retired_stdin","chars":"once"}`, "background_command")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), stdinTool)
 	seedBridgeAPIBackgroundTask(t, admin, "default", scope.GetSessionId(), scope.GetSessionThreadId(), scope.GetBinding().GetBindingId(), task, "evt_retired_stdin_source")
 	stdinRequest := &bridgev1.SendCommandInputRequest{Scope: scope, TaskId: task, ToolUseEventId: stdinTool, OperationId: "op_retired_stdin"}
 	tracer := &bridgeExecutionQueryTracer{}
@@ -103,8 +104,8 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 	if err != nil || repairFirst.GetCommitted() == nil {
 		t.Fatalf("repair admission=%v/%v", repairFirst, err)
 	}
-	mcpScope := bridgeAPIScope("session_retired_mcp", "thread_retired_mcp", "binding_retired_mcp", 1, podUID)
-	seedBridgeAPISession(t, admin, "default", mcpScope.SessionId, mcpScope.SessionThreadId)
+	mcpScope := sessionfixture.BridgeAPIScope("session_retired_mcp", "thread_retired_mcp", "binding_retired_mcp", 1, podUID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", mcpScope.SessionId, mcpScope.SessionThreadId)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", mcpScope.SessionId, mcpScope.Binding.BindingId, 1, podUID)
 	mcpTool := writeDurableMCPToolUseForTest(t, store, mcpScope)
 	mcp := processRegistryRPCWithIdentity(t, store, auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "mcp-connector"}}, nil)
@@ -120,8 +121,8 @@ func TestPostgreSQLRuntimeExecutorReceiptRetirement(t *testing.T) {
 		t.Fatalf("MCP commit=%v/%v", committedMCP, err)
 	}
 	// Separate in-flight custody exercises the hidden lease-renewal mutation.
-	mcpInflightScope := bridgeAPIScope("session_retired_mcp_inflight", "thread_retired_mcp_inflight", "binding_retired_mcp_inflight", 1, podUID)
-	seedBridgeAPISession(t, admin, "default", mcpInflightScope.SessionId, mcpInflightScope.SessionThreadId)
+	mcpInflightScope := sessionfixture.BridgeAPIScope("session_retired_mcp_inflight", "thread_retired_mcp_inflight", "binding_retired_mcp_inflight", 1, podUID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", mcpInflightScope.SessionId, mcpInflightScope.SessionThreadId)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", mcpInflightScope.SessionId, mcpInflightScope.Binding.BindingId, 1, podUID)
 	inflightTool := writeDurableMCPToolUseForTest(t, store, mcpInflightScope)
 	inflightClaim := &bridgev1.ClaimMcpToolResultRequest{Scope: mcpInflightScope, ToolUseEventId: inflightTool, ClaimId: "claim_inflight_retired"}

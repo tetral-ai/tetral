@@ -26,6 +26,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	runtimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -50,9 +51,9 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			queueDB := roles.OpenWorkload(t, "queue", nil)
 			sandboxDB := roles.OpenWorkload(t, "sandbox", nil)
 			const session, thread, binding, pod = "sesn_mcp_durable", "thr_mcp_durable", "bind_mcp_durable", "pod_mcp_durable"
-			seedBridgeAPISession(t, admin, "default", session, thread)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, pod)
-			seedReadySandboxForSharedToolExecution(t, admin, "default", session)
+			sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
 			startMCPDeliveryCaptures(ctx, t, sandboxDB, queueDB)
 			installed := `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"work-github"},{"type":"mcp_toolset","mcp_server_name":"work-slack"}],"mcp_servers":[{"type":"url","name":"work-github","url":"https://api.githubcopilot.com/mcp/"},{"type":"url","name":"work-slack","url":"https://mcp.slack.com/mcp"}]}`
 			mustMCPDeliveryExec(t, admin, `UPDATE sessions SET installed_tools_json=$1,vault_ids_json='["vlt_mcp_durable"]' WHERE id=$2`, installed, session)
@@ -130,7 +131,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 					t.Fatal(err)
 				}
 				seedBridgeAPIEvent(t, admin, "default", session, thread, "evt_"+id, sequence, "user.message", `{"content":[{"type":"text","text":"observe catalog"}]}`)
-				seedBridgeAPIRuntimeInbox(t, admin, "default", session, thread, id, "messages", fmt.Sprintf(`[%q]`, "evt_"+id), "delivering", binding, pod, sequence, sequence)
+				sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", session, thread, id, "messages", fmt.Sprintf(`[%q]`, "evt_"+id), "delivering", binding, pod, sequence, sequence)
 				runtime.action(map[string]any{"kind": "start-provider", "runtimeInputId": id, "inputOrder": sequence, "hold": hold})
 				runtime.wait(func(observation deliveryRuntimeObservation) bool {
 					return len(observation.ProviderRequests) >= expected

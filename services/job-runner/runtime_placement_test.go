@@ -13,13 +13,14 @@ import (
 	kubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestPostgreSQLRuntimePlacementP2C(t *testing.T) {
 	for _, scenario := range []string{"lower load", "one invalid", "second round", "all invalid", "caller cancellation"} {
 		t.Run(scenario, func(t *testing.T) {
 			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			seedBridgeAPISession(t, admin, "default", "session_placement", "thread_placement")
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", "session_placement", "thread_placement")
 			client := dbconnect.NewClientForTesting(runtime)
 			var candidates []kubernetes.BindingCandidate
 			for i := 1; i <= 5; i++ {

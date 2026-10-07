@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -92,7 +93,7 @@ func newMCPDurableCompositionWithOptions(t *testing.T, options map[string]any) *
 	}
 
 	const sessionID, threadID, bindingID, podUID = "sesn_mcp_durable", "thr_mcp_durable", "bind_mcp_durable", "pod_mcp_durable"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	installed := `{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"work-github"},{"type":"mcp_toolset","mcp_server_name":"work-slack"}],"mcp_servers":[{"type":"url","name":"work-github","url":"https://api.githubcopilot.com/mcp/"},{"type":"url","name":"work-slack","url":"https://mcp.slack.com/mcp"}]}`
 	if _, err := admin.Exec(`UPDATE sessions SET installed_tools_json=$1,vault_ids_json='["vlt_mcp_durable"]' WHERE workspace_id='default' AND id=$2`, installed, sessionID); err != nil {
@@ -125,7 +126,7 @@ func newMCPDurableCompositionWithOptions(t *testing.T, options map[string]any) *
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(roles.DB))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-durable-binding-key-with-32-bytes")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_durable_start", "mreq_mcp_durable", "agent_provider_request", 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -23,11 +24,11 @@ func TestPostgreSQLRuntimeTerminationClosesMainAndSiblingToolRoutesAtomically(t 
 		interruptInputID = "rin_termination_interrupt_child"
 		interruptEventID = "evt_termination_interrupt_child"
 	)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, childID)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, requestChildID)
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, interruptChildID)
-	mainScope := bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
-	childScope := bridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID)
+	sessionfixture.SeedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, childID)
+	sessionfixture.SeedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, requestChildID)
+	sessionfixture.SeedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, fixture.threadID, interruptChildID)
+	mainScope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID)
+	childScope := sessionfixture.BridgeAPIScope(fixture.sessionID, childID, fixture.bindingID, 1, fixture.podUID)
 	mainToolID := writeDurableOrdinaryToolUseForTest(t, fixture.store, mainScope, "mreq_termination_main_tool", "call_termination_main_tool", "Read", `{"path":"main.txt"}`)
 	childToolID := writeDurableOrdinaryToolUseForTest(t, fixture.store, childScope, "mreq_termination_child_tool", "call_termination_child_tool", "Read", `{"path":"child.txt"}`)
 	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_pending_tool_uses SET status='pending',decision=NULL WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, fixture.sessionID, childToolID); err != nil {

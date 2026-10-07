@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -149,7 +150,7 @@ func (s *committingInterruptRuntimeSender) Interrupt(ctx context.Context, target
 	s.requests = append(s.requests, request)
 	lease := request.GetInterruptLeaseRef()
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
-		Scope: bridgeAPIScope(
+		Scope: sessionfixture.BridgeAPIScope(
 			request.GetSessionId(), request.GetSessionThreadId(), request.GetBindingId(),
 			request.GetBindingGeneration(), request.GetTargetPodUid(),
 		),
@@ -189,9 +190,9 @@ func TestPostgreSQLInterruptSettlesPreparedRejectionAndQueuedFollowers(t *testin
 		bindingID = "bind_interrupt_follower_production"
 		podUID    = "pod_interrupt_follower_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1' WHERE session_id=$1`, sessionID); err != nil {
 		t.Fatal(err)
 	}
@@ -333,9 +334,9 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 		bindingID = "bind_interrupt_accepted_residue"
 		podUID    = "pod_interrupt_accepted_residue"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 
 	client := dbconnect.NewClientForTesting(runtime)
 	eventService := sessionevent.NewService(sessionevent.NewPostgreSQLStore(client))
@@ -455,10 +456,10 @@ func TestPostgreSQLInterruptBarrierFollowsSessionQueueOrderAcrossThreads(t *test
 		bindingID = "bind_interrupt_queue_order"
 		podUID    = "pod_interrupt_queue_order"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_interrupt_queue_order_child_history", 9,
 		"session.status", `{"type":"session.status"}`)
 
@@ -577,9 +578,9 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		messageID    = "rin_interrupt_production_message"
 		messageEvent = "evt_interrupt_production_message"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, messageEvent, 1, "user.message", `{"content":[{"type":"text","text":"run the durable operation"}]}`)
 	messageJob := jobrunner.RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -656,9 +657,9 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 	// hot run slot. The Runtime is the final busy authority in that lag window.
 	cleanupID := "cleanup_interrupt_production_hot"
 	idleEventID := "evt_interrupt_production_lagging_idle"
-	idleSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	idleSequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, idleEventID, idleSequence, "session.status_idle", `{"type":"session.status_idle"}`)
-	seedBridgeAPIStreamChange(t, admin, "default", sessionID, threadID, idleEventID, 1, "internal", false)
+	sessionfixture.SeedBridgeAPIStreamChange(t, admin, "default", sessionID, threadID, idleEventID, 1, "internal", false)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='idle', updated_at=clock_timestamp()
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
 		t.Fatalf("seed lagging idle Thread projection: %v", err)
@@ -759,7 +760,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("read production-born interrupt Inbox: %v", err)
 	}
 	postConfigEventID := "evt_interrupt_production_post_config"
-	postConfigSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	postConfigSequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, postConfigEventID, postConfigSequence, "user.message", `{"content":[{"type":"text","text":"post-config ordinary"}]}`)
 	postConfigJob := jobrunner.RuntimeJob{
 		WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
@@ -847,7 +848,7 @@ func TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes(t *testi
 		t.Fatalf("installed config Queue state = %s/%v; want acknowledged", configStatus, err)
 	}
 	coldAfterInterrupt, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
 	})
 	if err != nil {
 		t.Fatalf("load cold Provider context after interrupt: %v", err)
@@ -967,19 +968,19 @@ func TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence(t *tes
 		turnID         = "evt_interrupt_joined_replay_running"
 		modelRequestID = "mreq_interrupt_joined_replay"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-joined-replay-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
 	seedBridgeAPIRequestStart(t, bridgeStore, scope, "rwrite_"+modelRequestID+"_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	partial, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_" + modelRequestID + "_partial", ModelRequestId: modelRequestID,
 		PreallocatedEventId: proto.String("evt_0000000000000000000000000000000a"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"failed partial text"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("failed partial text"),
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("failed partial text"),
 	})
 	if err != nil || partial.GetCommitted() == nil {
 		t.Fatalf("write joined replay failed partial: response=%#v err=%v", partial, err)
@@ -1227,14 +1228,14 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 		oldPodUID     = "pod_interrupt_pod_loss_old"
 		newPodUID     = "pod_interrupt_pod_loss_new"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, oldBindingID, 1, oldPodUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, oldBindingID, 1)
 	client := dbconnect.NewClientForTesting(runtime)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
-	mainScope := bridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
-	siblingScope := bridgeAPIScope(sessionID, siblingID, oldBindingID, 1, oldPodUID)
+	mainScope := sessionfixture.BridgeAPIScope(sessionID, threadID, oldBindingID, 1, oldPodUID)
+	siblingScope := sessionfixture.BridgeAPIScope(sessionID, siblingID, oldBindingID, 1, oldPodUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, mainScope, mainTurnID)
 	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, siblingTurnID)
 	mainToolID := writeDurableOrdinaryToolUseForTest(t, bridgeStore, mainScope, mainRequestID,
@@ -1377,7 +1378,7 @@ func TestPostgreSQLPodLossContinuesSameInterruptThroughReplacementRuntime(t *tes
 	if recoveryQueueStatus != queue.StatusAcknowledged {
 		t.Fatalf("recovery Queue status = %s; want acknowledged before interrupt delivery", recoveryQueueStatus)
 	}
-	replacementScope := bridgeAPIScope(
+	replacementScope := sessionfixture.BridgeAPIScope(
 		sessionID,
 		threadID,
 		recoveryRequest.GetBindingId(),
@@ -1515,14 +1516,14 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		interruptID    = "rin_interrupt_closeout_then_loss"
 		interruptEvent = "evt_interrupt_closeout_then_loss"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_closeout_then_loss_start", modelRequestID, runtimecontrol.RequestKindAgentProviderRequest, 0)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 3, "user.interrupt", `{}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
 		`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 3, 3)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, threadID, interruptID, "interrupt_control", interruptEvent, 3, 3, time.Now().UTC())
@@ -1535,7 +1536,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
 		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
-			RuntimeInputId: interruptID, InterruptLeaseRef: bridgeInterruptLeaseRef(oldLease),
+			RuntimeInputId: interruptID, InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(oldLease),
 		},
 	})
 	if err != nil || ended.GetCommitted() == nil {
@@ -1557,7 +1558,7 @@ func TestPostgreSQLPodLossAfterInterruptCloseoutReplaysReceiptWithoutRuntime(t *
 		ReplayRuntimeDeliveryFinalization(context.Background(), closeoutJob); replayErr != nil || found {
 		t.Fatalf("replay interrupt receipt while durable Turn is open = %#v/%t/%v; want not found", replayed, found, replayErr)
 	}
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	repairStore := runtimePodLossSweepStore(t, runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
 	})
@@ -1723,19 +1724,19 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 		lateMail      = "evt_interrupt_actor_late_mail_production"
 		lateChild     = "evt_interrupt_actor_late_child_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, siblingID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, siblingID, grandchildID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, siblingSource, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+siblingID+`","message":"external sibling mail waits"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, mainID, siblingSource)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateMail, 1, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","input":{"task_name":"task_`+grandchildID+`","message":"must be stale"},"evaluated_permission":"allow"}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateChild, 2, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be stale"},"evaluated_permission":"allow"}`)
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, "mreq_interrupt_actor_late", lateMail, "call_interrupt_actor_late_mail", "send_message")
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, "mreq_interrupt_actor_late", lateMail, "call_interrupt_actor_late_mail", "send_message")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
 		SET data_json=jsonb_set(data_json::jsonb, '{parts}', (data_json::jsonb->'parts') ||
 			'[{"type":"tool_call","modelToolCallId":"call_interrupt_actor_late_child","toolName":"spawn_agent","canonicalInput":{}}]'::jsonb)::text
@@ -1764,8 +1765,8 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("interrupt-actor-production-key")
-	mainScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
-	siblingScope := bridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
+	mainScope := sessionfixture.BridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+	siblingScope := sessionfixture.BridgeAPIScope(sessionID, siblingID, bindingID, 1, podUID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(siblingSource, siblingID)
 	if response, err := bridgeStore.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: mainScope, DeliveryId: deliveryID, TargetThreadId: siblingID,
@@ -1916,11 +1917,11 @@ func runPostgreSQLColdInterruptProductionCase(t *testing.T, explicitChild bool) 
 		bindingID  = "bind_interrupt_cold_production"
 		podUID     = "pod_interrupt_cold_production"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, "evt_interrupt_cold_history", 1, "user.message", `{"content":[{"type":"text","text":"durable cold history"}]}`)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, mainID, "msg_interrupt_cold_history", "evt_interrupt_cold_history", 1)
 	runtimeThreadID := mainID

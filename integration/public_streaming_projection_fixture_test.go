@@ -30,6 +30,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -172,7 +173,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 	h.session = result.Session.ID
 	binding, pod := id.New("bind_"), id.New("pod_")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", h.session, binding, 1, pod)
-	f.scope = bridgeAPIScope(h.session, h.thread(t), binding, 1, pod)
+	f.scope = sessionfixture.BridgeAPIScope(h.session, h.thread(t), binding, 1, pod)
 	store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(pools.DB))
 	store.RuntimeBindingTokenHMACKey = []byte("projection-test-binding-hmac-key-32")
 	endpoint := serveContentBridge(t, store, map[string]string{"projection-runtime-token": pod}, func(_ context.Context, method string, response any) error {
@@ -257,7 +258,7 @@ func (f *publicProjectionFixture) text(t *testing.T, request *publicProjectionRe
 		}
 		parts = append(parts, &bridgev1.RuntimeContextPart{Content: &bridgev1.RuntimeContextPart_Reasoning{Reasoning: &bridgev1.RuntimeContextReasoning{Text: f.vectors.Content.ReasoningText, ProviderMetadataJson: bridgeString(string(metadata))}}})
 	}
-	parts = append(parts, bridgeTextContextDeltaForTest(text).Parts...)
+	parts = append(parts, sessionfixture.BridgeTextContextDeltaForTest(text).Parts...)
 	return f.textWithID(t, request, event, text, parts)
 }
 
@@ -299,7 +300,7 @@ func (f *publicProjectionFixture) thinkingWithID(t *testing.T, request *publicPr
 
 func (f *publicProjectionFixture) tool(t *testing.T, request *publicProjectionRequest, name, input string) string {
 	t.Helper()
-	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, ToolDeclaration: bridgeToolDeclarationWithRouteForTest(id.New("call_"), name, input, "allow")})
+	response, err := f.bridge.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: request.scope, RuntimeWriteId: id.New("rwrite_"), ModelRequestId: request.id, ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest(id.New("call_"), name, input, "allow")})
 	if err != nil || response.GetCommitted() == nil {
 		t.Fatalf("actual Bridge tool declaration: %v", err)
 	}
@@ -346,7 +347,7 @@ func (f *publicProjectionFixture) compact(t *testing.T, request *publicProjectio
 	t.Helper()
 	end := f.endRequest(request)
 	end.ProviderContextRetention.Disposition = "compacted"
-	end.CompactionContext = bridgeTextContextDeltaForTest(summary)
+	end.CompactionContext = sessionfixture.BridgeTextContextDeltaForTest(summary)
 	end.CompactionEventPayloadJson = `{"type":"agent.thread_context_compacted"}`
 	var boundary int64
 	if err := f.db.QueryRow(`SELECT COALESCE(max(sequence),0) FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3`, request.scope.WorkspaceId, request.scope.SessionId, request.scope.SessionThreadId).Scan(&boundary); err != nil {

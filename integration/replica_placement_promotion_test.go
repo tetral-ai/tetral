@@ -18,6 +18,7 @@ import (
 	kubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -47,7 +48,7 @@ func TestPostgreSQLReplicaPlacementPromotionRaces(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			seedBridgeAPISession(t, admin, "default", "placement-race-session", "placement-race-thread")
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", "placement-race-session", "placement-race-thread")
 			seedBridgeAPIEvent(t, admin, "default", "placement-race-session", "placement-race-thread", "placement-race-source", 1, "session.status_rescheduled", "{}")
 			if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default','placement-race-session','idle',clock_timestamp(),clock_timestamp())`); err != nil {
 				t.Fatal(err)

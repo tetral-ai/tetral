@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -63,13 +64,13 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 		bindingID = "bind_reviewer_runtime_composition"
 		podUID    = "pod_reviewer_runtime_composition"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("reviewer-runtime-composition-key")
-	parentScope := bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
+	parentScope := sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID)
 	parentStart := seedBridgeAPIRequestStart(t, store, parentScope, "rwrite_reviewer_composition_parent_start", "mreq_reviewer_composition_parent", runtimecontrol.RequestKindAgentProviderRequest, 0)
 	parentBoundaryEventID := parentStart.GetCommitted().GetEventId()
 	if parentBoundaryEventID == "" {
@@ -234,7 +235,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 		FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
 		ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "interrupted"},
 		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
-			RuntimeInputId: interruptInputID, InterruptLeaseRef: bridgeInterruptLeaseRef(interruptLease),
+			RuntimeInputId: interruptInputID, InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(interruptLease),
 		},
 	})
 	if err != nil || parentEnd.GetCommitted() == nil {
@@ -275,7 +276,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	}
 	targetApplication, err := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_target_tool", ModelRequestId: "mreq_reviewer_composition_parent",
-		ToolDeclaration: bridgeToolDeclarationForTest("tool_call_reviewer_trunk", "Write", `{"path":"src/a.ts","content":"ok"}`, "allow", "sandbox_execute"),
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("tool_call_reviewer_trunk", "Write", `{"path":"src/a.ts","content":"ok"}`, "allow", "sandbox_execute"),
 	})
 	if err != nil || targetApplication.GetStale() == nil {
 		t.Fatalf("apply late Reviewer allow to terminal target = %#v/%v; want typed stale", targetApplication, err)
@@ -283,7 +284,7 @@ func TestPostgreSQLReviewerRunExitClosesWithExactDurableAuthority(t *testing.T) 
 	ordinaryMember, ordinaryMemberErr := client.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: parentScope, RuntimeWriteId: "rwrite_reviewer_composition_late_message", ModelRequestId: "mreq_reviewer_composition_parent",
 		PreallocatedEventId: proto.String("evt_00000000000000000000000000000009"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"late"}]}`,
-		AssistantContextDelta: bridgeTextContextDeltaForTest("late"),
+		AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("late"),
 	})
 	if ordinaryMember != nil || status.Code(ordinaryMemberErr) != codes.FailedPrecondition {
 		t.Fatalf("write ordinary member to terminal target = %#v/%v; want FailedPrecondition", ordinaryMember, ordinaryMemberErr)

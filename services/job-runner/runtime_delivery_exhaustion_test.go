@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -55,7 +56,7 @@ func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(
 		inputID   = "rin_malformed_message_replacement"
 		eventID   = "evt_malformed_message_replacement"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"recover"}]}`)
 	job := exhaustionRuntimeJob(sessionID, threadID, inputID, "messages", []string{eventID})
 	seedRuntimeInboxBirthForJob(t, admin, job)
@@ -94,9 +95,9 @@ func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(
 
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "evt_exhaust_delivering", 1, "user.message", `{"type":"user.message"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", `["evt_exhaust_delivering"]`, "delivering", "bind_exhaust_delivering", "pod_exhaust_delivering", 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", `["evt_exhaust_delivering"]`, "delivering", "bind_exhaust_delivering", "pod_exhaust_delivering", 1, 1)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_exhaust_delivering", "bind_exhaust_delivering", 1, "pod_exhaust_delivering")
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", []string{"evt_exhaust_delivering"})
@@ -111,9 +112,9 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *tes
 
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionCancelledBeforeTransactionWritesNothing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled", "evt_exhaust_cancelled", 1, "user.message", `{"type":"user.message"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled", "rin_exhaust_cancelled", "messages", `["evt_exhaust_cancelled"]`, "accepted", "bind_exhaust_cancelled", "pod_exhaust_cancelled", 1, 1)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_cancelled", "thr_exhaust_cancelled", "rin_exhaust_cancelled", "messages", `["evt_exhaust_cancelled"]`, "accepted", "bind_exhaust_cancelled", "pod_exhaust_cancelled", 1, 1)
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	job := exhaustionRuntimeJob("sesn_exhaust_cancelled", "thr_exhaust_cancelled", "rin_exhaust_cancelled", "messages", []string{"evt_exhaust_cancelled"})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -285,7 +286,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 					sessionID = "sesn_invalid_generic_conflict"
 					threadID  = "thr_invalid_generic_conflict"
 				)
-				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 				seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_inbox_generic_conflict", 1, "user.message", `{"type":"user.message"}`)
 				seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_queue_generic_conflict", 2, "user.message", `{"type":"user.message"}`)
 				inboxJob := exhaustionRuntimeJob(sessionID, threadID, "rin_invalid_generic_conflict", "messages", []string{"evt_inbox_generic_conflict"})
@@ -327,11 +328,11 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 					childID   = "thr_invalid_missing_mail_child"
 					delivery  = "delivery_invalid_missing_mail"
 				)
-				seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-				messageJSON := bridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_child", "done"))
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+				sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+				messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_child", "done"))
 				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_invalid_missing_mail", 1, "agent.thread_message_sent",
-					bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_invalid_missing_mail", messageJSON))
+					sessionfixture.BridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_invalid_missing_mail", messageJSON))
 				request, _, err := runtimecontrol.AgentMailWakeEnqueueRequest("default", sessionID, mainID, delivery, now)
 				if err != nil {
 					t.Fatalf("build missing agent-mail Queue custody: %v", err)
@@ -355,7 +356,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 					taskID    = "task_invalid_missing_task"
 					sourceID  = "sevt_invalid_missing_task"
 				)
-				seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_invalid_missing_task", 1, "pod_invalid_missing_task")
 				seedBridgeAPINotifiableBackgroundTask(t, admin, "default", sessionID, threadID, "bind_invalid_missing_task", taskID, sourceID)
 				settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
@@ -593,7 +594,7 @@ func seedCrossDatabaseExhaustionFixture(t *testing.T, bridgeAdmin *sql.DB, suffi
 	threadID := "thr_cross_" + suffix
 	runtimeInputID := "rin_cross_" + suffix
 	eventID := "evt_cross_" + suffix
-	seedBridgeAPISession(t, bridgeAdmin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, bridgeAdmin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, bridgeAdmin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
 	if existingInbox {
 		job := exhaustionRuntimeJob(sessionID, threadID, runtimeInputID, "messages", []string{eventID})

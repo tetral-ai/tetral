@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	driver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
@@ -150,10 +151,10 @@ func TestPostgreSQLReplicaSandboxProcessTakeover(t *testing.T) {
 				thread := fmt.Sprintf("thr_process_takeover_%d", i)
 				binding := fmt.Sprintf("binding_process_takeover_%d", i)
 				pod := fmt.Sprintf("pod_process_takeover_%d", i)
-				seedBridgeAPISession(t, admin, "default", session, thread)
+				sessionfixture.SeedBridgeAPISession(t, admin, "default", session, thread)
 				seedBridgeAPIRuntimeBinding(t, admin, "default", session, binding, 1, pod)
-				seedReadySandboxForSharedToolExecution(t, admin, "default", session)
-				scope := bridgeAPIScope(session, thread, binding, 1, pod)
+				sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", session)
+				scope := sessionfixture.BridgeAPIScope(session, thread, binding, 1, pod)
 				id := writeDurableOrdinaryToolUseForTest(t, bridgeStore, scope, "request_"+session, "call_"+session, "Read", `{"file_path":"/workspace/input.txt"}`)
 				ack, err := bridgeStore.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{Scope: scope, ToolUseEventId: id})
 				if err != nil || ack.GetCommitted() == nil {

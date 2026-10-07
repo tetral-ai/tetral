@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -43,11 +44,11 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		bindingID = "bind_mcp_production_composition"
 		podUID    = "pod_mcp_production_composition"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("mcp-production-context-signing-key")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	toolUseEventID := writeDurableMCPToolUseForTest(t, store, scope)
 	cancelledToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_mcp_production_cancelled_use", ModelRequestId: "mreq_mcp_durable_claim",
@@ -141,7 +142,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	wrongPodContext := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer mcp-production-wrong-runtime-token")
 	wrongPodSettlement, err := bridgeClient.SettleToolResult(wrongPodContext, &bridgev1.SettleToolResultRequest{
 		Scope:      scope,
-		Settlement: bridgeCompletedToolSettlementForTest(toolUseEventID, "wrong pod must not settle"),
+		Settlement: sessionfixture.BridgeCompletedToolSettlementForTest(toolUseEventID, "wrong pod must not settle"),
 	})
 	if err != nil || wrongPodSettlement.GetStale() == nil {
 		t.Fatalf("wrong-pod MCP production settlement = %+v, %v; want stale without mutation", wrongPodSettlement, err)
@@ -353,14 +354,14 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if mainCalls != 1 || mainResults != 1 || cleanupCalls != 1 || cleanupResults != 0 {
 		t.Fatalf("MCP cold context calls/results main=%d/%d cleanup=%d/%d; want one settled pair and one unresolved call", mainCalls, mainResults, cleanupCalls, cleanupResults)
 	}
-	cleanupSettlement, err := store.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	cleanupSettlement, err := store.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
-		bridgeCompletedToolSettlementForTest(cleanupToolUseEventID, "reacquired claimant"),
+		sessionfixture.BridgeCompletedToolSettlementForTest(cleanupToolUseEventID, "reacquired claimant"),
 	))
 	if err != nil {
 		t.Fatalf("settle staged cleanup MCP result: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, cleanupSettlement, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, cleanupSettlement, "committed")
 	finalLoaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("cold-load fully settled MCP production context: %v", err)
@@ -438,7 +439,7 @@ func (s *mcpConnectorProductionBridgeServer) ClaimMcpToolResult(ctx context.Cont
 	}
 	s.mu.Unlock()
 	if request.GetClaimId() == "claim_mcp_production_cancel_takeover" {
-		response, err := s.store.SettleToolResult(ctx, bridgeToolSettlementRequestForTest(request.GetScope(), &bridgev1.RuntimeToolSettlement{
+		response, err := s.store.SettleToolResult(ctx, sessionfixture.BridgeToolSettlementRequestForTest(request.GetScope(), &bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: s.cancelledToolUseEventID,
 			Outcome:        &bridgev1.RuntimeToolSettlement_Cancelled{Cancelled: &bridgev1.RuntimeToolCancelled{}},
 		}))

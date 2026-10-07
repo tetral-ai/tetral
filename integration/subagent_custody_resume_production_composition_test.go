@@ -27,6 +27,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -344,8 +345,8 @@ func seedChildResumeRoute(t *testing.T, admin *sql.DB, sessionID, parentID, sour
 		sessionID, sourceID, modelRequestID, `{"model_tool_call_id":"`+modelToolCallID+`"}`); err != nil {
 		t.Fatalf("project resume source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, modelRequestID, sourceID, modelToolCallID, "resume_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, modelRequestID, sourceID, modelToolCallID, "resume_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 }
 
 func TestSubagentFirstMailRemainsOwnedAfterLocalAdmissionRejection(t *testing.T) {
@@ -356,7 +357,7 @@ func TestSubagentFirstMailRemainsOwnedAfterLocalAdmissionRejection(t *testing.T)
 		bindingID = "bind_subagent_first_mail_custody"
 		podUID    = "pod_subagent_first_mail_custody"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_subagent_first_mail_parent", "evt_subagent_first_mail_parent", 1)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
@@ -453,7 +454,7 @@ func TestSubagentFirstMailExhaustionFailsOnlyExactChild(t *testing.T) {
 		bindingID = "bind_first_mail_final_failure"
 		podUID    = "pod_first_mail_final_failure"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_first_mail_final_parent", "evt_first_mail_final_parent", 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -515,7 +516,7 @@ func TestSubagentFirstMailExhaustionFailsOnlyExactChild(t *testing.T) {
 	}
 	messageBoundary := int64(1)
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: bridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_late_first_mail_start",
+		Scope: sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeWriteId: "rwrite_late_first_mail_start",
 		ModelRequestId: "mreq_late_first_mail_start", EventType: "span.model_request_start",
 		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_late_first_mail_start"}`,
 		ContextThroughMessageSequence: &messageBoundary, RequestKind: "agent_provider_request",
@@ -826,10 +827,10 @@ func TestSubagentMailAcknowledgesWhileEarlierToolRemainsActive(t *testing.T) {
 	sourceID := "evt_busy_tool_later_mail"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, sourceID, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope:      bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		Scope:      sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		DeliveryId: deliveryID, TargetThreadId: fixture.childID,
 		SourceToolUseEventId: sourceID, Content: "continue after the active tool settles",
 	}); err != nil || delivered.GetCommitted() == nil {
@@ -1077,7 +1078,7 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 	fixture := newSubagentMailFixture(t, "first_mail_interrupted_resume")
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	siblingID := "thr_first_mail_interrupted_sibling"
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
+	sessionfixture.SeedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
 	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_threads
 		SET agent_type='worker' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, fixture.sessionID, siblingID); err != nil {
 		t.Fatalf("complete sibling fixture: %v", err)
@@ -1113,7 +1114,7 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 			firstMessageID, firstSourceEventID, startID, modelRequestID, toolUseID, startBoundary)
 	}
 
-	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	parentScope := sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
 	closeSourceID := "evt_close_inflight_first_mail"
 	controlID := admitChildCloseThroughProduction(t, fixture.admin, client, parentScope,
 		fixture.sessionID, parentID, fixture.childID, closeSourceID)
@@ -1206,10 +1207,10 @@ func TestSubagentFirstMailInterruptedCloseColdResumeAndLaterInputProductionCompo
 
 	laterSourceID := "evt_later_after_interrupted_resume"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
 	laterDeliveryID := runtimecontrol.AgentMailDeliveryID(laterSourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
+		Scope: sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
 		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "one later input after interrupted first_mail resume",
 	}); err != nil || delivered.GetCommitted() == nil {
 		t.Fatalf("deliver later input after interrupted resume = %#v/%v", delivered, err)
@@ -1258,7 +1259,7 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("subagent-first_mail-composition-key")
-	childScope := bridgeAPIScope(fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
+	childScope := sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID)
 	var messageBoundary int64
 	var preCompactionStartID string
 	var parentBoundaryEventID string
@@ -1294,7 +1295,7 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 		PrefixConsumption: &bridgev1.PrefixConsumptionDraft{
 			ChildThreadId: fixture.childID, ParentBoundaryEventId: parentBoundaryEventID,
 		},
-		CompactionContext:               bridgeTextContextDeltaForTest("first_mail request completed before this retained summary"),
+		CompactionContext:               sessionfixture.BridgeTextContextDeltaForTest("first_mail request completed before this retained summary"),
 		CompactedThroughMessageSequence: &compactionBoundary,
 		CompactionEventPayloadJson:      `{"type":"agent.thread_context_compacted"}`,
 	})
@@ -1311,7 +1312,7 @@ func TestSubagentClosedResumeUsesPostCompactionRequestBoundary(t *testing.T) {
 
 	client := startActorProductionBridge(t, fixture.runtimeDB)
 	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
-		bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
 		"evt_close_after_compaction")
 	var latestClosedIdleID string
@@ -1378,7 +1379,7 @@ func TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest(t *testing.T) {
 	runtimeProcess.kill(t)
 
 	actorClient := startActorProductionBridge(t, fixture.runtimeDB)
-	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	parentScope := sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
 	closeChildThroughProductionInterrupt(
 		t, fixture.runtimeDB, fixture.admin, actorClient, fixture.bridgeAddress, parentScope,
 		fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
@@ -1463,7 +1464,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 	executingRuntime.kill(t)
 
 	client := startActorProductionBridge(t, fixture.runtimeDB)
-	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	parentScope := sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
 	closeChildThroughProductionInterrupt(t, fixture.runtimeDB, fixture.admin, client, fixture.bridgeAddress,
 		parentScope, fixture.sessionID, parentID, fixture.childID, fixture.bindingID, fixture.podUID,
 		"evt_close_before_terminal_tool_resume")
@@ -1479,7 +1480,7 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 
 	laterSourceID := "evt_terminal_tool_after_resume"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
 	laterDeliveryID := runtimecontrol.AgentMailDeliveryID(laterSourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: parentScope, DeliveryId: laterDeliveryID, TargetThreadId: fixture.childID,
@@ -1561,13 +1562,13 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	siblingID := "thr_close_before_start_sibling"
 	siblingDeliveryID := "delivery_close_before_start_sibling"
-	seedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
+	sessionfixture.SeedBridgeAPIChildThread(t, fixture.admin, "default", fixture.sessionID, parentID, siblingID)
 	if _, err := fixture.admin.ExecContext(context.Background(), `UPDATE session_threads SET agent_type='worker',task_name='close-before-start-sibling'
 		WHERE workspace_id='default' AND session_id=$1 AND id=$2`, fixture.sessionID, siblingID); err != nil {
 		t.Fatalf("name close-before-start sibling: %v", err)
 	}
 	siblingRuntimeInputID := runtimecontrol.CompletionRuntimeInputID(siblingDeliveryID)
-	parentScope := bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
+	parentScope := sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID)
 	closeSourceID := "evt_close_before_first_mail_start"
 	controlID := admitChildCloseThroughProduction(
 		t, fixture.admin, client, parentScope, fixture.sessionID, parentID, fixture.childID, closeSourceID,
@@ -1575,7 +1576,7 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	closeFirstSourceID := "evt_mail_after_close_admission"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, closeFirstSourceID, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, closeFirstSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, closeFirstSourceID)
 	closeFirstDeliveryID := runtimecontrol.AgentMailDeliveryID(closeFirstSourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
 		Scope: parentScope, DeliveryId: closeFirstDeliveryID, TargetThreadId: fixture.childID,
@@ -1655,7 +1656,7 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 	messageBoundary := int64(1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(fixture.runtimeDB))
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope(fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID),
+		Scope:          sessionfixture.BridgeAPIScope(fixture.sessionID, fixture.childID, fixture.bindingID, 1, fixture.podUID),
 		RuntimeWriteId: "rwrite_late_close_winner_start", ModelRequestId: "mreq_late_close_winner_start",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_late_close_winner_start"}`,
 		ContextThroughMessageSequence: &messageBoundary, RequestKind: "agent_provider_request",
@@ -1677,10 +1678,10 @@ func TestSubagentFirstMailCloseBeforeRequestStartCancelsExactCustody(t *testing.
 
 	laterSourceID := "evt_later_after_close_before_start"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, laterSourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, laterSourceID)
 	laterDeliveryID := runtimecontrol.AgentMailDeliveryID(laterSourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope: bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
+		Scope: sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID), DeliveryId: laterDeliveryID,
 		TargetThreadId: fixture.childID, SourceToolUseEventId: laterSourceID, Content: "execute only the later resumed input",
 	}); err != nil || delivered.GetCommitted() == nil {
 		t.Fatalf("deliver later input after CLOSE-won resume = %#v/%v", delivered, err)
@@ -1881,10 +1882,10 @@ func TestLaterSubagentMailNPlusOneFailsOnlyExactChild(t *testing.T) {
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	sourceID := "evt_ordinary_n_plus_one_mail"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, sourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope:      bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		Scope:      sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		DeliveryId: deliveryID, TargetThreadId: fixture.childID, SourceToolUseEventId: sourceID,
 		Content: "ordinary follow-up that must not acquire first_mail lineage",
 	}); err != nil || delivered.GetCommitted() == nil {
@@ -2068,10 +2069,10 @@ func prepareOrdinaryAgentMailNPlusOnePending(t *testing.T, suffix string) ordina
 	parentID := parentThreadIDForChild(t, fixture.admin, fixture.sessionID, fixture.childID)
 	sourceID := "evt_" + suffix + "_mail"
 	seedActorSourceEvent(t, fixture.admin, fixture.sessionID, parentID, sourceID, "agent.tool_use", `{"type":"agent.tool_use","name":"send_message","evaluated_permission":"allow"}`)
-	seedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, fixture.admin, "default", fixture.sessionID, parentID, sourceID)
 	deliveryID := runtimecontrol.AgentMailDeliveryID(sourceID, fixture.childID)
 	if delivered, err := client.DeliverInterAgentMail(context.Background(), &bridgev1.DeliverInterAgentMailRequest{
-		Scope:      bridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
+		Scope:      sessionfixture.BridgeAPIScope(fixture.sessionID, parentID, fixture.bindingID, 1, fixture.podUID),
 		DeliveryId: deliveryID, TargetThreadId: fixture.childID, SourceToolUseEventId: sourceID,
 		Content: "ordinary follow-up finalization ownership proof",
 	}); err != nil || delivered.GetCommitted() == nil {
@@ -2192,7 +2193,7 @@ func newSubagentMailFixture(t *testing.T, suffix string) subagentMailFixture {
 	parentID := "thr_parent_" + suffix
 	bindingID := "bind_mail_" + suffix
 	podUID := "pod_mail_" + suffix
-	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, parentID, "msg_parent_"+suffix, "evt_parent_"+suffix, 1)
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -2321,8 +2322,8 @@ func admitChildCloseThroughProduction(
 		sessionID, sourceID, "mreq_"+sourceID, `{"model_tool_call_id":"call_`+sourceID+`"}`); err != nil {
 		t.Fatalf("project close source: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_"+sourceID, sourceID, "call_"+sourceID, "close_agent")
-	seedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, parentID, "mreq_"+sourceID, sourceID, "call_"+sourceID, "close_agent")
+	sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
 	admitted, err := client.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
 		Scope: parentScope, SourceToolUseEventId: sourceID, TargetChildThreadId: childID,
 		Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
@@ -2351,7 +2352,7 @@ func settleChildCloseThroughProduction(
 		t.Fatalf("commit production child close = %#v/%v", closed, err)
 	}
 	if settled, err := client.SettleToolResult(context.Background(), &bridgev1.SettleToolResultRequest{
-		Scope: parentScope, Settlement: bridgeCompletedToolSettlementForTest(sourceID, "child closed"),
+		Scope: parentScope, Settlement: sessionfixture.BridgeCompletedToolSettlementForTest(sourceID, "child closed"),
 	}); err != nil || settled.GetCommitted() == nil {
 		t.Fatalf("settle production child close Tool result = %#v/%v", settled, err)
 	}

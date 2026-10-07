@@ -27,6 +27,7 @@ import (
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
@@ -95,11 +96,11 @@ func runContentToolLifecycle(t *testing.T, delayed bool, spec contentToolLifecyc
 	jobRunnerDB := workloads.OpenWorkload(t, "job_runner", nil)
 	apiDB := workloads.OpenWorkload(t, "api", nil)
 	sessionID, threadID, bindingID, podUID := id.New("sesn_"), id.New("thr_"), id.New("bind_"), id.New("pod_")
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
-	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}],"skills":[],"metadata":{}}`)
-	seedReadySandboxForSharedToolExecution(t, admin, "default", sessionID)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	sessionfixture.SeedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}],"skills":[],"metadata":{}}`)
+	sessionfixture.SeedReadySandboxForSharedToolExecution(t, admin, "default", sessionID)
 	if _, err := admin.Exec(`UPDATE session_runtime_bindings SET agent_runtime_pod_ip='127.0.0.1',agent_runtime_pod_name='content-runtime' WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
 		t.Fatal(err)
 	}

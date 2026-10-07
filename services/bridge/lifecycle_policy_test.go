@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -56,7 +57,7 @@ func TestBridgeLifecyclePolicyFailsClosed(t *testing.T) {
 	// or database work instead of running with a zero admission budget.
 	store := NewPostgreSQLBridgeAPIStore(nil)
 	store.LifecyclePolicy = BridgeLifecyclePolicy{DrainTimeout: 40 * time.Second}
-	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{Scope: bridgeAPIScope("sesn_policy", "thr_policy", "bind_policy", 1, "pod_policy"), ToolUseEventId: "tool_policy"})
+	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{Scope: sessionfixture.BridgeAPIScope("sesn_policy", "thr_policy", "bind_policy", 1, "pod_policy"), ToolUseEventId: "tool_policy"})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("partial policy admission=%v", err)
 	}
@@ -103,7 +104,7 @@ func TestPostgreSQLBridgeAdmissionPhaseDeadlineRollsBack(t *testing.T) {
 			store.LifecyclePolicy = DefaultBridgeLifecyclePolicy()
 			store.LifecyclePolicy.AdmissionTimeout = 40 * time.Millisecond
 			store.LifecyclePolicy.ReleaseTimeout = 40 * time.Millisecond
-			scope := bridgeAPIScope("sesn_handoff", "thr_handoff", "bind_handoff", 1, "pod_handoff")
+			scope := sessionfixture.BridgeAPIScope("sesn_handoff", "thr_handoff", "bind_handoff", 1, "pod_handoff")
 			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
 			before := receiptTenantSnapshot(t, admin)

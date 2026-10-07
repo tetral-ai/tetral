@@ -24,6 +24,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -97,11 +98,11 @@ func seedTransportMCP(t *testing.T, runtimeDB, admin *sql.DB) (*bridge.PostgreSQ
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_transport_mcp", "bind_transport_mcp", 1, "pod_transport")
 	store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
-	scope := bridgeAPIScope("sesn_transport_mcp", "thr_transport_mcp", "bind_transport_mcp", 1, "pod_transport")
+	scope := sessionfixture.BridgeAPIScope("sesn_transport_mcp", "thr_transport_mcp", "bind_transport_mcp", 1, "pod_transport")
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "turn_transport_mcp")
 	seedBridgeAPIRequestStart(t, store, scope, "start_transport_mcp", "request_transport_mcp", "agent_provider_request", 0)
 	serverName := "github"
-	declaration := bridgeToolDeclarationForTest("call_transport_mcp", "create_issue", `{"title":"original"}`, "allow", "mcp_execute")
+	declaration := sessionfixture.BridgeToolDeclarationForTest("call_transport_mcp", "create_issue", `{"title":"original"}`, "allow", "mcp_execute")
 	declaration.EventKind = bridgev1.RuntimeToolEventKind_RUNTIME_TOOL_EVENT_KIND_MCP
 	declaration.McpServerName = &serverName
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write_transport_mcp", ModelRequestId: "request_transport_mcp", ToolDeclaration: declaration})
@@ -485,7 +486,7 @@ func proveTransportMCPRuntimeContinuation(t *testing.T, runtimeDB, admin *sql.DB
 	store := bridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("replica-handoff-shared-token-signing-key")
 	startHandoffResultListener(t, store)
-	seedRuntimePodLostStatusFence(t, admin, scope.SessionId, scope.Binding.BindingId, scope.Binding.BindingGeneration)
+	sessionfixture.SeedRuntimePodLostStatusFence(t, admin, scope.SessionId, scope.Binding.BindingId, scope.Binding.BindingGeneration)
 	endpoint := serveReplicaBridge(t, store, map[string]string{"old": scope.Binding.TargetPodUid, "new": "pod_new"}, nil)
 	// The selected connector replacement leaves the original Runtime binding
 	// intact. A fresh local Core host loads that same current process and admits

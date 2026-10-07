@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -38,7 +39,7 @@ func TestPostgreSQLContentColdContext(t *testing.T) {
 				f.store.RuntimeBindingTokenHMACKey = []byte("content-cold-context-test-signing-key")
 				// The stale agent declaration deliberately disagrees. The installed
 				// snapshot owns the cold family, defaults and per-tool overrides.
-				seedBridgeAPIAgentConfig(t, f.admin, "default", f.scope.SessionId, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"gpt","default_config":{"permission_policy":{"type":"always_allow"}}}],"skills":[],"metadata":{}}`)
+				sessionfixture.SeedBridgeAPIAgentConfig(t, f.admin, "default", f.scope.SessionId, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"gpt","default_config":{"permission_policy":{"type":"always_allow"}}}],"skills":[],"metadata":{}}`)
 				installed, err := json.Marshal(map[string]any{"tools": vector.InstalledTools, "mcp_servers": []any{}})
 				if err != nil {
 					t.Fatal(err)
@@ -105,7 +106,7 @@ func runContentColdContextVariants(t *testing.T, compose bool) {
 			case "no-content-end":
 				f.end(t, nil)
 			case "success-end-pending-tool", "abnormal-end-retained-pending-tool", "decided-allow", "decided-deny":
-				tool, err := f.store.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: f.scope, RuntimeWriteId: "tool", ModelRequestId: "request", ToolDeclaration: bridgeToolDeclarationForTest("call-a", "Read", `{"path":"a"}`, "ask", "sandbox_execute")})
+				tool, err := f.store.WriteEvent(f.ctx, &bridgev1.WriteEventRequest{Scope: f.scope, RuntimeWriteId: "tool", ModelRequestId: "request", ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest("call-a", "Read", `{"path":"a"}`, "ask", "sandbox_execute")})
 				if err != nil {
 					t.Fatal(err)
 				}

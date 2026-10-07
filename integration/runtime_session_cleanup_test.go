@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -31,7 +32,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 		toolUseEventID  = "evt_cleanup_narrow_tool_use"
 		modelToolCallID = "call_cleanup_narrow_tool"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_events (
 		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -51,13 +52,13 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	); err != nil {
 		t.Fatalf("seed cleanup Tool turn: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(
+	sessionfixture.SeedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, threadID, modelRequestID,
 		toolUseEventID, modelToolCallID, "Read",
 	)
 	tracer := &bridgeExecutionQueryTracer{}
 	client := dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer))
-	scope := bridgeAPIScope(sessionID, threadID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_cleanup_narrow_tool", 1, "pod_cleanup_narrow_tool")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_cleanup_narrow_idle", 4, "session.status_idle", `{"type":"session.status_idle","stop_reason":{"type":"end_turn"}}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,status_event_id,binding_id,binding_generation,idle_since,cleanup_job_id,cleanup_enqueued_at,created_at,updated_at
@@ -157,13 +158,13 @@ func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
 		toolUseID = "evt_delete_consumed_attachment_tool"
 		resultID  = "evt_delete_consumed_attachment_result"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment")
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.AttachmentBlobStore = blob.NewFakeBlobStore()
 	store.Clock = func() time.Time { return time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC) }
 	attachment := createBridgeTransientAttachmentForTest(t, admin, store,
-		bridgeAPIScope(sessionID, threadID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment"),
+		sessionfixture.BridgeAPIScope(sessionID, threadID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment"),
 		"delete_consumed_attachment", toolUseID, []byte("consumed-attachment"))
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, resultID, 1, "agent.tool_result", `{"type":"agent.tool_result"}`)
 	if _, err := admin.Exec(`INSERT INTO session_runtime_tool_results (
@@ -184,7 +185,7 @@ func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
 	if result, err := store.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
 		t.Fatalf("reconcile consumed attachment = %+v, %v; want one deleted", result, err)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
 		t.Fatalf("consumed attachment status = %q; want deleted", got)
 	}
 	if _, err := admin.Exec(`UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2
@@ -221,7 +222,7 @@ func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_cleanup_preclaim", "bind_bridge_cleanup_preclaim", 7, "pod_uid_cleanup_preclaim")
 
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -229,7 +230,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope("sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim", "bind_bridge_cleanup_preclaim", 7, "pod_uid_cleanup_preclaim"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim", "bind_bridge_cleanup_preclaim", 7, "pod_uid_cleanup_preclaim"),
 		"evt_bridge_cleanup_preclaim_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {
@@ -250,7 +251,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 		"sesn_bridge_cleanup_preclaim",
 		"thr_bridge_cleanup_preclaim",
 		"sevt_cleanup_before_claim",
-		nextBridgeAPIEventSequenceForTest(t, admin, "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim"),
+		sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim"),
 	)
 
 	store := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
@@ -297,8 +298,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationAfterClaim(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main")
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "thr_bridge_cleanup_confirm_child")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "thr_bridge_cleanup_confirm_child")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_cleanup_confirm", "bind_bridge_cleanup_confirm", 7, "pod_uid_cleanup_confirm")
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_child", "sevt_cleanup_confirm_wait", 1)
 
@@ -307,7 +308,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope("sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "bind_bridge_cleanup_confirm", 7, "pod_uid_cleanup_confirm"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "bind_bridge_cleanup_confirm", 7, "pod_uid_cleanup_confirm"),
 		"evt_bridge_cleanup_confirm_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {
@@ -392,8 +393,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedInputByStreamFence(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main")
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "thr_bridge_cleanup_preidle_child")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "thr_bridge_cleanup_preidle_child")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_cleanup_preidle", "bind_bridge_cleanup_preidle", 7, "pod_uid_cleanup_preidle")
 	seedBridgeAPIUserMessageEvent(t, admin, "default", "sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_child", "sevt_cleanup_preidle_superseded", 99)
 
@@ -402,7 +403,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope("sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "bind_bridge_cleanup_preidle", 7, "pod_uid_cleanup_preidle"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "bind_bridge_cleanup_preidle", 7, "pod_uid_cleanup_preidle"),
 		"evt_bridge_cleanup_preidle_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {
@@ -439,8 +440,8 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputByStreamFence(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main")
-	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "thr_bridge_cleanup_child_postidle_child")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main")
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "thr_bridge_cleanup_child_postidle_child")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_cleanup_child_postidle", "bind_bridge_cleanup_child_postidle", 7, "pod_uid_cleanup_child_postidle")
 
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -448,7 +449,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope("sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "bind_bridge_cleanup_child_postidle", 7, "pod_uid_cleanup_child_postidle"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "bind_bridge_cleanup_child_postidle", 7, "pod_uid_cleanup_child_postidle"),
 		"evt_bridge_cleanup_child_postidle_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {
@@ -639,7 +640,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 			cleanupID = "cleanup_bridge_tree_reviewer_1"
 		)
 		seedBridgeCleanupTreeFixture(t, runtime, admin, sessionID, mainID, "", cleanupID, false)
-		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewer)
+		sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewer)
 		if _, err := admin.ExecContext(context.Background(),
 			`UPDATE session_threads SET status = 'running' WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
 			sessionID, reviewer); err != nil {
@@ -660,7 +661,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionTreeFenceClassifiesQuiescen
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProvenGone(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone")
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", "sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone")
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "sevt_cleanup_gone_wait", 1)
 
@@ -669,7 +670,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	attachment := createBridgeTransientAttachmentForTest(
 		t, admin, bridgeStore,
-		bridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
 		"attachment_cleanup_gone", "sevt_cleanup_gone_wait", []byte("cleanup-wait-attachment"),
 	)
 	resultJSON := `{"status":"success","attachment_ref":"` + attachment.GetAttachmentRef() + `"}`
@@ -693,7 +694,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
+		sessionfixture.BridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
 		"evt_bridge_cleanup_gone_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {
@@ -795,7 +796,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 0 {
 		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want retained recoverable attachment", result, err)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
+	if got := sessionfixture.BridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
 		t.Fatalf("cleanup-wait attachment status = %q; want staged", got)
 	}
 }
@@ -810,12 +811,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		modelRequestID = "mreq_cleanup_cold_approval"
 		durableTurnID  = "evt_cleanup_cold_approval_running"
 	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 7, podUID)
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("cleanup-cold-approval-key-32bytes")
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 7, podUID)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 7, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
 	seedBridgeAPIRequestStart(
 		t, bridgeStore, scope, "rwrite_cleanup_cold_approval_start", modelRequestID, "agent_provider_request", 0,
@@ -830,7 +831,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
-		ToolDeclaration: bridgeToolDeclarationForTest(
+		ToolDeclaration: sessionfixture.BridgeToolDeclarationForTest(
 			"tool-call-cleanup-cold-approval", "Write", string(approvalInputJSON), "ask", "sandbox_execute",
 		),
 	})
@@ -895,7 +896,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		recoveryPodUID    = "pod_cleanup_cold_approval_recovery"
 	)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, recoveryBindingID, 8, recoveryPodUID)
-	recoveryScope := bridgeAPIScope(sessionID, threadID, recoveryBindingID, 8, recoveryPodUID)
+	recoveryScope := sessionfixture.BridgeAPIScope(sessionID, threadID, recoveryBindingID, 8, recoveryPodUID)
 	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope: recoveryScope,
 	})
@@ -939,11 +940,11 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		t.Fatal("LoadContext omitted cleanup approval tool part")
 	}
 
-	setBridgeAPIPendingApprovalStatus(
+	sessionfixture.SetBridgeAPIPendingApprovalStatus(
 		t, admin, "default", sessionID, threadID, toolUseEventID, "resolving",
 	)
 	confirmationEventID := "evt_cleanup_cold_approval_deny"
-	confirmationSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	confirmationSequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
 	seedBridgeAPIEvent(
 		t, admin, "default", sessionID, threadID, confirmationEventID, confirmationSequence,
 		"user.tool_confirmation",
@@ -965,14 +966,14 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}
-	terminal, err := bridgeStore.SettleToolResult(context.Background(), bridgeToolSettlementRequestForTest(
+	terminal, err := bridgeStore.SettleToolResult(context.Background(), sessionfixture.BridgeToolSettlementRequestForTest(
 		recoveryScope,
-		bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: not safe"),
+		sessionfixture.BridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: not safe"),
 	))
 	if err != nil {
 		t.Fatalf("settle cleanup approval denial result: %v", err)
 	}
-	bridgeRequireToolSettlementOutcomeForTest(t, terminal, "committed")
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, terminal, "committed")
 	var pendingStatus string
 	var resultEventID sql.NullString
 	if err := admin.QueryRowContext(context.Background(),
@@ -990,12 +991,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 
 func seedBridgeCleanupTreeFixture(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, mainThreadID string, childThreadID string, cleanupID string, reviewer bool) {
 	t.Helper()
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
 	if childThreadID != "" {
 		if reviewer {
-			seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+			sessionfixture.SeedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
 		} else {
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
 		}
 	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_"+sessionID, 7, "pod_uid_"+sessionID)
@@ -1004,7 +1005,7 @@ func seedBridgeCleanupTreeFixture(t *testing.T, runtime *sql.DB, admin *sql.DB, 
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
-		bridgeAPIScope(sessionID, mainThreadID, "bind_"+sessionID, 7, "pod_uid_"+sessionID),
+		sessionfixture.BridgeAPIScope(sessionID, mainThreadID, "bind_"+sessionID, 7, "pod_uid_"+sessionID),
 		"evt_"+sessionID+"_running",
 		`{"type":"end_turn"}`,
 	)); err != nil {

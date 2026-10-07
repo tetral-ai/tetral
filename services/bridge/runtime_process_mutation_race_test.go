@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
@@ -60,14 +61,14 @@ func TestPostgreSQLRuntimeProcessServingMutationRaces(t *testing.T) {
 				seed := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 				scope, tool := seedAwaitExecutionNotificationFixture(t, seed, admin, "serving_fence")
 				modelRequest := "mreq_exec_notify_serving_fence"
-				request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, PreallocatedEventId: bridgeString("evt_00000000000000000000000000000002"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"original"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("original")}
+				request := &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, PreallocatedEventId: bridgeString("evt_00000000000000000000000000000002"), EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"original"}]}`, AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("original")}
 				if operation == "tool declaration" {
-					request = &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, ToolDeclaration: bridgeToolDeclarationWithRouteForTest("call-race", "Read", `{"file_path":"/workspace/once"}`, "allow")}
+					request = &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "write-race", ModelRequestId: modelRequest, ToolDeclaration: sessionfixture.BridgeToolDeclarationWithRouteForTest("call-race", "Read", `{"file_path":"/workspace/once"}`, "allow")}
 				}
 				if operation == "input commit" {
-					seq := nextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId)
+					seq := sessionfixture.NextBridgeAPIEventSequenceForTest(t, admin, scope.SessionId, scope.SessionThreadId)
 					seedBridgeAPIEvent(t, admin, "default", scope.SessionId, scope.SessionThreadId, "event-race-input", seq, "user.message", `{"content":[{"type":"text","text":"input"}]}`)
-					seedBridgeAPIRuntimeInbox(t, admin, "default", scope.SessionId, scope.SessionThreadId, "input-race", "messages", `["event-race-input"]`, "accepted", scope.Binding.BindingId, scope.Binding.TargetPodUid, seq, seq)
+					sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", scope.SessionId, scope.SessionThreadId, "input-race", "messages", `["event-race-input"]`, "accepted", scope.Binding.BindingId, scope.Binding.TargetPodUid, seq, seq)
 				}
 				if operation == "tool settlement" {
 					commitAwaitExecutionSettlement(t, admin, scope, tool, `{"status":"success","result":{"stdout":"original"}}`, false)
@@ -98,7 +99,7 @@ func TestPostgreSQLRuntimeProcessServingMutationRaces(t *testing.T) {
 						response, err := writer.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: "end-race", ModelRequestId: modelRequest, FinishReason: "tool-calls", UsageJson: `{}`, ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed", AssistantMessageSequence: &sequence, ToolUseEventIds: []string{tool}}})
 						return mutationOutcome{response.GetStale() != nil, err}
 					case "tool settlement":
-						response, err := writer.SettleToolResult(ctx, bridgeToolSettlementRequestForTest(scope, bridgeCompletedToolSettlementForTest(tool, "original")))
+						response, err := writer.SettleToolResult(ctx, sessionfixture.BridgeToolSettlementRequestForTest(scope, sessionfixture.BridgeCompletedToolSettlementForTest(tool, "original")))
 						return mutationOutcome{response.GetStale() != nil, err}
 					default:
 						response, err := writer.WriteEvent(ctx, request)
@@ -341,7 +342,7 @@ func TestPostgreSQLRuntimeUnseenRegistrationCrossesPromotion(t *testing.T) {
 				t.Fatal("unconfirmed delayed boot became current")
 			}
 			bindingBefore := receiptTenantSnapshot(t, admin)["session_runtime_bindings"]
-			if response, err := winner.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "surviving-original-binding", PreallocatedEventId: bridgeString("evt_00000000000000000000000000000003"), EventType: "agent.message", ModelRequestId: "mreq_exec_notify_unseen_register", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"survivor"}]}`, AssistantContextDelta: bridgeTextContextDeltaForTest("survivor")}); err != nil || response.GetCommitted() == nil {
+			if response, err := winner.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "surviving-original-binding", PreallocatedEventId: bridgeString("evt_00000000000000000000000000000003"), EventType: "agent.message", ModelRequestId: "mreq_exec_notify_unseen_register", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"survivor"}]}`, AssistantContextDelta: sessionfixture.BridgeTextContextDeltaForTest("survivor")}); err != nil || response.GetCommitted() == nil {
 				t.Fatalf("P2 original binding did not keep writing:%v/%v", response, err)
 			}
 			afterWrite := receiptTenantSnapshot(t, admin)
