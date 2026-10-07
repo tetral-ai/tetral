@@ -287,12 +287,7 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			}
 			for _, operation := range operations {
 				t.Run(operation.name, func(t *testing.T) {
-					err := operation.call(context.Background(), db)
-					kind := test.kind
-					if operation.name == "migrate" && kind == storage.SchemaErrorBehind {
-						kind = storage.SchemaErrorMalformed
-					}
-					assertSchemaErrorKind(t, err, kind)
+					assertSchemaErrorKind(t, operation.call(context.Background(), db), test.kind)
 					if after := baseTableNames(t, db); strings.Join(after, "\x00") != strings.Join(before, "\x00") {
 						t.Fatalf("tables mutated before=%v after=%v", before, after)
 					}
@@ -300,13 +295,6 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			}
 		})
 	}
-}
-
-func TestMigrateSchemaRejectsEmptyPredecessorRegistry(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	createMigrationRegistry(t, db)
-	assertSchemaErrorKind(t, storage.MigrateSchema(context.Background(), db), storage.SchemaErrorMalformed)
-	assertTableExists(t, db, "sessions", false)
 }
 
 func TestMigrateSchemaLateFailureRollsBackSchemaAndStampAndReleasesLock(t *testing.T) {

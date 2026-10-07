@@ -18,14 +18,19 @@
 //
 // STATE MACHINE (schema readiness, owned here):
 //
-//	state            meaning                              writer          legal next
-//	absent           no migration registry                -               -> current (MigrateSchema)
-//	current          registry present, versions applied   MigrateSchema   -> ahead (append a new migration)
-//	behind           registry older than this binary      -               -> current (MigrateSchema)
-//	ahead            registry newer than this binary      -               (rejected: SchemaErrorAhead)
-//	checksum drift   an applied checksum != its pinned     -               (rejected: SchemaErrorChecksumDrift)
+//	state                      meaning                                       outcome
+//	absent                     no history table and no namespace objects     -> current (MigrateSchema); VerifySchema: SchemaErrorMissing
+//	current                    history equals the version-one baseline       MigrateSchema verifies only; VerifySchema accepts
+//	occupied, no history       namespace objects without a history table     MigrateSchema: SchemaErrorUnexpectedState;
+//	                                                                         VerifySchema: SchemaErrorMissing
+//	behind                     history is a proper prefix of the registry    rejected by both: SchemaErrorBehind
+//	ahead / gap / duplicate    history newer, non-contiguous or repeated     rejected by both
+//	checksum drift             an applied checksum != its pinned identity    rejected by both: SchemaErrorChecksumDrift
+//	RLS drift                  isolation policies differ from the contract   rejected by both: SchemaErrorRLSDrift
 //
-// Production migration is invoked only by cmd/tetral-db-prepare; serving
+// There is no upgrade path: MigrateSchema initializes an empty namespace or
+// verifies the exact current identity, and rejects every other state.
+// Production initialization is invoked only by cmd/tetral-db-prepare; serving
 // processes call VerifySchema without schema repair.
 //
 // Only one connection migrates at a time: every migrator holds
@@ -35,21 +40,23 @@
 //   - Durable rows are the source of truth. Runtime Pod hot state is
 //     residency and execution state only; it is recoverable from the durable
 //     state Bridge loads, so losing pod hot state loses no committed fact.
-//   - MigrateSchema is the only public schema writer. Applied history makes
-//     reruns idempotent; individual ALTER statements need not be idempotent.
-//   - The deployed Alpha 1 version-one baseline is immutable. Later changes
-//     append migrations, each committed atomically with its history entry.
-//   - Version two adds per-repository Git identity. Existing NULL identities
-//     preserve the default; fresh and upgraded databases have the same schema.
-//   - The DDL uses only ordinary table/index DDL plus row-level security, so
-//     it stays portable across self-managed PostgreSQL and managed providers.
-//     The complete database preparation command additionally requires a
-//     PostgreSQL superuser for its current role installer; managed-provider
-//     customer administrators without that privilege cannot run it.
+//   - MigrateSchema is the only public schema writer. Initialization commits
+//     the whole baseline atomically with its history entry; a rerun on the
+//     exact identity applies no DDL.
+//   - The single version-one baseline is the fresh-install identity.
+//     MigrateSchema never upgrades a predecessor schema.
+//   - The DDL is ordinary table/index DDL with row-level security, plus the
+//     sessions agent-version trigger and the lock-only runtime process
+//     function (SECURITY DEFINER with a fixed search_path, owned by the
+//     migration role). It stays portable across self-managed PostgreSQL and
+//     managed providers. The complete database preparation command
+//     additionally requires a PostgreSQL superuser for its current role
+//     installer; managed-provider customer administrators without that
+//     privilege cannot run it.
 //
 // UPDATE-WITH:
-//   - postgresql_schema.go (immutable V1 table/index/policy DDL)
-//   - postgresql_migration_git_identity.go (V2 upgrade DDL)
+//   - postgresql_schema.go (version-one table/index/policy/trigger DDL)
+//   - postgresql_runtime_schema.go (runtime process and handoff tables, lock-only function)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
@@ -58,7 +65,9 @@
 //
 // The DDL in this package defines the columns and constraints of each table
 // but not which service may write it or read it. Owner (writer boundary) and
-// reader boundary for the session and runtime durable row families:
+// reader boundary for the session and runtime durable row families follow the
+// actual code paths; database/roles.json grants are the enforced upper bound
+// (a grant may exist only for row locks or Session-delete cascades):
 //
 //	row family                                             owner / writer boundary                                          readers
 //	sessions                                               api Session admission (row + pinned config);              Bridge LoadContext, Gateway provider lookup,
@@ -71,10 +80,19 @@
 //	                                                        (api admission, Bridge event/projection writes)
 //	session_event_idempotency_keys                         api event admission                                       api replay/conflict lookup
 //	session_messages                                       Runtime declarations persisted by Bridge                       Bridge LoadContext, Runtime cold repair
-//	session_pending_tool_uses                              Bridge only                                                      Bridge LoadContext cold-resume,
-//	                                                                                                                         Runtime pending ToolJob
-//	session_runtime_status                                 Bridge, the cleanup scheduler, and session-create seeding        cleanup scheduler, Bridge Job Runner, repair
-//	session_runtime_bindings                               Bridge only                                                      Bridge command delivery/reconcile, repair
+//	session_pending_tool_uses                              Bridge (declaration insert, settlement, interrupt); Job Runner   Bridge LoadContext cold-resume,
+//	                                                        settlement through internal/runtimecontrol; api approval         Runtime pending ToolJob, api approval
+//	                                                        decision (pending -> resolving)                                  lookup
+//	session_runtime_status                                 Bridge, Job Runner (delivery, pod-loss repair, Session           cleanup scheduler, Job Runner, repair
+//	                                                        cleanup), the cleanup scheduler, and session-create seeding
+//	session_runtime_bindings                               Job Runner (placement, delivery, pod-loss repair, Session        Job Runner delivery/reconcile/repair,
+//	                                                        cleanup); Bridge and Job Runner termination closeout and         Bridge receipt fences, Sandbox Service
+//	                                                        Bridge handoff release through internal/runtimecontrol           notification custody and prefix GC
+//	runtime_process_pods / runtime_processes               Bridge process registration, report and promotion                Bridge receipt fences; Job Runner
+//	                                                                                                                         placement and delivery fences (reads
+//	                                                                                                                         and the lock-only function)
+//	session_runtime_handoffs / _threads                    Bridge handoff release                                           Bridge replay; Bridge and Job Runner
+//	                                                                                                                         recovery source checks
 //	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge lifecycle and exact pod-loss custody
 //	session_sandbox_bindings                               Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service tool/lifecycle workers
 //	                                                        Session-delete release boundary
@@ -85,7 +103,8 @@
 //	session_resources / session_github_repository_resources api Session admission (+ token rotation)                 Sandbox Service clone, git-proxy
 //	                                                                                                                         allowlist, public Resources API
 //	session_git_tickets                                    Sandbox Service GitHub materialization (mint/rotate)             git-proxy per-request validation
-//	session_mcp_manifests                                  Bridge only                                                      Bridge LoadContext, manifest patch delivery
+//	session_mcp_manifests                                  Bridge (connector refresh acceptance); Job Runner (initial       Bridge LoadContext, Job Runner manifest
+//	                                                        discovery capture, delivery exhaustion)                          patch delivery
 //	session_background_tasks                               Sandbox Service (execution/result); Bridge (conversation commit) Runtime task read/send/cancel, cleanup
 //	request_usage_details                                  Bridge (WriteRequestEnd); Job Runner (synthetic terminal End)     session usage projection, audit/billing
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
@@ -93,13 +112,16 @@
 //	                                                                                                                         Bridge LoadContext
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution
 //	                                                       not insert-only); Vault hard-deletes on credential delete
-//	queue_jobs                                             owning services admit atomically; Queue Service transitions      Sandbox Service, Bridge Job Runner,
+//	queue_jobs                                             owning services admit atomically; Queue Service transitions      Sandbox Service, Job Runner,
 //	                                                                                                                         cleanup scheduler
 //	queue_partition_counters                               Queue admission and bounded Queue maintenance                    Queue admission and maintenance
 //	platform_provider_keys                                 operator ops CLI (platform credential domain)                    Gateway platform key pool (read-only, cached)
 //
-// UPDATE-WITH: the table DDL in postgresql_schema.go; the writer/reader
-// services under services/bridge, services/api,
-// services/sandbox, services/queue, services/event-stream,
-// services/git-proxy, services/gateway, and internal/session.
+// UPDATE-WITH: the table DDL in postgresql_schema.go and
+// postgresql_runtime_schema.go; the writer/reader services under
+// services/bridge, services/job-runner, services/api, services/sandbox,
+// services/queue, services/cleanup, services/event-stream, services/git-proxy
+// and services/gateway; the shared writers in internal/runtimecontrol,
+// internal/sessionevent, internal/mcpmanifest and internal/session; and the
+// enforced grants in database/roles.json.
 package storage

@@ -105,9 +105,11 @@ func postgresqlMigrationRegistry() []postgresqlMigration {
 	return []postgresqlMigration{{version: 1, checksum: schemaidentity.PostgreSQLSchemaVersionOneChecksum, steps: postgresqlBaselineSteps()}}
 }
 
-// MigrateSchema initializes only an empty schema or verifies the exact current
-// identity. It never upgrades a predecessor schema. The pinned connection and
-// advisory lock serialize owners before inspection and atomic initialization.
+// MigrateSchema initializes an empty namespace or verifies the exact current
+// identity and its RLS contract. Every other state is rejected, including a
+// history that is a valid prefix of the registry: it never upgrades a
+// predecessor schema. The pinned connection and advisory lock serialize owners
+// before inspection and atomic initialization.
 func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 	diagnostics := newMigrationDiagnostics(ctx)
 	defer func() {
@@ -147,11 +149,8 @@ func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 	}
 	if exists {
 		diagnostics.step = "validate_history"
-		if historyErr := validateAppliedPostgreSQLMigrations(history, registry); historyErr != nil {
+		if historyErr := classifyPostgreSQLHistory(history, registry); historyErr != nil {
 			return historyErr
-		}
-		if len(history) != len(registry) {
-			return newSchemaMigrationError(SchemaErrorMalformed, 0, nil)
 		}
 		if err := verifyPostgreSQLRLSContract(ctx, conn); err != nil {
 			return err
@@ -173,16 +172,13 @@ func MigrateSchema(ctx context.Context, db *sql.DB) (result error) {
 		if occupied {
 			return newSchemaMigrationError(SchemaErrorUnexpectedState, 0, nil)
 		}
-	}
-
-	for index := len(history); index < len(registry); index++ {
-		migration := registry[index]
-		diagnostics.start(ctx, migration.version)
-		if err := applyPostgreSQLMigration(ctx, conn, migration, !exists, diagnostics); err != nil {
-			return err
+		for index, migration := range registry {
+			diagnostics.start(ctx, migration.version)
+			if err := applyPostgreSQLMigration(ctx, conn, migration, index == 0, diagnostics); err != nil {
+				return err
+			}
+			diagnostics.completed(ctx)
 		}
-		exists = true
-		diagnostics.completed(ctx)
 	}
 
 	diagnostics.step = "release_lock"
@@ -264,11 +260,8 @@ func VerifySchema(ctx context.Context, db *sql.DB) error {
 	if !exists {
 		return newSchemaMigrationError(SchemaErrorMissing, 0, nil)
 	}
-	if err := validateAppliedPostgreSQLMigrations(history, registry); err != nil {
+	if err := classifyPostgreSQLHistory(history, registry); err != nil {
 		return err
-	}
-	if len(history) < len(registry) {
-		return newSchemaMigrationError(SchemaErrorBehind, registry[len(history)].version, nil)
 	}
 	if err := verifyPostgreSQLRLSContract(ctx, tx); err != nil {
 		return err
@@ -325,6 +318,19 @@ func readPostgreSQLMigrationHistory(ctx context.Context, queryer postgresqlMigra
 		return true, nil, newSchemaMigrationError(SchemaErrorMalformed, 0, err)
 	}
 	return true, history, nil
+}
+
+// classifyPostgreSQLHistory is shared by MigrateSchema and VerifySchema: only
+// the exact registry identity is current. A valid proper prefix is behind, which
+// both operations reject because neither upgrades an existing schema.
+func classifyPostgreSQLHistory(history []appliedPostgreSQLMigration, registry []postgresqlMigration) *SchemaMigrationError {
+	if err := validateAppliedPostgreSQLMigrations(history, registry); err != nil {
+		return err
+	}
+	if len(history) < len(registry) {
+		return newSchemaMigrationError(SchemaErrorBehind, registry[len(history)].version, nil)
+	}
+	return nil
 }
 
 func validateAppliedPostgreSQLMigrations(history []appliedPostgreSQLMigration, registry []postgresqlMigration) *SchemaMigrationError {

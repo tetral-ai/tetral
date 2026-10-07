@@ -7,9 +7,10 @@ contracts.
   Go and TypeScript readiness checks. Workspace is the sole database tenant
   dimension; Session and Thread isolation remains explicit relational and
   lifecycle ownership inside a Workspace.
-- `roles.json` declares the exact table and sequence privileges for each
-  serving workload. Operator-selected role names and credentials are inputs to
-  the installer and never belong in this repository.
+- `roles.json` declares the exact table and sequence privileges, and the
+  allowlisted SECURITY DEFINER function grants, for each serving workload.
+  Operator-selected role names and credentials are inputs to the installer and
+  never belong in this repository.
 - `ApplyRoleContract` owns role attributes, public-privilege revocation, schema
   ownership, and explicit serving grants. It repairs only this declared role
   boundary; application startup verifies schema and role posture but does not
@@ -41,8 +42,8 @@ unknown until an independent connection observes the identity.
 Runtime process custody has two non-tenant tables: `runtime_process_pods` owns
 registration allocation and the last promoted order, and `runtime_processes`
 retains candidate/current/retired boot identities and database timestamps. Bridge
-alone can register, report and promote. The separate `job_runner` role reads
-these facts and can execute the fixed lock-only
+alone can register, report and promote. Bridge and the separate `job_runner`
+role, which only reads these facts, can execute the fixed lock-only
 `public.tetral_lock_runtime_process(text,text,text)` function. Its migration-owned
 security-definer body uses a fixed search path and qualified table; it holds
 `FOR SHARE` through the calling transaction without granting process mutation.

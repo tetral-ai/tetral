@@ -12,8 +12,10 @@ type Identity struct {
 	Checksum string
 }
 
-// History returns a detached, ordered copy of the immutable schema identities.
-// Storage binds each identity to its DDL and verifies the checksum before use.
+// History returns a detached, ordered copy of the registered schema identities,
+// currently the single fresh-install baseline. Storage pins its registry to
+// PostgreSQLSchemaVersionOneChecksum and verifies its DDL checksum; release
+// metadata and the Gateway schema mirror check consume this list.
 func History() []Identity {
 	return []Identity{{Version: 1, Checksum: PostgreSQLSchemaVersionOneChecksum}}
 }
