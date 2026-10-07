@@ -39,21 +39,31 @@ type previewEntry struct {
 }
 
 type PreviewHub struct {
-	transport       PreviewTransport
-	config          StreamConfig
-	metrics         *PreviewMetrics
+	transport PreviewTransport
+	config    StreamConfig
+	metrics   *PreviewMetrics
+	// subscriptionsMu serializes viewer joins and departures with transport
+	// subscription setup and teardown (Join, PreviewViewer.Close and Close).
+	// An entry's subscription is assigned before any path can close it, and a
+	// join cannot reuse a subscription that is still closing. Lock order is
+	// subscriptionsMu, then mu. The lock is hub-wide, so a slow Subscribe delays
+	// other joins and departures for up to its context bound, and a transport
+	// Close delays them until it returns.
 	subscriptionsMu sync.Mutex
-	mu              sync.Mutex
-	entries         map[string]*previewEntry
-	queue           []previewEnvelope
-	pendingBytes    int
-	pendingFrames   int
-	viewerBytes     int
-	viewerFrames    int
-	wake            chan struct{}
-	done            chan struct{}
-	cancel          context.CancelFunc
-	closed          bool
+	// mu guards entries, queues and byte/frame accounting. It is never held
+	// across a transport call, and transport callbacks (offer, invalidate) take
+	// only mu, so a callback delivered during Subscribe or Close cannot deadlock.
+	mu            sync.Mutex
+	entries       map[string]*previewEntry
+	queue         []previewEnvelope
+	pendingBytes  int
+	pendingFrames int
+	viewerBytes   int
+	viewerFrames  int
+	wake          chan struct{}
+	done          chan struct{}
+	cancel        context.CancelFunc
+	closed        bool
 }
 
 type PreviewViewer struct {
@@ -86,6 +96,10 @@ func NewPreviewHub(transport PreviewTransport, config StreamConfig, metrics *Pre
 	return h, nil
 }
 
+// Join registers a viewer for the authorized workspace/Session subject. The
+// first local viewer installs the transport subscription while holding
+// subscriptionsMu but not mu; ctx bounds that setup. On setup failure the
+// viewer is still returned, with its previews already invalidated.
 func (h *PreviewHub) Join(ctx context.Context, ws workspace.ID, sessionID string) (*PreviewViewer, error) {
 	subject := eventwire.PreviewSubject(string(ws), sessionID)
 	h.subscriptionsMu.Lock()

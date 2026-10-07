@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,11 +13,18 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
+// fixtureTransport records subscription setup and teardown. A Subscribe for a
+// subject whose previous subscription is still closing counts as a violation of
+// the hub's setup/teardown serialization.
 type fixtureTransport struct {
 	mu                         sync.Mutex
 	subscriptions              []*fixtureSubscription
 	setupErr                   error
 	closeEntered, closeRelease chan struct{}
+	subscribed                 chan string
+	closing                    map[string]int
+	violations                 int
+	log                        []string
 }
 type fixtureSubscription struct {
 	owner   *fixtureTransport
@@ -29,6 +37,16 @@ type fixtureSubscription struct {
 func (f *fixtureTransport) Subscribe(_ context.Context, subject string, frame func(string, []byte), loss func(string)) (PreviewSubscription, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closing[subject] > 0 {
+		f.violations++
+	}
+	f.log = append(f.log, "subscribe")
+	if f.subscribed != nil {
+		select {
+		case f.subscribed <- subject:
+		default:
+		}
+	}
 	s := &fixtureSubscription{owner: f, subject: subject, frame: frame, loss: loss}
 	f.subscriptions = append(f.subscriptions, s)
 	return s, f.setupErr
@@ -37,6 +55,11 @@ func (s *fixtureSubscription) Close() error {
 	f := s.owner
 	f.mu.Lock()
 	s.closed = true
+	if f.closing == nil {
+		f.closing = map[string]int{}
+	}
+	f.closing[s.subject]++
+	f.log = append(f.log, "close_begin")
 	entered, release := f.closeEntered, f.closeRelease
 	f.mu.Unlock()
 	if entered != nil {
@@ -46,6 +69,10 @@ func (s *fixtureSubscription) Close() error {
 		}
 		<-release
 	}
+	f.mu.Lock()
+	f.closing[s.subject]--
+	f.log = append(f.log, "close_end")
+	f.mu.Unlock()
 	return nil
 }
 func (f *fixtureTransport) publish(t *testing.T, frame eventwire.PreviewFrame) {
@@ -145,7 +172,8 @@ func TestPreviewHubFanoutAndLastUnsubscribeJoinRace(t *testing.T) {
 	transport.mu.Lock()
 	transport.closeEntered = make(chan struct{}, 1)
 	transport.closeRelease = make(chan struct{})
-	entered, release := transport.closeEntered, transport.closeRelease
+	transport.subscribed = make(chan string, 1)
+	entered, release, subscribed := transport.closeEntered, transport.closeRelease, transport.subscribed
 	transport.mu.Unlock()
 	closed := make(chan struct{})
 	go func() { second.Close(); close(closed) }()
@@ -154,12 +182,22 @@ func TestPreviewHubFanoutAndLastUnsubscribeJoinRace(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("teardown barrier not reached")
 	}
+	joinStarted := make(chan struct{})
 	joined := make(chan *PreviewViewer, 1)
-	go func() { viewer, _ := hub.Join(t.Context(), workspace.DefaultID, "sesn_preview"); joined <- viewer }()
+	go func() {
+		close(joinStarted)
+		viewer, _ := hub.Join(t.Context(), workspace.DefaultID, "sesn_preview")
+		joined <- viewer
+	}()
+	<-joinStarted
+	// Absence observation after positive barriers: the last subscription's
+	// Close is held and the racing Join has started. Give that Join a bounded
+	// opportunity to reach Subscribe; arriving while Close is held means it did
+	// not wait for teardown. The violation count below is the oracle.
 	select {
-	case <-joined:
-		t.Fatal("join reused a closing subscription")
-	default:
+	case <-subscribed:
+		t.Fatal("join subscribed while the previous subscription was closing")
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(release)
 	<-closed
@@ -176,10 +214,14 @@ func TestPreviewHubFanoutAndLastUnsubscribeJoinRace(t *testing.T) {
 	transport.mu.Lock()
 	transport.closeEntered = nil
 	transport.closeRelease = nil
-	count := len(transport.subscriptions)
+	transport.subscribed = nil
+	count, violations, log := len(transport.subscriptions), transport.violations, append([]string(nil), transport.log...)
 	transport.mu.Unlock()
 	if count != 2 {
 		t.Fatalf("subscriptions installed=%d", count)
+	}
+	if violations != 0 || strings.Join(log, ",") != "subscribe,close_begin,close_end,subscribe" {
+		t.Fatalf("subscribe overlapped teardown: violations=%d order=%v", violations, log)
 	}
 	transport.publish(t, fixtureFrame("request_open", "", 0, ""))
 	takeFrame(t, third)
