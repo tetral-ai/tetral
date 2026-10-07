@@ -44,7 +44,6 @@ type options struct {
 	streamConfig          StreamConfig
 	previewHub            *PreviewHub
 	previewMetrics        *PreviewMetrics
-	deliveryObserver      func(deliveryObservation)
 	streamShutdownContext context.Context
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ type projectionReader struct {
 	mu               sync.Mutex
 	pages            int
 	descriptorBodies int
+	batches          [][]StreamChange
 }
 
 func (r *projectionReader) ListRequestFinalMessages(ctx context.Context, scope ReadScope, end string, after int64, limit int) ([]RequestFinalMessage, error) {
@@ -34,7 +36,11 @@ func (r *projectionReader) ListRequestFinalMessages(ctx context.Context, scope R
 	return r.Reader.ListRequestFinalMessages(ctx, scope, end, after, limit)
 }
 func (r *projectionReader) pageCount() int { r.mu.Lock(); defer r.mu.Unlock(); return r.pages }
-func (r *projectionReader) checkChanges(changes []StreamChange) {
+
+// retainChanges keeps each returned batch, sharing the writer's backing array,
+// so the test can observe from outside whether the writer dropped its payload
+// references. It also sums any body selected for a deferred text descriptor.
+func (r *projectionReader) retainChanges(changes []StreamChange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, change := range changes {
@@ -42,15 +48,52 @@ func (r *projectionReader) checkChanges(changes []StreamChange) {
 			r.descriptorBodies += len(change.Event.Payload)
 		}
 	}
+	r.batches = append(r.batches, changes)
 }
 
+// retainedRows counts every retained change row and the rows that still hold
+// any field. Call it only after a happens-before barrier with the writer.
+func (r *projectionReader) retainedRows() (rows, live int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, batch := range r.batches {
+		for _, change := range batch {
+			rows++
+			if !reflect.ValueOf(change).IsZero() {
+				live++
+			}
+		}
+	}
+	return rows, live
+}
+
+// fixtureResponse is the writer's owned test sink. When hold is set, the first
+// body Write that carries the marker is held until release or cancellation;
+// event headers and heartbeats use WriteString and pass through.
 type fixtureResponse struct {
 	*httptest.ResponseRecorder
-	opened chan struct{}
-	once   sync.Once
+	opened  chan struct{}
+	once    sync.Once
+	ctx     context.Context
+	marker  []byte
+	held    chan int
+	release chan struct{}
+	holding bool
 }
 
 func (w *fixtureResponse) Flush() { w.once.Do(func() { close(w.opened) }) }
+func (w *fixtureResponse) Write(p []byte) (int, error) {
+	if w.held != nil && !w.holding && bytes.Contains(p, w.marker) {
+		w.holding = true
+		w.held <- len(p)
+		select {
+		case <-w.release:
+		case <-w.ctx.Done():
+			return 0, w.ctx.Err()
+		}
+	}
+	return w.ResponseRecorder.Write(p)
+}
 func seedProjectionSession(t *testing.T, db *sql.DB) {
 	t.Helper()
 	queries := []string{
@@ -111,27 +154,10 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				request := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
-				response := &fixtureResponse{ResponseRecorder: httptest.NewRecorder(), opened: make(chan struct{})}
+				firstBody := strings.Repeat("A", 256*1024)
+				response := &fixtureResponse{ResponseRecorder: httptest.NewRecorder(), opened: make(chan struct{}), ctx: ctx, marker: []byte(firstBody), held: make(chan int, 1), release: make(chan struct{})}
 				changesRelease := make(chan struct{})
-				atWrite := make(chan deliveryObservation, 1)
-				writeRelease := make(chan struct{})
-				observations := []deliveryObservation{}
-				var observerMu sync.Mutex
-				handler := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), withDeliveryObserver(func(observation deliveryObservation) {
-					observerMu.Lock()
-					observations = append(observations, observation)
-					observerMu.Unlock()
-					if observation.Phase == "final_write" {
-						select {
-						case atWrite <- observation:
-						default:
-						}
-						select {
-						case <-writeRelease:
-						case <-ctx.Done():
-						}
-					}
-				}))}
+				handler := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub))}
 				done := make(chan struct{})
 				var types map[string]bool
 				if mode == "session_preview" {
@@ -161,7 +187,7 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 						} else {
 							changes, err = real.ListThreadEventChanges(ctx, workspace.DefaultID, scope.SessionID, scope.ThreadID, after, 100)
 						}
-						reader.checkChanges(changes)
+						reader.retainChanges(changes)
 						return changes, err
 					})
 				}()
@@ -183,25 +209,21 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				seedProjectionEvent(t, admin, "evt_suffix", 6, "session.status_idle", "", `{"stop_reason":"suffix_sentinel"}`)
 				seedProjectionEvent(t, admin, "evt_deleted", 7, "session.deleted", "", `{}`)
 				close(changesRelease)
-				var held deliveryObservation
+				var heldBytes int
 				select {
-				case held = <-atWrite:
+				case heldBytes = <-response.held:
 				case <-time.After(5 * time.Second):
-					t.Fatal("first complete-text writer barrier not reached")
+					t.Fatal("first complete-text response write not reached")
 				}
-				if held.FinalBodyBytes < 256*1024 || held.EncodingBytes < 256*1024 || held.ChangeRows != 0 || held.ChangePayloadBytes != 0 || reader.pageCount() != 1 {
-					t.Fatalf("held residency=%+v pages=%d", held, reader.pageCount())
+				// The first End-group body is held at the sink. The single reader
+				// batch (Start, three deferred texts, End and the two-row suffix)
+				// no longer references any payload, exactly one End page was
+				// requested, and the held write is the current full encoding.
+				if rows, live := reader.retainedRows(); rows != 7 || live != 0 {
+					t.Fatalf("reader-returned change rows=%d still referenced=%d at the first final write", rows, live)
 				}
-				observerMu.Lock()
-				batchReleased := false
-				for _, observation := range observations {
-					if observation.Phase == "batch_released" {
-						batchReleased = true
-					}
-				}
-				observerMu.Unlock()
-				if !batchReleased {
-					t.Fatal("original batch/suffix retained across final materialization")
+				if heldBytes < 256*1024 || reader.pageCount() != 1 {
+					t.Fatalf("held write bytes=%d pages=%d", heldBytes, reader.pageCount())
 				}
 				reader.mu.Lock()
 				bodied := reader.descriptorBodies
@@ -221,7 +243,7 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				if cancelAtWrite {
 					cancel()
 				} else {
-					close(writeRelease)
+					close(response.release)
 				}
 				select {
 				case <-done:
@@ -269,12 +291,6 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 					if reader.pageCount() != 4 {
 						t.Fatalf("page requests=%d want one per body plus EOF", reader.pageCount())
 					}
-				}
-				observerMu.Lock()
-				last := observations[len(observations)-1]
-				observerMu.Unlock()
-				if last.Phase != "stream_released" || last.FinalBodyBytes != 0 || last.EncodingBytes != 0 {
-					t.Fatalf("final residency=%+v", last)
 				}
 				if mode != "session_preview" && len(transport.subscriptions) != 0 {
 					t.Fatal("formal-only viewer subscribed")

@@ -14,18 +14,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/httpapi"
 )
 
-// deliveryObservation reports residency at the owning writer boundary for the
-// package's fixture. It contains sizes only and never retains event bodies.
-type deliveryObservation struct {
-	Phase                                                         string
-	ChangeRows, ChangePayloadBytes, FinalBodyBytes, EncodingBytes int
-	FormalLatency, PreviewLatency                                 time.Duration
-}
-
-func withDeliveryObserver(observer func(deliveryObservation)) Option {
-	return func(o *options) { o.deliveryObserver = observer }
-}
-
 type previewEventState struct {
 	eventType       string
 	next            int64
@@ -87,7 +75,6 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		httpapi.WriteError(w, r, err)
 		return
 	}
-	defer h.observe(deliveryObservation{Phase: "stream_released"})
 	state := streamPreviewState{requests: map[string]*previewRequestState{}, watermark: cursor, types: types}
 	defer h.releasePreviewRequests(&state)
 	if viewer != nil {
@@ -131,12 +118,9 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		} else {
 			emptyPolls = 0
 		}
-		batchBytes := 0
-		for _, change := range changes {
-			batchBytes += len(change.Event.Payload)
-		}
-		h.observe(deliveryObservation{Phase: "change_batch", ChangeRows: len(changes), ChangePayloadBytes: batchBytes})
 		for len(changes) > 0 {
+			// Zero each consumed element so the reader-returned batch no longer
+			// references its payload once the row is handled.
 			change := changes[0]
 			changes[0] = StreamChange{}
 			changes = changes[1:]
@@ -150,7 +134,6 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 				// again after the End group. Never retain two generated text bodies.
 				clear(changes)
 				changes = nil
-				h.observe(deliveryObservation{Phase: "batch_released"})
 				request := state.requests[change.ModelRequestID]
 				if request != nil {
 					request.stopped = true
@@ -251,11 +234,6 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 	}
 }
 
-func (h *handler) observe(observation deliveryObservation) {
-	if h.options.deliveryObserver != nil {
-		h.options.deliveryObserver(observation)
-	}
-}
 func (h *handler) writeEndGroup(ctx context.Context, writer *sseWriter, scope ReadScope, end StreamChange, state *streamPreviewState) error {
 	endSelectedAt := time.Now()
 	after := int64(0)
@@ -275,24 +253,21 @@ func (h *handler) writeEndGroup(ctx context.Context, writer *sseWriter, scope Re
 			return errors.New("invalid request final page")
 		}
 		message := page[0]
+		// Defensive: drop the page's reference so only the current message holds
+		// the body during the write. The production reader does not retain pages,
+		// so this is not itself a residency guarantee.
 		page[0] = RequestFinalMessage{}
-		page = nil //nolint:ineffassign // Preserve the source custody marker; this reset does not force GC or prove compiler liveness.
 		data, err := json.Marshal(normalizeEvent(message.Event))
 		if err != nil {
 			return err
 		}
-		h.observe(deliveryObservation{Phase: "final_write", FinalBodyBytes: len(message.Event.Payload), EncodingBytes: len(data)})
 		if err := writer.event(message.Event.Type, data); err != nil {
-			h.observe(deliveryObservation{Phase: "final_released"})
 			return err
 		}
 		h.recordFormalLatency(selectedAt)
 		h.options.previewMetrics.formalEvents.Add(1)
 		h.closeFormalPreview(state, StreamChange{Event: message.Event, ModelRequestID: end.ModelRequestID, RequestStartEventID: end.RequestStartEventID, RequestStartStreamPosition: end.RequestStartStreamPosition, ThreadRole: end.ThreadRole, RequestKind: end.RequestKind})
 		after = message.Sequence
-		message = RequestFinalMessage{}
-		data = nil //nolint:ineffassign // Preserve the source custody marker before the next read; this reset does not force GC or prove retention.
-		h.observe(deliveryObservation{Phase: "final_released"})
 	}
 	data, err := json.Marshal(normalizeEvent(end.Event))
 	if err != nil {
@@ -437,16 +412,12 @@ func (h *handler) previewFrame(ctx context.Context, writer *sseWriter, scope Rea
 	if err := writer.event(frame.Kind, data); err != nil {
 		return err
 	}
-	elapsed := time.Since(startedAt)
-	h.options.previewMetrics.previewLatency.observe(elapsed)
-	h.observe(deliveryObservation{Phase: "preview_written", PreviewLatency: elapsed})
+	h.options.previewMetrics.previewLatency.observe(time.Since(startedAt))
 	h.options.previewMetrics.previewEvents.Add(1)
 	return nil
 }
 func (h *handler) recordFormalLatency(selectedAt time.Time) {
-	elapsed := time.Since(selectedAt)
-	h.options.previewMetrics.formalLatency.observe(elapsed)
-	h.observe(deliveryObservation{Phase: "formal_written", FormalLatency: elapsed})
+	h.options.previewMetrics.formalLatency.observe(time.Since(selectedAt))
 }
 func (h *handler) trackPreviewRequest(state *streamPreviewState, id string, request *previewRequestState) {
 	state.requests[id] = request
