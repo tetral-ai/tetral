@@ -446,7 +446,7 @@ actual HTTP status; arbitrary dependency response names never enter diagnostics.
 
 The command validates `TETRAL_CANCEL_JOIN_TIMEOUT_MS` (default 5000) together
 with `TETRAL_SERVICE_DRAIN_TIMEOUT_MS`: their sum must fit within 25000 ms,
-leaving the gateway Pod's proxy allocation. One executable deadline covers
+leaving the web-connector Pod's proxy allocation. One executable deadline covers
 service drain, cancellation, all joins and dependency cleanup. An uncooperative
 producer causes exit status 1 without closing dependencies under live work.
 Reusable `Run` callers retain join-before-close ownership.

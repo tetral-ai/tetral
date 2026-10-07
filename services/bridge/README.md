@@ -117,9 +117,11 @@ release use their separately persisted old-owner proofs.
 phase. Under Session arbitration it checks every resident Thread's reconstructible
 checkpoint, hands back ordinary accepted/delivering input custody, preserves
 committed inputs and accepted executor identities, then atomically removes the old
-binding and writes immutable per-Thread `IDLE` or `RECOVER` dispositions. Recovery
-uses the existing Queue lease and exact handoff identity; only `RECOVER` carries a
-Queue ID. Accepted, uncommitted reviewer input rejects release as not checkpointed.
+binding and writes immutable per-Thread `IDLE` or `RECOVER` dispositions. For
+each `RECOVER` Thread the same transaction enqueues one new `runtime_recovery`
+job carrying `handoff_id`, deduplicated by workspace, Session, Thread and
+handoff, and records its Queue ID; `IDLE` Threads get no job. Accepted,
+uncommitted reviewer input rejects release as not checkpointed.
 Exact release response-loss retry reads the original receipt after unbind; it
 cannot enqueue again or reapply custody transitions.
 The process sink records `runtime.binding.released` or
@@ -579,6 +581,9 @@ interpretation and attached-memory reads in `internal/runtimeconfig`, and
 manifest canonicalization and acceptance in `internal/mcpmanifest`. These
 packages receive explicit data or the caller's existing transaction; they do
 not read process environment, open a database pool, own a Queue consumer or
-call a service business package. Bridge remains the Runtime RPC owner and
+call a service business package. The process registry behind
+`RegisterRuntimeProcess` and `ReportRuntimeProcess` is the exception: it
+receives the Bridge client and owns one short Pod/process transaction, because
+promotion must never run inside a Session transaction. Bridge remains the Runtime RPC owner and
 Job Runner remains the reconciliation owner. Mixed owner tests live in
 `integration/` and call each owner's actual production entry points.

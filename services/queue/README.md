@@ -246,6 +246,13 @@ forms. A single kind may carry more than one canonical payload sub-shape: the
 `runtime_mcp_manifest_update` shape (with its own `Format…DedupeKey` helper and
 `validateCanonicalQueueShape` branch) is a variant of `runtime_config_update`,
 not an additional kind — `isKnownKind` still admits only the seventeen above.
+`runtime_recovery` likewise has two canonical sub-shapes, and
+`DecodeRuntimeRecoveryPayload` accepts exactly one source: event-origin
+`{session_id, session_thread_id, source_event_id}` deduplicated by
+`FormatRuntimeRecoveryDedupeKey` (workspace, Session and source event), and
+handoff-origin `{session_id, session_thread_id, handoff_id}` deduplicated by
+`FormatRuntimeHandoffDedupeKey` (workspace, Session, Thread and handoff). Both
+use the Session partition key.
 
 The `runtime_input` kind carries an `input_kind` discriminator, checked by
 `isRuntimeInputKind`, over a closed set: `messages`, `interrupt_control`,

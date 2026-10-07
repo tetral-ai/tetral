@@ -502,7 +502,7 @@ secret material.
 Each boot generates one stable process ID and registers it after its owned
 clients, Runtime Core, listeners, and routing proxy are ready. An authenticated
 Bridge registration returns a receipt and server-assigned order; an ACCEPTING
-report must commit before `/readyz` becomes ready. Reports repeat every two
+report must commit before `/ready` becomes ready. Reports repeat every two
 seconds with a one-second timeout. Ten seconds without a committed report
 withdraws admission and readiness. A later validated current ACCEPTING ACK from
 this boot restores both after a temporary Bridge outage. An explicit stale-process

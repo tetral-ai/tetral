@@ -271,6 +271,37 @@ these phases, missing-grant rollback and workspace isolation.
   [completion_mail_delivery_test.go](../../integration/completion_mail_delivery_test.go),
   [runtime_pod_lost_delivery_repair_test.go](../../integration/runtime_pod_lost_delivery_repair_test.go).
 
+### Runtime recovery
+
+- **Contract.** A `runtime_recovery` job names one Session Thread and exactly
+  one source: an event-origin `source_event_id` or a handoff-origin
+  `handoff_id` written by Bridge's `ReleaseRuntimeBinding`. A payload with both
+  or neither is invalid. Partition and dedupe keys must equal the payload's
+  canonical keys (`runtimecontrol.RecoveryDedupeKey`).
+- **Source verification.** Under Session arbitration and the exact live Queue
+  lease, `runtimecontrol.VerifyRecoverySourceTx` accepts a handoff source only
+  while the exact handoff Thread row has the `RECOVER` disposition and records
+  this leased job's Queue ID, and no later handoff of the Session has a higher
+  binding generation. An event source must still exist on the same Thread with
+  a recoverable event type. A source that is no longer current is acknowledged
+  as a duplicate without a Runtime call.
+- **Delivery.** Activation resolves the current binding through the
+  process-aware target resolver, marks the Session running and sends
+  `RecoverThread` to the bound Pod with the source and a `RecoveryLeaseRef`
+  naming the exact job, lease token, partition and dedupe keys.
+- **Exhaustion.** When attempts are exhausted, the exact live lease owner
+  records `runtime_recovery_exhausted` through the shared termination
+  settlement. A main Thread terminalizes the Session and its pending recovery
+  custody; a child Thread is terminalized alone, its exact lease is
+  dead-lettered and Session residency is recomputed. A Session that is already
+  terminated cancels the lease without another termination.
+- **Conformance.**
+  [runtime_handoff_test.go](runtime_handoff_test.go),
+  [runtime_delivery_store_test.go](runtime_delivery_store_test.go);
+  cross-owner:
+  [runtime_delivery_store_test.go](../../integration/runtime_delivery_store_test.go),
+  [replica_runtime_handoff_test.go](../../integration/replica_runtime_handoff_test.go).
+
 ## Direct command transport and policy
 
 Standard routing uses native PodIP:19090; hardened routing uses PodIP:19443

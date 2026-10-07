@@ -45,7 +45,7 @@ runs only after the prior succeeds.
 
 | Stage | Action | Failure |
 | --- | --- | --- |
-| Authenticate | Verify the runtime workload token and the per-thread `runtime_binding_token` (scope triple, binding id/generation, pod UID, expiry) | gRPC `UNAUTHENTICATED`/`PERMISSION_DENIED` before any credential is resolved |
+| Authenticate | Verify the runtime workload token and the per-thread `runtime_binding_token` (scope triple, binding id/generation, pod UID, Runtime process ID, expiry) | gRPC `UNAUTHENTICATED`/`PERMISSION_DENIED` before any credential is resolved |
 | Readiness | Reject if the process is not ready | gRPC `UNAVAILABLE` ("gateway service not ready") — transient, runtime retries |
 | Admission | Bounded concurrent in-flight turns (`TurnAdmissionGate`, default 8, `TETRAL_GATEWAY_MAX_CONCURRENT_TURNS`) | fast retryable `provider-error` rather than event-loop queueing |
 | Validate | `validateProviderRequest` (pure, in `packages/protocol`) | deterministic `INVALID_ARGUMENT` — **non-retryable** for that turn |

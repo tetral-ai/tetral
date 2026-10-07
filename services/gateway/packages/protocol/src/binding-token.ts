@@ -6,8 +6,8 @@
  * signature over that encoded payload. Verification fails closed unless the
  * envelope has exactly three parts, the signature is valid, the version is
  * supported, the expiry is in the future, and every workspace, session,
- * thread, binding, generation, and Runtime pod claim exactly matches the
- * admitted request and authenticated caller.
+ * thread, binding, generation, Runtime pod and Runtime process claim exactly
+ * matches the admitted request and authenticated caller.
  *
  * The provider-gateway and MCP connector service shells call the verifier
  * after workload authentication and request-shape validation and before
