@@ -2,15 +2,15 @@
  * @packageDocumentation
  *
  * Defines the lowering package's public provider-error vocabulary and converts
- * failures into bounded `ProviderStreamEvent` payloads. It keeps timeout,
+ * failures into bounded `NormalizedProviderEvent` payloads. It keeps timeout,
  * cancellation, lowering, provider-specific, and unknown stream failures on
  * explicit classification paths, with unknown stream failures collapsing to a
  * retryable transport error. Request lowering and provider-gateway stream,
  * credential, and pool code construct these errors; the module emits generated
  * Gateway protocol values and performs no provider calls or retries itself.
  */
-import { NormalizedProviderEventType as ProviderStreamEventType } from "./normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent } from "./normalized-stream.js";
+import { NormalizedProviderEventType } from "./normalized-stream.js";
+import type { NormalizedProviderEvent } from "./normalized-stream.js";
 import type {
   ProviderError,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -57,9 +57,9 @@ export class ProviderStreamTimeoutError extends Error {
  * Runtime; callers do not pass provider bodies, headers, credentials, or stack
  * traces through this function.
  */
-export function providerErrorEvent(input: ProviderErrorInput): ProviderStreamEvent {
+export function providerErrorEvent(input: ProviderErrorInput): NormalizedProviderEvent {
   return {
-    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    type: NormalizedProviderEventType.ProviderError,
     providerError: {
       metadataJson: "{}",
       error: normalizeProviderError(input),

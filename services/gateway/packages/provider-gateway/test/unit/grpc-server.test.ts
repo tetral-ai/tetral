@@ -25,13 +25,13 @@ describe("Gateway gRPC streaming transport", () => {
     const request = validAnthropicProviderRequest();
     const service = createService({
       stream: async function* () {
-        yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+        yield textEvent(FragmentType.TextStart, "");
         for (let index = 0; index < 32; index += 1) {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, `chunk-${index}`);
+          yield textEvent(FragmentType.TextDelta, `chunk-${index}`);
         }
-        yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+        yield textEvent(FragmentType.TextEnd, "");
         yield {
-          type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+          type: FragmentType.Finish,
           finish: {
             reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
             usage: {
@@ -116,10 +116,10 @@ describe("Gateway gRPC streaming transport", () => {
       const service = createService({
         stream: async function* () {
           yield {
-            type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+            type: FragmentType.ToolCall,
             toolCall: { id: `call_${scenario.name}`, name: "bounded_tool", inputJson: scenario.inputJson, metadataJson: "{}" },
           };
-          yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}",usage:undefined}};
+          yield {type:FragmentType.Finish,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}",usage:undefined}};
         },
       });
       const server = createGatewayGrpcServer(service);
@@ -181,7 +181,7 @@ describe("Gateway gRPC streaming transport", () => {
           aborted = true;
           release?.();
         }, { once: true });
-        yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
+        yield {type:FragmentType.ReasoningStart,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
         await new Promise<void>((resolve) => {
           release = resolve;
         });

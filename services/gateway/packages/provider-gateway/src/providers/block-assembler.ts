@@ -93,40 +93,40 @@ export class ProviderBlockAssembler {
     if (this.terminal) throw new Error("provider stream emitted after terminal");
     if (!validateNormalizedProviderEvent(event)) throw new Error("invalid normalized provider event");
     switch (event.type) {
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
+      case Kind.TextStart:
         this.start("text", event.text.id, event.text.metadataJson); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_REASONING_START: {
+      case Kind.ReasoningStart: {
         const block = this.start("reasoning", event.reasoning.id, event.reasoning.metadataJson);
         const frame = this.frame({ type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED,
           thinkingStarted: { providerPartId: block.id, eventId: block.eventId! } });
         this.offer({ kind: "thinking_started", providerPartId: block.id, eventId: block.eventId! });
         return [frame];
       }
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+      case Kind.TextDelta:
         this.delta("text", event.text.id, event.text.text, event.text.metadataJson); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+      case Kind.ReasoningDelta:
         this.delta("reasoning", event.reasoning.id, event.reasoning.text, event.reasoning.metadataJson); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
+      case Kind.TextEnd:
         return this.end("text", event.text.id, event.text.metadataJson);
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
+      case Kind.ReasoningEnd:
         return this.end("reasoning", event.reasoning.id, event.reasoning.metadataJson);
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
+      case Kind.ToolInputStart:
         this.startTool(event.toolInput); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+      case Kind.ToolInputDelta:
         this.toolInput(event.toolInput, false); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
+      case Kind.ToolInputEnd:
         this.toolInput(event.toolInput, true); return [];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
+      case Kind.ToolCall:
         return [this.toolCall(event.toolCall)];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS:
+      case Kind.AttachmentRejections:
         if (this.contentStarted || this.attachmentsSeen) throw new Error("misplaced attachment rejections");
         this.attachmentsSeen = true;
         return [this.frame({ type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS, attachmentRejections: event.attachmentRejections })];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_FINISH:
+      case Kind.Finish:
         this.assertComplete("finish");
         this.terminal = true;
         return [this.frame({ type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, finish: event.finish })];
-      case Kind.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
+      case Kind.ProviderError:
         this.terminal = true;
         this.release();
         return [this.frame({ type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, providerError: event.providerError })];

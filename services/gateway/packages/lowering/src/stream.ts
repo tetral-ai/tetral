@@ -13,8 +13,8 @@
 import {
   ProviderFinishReason,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { NormalizedProviderEventType as ProviderStreamEventType } from "./normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent, NormalizedTextEventType, NormalizedReasoningEventType, NormalizedToolInputEventType } from "./normalized-stream.js";
+import { NormalizedProviderEventType } from "./normalized-stream.js";
+import type { NormalizedProviderEvent, NormalizedTextEventType, NormalizedReasoningEventType, NormalizedToolInputEventType } from "./normalized-stream.js";
 import { redactedProviderMetadataJson } from "./redaction.js";
 import { normalizeProviderUsage } from "./usage.js";
 import type { ProviderUsageInput, ProviderUsageWireFamily } from "./usage.js";
@@ -52,13 +52,11 @@ export interface ProviderStreamRaiserOptions {
   };
 }
 
-// ProviderStreamRaiser is the producer-side enforcer of the stream wire
-// contract. It maps provider SDK stream parts to ProviderStreamEvents while
-// holding a single terminal latch and synthesizing stable fragment ids. The
-// mirror consumer,
-// services/agent-runtime/packages/core/src/llm/llm-service.ts
-// (ProviderStreamValidator), re-checks the same ordering/terminal rules on
-// receipt.
+// ProviderStreamRaiser maps provider SDK stream parts to Gateway-private
+// normalized fragments while holding a single terminal latch and synthesizing
+// stable fragment ids. Gateway's ProviderBlockAssembler consumes these
+// fragments; none of them cross the Runtime RPC, and Runtime validates only the
+// complete-frame protocol it receives.
 //
 // Terminal latch state table:
 //   state    | meaning                      | writers               | readers      | legal transitions
@@ -99,7 +97,7 @@ export class ProviderStreamRaiser {
    * The method throws on post-finish output, contradictory tool names, or a
    * missing required tool name, leaving outer orchestration to raise the error.
    */
-  map(part: GatewayStreamPart): readonly ProviderStreamEvent[] {
+  map(part: GatewayStreamPart): readonly NormalizedProviderEvent[] {
     if (part.type === "raw") {
       return [];
     }
@@ -112,39 +110,39 @@ export class ProviderStreamRaiser {
     }
     switch (part.type) {
       case "text-start":
-        return [this.textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, this.startIdFor("text", part.id), part.metadata, "")];
+        return [this.textEvent(NormalizedProviderEventType.TextStart, this.startIdFor("text", part.id), part.metadata, "")];
       case "text-delta":
-        return [this.textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, this.currentIdFor("text", part.id), part.metadata, deltaText(part))];
+        return [this.textEvent(NormalizedProviderEventType.TextDelta, this.currentIdFor("text", part.id), part.metadata, deltaText(part))];
       case "text-end":
-        return [this.textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, this.endIdFor("text", part.id), part.metadata, "")];
+        return [this.textEvent(NormalizedProviderEventType.TextEnd, this.endIdFor("text", part.id), part.metadata, "")];
       case "reasoning-start":
-        return [this.reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, this.startIdFor("reasoning", part.id), part.metadata, "")];
+        return [this.reasoningEvent(NormalizedProviderEventType.ReasoningStart, this.startIdFor("reasoning", part.id), part.metadata, "")];
       case "reasoning-delta":
-        return [this.reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA, this.currentIdFor("reasoning", part.id), part.metadata, deltaText(part))];
+        return [this.reasoningEvent(NormalizedProviderEventType.ReasoningDelta, this.currentIdFor("reasoning", part.id), part.metadata, deltaText(part))];
       case "reasoning-end":
-        return [this.reasoningEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, this.endIdFor("reasoning", part.id), part.metadata, "")];
+        return [this.reasoningEvent(NormalizedProviderEventType.ReasoningEnd, this.endIdFor("reasoning", part.id), part.metadata, "")];
       case "tool-input-start": {
         const id = this.startIdFor("tool", part.id);
         const name = requiredName(part.name);
         this.toolInputNames.set(id, name);
-        return [this.toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, id, name, "", part.metadata)];
+        return [this.toolInputEvent(NormalizedProviderEventType.ToolInputStart, id, name, "", part.metadata)];
       }
       case "tool-input-delta": {
         const id = this.currentIdFor("tool", part.id);
         const name = part.name ?? this.toolInputNames.get(id) ?? "";
-        return [this.toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, id, name, deltaText(part), part.metadata)];
+        return [this.toolInputEvent(NormalizedProviderEventType.ToolInputDelta, id, name, deltaText(part), part.metadata)];
       }
       case "tool-input-end": {
         const id = this.currentIdFor("tool", part.id);
         const name = part.name ?? this.toolInputNames.get(id) ?? "";
-        return [this.toolInputEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, id, name, "", part.metadata)];
+        return [this.toolInputEvent(NormalizedProviderEventType.ToolInputEnd, id, name, "", part.metadata)];
       }
       case "tool-call":
         return [this.toolCallEvent(part)];
       case "finish":
         this.terminal = true;
         return [{
-          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+          type: NormalizedProviderEventType.Finish,
           finish: {
             reason: finishReason(part.finishReason),
             usage: normalizeProviderUsage(part.usage, {
@@ -160,7 +158,7 @@ export class ProviderStreamRaiser {
     }
   }
 
-  private textEvent(type: NormalizedTextEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
+  private textEvent(type: NormalizedTextEventType, id: string, metadata: unknown, text: string): NormalizedProviderEvent {
     return {
       type,
       text: {
@@ -171,7 +169,7 @@ export class ProviderStreamRaiser {
     };
   }
 
-  private reasoningEvent(type: NormalizedReasoningEventType, id: string, metadata: unknown, text: string): ProviderStreamEvent {
+  private reasoningEvent(type: NormalizedReasoningEventType, id: string, metadata: unknown, text: string): NormalizedProviderEvent {
     return {
       type,
       reasoning: {
@@ -182,7 +180,7 @@ export class ProviderStreamRaiser {
     };
   }
 
-  private toolInputEvent(type: NormalizedToolInputEventType, id: string, name: string, text: string, metadata: unknown): ProviderStreamEvent {
+  private toolInputEvent(type: NormalizedToolInputEventType, id: string, name: string, text: string, metadata: unknown): NormalizedProviderEvent {
     return {
       type,
       toolInput: {
@@ -194,7 +192,7 @@ export class ProviderStreamRaiser {
     };
   }
 
-  private toolCallEvent(part: Extract<GatewayStreamPart, { readonly type: "tool-call" }>): ProviderStreamEvent {
+  private toolCallEvent(part: Extract<GatewayStreamPart, { readonly type: "tool-call" }>): NormalizedProviderEvent {
     const id = this.currentIdFor("tool", part.id);
     const name = requiredName(part.name ?? this.toolInputNames.get(id));
     const streamedName = this.toolInputNames.get(id);
@@ -205,7 +203,7 @@ export class ProviderStreamRaiser {
       this.activeImplicitIds.delete("tool");
     }
     return {
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+      type: NormalizedProviderEventType.ToolCall,
       toolCall: {
         id,
         name,

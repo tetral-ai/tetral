@@ -495,7 +495,7 @@ export class ProviderGatewayServiceShell {
     }
     if (attachmentResolution.rejections.length > 0) {
       yield* assembler.accept({
-        type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS,
+        type: NormalizedProviderEventType.AttachmentRejections,
         attachmentRejections: { rejections: [...attachmentResolution.rejections] },
       });
     }
@@ -849,19 +849,19 @@ function logGatewayProviderTimeout(
 
 function boundedProviderEventKind(type: NormalizedProviderEventType): string {
   switch (type) {
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START: return "text_start";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA: return "text_delta";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END: return "text_end";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START: return "reasoning_start";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA: return "reasoning_delta";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END: return "reasoning_end";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START: return "tool_input_start";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA: return "tool_input_delta";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END: return "tool_input_end";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL: return "tool_call";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH: return "finish";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR: return "provider_error";
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS: return "attachment_rejections";
+    case NormalizedProviderEventType.TextStart: return "text_start";
+    case NormalizedProviderEventType.TextDelta: return "text_delta";
+    case NormalizedProviderEventType.TextEnd: return "text_end";
+    case NormalizedProviderEventType.ReasoningStart: return "reasoning_start";
+    case NormalizedProviderEventType.ReasoningDelta: return "reasoning_delta";
+    case NormalizedProviderEventType.ReasoningEnd: return "reasoning_end";
+    case NormalizedProviderEventType.ToolInputStart: return "tool_input_start";
+    case NormalizedProviderEventType.ToolInputDelta: return "tool_input_delta";
+    case NormalizedProviderEventType.ToolInputEnd: return "tool_input_end";
+    case NormalizedProviderEventType.ToolCall: return "tool_call";
+    case NormalizedProviderEventType.Finish: return "finish";
+    case NormalizedProviderEventType.ProviderError: return "provider_error";
+    case NormalizedProviderEventType.AttachmentRejections: return "attachment_rejections";
     default: return "unknown";
   }
 }
@@ -1076,13 +1076,13 @@ const DefaultProviderSemanticProgressTimeoutMs = 60_000;
 function isProviderSemanticProgress(value: unknown): boolean {
   const event = value as NormalizedProviderEvent;
   switch (event.type) {
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+    case NormalizedProviderEventType.TextDelta:
       return (event.text?.text.length ?? 0) > 0;
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+    case NormalizedProviderEventType.ReasoningDelta:
       return (event.reasoning?.text.length ?? 0) > 0;
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+    case NormalizedProviderEventType.ToolInputDelta:
       return (event.toolInput?.text.length ?? 0) > 0;
-    case NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
+    case NormalizedProviderEventType.ToolCall:
       return true;
     default:
       return false;

@@ -33,8 +33,8 @@ import type { ProviderTransport } from "./transport.js";
 import { streamLanguageModel } from "./model-stream.js";
 import type { ProviderModelStreamResources } from "./model-stream.js";
 import { ProviderStreamRaiser } from "@tetral/gateway-lowering/src/stream.js";
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { lookupGatewayModel, routeEffectiveGatewayModelLimits } from "./catalog.js";
 import { createOpenAIOAuthFetch, OpenAICodexResponsesEndpoint, OpenAIOAuthDummyAPIKey } from "./openai-oauth.js";
 import { openAIOAuthCredentialRefreshDue } from "./openai-oauth-refresh.js";
@@ -197,7 +197,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   async close(deadline?: Date): Promise<void> { await this.transport?.close(deadline); }
 
   /** Streams one validated request through its catalog-selected provider client. */
-  async *stream(input: ProviderRequestStreamInput): AsyncGenerator<ProviderStreamEvent> {
+  async *stream(input: ProviderRequestStreamInput): AsyncGenerator<NormalizedProviderEvent> {
     input.abortSignal?.throwIfAborted();
     const model = input.request.model;
     const entry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
@@ -252,7 +252,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     input: ProviderRequestStreamInput,
     entry: GatewayModelCatalogEntry,
     rules: ProviderRules,
-  ): AsyncGenerator<ProviderStreamEvent> {
+  ): AsyncGenerator<NormalizedProviderEvent> {
     const credential = input.credential;
     if (!isProviderAPIKeyCredential(credential, entry.supplyProviderId)) {
       yield providerErrorEvent({
@@ -329,7 +329,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     input: ProviderRequestStreamInput,
     entry: GatewayModelCatalogEntry,
     rules: ProviderRules,
-  ): AsyncGenerator<ProviderStreamEvent> {
+  ): AsyncGenerator<NormalizedProviderEvent> {
     const credential = input.credential;
     if (isProviderAPIKeyCredential(credential, "openai")) {
       yield* this.streamOpenAIResponses(input, entry, rules, credential, officialOpenAIProviderFetch(input, ["https://api.openai.com"], this.fetch, this.providerFetchTimeouts));
@@ -395,7 +395,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     credential: ResolvedProviderAPIKeyCredential | ResolvedOpenAIOAuthCredential,
     fetchImpl: FetchFunction,
     overrides: { readonly apiKey?: string | undefined } = {},
-  ): AsyncGenerator<ProviderStreamEvent> {
+  ): AsyncGenerator<NormalizedProviderEvent> {
     const lowered = lowerProviderRequest(input.request, rules, {
       modelOutputTokenLimit: entry.modelOutputTokenLimit,
       resolvedAttachments: input.resolvedAttachments,
@@ -442,7 +442,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     input: ProviderRequestStreamInput,
     entry: GatewayModelCatalogEntry,
     rules: ProviderRules,
-  ): AsyncGenerator<ProviderStreamEvent> {
+  ): AsyncGenerator<NormalizedProviderEvent> {
     const credential = input.credential;
     if (!isProviderAPIKeyCredential(credential, entry.supplyProviderId)) {
       yield providerErrorEvent({
@@ -1215,9 +1215,9 @@ function classifiedProviderError(providerId: GatewayCatalogProviderId, error: un
   );
 }
 
-function isTerminalProviderStreamEvent(event: ProviderStreamEvent): boolean {
-  return event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH ||
-    event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR;
+function isTerminalProviderStreamEvent(event: NormalizedProviderEvent): boolean {
+  return event.type === NormalizedProviderEventType.Finish ||
+    event.type === NormalizedProviderEventType.ProviderError;
 }
 
 function providerFailureInput(error: unknown): Parameters<typeof classifyProviderFailure>[1] {

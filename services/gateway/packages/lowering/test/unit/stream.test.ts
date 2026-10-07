@@ -1,5 +1,5 @@
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import {
   ProviderFinishReason,
@@ -42,17 +42,17 @@ describe("Gateway stream raising", () => {
     ];
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.TextStart,
+      NormalizedProviderEventType.TextDelta,
+      NormalizedProviderEventType.TextEnd,
+      NormalizedProviderEventType.ReasoningStart,
+      NormalizedProviderEventType.ReasoningDelta,
+      NormalizedProviderEventType.ReasoningEnd,
+      NormalizedProviderEventType.ToolInputStart,
+      NormalizedProviderEventType.ToolInputDelta,
+      NormalizedProviderEventType.ToolInputEnd,
+      NormalizedProviderEventType.ToolCall,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.text?.text).toBe("hello");
     expect(events[3]?.reasoning?.metadataJson).toContain("signature");

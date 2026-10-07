@@ -378,7 +378,7 @@ export async function runLargeToolInputMappingProof() {
 			stream: async function* () {
 				for (const [index, input] of inputs.entries()) {
 					yield {
-						type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+						type: NormalizedProviderEventType.ToolCall,
 						toolCall: {
 							id: `call_large_memory_${index}`,
 							name: "memory",
@@ -388,7 +388,7 @@ export async function runLargeToolInputMappingProof() {
 					};
 				}
 				yield {
-					type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+					type: NormalizedProviderEventType.Finish,
 					finish: {
 						reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
 						usage: {
@@ -807,7 +807,7 @@ export async function runGatewayAbsentRetryDelayProof() {
 		providerStreamer: {
 			stream: async function* () {
 				yield {
-					type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+					type: NormalizedProviderEventType.ProviderError,
 					providerError: {
 						metadataJson: "{}",
 						error: {
@@ -942,7 +942,7 @@ function capacityCredentialResolver(): ProviderCredentialResolver {
 
 async function* successfulCapacityStream(request: ProviderRequest): AsyncGenerator<NormalizedProviderEvent> {
 	yield {
-		type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+		type: NormalizedProviderEventType.Finish,
 		finish: {
 			reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
 			usage: {

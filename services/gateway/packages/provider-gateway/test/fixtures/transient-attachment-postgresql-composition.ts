@@ -1,4 +1,3 @@
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { Metadata } from "@grpc/grpc-js";
 import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";

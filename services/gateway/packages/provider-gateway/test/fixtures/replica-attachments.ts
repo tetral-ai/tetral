@@ -1,4 +1,4 @@
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { credentials, Metadata } from "@grpc/grpc-js";
@@ -46,7 +46,7 @@ const app=createProviderGatewayApp({config,logger:{info:r=>logs.push(r),error:r=
   if(variant==="deleted")assert.equal(input.resolvedAttachments!.length,0);
   else if(variant==="transient"){assert.equal(input.resolvedAttachments!.length,1);assert.equal(Buffer.from(input.resolvedAttachments![0]!.data).toString(),"independent-transient-bytes");}
   else{assert.equal(input.resolvedAttachments!.length,1);assert.equal(input.resolvedAttachments![0]!.data.length,8*1024*1024+17);hash=createHash("sha256").update(input.resolvedAttachments![0]!.data).digest("hex");assert.equal(hash,expectedHash);}
-  yield{type:ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,usage:{inputTotalTokens:1,inputUncachedTokens:1,outputTotalTokens:0,totalTokens:1,providerUsageJson:"{}"},metadataJson:"{}"}};
+  yield{type:NormalizedProviderEventType.Finish,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,usage:{inputTotalTokens:1,inputUncachedTokens:1,outputTotalTokens:0,totalTokens:1,providerUsageJson:"{}"},metadataJson:"{}"}};
  }},
 });
 const started=await app.start();

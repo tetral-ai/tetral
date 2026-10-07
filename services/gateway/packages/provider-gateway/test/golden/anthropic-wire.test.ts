@@ -1,5 +1,5 @@
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
@@ -957,7 +957,7 @@ describe("OpenAI Responses golden wire path", () => {
 					events
 						.map((event) => event.type)
 						.includes(
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+							NormalizedProviderEventType.ReasoningStart,
 						) &&
 					events
 						.map((event) => event.reasoning?.text ?? "")
@@ -971,7 +971,7 @@ describe("OpenAI Responses golden wire path", () => {
 			expect(captured.pathname).toBe("/v1/responses");
 			expect(captured.headers.authorization).toBe("Bearer sk-session-openai");
 			expect(result.events.map((event) => event.type)).toContain(
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+				NormalizedProviderEventType.ReasoningStart,
 			);
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
@@ -1160,20 +1160,20 @@ describe("Anthropic golden wire path", () => {
 			]);
 
 			expect(events.map((event) => event.type)).toEqual([
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				NormalizedProviderEventType.ReasoningStart,
+				NormalizedProviderEventType.ReasoningDelta,
+				NormalizedProviderEventType.ReasoningDelta,
+				NormalizedProviderEventType.ReasoningDelta,
+				NormalizedProviderEventType.ReasoningEnd,
+				NormalizedProviderEventType.TextStart,
+				NormalizedProviderEventType.TextDelta,
+				NormalizedProviderEventType.TextEnd,
+				NormalizedProviderEventType.ToolInputStart,
+				NormalizedProviderEventType.ToolInputDelta,
+				NormalizedProviderEventType.ToolInputDelta,
+				NormalizedProviderEventType.ToolInputEnd,
+				NormalizedProviderEventType.ToolCall,
+				NormalizedProviderEventType.Finish,
 			]);
 			const reasoningText = events
 				.map((event) => event.reasoning?.text ?? "")
@@ -1241,9 +1241,9 @@ describe("Anthropic golden wire path", () => {
 					return (
 						types.length === 2 &&
 						types[0] ===
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START &&
+							NormalizedProviderEventType.ReasoningStart &&
 						types[1] ===
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA &&
+							NormalizedProviderEventType.ReasoningDelta &&
 						events
 							.map((event) => event.reasoning?.text ?? "")
 							.join("")
@@ -1258,8 +1258,8 @@ describe("Anthropic golden wire path", () => {
 				AnthropicBetaHeader,
 			);
 			expect(result.events.map((event) => event.type)).toEqual([
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
+				NormalizedProviderEventType.ReasoningStart,
+				NormalizedProviderEventType.ReasoningDelta,
 			]);
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
@@ -1358,7 +1358,7 @@ describe("Session provider golden wire path", () => {
 					events
 						.map((event) => event.type)
 						.includes(
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+							NormalizedProviderEventType.ReasoningStart,
 						) &&
 					events
 						.map((event) => event.reasoning?.text ?? "")
@@ -1370,7 +1370,7 @@ describe("Session provider golden wire path", () => {
 			expect(mock.requests).toHaveLength(1);
 			expect(mock.requests[0]?.headers["anthropic-beta"]).toBeUndefined();
 			expect(result.events.map((event) => event.type)).toContain(
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+				NormalizedProviderEventType.ReasoningStart,
 			);
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
@@ -1711,7 +1711,7 @@ describe("Session provider golden wire path", () => {
 				},
 			]);
 			expect(events.map((event) => event.type)).toContain(
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA,
+				NormalizedProviderEventType.ReasoningDelta,
 			);
 			expect(events.map((event) => event.text?.text ?? "").join("")).toBe("ok");
 			await expectProviderEventsFixture(
@@ -1854,7 +1854,7 @@ describe("Session provider golden wire path", () => {
 					events
 						.map((event) => event.type)
 						.includes(
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+							NormalizedProviderEventType.ReasoningStart,
 						) &&
 					events
 						.map((event) => event.reasoning?.text ?? "")
@@ -1868,7 +1868,7 @@ describe("Session provider golden wire path", () => {
 			expect(captured.pathname).toBe("/chat/completions");
 			expect(captured.headers.authorization).toBe("Bearer sk-session-deepseek");
 			expect(result.events.map((event) => event.type)).toContain(
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+				NormalizedProviderEventType.ReasoningStart,
 			);
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
@@ -1947,7 +1947,7 @@ describe("Session provider golden wire path", () => {
 					events
 						.map((event) => event.type)
 						.includes(
-							ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+							NormalizedProviderEventType.ReasoningStart,
 						) &&
 					events
 						.map((event) => event.reasoning?.text ?? "")
@@ -1958,7 +1958,7 @@ describe("Session provider golden wire path", () => {
 
 			expect(mock.requests).toHaveLength(1);
 			expect(result.events.map((event) => event.type)).toContain(
-				ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+				NormalizedProviderEventType.ReasoningStart,
 			);
 			expect(
 				result.events.map((event) => event.reasoning?.text ?? "").join(""),
@@ -2555,7 +2555,7 @@ function fixtureStreamHoldingOpen(fixture: string): ReadableStream<Uint8Array> {
 }
 
 function expectProviderToolTurn(
-	events: readonly ProviderStreamEvent[],
+	events: readonly NormalizedProviderEvent[],
 	options: {
 		readonly reasoningIncludes: readonly string[];
 		readonly textIncludes: string;
@@ -2565,28 +2565,28 @@ function expectProviderToolTurn(
 ): void {
 	const types = events.map((event) => event.type);
 	const reasoningStart = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
+		NormalizedProviderEventType.ReasoningStart,
 	);
 	const reasoningEnd = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
+		NormalizedProviderEventType.ReasoningEnd,
 	);
 	const textStart = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+		NormalizedProviderEventType.TextStart,
 	);
 	const textEnd = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+		NormalizedProviderEventType.TextEnd,
 	);
 	const toolInputStart = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
+		NormalizedProviderEventType.ToolInputStart,
 	);
 	const toolInputEnd = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
+		NormalizedProviderEventType.ToolInputEnd,
 	);
 	const toolCallIndex = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+		NormalizedProviderEventType.ToolCall,
 	);
 	const finishIndex = types.indexOf(
-		ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+		NormalizedProviderEventType.Finish,
 	);
 	expect(reasoningStart).toBeGreaterThanOrEqual(0);
 	expect(reasoningEnd).toBeGreaterThan(reasoningStart);
@@ -2612,7 +2612,7 @@ function expectProviderToolTurn(
 	const toolCalls = events.filter(
 		(event) =>
 			event.type ===
-			ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+			NormalizedProviderEventType.ToolCall,
 	);
 	expect(toolCalls).toHaveLength(1);
 	expect(toolCalls[0]?.toolCall).toMatchObject({
@@ -2771,7 +2771,7 @@ async function expectCapturedRequestFixture(
 }
 
 async function expectProviderEventsFixture(
-	events: readonly ProviderStreamEvent[],
+	events: readonly NormalizedProviderEvent[],
 	relativePath: string,
 ): Promise<void> {
 	const expected =
@@ -3345,9 +3345,9 @@ function deepSeekGoldenRequest(
 }
 
 async function collectEvents(
-	events: AsyncIterable<ProviderStreamEvent>,
-): Promise<readonly ProviderStreamEvent[]> {
-	const output: ProviderStreamEvent[] = [];
+	events: AsyncIterable<NormalizedProviderEvent>,
+): Promise<readonly NormalizedProviderEvent[]> {
+	const output: NormalizedProviderEvent[] = [];
 	for await (const event of events) {
 		output.push(event);
 	}
@@ -3355,12 +3355,12 @@ async function collectEvents(
 }
 
 async function collectEventsUntilError(
-	events: AsyncIterable<ProviderStreamEvent>,
+	events: AsyncIterable<NormalizedProviderEvent>,
 ): Promise<{
-	readonly events: readonly ProviderStreamEvent[];
+	readonly events: readonly NormalizedProviderEvent[];
 	readonly error: unknown;
 }> {
-	const output: ProviderStreamEvent[] = [];
+	const output: NormalizedProviderEvent[] = [];
 	try {
 		for await (const event of events) {
 			output.push(event);
@@ -3372,15 +3372,15 @@ async function collectEventsUntilError(
 }
 
 async function collectEventsDisconnectingWhen(
-	events: AsyncIterable<ProviderStreamEvent>,
-	predicate: (events: readonly ProviderStreamEvent[]) => boolean,
+	events: AsyncIterable<NormalizedProviderEvent>,
+	predicate: (events: readonly NormalizedProviderEvent[]) => boolean,
 	disconnect: () => Promise<void>,
 	watchdogMs = 3_000,
 ): Promise<{
-	readonly events: readonly ProviderStreamEvent[];
+	readonly events: readonly NormalizedProviderEvent[];
 	readonly error: unknown;
 }> {
-	const output: ProviderStreamEvent[] = [];
+	const output: NormalizedProviderEvent[] = [];
 	const iterator = events[Symbol.asyncIterator]();
 	let disconnected = false;
 	const disconnectOnce = async (): Promise<void> => {
@@ -3404,7 +3404,7 @@ async function collectEventsDisconnectingWhen(
 	while (true) {
 		let watchdog: ReturnType<typeof setTimeout> | undefined;
 		let watchdogExpired = false;
-		let next: IteratorResult<ProviderStreamEvent>;
+		let next: IteratorResult<NormalizedProviderEvent>;
 		try {
 			next = await Promise.race([
 				iterator.next(),

@@ -1,5 +1,5 @@
-import { NormalizedProviderEventType as ProviderStreamEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
-import type { NormalizedProviderEvent as ProviderStreamEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
+import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, jest, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -171,7 +171,7 @@ describe("ProviderClientRegistry provider streaming", () => {
       schema: JSON.parse(approvalReviewerOutputSchemaJson),
     });
     expect(events.at(-1)).toMatchObject({
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      type: NormalizedProviderEventType.Finish,
       finish: {
         contextWindowTokens: 1_000_000,
         inputLimitTokens: undefined,
@@ -280,10 +280,10 @@ describe("ProviderClientRegistry provider streaming", () => {
     expect(calls[0]?.tools?.Read?.description).toBe("Read a file.");
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.TextStart,
+      NormalizedProviderEventType.TextDelta,
+      NormalizedProviderEventType.TextEnd,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.text?.text).toBe("hello");
     expect(events[3]?.finish).toMatchObject({
@@ -444,7 +444,7 @@ describe("ProviderClientRegistry provider streaming", () => {
     const events = await collectEvents(registry.stream({ request, credential: platformAnthropicCredential() }));
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[0]?.finish?.usage?.providerUsageJson).toContain("providerOnlyCounter");
   });
@@ -937,11 +937,11 @@ describe("ProviderClientRegistry provider streaming", () => {
     }));
 
     expect(events.map((event) => event.type)).toEqual([
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      NormalizedProviderEventType.ToolInputStart,
+      NormalizedProviderEventType.ToolInputDelta,
+      NormalizedProviderEventType.ToolInputEnd,
+      NormalizedProviderEventType.ToolCall,
+      NormalizedProviderEventType.Finish,
     ]);
     expect(events[1]?.toolInput?.text).toBe(rawPatch);
     expect(JSON.parse(events[3]?.toolCall?.inputJson ?? "null")).toBe(rawPatch);
@@ -1083,7 +1083,7 @@ describe("ProviderClientRegistry provider streaming", () => {
     }));
 
     expect(events.at(-1)).toMatchObject({
-      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      type: NormalizedProviderEventType.Finish,
       finish: {
         contextWindowTokens: 500_000,
         inputLimitTokens: 372_000,
@@ -1432,7 +1432,7 @@ describe("ProviderClientRegistry provider streaming", () => {
         }, { preconnect: () => {} }),
       });
 
-      const events: ProviderStreamEvent[] = [];
+      const events: NormalizedProviderEvent[] = [];
       const error = await caughtError((async () => {
         for await (const event of registry.stream({ request, credential })) {
           events.push(event);
@@ -1641,8 +1641,8 @@ function finishPart(): TextStreamPart<ToolSet> {
   };
 }
 
-async function collectEvents(events: AsyncIterable<ProviderStreamEvent>): Promise<readonly ProviderStreamEvent[]> {
-  const output: ProviderStreamEvent[] = [];
+async function collectEvents(events: AsyncIterable<NormalizedProviderEvent>): Promise<readonly NormalizedProviderEvent[]> {
+  const output: NormalizedProviderEvent[] = [];
   for await (const event of events) {
     output.push(event);
   }

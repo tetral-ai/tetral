@@ -367,7 +367,7 @@ const semanticTimeoutStreamer = {
 		if (!failedPartialRequest) await writeRuntimeState();
 		if (scenario === "semantic_tool_route" && providerInvocations === 1) {
 			yield {
-				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+				type: NormalizedProviderEventType.ToolCall,
 				toolCall: {
 					id: "call_semantic_tool_route",
 					name: "Read",
@@ -376,7 +376,7 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				type: NormalizedProviderEventType.Finish,
 				finish: {
 					reason: ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS,
 					contextWindowTokens: 200_000,
@@ -395,11 +395,11 @@ const semanticTimeoutStreamer = {
 		}
 		if (failedPartialRequest) {
 			yield {
-				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+				type: NormalizedProviderEventType.TextStart,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
 			yield {
-				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+				type: NormalizedProviderEventType.TextDelta,
 				text: {
 					id: `failed-partial-${providerInvocations}`,
 					text: `failed partial ${providerInvocations}`,
@@ -407,7 +407,7 @@ const semanticTimeoutStreamer = {
 				},
 			};
 			yield {
-				type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+				type: NormalizedProviderEventType.TextEnd,
 				text: { id: `failed-partial-${providerInvocations}`, text: "", metadataJson: "{}" },
 			};
 			// This case requires a completed partial before the semantic stall.
@@ -420,19 +420,19 @@ const semanticTimeoutStreamer = {
 			return;
 		}
 		yield {
-			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+			type: NormalizedProviderEventType.TextStart,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+			type: NormalizedProviderEventType.TextDelta,
 			text: { id: "recovered", text: "recovered input", metadataJson: "{}" },
 		};
 		yield {
-			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+			type: NormalizedProviderEventType.TextEnd,
 			text: { id: "recovered", text: "", metadataJson: "{}" },
 		};
 		yield {
-			type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+			type: NormalizedProviderEventType.Finish,
 			finish: {
 				reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
 				contextWindowTokens: 200_000,

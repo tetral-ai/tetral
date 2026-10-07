@@ -64,9 +64,9 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "visible");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
           await never();
         },
       },
@@ -98,9 +98,9 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "visible");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
           await never();
         },
       },
@@ -230,7 +230,7 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "not-a-delta");
+          yield textEvent(FragmentType.TextStart, "not-a-delta");
         },
       },
     });
@@ -572,7 +572,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamTimeouts: { firstByteTimeoutMs: 500, interChunkTimeoutMs: 5 },
       providerStreamer: {
         stream: async function* (input) {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(FragmentType.TextStart, "");
           input.abortSignal?.addEventListener("abort", () => {
             aborted = true;
             release();
@@ -625,11 +625,11 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamer: {
         stream: async function* (input) {
           yield textEvent(
-            FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+            FragmentType.TextStart,
             "",
           );
           yield textEvent(
-            FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+            FragmentType.TextDelta,
             "visible",
           );
           for (let index = 0; index < 20; index += 1) {
@@ -711,16 +711,16 @@ describe("ProviderGatewayServiceShell", () => {
       },
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "visible");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextDelta, "visible");
+          yield textEvent(FragmentType.TextEnd, "");
           await new Promise((resolve) => setTimeout(resolve, 30));
-          yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
-          yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA, "thinking");
-          yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
+          yield reasoningEvent(FragmentType.ReasoningDelta, "thinking");
+          yield reasoningEvent(FragmentType.ReasoningEnd, "");
           await new Promise((resolve) => setTimeout(resolve, 30));
-          yield toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "Read", "", "call_1");
-          yield toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "Read", "", "call_1");
+          yield toolInputEvent(FragmentType.ToolInputStart, "Read", "", "call_1");
+          yield toolInputEvent(FragmentType.ToolInputEnd, "Read", "", "call_1");
           yield toolCallEvent("call_1", "Read", "{}");
           await new Promise((resolve) => setTimeout(resolve, 30));
           yield finishEvent();
@@ -750,7 +750,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamTimeouts: { firstByteTimeoutMs: 500, interChunkTimeoutMs: 500 },
       providerStreamer: {
         stream: async function* () {
-          yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
           await never();
         },
       },
@@ -786,7 +786,7 @@ describe("ProviderGatewayServiceShell", () => {
       providerStreamer: {
         stream: async function* () {
           try {
-            yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
+            yield reasoningEvent(FragmentType.ReasoningStart, "");
             await never();
           } finally {
             providerClosed = true;
@@ -857,8 +857,8 @@ describe("ProviderGatewayServiceShell", () => {
           if (keyID === "pfk_rate_limited") {
             throw new ProviderKeyFailureError(retryableProviderFailure());
           }
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield textEvent(FragmentType.TextEnd, "");
           yield finishEvent();
         },
       },
@@ -1010,7 +1010,7 @@ describe("ProviderGatewayServiceShell", () => {
           const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
           attempts.push(keyID);
           if (keyID === "pfk_balance") {
-            yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            yield textEvent(FragmentType.TextStart, "");
             throw new ProviderKeyFailureError(
               classifyProviderFailure("deepseek", {
                 body: { message: "Insufficient Balance" },
@@ -1156,7 +1156,7 @@ describe("ProviderGatewayServiceShell", () => {
           const keyID = input.credential?.source === "platform" ? input.credential.platformKey.keyId : "missing";
           attempts.push(keyID);
           if (keyID === "pfk_1") {
-            yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            yield textEvent(FragmentType.TextStart, "");
             throw new ProviderKeyFailureError({
               action: "quarantine",
               providerError: {
@@ -1202,7 +1202,7 @@ describe("ProviderGatewayServiceShell", () => {
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          yield textEvent(FragmentType.TextStart, "");
           throw new ProviderKeyFailureError({
             action: "quarantine",
             providerError: {
@@ -1245,9 +1245,9 @@ describe("ProviderGatewayServiceShell", () => {
       credentialResolver: platformCredentialResolver(new RecordingPlatformCredentialPool(["pfk_1"])),
       providerStreamer: {
         stream: async function* () {
-          yield textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
-          yield reasoningEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, "");
-          yield toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", "");
+          yield textEvent(FragmentType.TextStart, "");
+          yield reasoningEvent(FragmentType.ReasoningStart, "");
+          yield toolInputEvent(FragmentType.ToolInputStart, "lookup", "");
           throw new ProviderKeyFailureError(retryableProviderFailure());
         },
       },
@@ -1273,15 +1273,15 @@ describe("ProviderGatewayServiceShell", () => {
     const cases = [
       {
         name: "open text at finish",
-        events: [textEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, ""), finishEvent()],
+        events: [textEvent(FragmentType.TextStart, ""), finishEvent()],
         category: "finish",
         counts: { text: 1, reasoning: 0, toolInput: 0 },
       },
       {
         name: "ended tool input without call",
         events: [
-          toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", ""),
-          toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup", ""),
+          toolInputEvent(FragmentType.ToolInputStart, "lookup", ""),
+          toolInputEvent(FragmentType.ToolInputEnd, "lookup", ""),
           finishEvent(),
         ],
         category: "finish",
@@ -1324,7 +1324,7 @@ describe("ProviderGatewayServiceShell", () => {
       logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       providerStreamer: {
         stream: async function* () {
-          yield toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", "", "tool_early");
+          yield toolInputEvent(FragmentType.ToolInputStart, "lookup", "", "tool_early");
           yield toolCallEvent("tool_early", "lookup", '{"query":"hello"}');
         },
       },
@@ -1353,13 +1353,13 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const streamEvents = [
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_a", "", "tool_a"),
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_b", "", "tool_b"),
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_b", '{"b":1}', "tool_b"),
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_b", "", "tool_b"),
+      toolInputEvent(FragmentType.ToolInputStart, "lookup_a", "", "tool_a"),
+      toolInputEvent(FragmentType.ToolInputStart, "lookup_b", "", "tool_b"),
+      toolInputEvent(FragmentType.ToolInputDelta, "lookup_b", '{"b":1}', "tool_b"),
+      toolInputEvent(FragmentType.ToolInputEnd, "lookup_b", "", "tool_b"),
       toolCallEvent("tool_b", "lookup_b", '{"b":1}'),
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_a", '{"a":1}', "tool_a"),
-      toolInputEvent(FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_a", "", "tool_a"),
+      toolInputEvent(FragmentType.ToolInputDelta, "lookup_a", '{"a":1}', "tool_a"),
+      toolInputEvent(FragmentType.ToolInputEnd, "lookup_a", "", "tool_a"),
       toolCallEvent("tool_a", "lookup_a", '{"a":1}'),
       finishEvent(),
     ];
@@ -2203,14 +2203,14 @@ function toolCallEvent(
   inputJson: string,
 ): NormalizedProviderEvent {
   return {
-    type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+    type: FragmentType.ToolCall,
     toolCall: { id, name, inputJson, metadataJson: "{}" },
   };
 }
 
 function providerError(code: string, retryable: boolean): NormalizedProviderEvent {
   return {
-    type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    type: FragmentType.ProviderError,
     providerError: {
       metadataJson: "{}",
       error: {
@@ -2227,7 +2227,7 @@ function providerError(code: string, retryable: boolean): NormalizedProviderEven
 
 function finishEvent(): NormalizedProviderEvent {
   return {
-    type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    type: FragmentType.Finish,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
       usage: {

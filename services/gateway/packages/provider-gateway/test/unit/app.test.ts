@@ -30,11 +30,11 @@ describe("ProviderGatewayApp lifecycle", () => {
       tokenReviewClient: new AllowingTokenReviewClient(),
       providerStreamer: {
         stream: async function* () {
-          yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
+          yield {type:FragmentType.ReasoningStart,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           await new Promise<void>((resolve) => {
             releaseStream = resolve;
           });
-          yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
+          yield {type:FragmentType.ReasoningEnd,reasoning:{id:"thinking",text:"",metadataJson:"{}"}};
           yield finishEvent();
         },
       },
@@ -201,7 +201,7 @@ function textEvent(
 
 function finishEvent(): NormalizedProviderEvent {
   return {
-    type: FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    type: FragmentType.Finish,
     finish: {
       reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
       usage: {

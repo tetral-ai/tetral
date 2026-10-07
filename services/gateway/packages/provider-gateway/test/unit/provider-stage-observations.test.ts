@@ -9,7 +9,7 @@ import { ProviderGatewayMetricsRegistry } from "../../src/metrics.js";
 import { writeProviderStreamEvents } from "../../src/grpc-server.js";
 import { validProviderRequest } from "./fixtures.js";
 const request = () => validProviderRequest({model:{providerId:"anthropic",modelId:"claude-opus-4-8",variant:""}});
-const finish = () => ({type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_FINISH,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}",usage:undefined}} as const);
+const finish = () => ({type:FragmentType.Finish,finish:{reason:ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,metadataJson:"{}",usage:undefined}} as const);
 const auth = {authenticate:async()=>({ok:true as const,serviceAccount:{namespace:"ns",name:"runtime",podUid:"pod"}})};
 class ControlledWriter extends EventEmitter {
   cancelled = false;
@@ -24,7 +24,7 @@ describe("Provider stage completion samples", () => {
     let now=0; const samples: Record<string,unknown>[]=[]; const metrics=new ProviderGatewayMetricsRegistry();
     const service=new ProviderGatewayServiceShell({authenticator:auth,runtimeBindingTokenVerifier:{verify:()=>true},ready:()=>true,metrics,observationClock:()=>now,
       logger:{info:record=>{if(sink==="throwing")throw Error("sink unavailable");if(sink==="recording")samples.push(record);},error:()=>{}},
-      providerStreamer:{stream:async function*(){now=5;yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,text:{id:"text",text:"",metadataJson:"{}"}};yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,text:{id:"text",text:"alpha",metadataJson:"{}"}};now=20;yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,text:{id:"text",text:"",metadataJson:"{}"}};yield finish();}}
+      providerStreamer:{stream:async function*(){now=5;yield {type:FragmentType.TextStart,text:{id:"text",text:"",metadataJson:"{}"}};yield {type:FragmentType.TextDelta,text:{id:"text",text:"alpha",metadataJson:"{}"}};now=20;yield {type:FragmentType.TextEnd,text:{id:"text",text:"",metadataJson:"{}"}};yield finish();}}
     });
     const writer=new ControlledWriter();
     const operation=writeProviderStreamEvents(writer,service.streamProviderRequest(request(),new Metadata()),{onWriteStarted:frame=>service.recordCompleteFrameWriteStarted(frame),onWriteCallback:frame=>service.recordCompleteFrameWriteCallback(frame),onWriteSettled:(frame,outcome)=>service.recordCompleteFrameWrite(frame,outcome)});
@@ -57,7 +57,7 @@ describe("Provider stage completion samples", () => {
   });
   test("writer cancellation emits closed outcome and clears frame ownership",async()=>{
     let now=0;const samples:Record<string,unknown>[]=[];const metrics=new ProviderGatewayMetricsRegistry();
-    const service=new ProviderGatewayServiceShell({authenticator:auth,runtimeBindingTokenVerifier:{verify:()=>true},ready:()=>true,metrics,observationClock:()=>now,logger:{info:record=>samples.push(record),error:()=>{}},providerStreamer:{stream:async function*(){now=5;yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,text:{id:"t",text:"",metadataJson:"{}"}};yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,text:{id:"t",text:"x",metadataJson:"{}"}};now=20;yield {type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,text:{id:"t",text:"",metadataJson:"{}"}};yield finish();}}});
+    const service=new ProviderGatewayServiceShell({authenticator:auth,runtimeBindingTokenVerifier:{verify:()=>true},ready:()=>true,metrics,observationClock:()=>now,logger:{info:record=>samples.push(record),error:()=>{}},providerStreamer:{stream:async function*(){now=5;yield {type:FragmentType.TextStart,text:{id:"t",text:"",metadataJson:"{}"}};yield {type:FragmentType.TextDelta,text:{id:"t",text:"x",metadataJson:"{}"}};now=20;yield {type:FragmentType.TextEnd,text:{id:"t",text:"",metadataJson:"{}"}};yield finish();}}});
     let joined=false;let custody:Promise<void>|undefined;
     const writer=new ControlledWriter();const operation=writeProviderStreamEvents(writer,service.streamProviderRequest(request(),new Metadata()),{registerWriteCustody:pending=>{custody=pending;void pending.then(()=>{joined=true;});},onWriteStarted:frame=>service.recordCompleteFrameWriteStarted(frame),onWriteSettled:(frame,outcome)=>service.recordCompleteFrameWrite(frame,outcome)});
     for(let i=0;i<100 && writer.writes===0;i++)await Promise.resolve();now=27;writer.cancelled=true;writer.emit("cancelled");await operation;

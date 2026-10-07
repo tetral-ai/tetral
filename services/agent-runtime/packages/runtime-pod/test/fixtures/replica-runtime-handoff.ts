@@ -126,13 +126,13 @@ const gatewayService = new ProviderGatewayServiceShell({
             });
             await writeJsonSnapshot(`${input.directory}/ledger.json`, ledger);
             yield {
-                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+                type: NormalizedProviderEventType.TextStart,
                 text: {
                     id: "frame", text: "", metadataJson: "{}"
                 },
             };
             yield {
-                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA,
+                type: NormalizedProviderEventType.TextDelta,
                 text: {
                     id: "frame",
                     text: reviewer
@@ -158,7 +158,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                 (reviewer && input.reviewerScenario === "hold"))
                 await wait(`${input.directory}/${session}-${ordinal}.release`, request.abortSignal);
             yield {
-                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
+                type: NormalizedProviderEventType.TextEnd,
                 text: {
                     id: "frame", text: "", metadataJson: "{}"
                 },
@@ -173,7 +173,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                         session.endsWith("b")));
             if (tool)
                 yield {
-                    type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+                    type: NormalizedProviderEventType.ToolCall,
                     toolCall: {
                         id: "tool-current",
                         name: reviewRead || session.endsWith("b")
@@ -190,7 +190,7 @@ const gatewayService = new ProviderGatewayServiceShell({
                     },
                 };
             yield {
-                type: NormalizedProviderEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+                type: NormalizedProviderEventType.Finish,
                 finish: {
                     reason: tool
                         ? ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS

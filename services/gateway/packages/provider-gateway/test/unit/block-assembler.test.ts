@@ -83,8 +83,8 @@ describe("Gateway complete block ownership",()=>{
 
 describe("Gateway private fragment lifecycle rejection", () => {
   function raw(kind: "text" | "reasoning" | "toolInput", phase: "START" | "DELTA" | "END", name = "Read"): NormalizedProviderEvent {
-    const prefix = kind === "toolInput" ? "TOOL_INPUT" : kind.toUpperCase();
-    const type = FragmentType[`PROVIDER_STREAM_EVENT_TYPE_${prefix}_${phase}` as keyof typeof FragmentType];
+    const prefix = kind === "toolInput" ? "ToolInput" : kind === "text" ? "Text" : "Reasoning";
+    const type = FragmentType[`${prefix}${phase[0]}${phase.slice(1).toLowerCase()}` as keyof typeof FragmentType];
     return {type,[kind]:{id:"part",text:phase === "DELTA" ? "x" : "",metadataJson:"{}",...(kind === "toolInput" ? {name} : {})}} as NormalizedProviderEvent;
   }
   for (const kind of ["text","reasoning","toolInput"] as const) {
@@ -104,7 +104,7 @@ describe("Gateway private fragment lifecycle rejection", () => {
   });
   test("tool name mismatch on complete call is rejected", () => {
     const assembler = setup().assembler; assembler.accept(raw("toolInput","START")); assembler.accept(raw("toolInput","END"));
-    expect(()=>assembler.accept({type:FragmentType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,toolCall:{id:"part",name:"Write",inputJson:"{}",metadataJson:"{}"}})).toThrow(ProviderIncompleteStreamError);
+    expect(()=>assembler.accept({type:FragmentType.ToolCall,toolCall:{id:"part",name:"Write",inputJson:"{}",metadataJson:"{}"}})).toThrow(ProviderIncompleteStreamError);
   });
   test("Finish rejects ended tool input without a complete call", () => {
     const {assembler,send}=setup(); assembler.accept(raw("toolInput","START")); assembler.accept(raw("toolInput","END")); expect(()=>send({type:"finish",finishReason:"stop"})).toThrow(ProviderIncompleteStreamError);
