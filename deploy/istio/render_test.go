@@ -37,7 +37,7 @@ func TestLockedIstiodRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	found := false
+	found, meshFound := false, false
 	crds := 0
 	for {
 		var obj map[string]any
@@ -51,6 +51,18 @@ func TestLockedIstiodRender(t *testing.T) {
 		}
 		if obj["kind"] == "CustomResourceDefinition" {
 			crds++
+		}
+		if obj["kind"] == "ConfigMap" && obj["metadata"].(map[string]any)["name"] == "istio-1-31-1" {
+			// Sidecar access logs would add a line per routed RPC, including
+			// Queue polling and heartbeats; the mesh leaves them disabled.
+			var mesh map[string]any
+			if err := yaml.Unmarshal([]byte(obj["data"].(map[string]any)["mesh"].(string)), &mesh); err != nil {
+				t.Fatal(err)
+			}
+			if file, present := mesh["accessLogFile"]; present && file != "" {
+				t.Fatalf("mesh-wide proxy access logging enabled: %v", file)
+			}
+			meshFound = true
 		}
 		if obj["kind"] != "Deployment" {
 			continue
@@ -90,8 +102,8 @@ func TestLockedIstiodRender(t *testing.T) {
 			t.Fatal("missing required issuer Secret mount")
 		}
 	}
-	if !found || crds != 15 {
-		t.Fatalf("incomplete actual charts: discovery=%v CRDs=%d", found, crds)
+	if !found || !meshFound || crds != 15 {
+		t.Fatalf("incomplete actual charts: discovery=%v mesh=%v CRDs=%d", found, meshFound, crds)
 	}
 	if !bytes.Contains(data, []byte("trustDomain: transport.example")) {
 		t.Fatal("operator trust domain not projected")

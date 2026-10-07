@@ -9,8 +9,6 @@ meshConfig:
   defaultConfig:
     holdApplicationUntilProxyStarts: true
     terminationDrainDuration: 5s
-  accessLogFile: /dev/stdout
-  accessLogEncoding: JSON
 global:
   hub: docker.io/istio
   tag: 1.31.1

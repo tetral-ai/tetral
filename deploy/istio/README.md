@@ -29,11 +29,17 @@ instead of silently generating another root. External issuer, trust-transition
 and Secret delivery procedures remain operator responsibilities.
 
 The workload chart uses native Kubernetes sidecars, waits for proxy startup,
-and keeps the proxy through application shutdown. The fixed proxy shutdown
-allocation is five seconds. Routing NetworkPolicies allow only the selected
-Istiod revision on port 15012, in addition to each service's existing peers.
-Queue and Web gain receiver proxies in the hardened profile; six routing roles
-are mandatory in both profiles.
+and keeps the proxy through application shutdown. The proxy shutdown allocation
+(`terminationDrainDuration`) is five seconds for every routed role except
+Runtime, whose allocation follows `lifecycle.runtimeProxyJoinMs` (default 5000
+ms) and is validated within `lifecycle.runtimeGraceSeconds`. Mesh-wide proxy
+access logging is disabled (`meshConfig` sets no `accessLogFile`), so routed
+RPCs, including Queue polling and heartbeats, write no per-request proxy lines;
+proxy failures surface through application records and proxy statistics.
+Routing NetworkPolicies allow only the selected Istiod revision on port 15012,
+in addition to each service's existing peers. Queue and Web gain receiver
+proxies in the hardened profile; six routing roles are mandatory in both
+profiles.
 
 Local Docker fixtures execute the locked proxy and production Bun images. They
 verify file-SDS replacement, full handshakes, exact peer identities, rejected
