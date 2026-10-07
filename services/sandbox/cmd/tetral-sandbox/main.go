@@ -15,7 +15,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 
 	"google.golang.org/grpc"
@@ -103,7 +102,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	store := sandbox.NewPostgreSQLStore(openResult.Client)
-	queueClient := tetralsandbox.WithQueueAcquisition(tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConn)))
+	queueClient := sandboxQueueClient(queueConn)
 	queueStore := queue.NewPostgreSQLStore(openResult.Client)
 	workspaceStore := workspace.NewStore(openResult.RawDatabaseForExcludedStores)
 	executionCoordinator := tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(openResult.Client, cfg.ResourceCredentialRefreshMargin)

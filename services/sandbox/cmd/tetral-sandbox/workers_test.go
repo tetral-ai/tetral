@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,28 +25,42 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	sandbox "github.com/tetral-ai/tetral/services/sandbox"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // This inventory binds each typed registration to its actual production caller,
 // including the context argument. A new or escaped producer cannot disappear
 // behind the shared registry's generic lifecycle tests.
 func TestSandboxCommandWorkerRegistrationInventory(t *testing.T) {
-	expected := map[string]string{
-		"workerQueueNotifications": "notificationLoop", "workerQueueOverLimit": "overLimitLoop",
-		"workerEnvironmentBuild": "EnvironmentBuildJobRunner", "workerOutputCapture": "SandboxOutputCaptureJobRunner",
-		"workerOutputCaptureCleanup": "SandboxOutputCaptureCleanupRunner", "workerOutputCaptureSweep": "SweepExpiredCaptures",
-		"workerToolExecution": "toolExecutionLoop", "workerToolCancel": "SandboxToolCancelJobRunner",
-		"workerBackgroundReconcile": "SandboxBackgroundReconcileJobRunner", "workerBackgroundCommand": "SandboxBackgroundCommandJobRunner",
-		"workerMemoryProjection": "SandboxMemoryProjectionJobRunner", "workerActivation": "SandboxActivationJobRunner",
-		"workerMaterialization": "SandboxMaterializationJobRunner", "workerRelease": "SandboxReleaseJobRunner",
-		"workerEnvironmentReadyFanout": "EnvironmentReadyFanoutJobRunner", "workerResourcePrefixGC": "ResourcePrefixGCRunner",
+	expected := map[string]struct {
+		id       sandboxWorkerID
+		callback string
+	}{
+		"workerQueueNotifications":     {workerQueueNotifications, "notificationLoop"},
+		"workerQueueOverLimit":         {workerQueueOverLimit, "overLimitLoop"},
+		"workerEnvironmentBuild":       {workerEnvironmentBuild, "EnvironmentBuildJobRunner"},
+		"workerOutputCapture":          {workerOutputCapture, "SandboxOutputCaptureJobRunner"},
+		"workerOutputCaptureCleanup":   {workerOutputCaptureCleanup, "SandboxOutputCaptureCleanupRunner"},
+		"workerOutputCaptureSweep":     {workerOutputCaptureSweep, "SweepExpiredCaptures"},
+		"workerToolExecution":          {workerToolExecution, "toolExecutionLoop"},
+		"workerToolCancel":             {workerToolCancel, "SandboxToolCancelJobRunner"},
+		"workerBackgroundReconcile":    {workerBackgroundReconcile, "SandboxBackgroundReconcileJobRunner"},
+		"workerBackgroundCommand":      {workerBackgroundCommand, "SandboxBackgroundCommandJobRunner"},
+		"workerMemoryProjection":       {workerMemoryProjection, "SandboxMemoryProjectionJobRunner"},
+		"workerActivation":             {workerActivation, "SandboxActivationJobRunner"},
+		"workerMaterialization":        {workerMaterialization, "SandboxMaterializationJobRunner"},
+		"workerRelease":                {workerRelease, "SandboxReleaseJobRunner"},
+		"workerEnvironmentReadyFanout": {workerEnvironmentReadyFanout, "EnvironmentReadyFanoutJobRunner"},
+		"workerResourcePrefixGC":       {workerResourcePrefixGC, "ResourcePrefixGCRunner"},
 	}
 	source, err := parser.ParseFile(token.NewFileSet(), "worker_assembly.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	protectedQueue := false
 	ast.Inspect(source, func(node ast.Node) bool {
 		if statement, ok := node.(*ast.GoStmt); ok {
 			joined := false
@@ -57,17 +72,6 @@ func TestSandboxCommandWorkerRegistrationInventory(t *testing.T) {
 			})
 			if !joined {
 				t.Fatal("command producer escaped registered worker join")
-			}
-		}
-		if assignment, ok := node.(*ast.AssignStmt); ok {
-			for i, lhs := range assignment.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == "queueClient" && i < len(assignment.Rhs) {
-					if call, ok := assignment.Rhs[i].(*ast.CallExpr); ok {
-						if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "WithQueueAcquisition" {
-							protectedQueue = true
-						}
-					}
-				}
 			}
 		}
 		call, ok := node.(*ast.CallExpr)
@@ -96,10 +100,11 @@ func TestSandboxCommandWorkerRegistrationInventory(t *testing.T) {
 		if !ok {
 			t.Fatal("worker ID is not typed")
 		}
-		symbol, known := expected[id.Name]
+		registration, known := expected[id.Name]
 		if !known || seen[id.Name] {
 			t.Fatalf("unknown/duplicate registration %s", id.Name)
 		}
+		symbol := registration.callback
 		seen[id.Name] = true
 		callback, ok := call.Args[1].(*ast.FuncLit)
 		if !ok || len(callback.Type.Params.List) != 1 || callback.Type.Params.List[0].Names[0].Name != "workerCtx" {
@@ -138,18 +143,126 @@ func TestSandboxCommandWorkerRegistrationInventory(t *testing.T) {
 		if !found || !contextOwned {
 			t.Fatalf("%s lost production callback %s/context", id.Name, symbol)
 		}
+		class, cataloged := sandboxWorkerCatalog[registration.id]
+		if !cataloged {
+			t.Fatalf("%s is not in the worker catalog", id.Name)
+		}
+		if class == workerConsumer && !consumerUsesSharedQueueClient(t, id.Name, callback) {
+			t.Fatalf("%s does not lease through the shared acquisition-fenced Queue client", id.Name)
+		}
 		return false
 	})
-	mainSource, err := os.ReadFile("main.go")
+	requireQueueClientWiring(t, source)
+	if len(seen) != len(expected) || len(sandboxWorkerCatalog) != len(expected) {
+		t.Fatalf("worker registration census=%d/%d/%d", len(seen), len(expected), len(sandboxWorkerCatalog))
+	}
+}
+
+// consumerUsesSharedQueueClient requires every Queue reference in one consumer
+// registration to be the builder's local queueClient, with at least one reference.
+func consumerUsesSharedQueueClient(t *testing.T, worker string, callback *ast.FuncLit) bool {
+	t.Helper()
+	references := 0
+	ast.Inspect(callback.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.KeyValueExpr:
+			if key, ok := node.Key.(*ast.Ident); ok && key.Name == "Queue" {
+				if value, ok := node.Value.(*ast.Ident); !ok || value.Name != "queueClient" {
+					t.Fatalf("%s Queue field bypasses the shared client", worker)
+				}
+				references++
+			}
+		case *ast.CallExpr:
+			if selector, ok := node.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "toolExecutionLoop" {
+				if len(node.Args) < 6 {
+					t.Fatalf("%s tool execution loop lost its Queue argument", worker)
+				}
+				if value, ok := node.Args[5].(*ast.Ident); !ok || value.Name != "queueClient" {
+					t.Fatalf("%s tool execution loop bypasses the shared client", worker)
+				}
+				references++
+			}
+		}
+		return true
+	})
+	return references > 0
+}
+
+// requireQueueClientWiring binds the builder's local queueClient to the dependency
+// field and the command's only queueClient to the production constructor.
+func requireQueueClientWiring(t *testing.T, assembly *ast.File) {
+	t.Helper()
+	builderBound := false
+	ast.Inspect(assembly, func(n ast.Node) bool {
+		function, ok := n.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "buildSandboxWorkers" {
+			return true
+		}
+		ast.Inspect(function.Body, func(n ast.Node) bool {
+			assignment, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for index, lhs := range assignment.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "queueClient" && index < len(assignment.Rhs) {
+					value, ok := assignment.Rhs[index].(*ast.SelectorExpr)
+					if !ok || value.Sel.Name != "queueClient" {
+						t.Fatal("worker builder queueClient is not the dependency's client")
+					}
+					if owner, ok := value.X.(*ast.Ident); !ok || owner.Name != "d" {
+						t.Fatal("worker builder queueClient is not the dependency's client")
+					}
+					builderBound = true
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if !builderBound {
+		t.Fatal("worker builder lost its queueClient binding")
+	}
+	command, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(mainSource), "tetralsandbox.WithQueueAcquisition(") || !strings.Contains(string(mainSource), "launchSandboxWorkers(") {
-		t.Fatal("command lost acquisition fence or production launcher")
-	}
-	_ = protectedQueue
-	if len(seen) != len(expected) || len(sandboxWorkerCatalog) != len(expected) {
-		t.Fatalf("worker registration census=%d/%d/%d", len(seen), len(expected), len(sandboxWorkerCatalog))
+	constructed, passed := 0, 0
+	ast.Inspect(command, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for index, lhs := range node.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "queueClient" {
+					call, ok := node.Rhs[index].(*ast.CallExpr)
+					if !ok {
+						t.Fatal("command queueClient is not constructed by sandboxQueueClient")
+					}
+					if callee, ok := call.Fun.(*ast.Ident); !ok || callee.Name != "sandboxQueueClient" {
+						t.Fatal("command queueClient is not constructed by sandboxQueueClient")
+					}
+					constructed++
+				}
+			}
+		case *ast.CompositeLit:
+			if typeName, ok := node.Type.(*ast.Ident); !ok || typeName.Name != "sandboxWorkerDependencies" {
+				return true
+			}
+			for _, element := range node.Elts {
+				field, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := field.Key.(*ast.Ident); ok && key.Name == "queueClient" {
+					if value, ok := field.Value.(*ast.Ident); !ok || value.Name != "queueClient" {
+						t.Fatal("command passes another Queue client to the workers")
+					}
+					passed++
+				}
+			}
+		}
+		return true
+	})
+	if constructed != 1 || passed != 1 {
+		t.Fatalf("command Queue client constructions=%d worker dependencies=%d; want 1/1", constructed, passed)
 	}
 }
 
@@ -228,63 +341,82 @@ func TestSandboxRegisteredWorkersDrainAndJoin(t *testing.T) {
 	}
 }
 
-type registryLateQueue struct {
-	sandbox.SandboxQueueClient
-	entered, reply chan struct{}
-	deferred       *queuev1.DeferRequest
-	workCancelled  bool
+// lateLeaseQueue is an in-process Queue server: Lease returns one leased job and
+// Defer records the exact capability it receives.
+type lateLeaseQueue struct {
+	queuev1.UnimplementedQueueServiceServer
+	deferred      chan *queuev1.DeferRequest
+	workCancelled atomic.Bool
 }
 
-func (q *registryLateQueue) Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
-	close(q.entered)
-	<-q.reply
+func (q *lateLeaseQueue) Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
 	return &queuev1.LeaseResponse{Jobs: []*queuev1.QueueJob{{Id: "late_job", WorkspaceId: "default", LeaseToken: "exact_lease"}}}, nil
 }
-func (q *registryLateQueue) Defer(ctx context.Context, r *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
-	q.deferred = r
-	q.workCancelled = ctx.Err() != nil
+
+func (q *lateLeaseQueue) Defer(ctx context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
+	q.workCancelled.Store(ctx.Err() != nil)
+	q.deferred <- request
 	return &queuev1.TransitionResponse{Updated: true}, nil
 }
-func TestSandboxRegisteredConsumersReturnLateLease(t *testing.T) {
-	for id, class := range sandboxWorkerCatalog {
-		if class != workerConsumer {
-			continue
-		}
-		t.Run(string(id), func(t *testing.T) {
-			acquire, quiesce := context.WithCancel(context.Background())
-			defer quiesce()
-			work, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			work = sandbox.WithAcquisitionContext(work, acquire)
-			registry := newSandboxWorkerRegistry()
-			registerOtherWorkers(registry, id)
-			raw := &registryLateQueue{entered: make(chan struct{}), reply: make(chan struct{})}
-			client := sandbox.WithQueueAcquisition(raw)
-			result := make(chan error, 1)
-			registry.register(id, func(ctx context.Context) {
-				response, err := client.Lease(ctx, &queuev1.LeaseRequest{})
-				if len(response.GetJobs()) != 0 || !errors.Is(err, context.Canceled) {
-					result <- errors.New("late lease escaped admission")
-				} else {
-					result <- nil
-				}
-			})
-			done, err := registry.start(work, acquire)
-			if err != nil {
-				t.Fatal(err)
-			}
-			<-raw.entered
-			quiesce()
-			close(raw.reply)
-			if err := <-result; err != nil {
-				t.Fatal(err)
-			}
-			if raw.deferred == nil || raw.deferred.GetWorkspaceId() != "default" || raw.deferred.GetJobId() != "late_job" || raw.deferred.GetLeaseToken() != "exact_lease" || raw.workCancelled {
-				t.Fatalf("exact capability disposition=%v work_cancelled=%t", raw.deferred, raw.workCancelled)
-			}
-			cancel()
-			<-done
-		})
+
+// lateReplyConn holds a received Lease reply at a barrier, modeling a reply that
+// Queue committed and delivered as acquisition closes.
+type lateReplyConn struct {
+	grpc.ClientConnInterface
+	received, release chan struct{}
+}
+
+func (c *lateReplyConn) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
+	err := c.ClientConnInterface.Invoke(ctx, method, args, reply, opts...)
+	if method == queuev1.QueueService_Lease_FullMethodName {
+		close(c.received)
+		<-c.release
+	}
+	return err
+}
+
+func TestSandboxQueueClientDefersLateLease(t *testing.T) {
+	listener := bufconn.Listen(1 << 20)
+	server := grpc.NewServer()
+	fake := &lateLeaseQueue{deferred: make(chan *queuev1.DeferRequest, 1)}
+	queuev1.RegisterQueueServiceServer(server, fake)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); <-served })
+	conn, err := grpc.NewClient("passthrough:///queue", grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		return listener.DialContext(ctx)
+	}), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	barrier := &lateReplyConn{ClientConnInterface: conn, received: make(chan struct{}), release: make(chan struct{})}
+	client := sandboxQueueClient(barrier)
+
+	acquire, quiesce := context.WithCancel(context.Background())
+	defer quiesce()
+	work, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	work = sandbox.WithAcquisitionContext(work, acquire)
+	type leaseOutcome struct {
+		response *queuev1.LeaseResponse
+		err      error
+	}
+	result := make(chan leaseOutcome, 1)
+	go func() {
+		response, err := client.Lease(work, &queuev1.LeaseRequest{WorkspaceId: "default"})
+		result <- leaseOutcome{response, err}
+	}()
+	<-barrier.received
+	quiesce()
+	close(barrier.release)
+	outcome := <-result
+	if len(outcome.response.GetJobs()) != 0 || !errors.Is(outcome.err, context.Canceled) {
+		t.Fatalf("late lease escaped admission: jobs=%d err=%v", len(outcome.response.GetJobs()), outcome.err)
+	}
+	deferred := <-fake.deferred
+	if deferred.GetWorkspaceId() != "default" || deferred.GetJobId() != "late_job" || deferred.GetLeaseToken() != "exact_lease" || fake.workCancelled.Load() {
+		t.Fatalf("exact capability disposition=%v work_cancelled=%t", deferred, fake.workCancelled.Load())
 	}
 }
 

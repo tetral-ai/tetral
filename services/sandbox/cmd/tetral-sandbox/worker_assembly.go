@@ -9,7 +9,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
+
+	"google.golang.org/grpc"
 )
 
 // Loop entries are owning dependencies. The production builder below is also
@@ -51,6 +54,13 @@ type sandboxWorkerDependencies struct {
 	workerPool             *tetralsandbox.WorkspaceConsumerPool
 	queueWake              *queue.WakeSignal
 	logger                 *slog.Logger
+}
+
+// sandboxQueueClient builds the one Queue client every registered consumer uses. The
+// acquisition wrapper closes Lease admission at quiesce and returns a late lease's exact
+// capabilities instead of starting its jobs.
+func sandboxQueueClient(conn grpc.ClientConnInterface) tetralsandbox.SandboxQueueClient {
+	return tetralsandbox.WithQueueAcquisition(tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(conn)))
 }
 
 func launchSandboxWorkers(work, acquisition context.Context, d sandboxWorkerDependencies) (<-chan struct{}, error) {
