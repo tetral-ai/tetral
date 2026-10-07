@@ -1,13 +1,14 @@
 package testinfra
 
 import (
-	"context"
-	"os/exec"
 	"slices"
 	"testing"
-	"time"
 )
 
+// TestConfigurationProjectionProfilesDeclareBunWorkspaceDependency keeps the
+// startup parser root's workspace declaration and Affected closure;
+// TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards asserts its Fast
+// exclusion and its placement in exactly one Full race shard.
 func TestConfigurationProjectionProfilesDeclareBunWorkspaceDependency(t *testing.T) {
 	const packageName = "github.com/tetral-ai/tetral/deploy/helm"
 	const runnable = "TestConfigurationOperationalProjectionUsesOwningParsers"
@@ -27,59 +28,6 @@ func TestConfigurationProjectionProfilesDeclareBunWorkspaceDependency(t *testing
 	}
 	if declarations != 1 {
 		t.Fatal("actual cross-language parser root needs one explicit workspace contract")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "go", "list", "-json", "./deploy/helm")
-	command.Dir = root
-	output, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pkg listedPackage
-	if err := decodeOnePackage(output, &pkg); err != nil {
-		t.Fatal(err)
-	}
-	included, excluded, err := noInfrastructureTests(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(included, runnable) {
-		t.Fatal("Fast must compile but not run Bun-dependent startup parser root")
-	}
-	accounted := 0
-	for _, item := range excluded {
-		if item.Runnable == runnable {
-			accounted++
-			if !slices.Contains(append([]string{item.Capability}, item.Capabilities...), "bun-workspaces") {
-				t.Fatal("Fast exclusion lost workspace capability")
-			}
-		}
-	}
-	if accounted != 1 {
-		t.Fatal("Fast must account for the excluded real parser root exactly once")
-	}
-	full, _, err := fullGoSelections(root, "configuration startup parser contract")
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for index := 0; index < 4; index++ {
-		shard, err := SelectPlan(Plan{Profile: ProfileFull, Selections: full}, []string{"go"}, index, 4)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, selection := range shard.Selections {
-			if slices.Contains(selection.Packages, packageName) && slices.Contains(selection.Tests, runnable) {
-				count++
-				if !slices.Contains(selection.Dependencies, "bun-workspaces") || !slices.Contains(shard.Dependencies, "bun-workspaces") {
-					t.Fatal("Full native shard lacks clean-workspace prerequisite")
-				}
-			}
-		}
-	}
-	if count != 1 {
-		t.Fatalf("Full shards select actual startup parser root %d times", count)
 	}
 	revision := Revision{ChangedPaths: []string{"deploy/helm/configuration_projection_test.go"}}
 	affected, err := affectedSelections(root, inventory, &revision)
