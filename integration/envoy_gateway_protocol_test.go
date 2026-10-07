@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/testinfra"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -41,8 +42,9 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				signer := transporttest.Must(auth.NewInternalPrincipalSignerFromBase64(private))
 				handler := transporttest.Must(authservice.BuildRouter(ctx, authservice.RouterBuildConfig{RawDatabase: authDB, Config: authservice.Config{BootstrapAPIKey: key, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: private, InternalPrincipalTTL: time.Minute}}))
 				adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: time.Minute}))
-				ports := envoyGatewayFixturePorts{HTTP: edgeFixturePort(t), HTTPS: edgeFixturePort(t), Ready: edgeFixturePort(t), Admin: edgeFixturePort(t), Stats: edgeFixturePort(t)}
+				ports, releasePorts := reserveEnvoyGatewayFixturePorts(t)
 				fixture := translateProductionEnvoyGateway(t, profile, ports)
+				fixture.ReleasePorts = releasePorts
 				joinCheck := startEnvoyGatewayAuthCheck(ctx, t, fixture, profile, adapter)
 				var authRequests, apiRequests, eventRequests, gitRequests atomic.Int64
 				var lastAuthPath atomic.Pointer[string]
@@ -343,12 +345,18 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 	})
 }
 
-func edgeFixturePort(t *testing.T) int {
+// reserveEnvoyGatewayFixturePorts holds the five host-network Envoy ports from
+// translation until the Envoy container dispatch, so concurrent tests cannot
+// take them in between. The returned release is idempotent and also registered
+// for cleanup.
+func reserveEnvoyGatewayFixturePorts(t *testing.T) (envoyGatewayFixturePorts, func()) {
 	t.Helper()
-	listener := transporttest.Must(net.Listen("tcp", "127.0.0.1:0"))
-	port := listener.Addr().(*net.TCPAddr).Port
-	_ = listener.Close()
-	return port
+	bindings, release, err := testinfra.ReserveLoopbackPorts(1, 2, 3, 4, 5)
+	if err != nil {
+		t.Fatal("reserve Envoy fixture loopback ports")
+	}
+	t.Cleanup(release)
+	return envoyGatewayFixturePorts{HTTP: bindings[1], HTTPS: bindings[2], Ready: bindings[3], Admin: bindings[4], Stats: bindings[5]}, release
 }
 func projectEdgeBackendCredentials(t *testing.T, directory string, fixture *envoyGatewayTranslation, role string) {
 	t.Helper()
@@ -499,7 +507,7 @@ func startEnvoyGatewayProxy(ctx context.Context, t *testing.T, fixture *envoyGat
 		t.Cleanup(func() { _ = listener.Close() })
 		xdsListeners = append(xdsListeners, listener)
 	}
-	fixture.Control = serveTranslatedEnvoy(ctx, t, fixture.Snapshot, xdsListeners, controlTLS, processDirectory, "tetral-local-official-snapshot", fixture.ProcessDrainArgs...)
+	fixture.Control = serveTranslatedEnvoy(ctx, t, fixture.Snapshot, xdsListeners, controlTLS, processDirectory, "tetral-local-official-snapshot", fixture.ReleasePorts, fixture.ProcessDrainArgs...)
 }
 
 func edgeSafeErrorKind(body map[string]any) string {

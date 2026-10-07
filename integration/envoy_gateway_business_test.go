@@ -76,10 +76,11 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		t.Cleanup(cancel)
 		edge.ctx = ctx
-		ports := envoyGatewayFixturePorts{HTTP: edgeFixturePort(t), HTTPS: edgeFixturePort(t), Ready: edgeFixturePort(t), Admin: edgeFixturePort(t), Stats: edgeFixturePort(t)}
+		ports, releasePorts := reserveEnvoyGatewayFixturePorts(t)
 		// api.localhost is an explicit concrete API hostname. The SDK
 		// uses normal DNS and full CA/hostname verification without URL rewriting.
 		fixture := translateProductionEnvoyGatewayHosts(t, profile, ports, "api.localhost", "git.localhost")
+		fixture.ReleasePorts = releasePorts
 		edge.fixture = fixture
 		if edge.lifecycle != nil {
 			edge.lifecycle.bind(ctx, fixture, profile)

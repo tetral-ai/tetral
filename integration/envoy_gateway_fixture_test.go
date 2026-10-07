@@ -281,7 +281,9 @@ func requireConfinedEnvoyListeners(t *testing.T, snapshot *translatedEnvoySnapsh
 	return result
 }
 
-func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *translatedEnvoySnapshot, xdsListeners []net.Listener, xdsTLS *tls.Config, directory, nodeID string, drainArgs ...string) *translatedEnvoyControl {
+// releasePorts, when non-nil, frees the caller's reserved host ports
+// immediately before the host-network Envoy container is dispatched.
+func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *translatedEnvoySnapshot, xdsListeners []net.Listener, xdsTLS *tls.Config, directory, nodeID string, releasePorts func(), drainArgs ...string) *translatedEnvoyControl {
 	t.Helper()
 	sockets := requireConfinedEnvoyListeners(t, snapshot)
 	deadline, ok := ownerCtx.Deadline()
@@ -354,6 +356,9 @@ func serveTranslatedEnvoy(ownerCtx context.Context, t *testing.T, snapshot *tran
 			t.Fatal("selected upstream process drain arguments differ")
 		}
 		arguments = append(arguments, drainArgs...)
+	}
+	if releasePorts != nil {
+		releasePorts()
 	}
 	container, err := resources.Run(ctx, testinfra.ContainerSpec{HostNetwork: true, ExtraHosts: map[string]string{"envoy-gateway": "127.0.0.1"}, Image: image, User: "0", Entrypoint: "/usr/local/bin/envoy", Mounts: []testinfra.DockerMount{{Source: directory, Target: "/fixture", ReadOnly: true}, {Source: filepath.Join(directory, "sds"), Target: "/sds", ReadOnly: true}}, Command: arguments})
 	if err != nil {

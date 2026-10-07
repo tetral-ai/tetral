@@ -36,6 +36,10 @@ type envoyGatewayTranslation struct {
 	Directory        string
 	Control          *translatedEnvoyControl
 	ProcessDrainArgs []string
+	// ReleasePorts, when set by the caller that reserved Ports, frees the held
+	// loopback ports immediately before the Envoy container dispatch. It is
+	// idempotent, so later Envoy generations rebind the same ports unchanged.
+	ReleasePorts func()
 }
 
 func translateProductionEnvoyGateway(t *testing.T, profile string, ports envoyGatewayFixturePorts) *envoyGatewayTranslation {
