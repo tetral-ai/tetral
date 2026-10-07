@@ -3,10 +3,13 @@ namespaces:
 
 # Where Tetral's dependencies live is a property of the cluster, not of
 # Tetral, so every such location is a value here rather than a literal in
-# a template: the API server, the database, the ingress controller, the
-# DNS service, and the outbound-HTTPS allowance. The defaults reproduce
-# the canonical manifests, so a cluster shaped like the kubeadm default
-# needs none of them. Each peer list is a plain NetworkPolicy peer list
+# a template: the API server, the database, the public edge data plane
+# (publicIngressPeers), the DNS service, and the outbound-HTTPS allowance.
+# The defaults reproduce the canonical manifests and are illustrative. With
+# Cilium disabled, apiServerPeers and apiServerPort must name the API server
+# endpoint that NetworkPolicy evaluates after Service translation - typically
+# the control-plane endpoint addresses and their port, not the kubernetes
+# ClusterIP 10.96.0.1:443. Each peer list is a plain NetworkPolicy peer list
 # and accepts every peer shape that API allows - except
 # ciliumDNSEndpointSelectors, which is a Cilium endpoint selector and
 # uses Cilium's own label syntax.
@@ -49,9 +52,11 @@ network:
     - matchLabels:
         k8s:io.kubernetes.pod.namespace: kube-system
         k8s:k8s-app: kube-dns
-  # Outbound HTTPS for the five workloads that call third-party APIs (model
-  # providers, the sandbox provider, blob storage, the web reader, and
-  # git-proxy). The default is unrestricted because those endpoints are
+  # Outbound HTTPS for the workloads that call operator-selected endpoints:
+  # API, Bridge, Job Runner and Web Connector blob storage; the Sandbox
+  # provider and blob storage; Provider Gateway model providers; MCP
+  # Connector remote MCP servers; Web Connector search and reader; and the
+  # git-proxy upstream. The default is unrestricted because those endpoints are
   # operator-chosen and resolve dynamically. NetworkPolicy is a union of
   # allows, so this cannot be narrowed by adding another policy - a deployment
   # that requires an egress gateway or a fixed provider range narrows it here.

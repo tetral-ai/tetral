@@ -194,16 +194,18 @@ The chart parameterizes only axes already present in the canonical manifests:
   exactly, and an empty list is refused at render time: Kubernetes reads an
   empty peer list as "match everything", so emptying one widens the policy
   instead of narrowing it.
-  - `apiServerPeers` and `apiServerPort` — the example `10.96.0.1/32`, in six ordinary
-    NetworkPolicies. Runtime, Bridge, Provider Gateway, MCP and Web call
-    TokenReview for inbound bearer authentication; Job Runner uses the API
-    only for Runtime Pod and EndpointSlice visibility. Missing bearer
-    credentials are rejected
-    before TokenReview, and health endpoints do not use it. A non-Cilium
-    cluster whose service CIDR differs must override this value; the failure
-    surfaces as stalled work, not as a failed install. On Cilium, the six
-    entity policies described in prerequisite 3 carry this path instead;
-    `apiServerPeers` remains the non-Cilium fallback.
+  - `apiServerPeers` and `apiServerPort` — illustrative defaults
+    `10.96.0.1/32` and `443`, in six ordinary NetworkPolicies. Runtime,
+    Bridge, Provider Gateway, MCP and Web call TokenReview for inbound bearer
+    authentication; Job Runner uses the API only for Runtime Pod and
+    EndpointSlice visibility. Missing bearer credentials are rejected before
+    TokenReview, and health endpoints do not use it. With Cilium disabled,
+    standard NetworkPolicy evaluates the API server endpoint after Service
+    translation, so set these values to that endpoint, typically the
+    control-plane endpoint addresses and their port rather than the
+    `kubernetes` ClusterIP; see prerequisite 3. A mismatch surfaces as stalled
+    work, not as a failed install. On Cilium, the six entity policies
+    described in prerequisite 3 carry this path instead.
   - `databasePeers` and `databasePort` — the in-cluster database pod label and
     `5432`, in eleven policies. The port must match the DSN in the Secrets;
     managed PostgreSQL often listens elsewhere, and a pooler in front of it
@@ -211,8 +213,8 @@ The chart parameterizes only axes already present in the canonical manifests:
   - `publicIngressPeers` — the labelled ingress namespace, in four policies.
     An edge that is not a pod, such as a cloud load balancer, is admitted by
     replacing this with the peer that describes it.
-  - `dnsPeers` — `kube-system` plus `k8s-app=kube-dns`, in ten ordinary
-    NetworkPolicies, and
+  - `dnsPeers` — `kube-system` plus `k8s-app=kube-dns`, in every workload
+    NetworkPolicy, and
     `ciliumDNSEndpointSelectors` — the same dependency for the opt-in
     git-proxy FQDN policy. When `cilium.gitProxyFQDNPolicy=true`, that policy
     carries the L7 DNS rule that teaches Cilium the addresses behind its
@@ -221,18 +223,21 @@ The chart parameterizes only axes already present in the canonical manifests:
     the host network: an `ipBlock` for the link-local address expresses it
     under some CNIs and not under others.
   - `externalEgressPeers` and `externalEgressPorts` — outbound traffic for the
-    five workloads that reach
-    third-party APIs, unrestricted by default because those endpoints are
-    operator-chosen and resolve dynamically, on port 443 by default. If a
-    provider, sandbox, blob, or web endpoint URL carries an explicit port,
-    list it in `externalEgressPorts`. NetworkPolicy is a union of allows, so a
+    workloads that reach operator-selected endpoints: API, Bridge, Job Runner
+    and Web Connector blob storage; the Sandbox provider and blob storage;
+    Provider Gateway model providers; MCP Connector remote MCP servers; Web
+    Connector search and reader; and the git-proxy upstream. It is
+    unrestricted by default because those endpoints are operator-chosen and
+    resolve dynamically, on port 443 by default. If a provider, sandbox, blob,
+    MCP server or web endpoint URL carries an explicit port, list it in
+    `externalEgressPorts`. NetworkPolicy is a union of allows, so a
     deployment that requires an egress gateway or a fixed provider range
     narrows the peer list here; adding a second, tighter policy cannot revoke
     what this one permits.
 - `observability.deploymentEnvironment` and
-  `observability.serviceVersion` drive all eleven container sites.
+  `observability.serviceVersion` drive every workload container.
 - `resources.*` carries the thirteen workload-container request/limit blocks.
-  The other five `resources:` mappings in the canonical YAML are fixed RBAC
+  The remaining `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
   them.
 - `cilium.enabled` controls the six API-server Cilium objects.

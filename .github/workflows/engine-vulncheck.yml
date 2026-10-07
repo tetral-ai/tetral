@@ -3,8 +3,10 @@ name: engine-vulncheck
 # Go dependency vulnerabilities track upstream advisories, not pull requests: a
 # change to this repository cannot introduce one unless it changes the module
 # graph, and an advisory published tomorrow applies to code that merged last
-# week. Pull requests therefore run this gate only when go.mod/go.sum (or this
-# workflow) change, and the daily schedule reports new advisories when they
+# week. Pull requests therefore run this gate only when the Go module graph
+# (go.mod/go.sum), the test-only Envoy Gateway secret-helper module,
+# scripts/check-envoy-secret-helper.py, deploy/dependencies.lock.json or this
+# workflow change, and the daily schedule reports new advisories when they
 # actually appear.
 #
 # Why the scan is split: symbol-level analysis of the whole repository peaks
