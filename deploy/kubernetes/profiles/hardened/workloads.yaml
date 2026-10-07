@@ -2372,8 +2372,6 @@ spec:
               value: "40000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "hardened"
             - name: TETRAL_ROUTING_PROXY_REQUIRED
               value: "true"
             - name: TETRAL_BRIDGE_API_HTTP_ADDR
@@ -2968,10 +2966,6 @@ spec:
               value: "30000"
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "hardened"
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
             - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9091
             - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR
@@ -3127,10 +3121,6 @@ spec:
               value: "30000"
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "hardened"
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
             - name: TETRAL_PROVIDER_GATEWAY_HTTP_ADDR
               value: 0.0.0.0:8080
             - name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR
@@ -3285,8 +3275,6 @@ spec:
               value: "5000"
             - name: TETRAL_TRANSPORT_PROFILE
               value: "hardened"
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
             - name: TETRAL_QUEUE_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:
@@ -3430,8 +3418,6 @@ spec:
               value: "30000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "hardened"
             - name: TETRAL_ROUTING_PROXY_REQUIRED
               value: "true"
             - name: TETRAL_SANDBOX_HTTP_ADDR
@@ -3696,10 +3682,6 @@ spec:
               value: "10000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "hardened"
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9092
             - name: TETRAL_WEB_CONNECTOR_METRICS_ADDR

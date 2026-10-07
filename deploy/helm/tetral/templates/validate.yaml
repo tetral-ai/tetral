@@ -44,8 +44,6 @@ that silently permits more than the default did.
 {{- if not (kindIs "bool" .Values.autoscaling.providerGateway.enabled) }}
 {{- fail "autoscaling.providerGateway.enabled must be a boolean." }}
 {{- end }}
-{{- if ne .Values.routing.enabled true }}{{ fail "routing.enabled must be true: internal Istiod/Envoy routing is mandatory" }}{{ end }}
-{{- if ne .Values.routing.version "1.31.1" }}{{ fail "routing.version must match the locked Istio release 1.31.1" }}{{ end }}
 {{- if ne .Values.routing.revision "1-31-1" }}{{ fail "routing.revision must match the locked Istio revision" }}{{ end }}
 {{- if not (has .Values.transport.profile (list "standard-routed" "hardened")) }}{{ fail "transport.profile must be standard-routed or hardened" }}{{ end }}
 {{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" .Values.routing.trustDomain) }}{{ fail "routing.trustDomain must be a concrete DNS trust domain" }}{{ end }}

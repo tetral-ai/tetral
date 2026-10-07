@@ -77,10 +77,6 @@ spec:
               value: {{ .Values.lifecycle.cancelJoinMs | quote }}
             - name: TETRAL_TRANSPORT_PROFILE
               value: {{ .Values.transport.profile | quote }}
-{{- if eq .Values.transport.profile "hardened" }}
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
-{{- end }}
             - name: TETRAL_QUEUE_HTTP_ADDR
               valueFrom:
                 configMapKeyRef:

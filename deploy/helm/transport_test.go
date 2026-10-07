@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,9 +224,33 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 						t.Fatalf("mandatory%s annotation%s=%v", role, k, annotations[k])
 					}
 				}
-				env := transportEnv(t, d)
-				if env["TETRAL_ROUTING_PROXY_REQUIRED"] != "true" || env["TETRAL_TRANSPORT_PROFILE"] != profile {
-					t.Fatalf("mandatory proxy startup setting missing for%s", role)
+			}
+			// The native routing sidecar orders every routed application after
+			// its proxy. Startup keys go only to the processes that read them.
+			startupKeys := map[string]string{"TETRAL_TRANSPORT_PROFILE": profile, "TETRAL_ROUTING_PROXY_REQUIRED": "true"}
+			for role, consumed := range map[string][]string{
+				"agent-runtime":    {"TETRAL_TRANSPORT_PROFILE", "TETRAL_ROUTING_PROXY_REQUIRED"},
+				"job-runner":       {"TETRAL_TRANSPORT_PROFILE", "TETRAL_ROUTING_PROXY_REQUIRED"},
+				"queue":            {"TETRAL_TRANSPORT_PROFILE"},
+				"bridge":           {"TETRAL_ROUTING_PROXY_REQUIRED"},
+				"sandbox":          {"TETRAL_ROUTING_PROXY_REQUIRED"},
+				"provider-gateway": nil,
+				"mcp-connector":    nil,
+				"web-connector":    nil,
+			} {
+				ns := "tetral-system"
+				if role == "agent-runtime" {
+					ns = "tetral-agent-runtime"
+				}
+				env := transportEnv(t, objects["apps/v1|Deployment|"+ns+"|"+role])
+				for key, want := range startupKeys {
+					value, present := env[key]
+					switch {
+					case slices.Contains(consumed, key) && value != want:
+						t.Fatalf("%s startup setting %s=%q want %q", role, key, value, want)
+					case !slices.Contains(consumed, key) && present:
+						t.Fatalf("%s receives %s, which it does not read", role, key)
+					}
 				}
 			}
 			if profile == "standard-routed" {
@@ -262,7 +287,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []string{"routing.enabled=false", "routing.version=1.30.0", "transport.profile=plain", "transport.databaseServerName="} {
+	for _, bad := range []string{"routing.revision=1-30-0", "transport.profile=plain", "transport.databaseServerName="} {
 		requireRenderError(t, helm, chart, []string{bad})
 	}
 }

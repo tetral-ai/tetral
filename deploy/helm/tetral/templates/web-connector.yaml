@@ -69,12 +69,6 @@ spec:
               value: {{ .Values.lifecycle.webDrainMs | quote }}
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.cancelJoinMs | quote }}
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: {{ .Values.transport.profile | quote }}
-{{- if eq .Values.transport.profile "hardened" }}
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
-{{- end }}
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9092
             - name: TETRAL_WEB_CONNECTOR_METRICS_ADDR

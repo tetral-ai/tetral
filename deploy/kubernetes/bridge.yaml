@@ -74,8 +74,6 @@ spec:
               value: "40000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "standard-routed"
             - name: TETRAL_ROUTING_PROXY_REQUIRED
               value: "true"
             - name: TETRAL_BRIDGE_API_HTTP_ADDR

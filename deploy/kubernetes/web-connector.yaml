@@ -64,8 +64,6 @@ spec:
               value: "10000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "standard-routed"
             - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9092
             - name: TETRAL_WEB_CONNECTOR_METRICS_ADDR

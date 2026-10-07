@@ -428,6 +428,11 @@ of the other workloads. The external cache bucket still requires its enabled
 seven-day expiry lifecycle rule. The deployment contract and denied-access
 controls live in `deploy/kubernetes/separated_workloads_test.go`.
 
+Web Connector has a routing sidecar only in the hardened transport profile,
+where its receiver proxy is injected as a Kubernetes native sidecar and
+therefore starts before the application. The command has no proxy wait of its
+own and reads no transport-profile setting.
+
 ## Process diagnostics
 
 The command follows the shared [Go process diagnostic contract](../../internal/workload/README.md#diagnostics)

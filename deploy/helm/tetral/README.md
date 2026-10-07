@@ -371,7 +371,8 @@ credential paths, RBAC and NetworkPolicy peers, including denied inherited acces
 ## Internal routing and protected stores
 
 Install the [locked Istiod prerequisite](../../istio/README.md) before workloads.
-`routing.enabled=false` and mismatched release/revision values are rejected.
+Internal routing is not a chart option: the chart fixes the locked Istio release,
+and a `routing.revision` other than the locked revision is rejected.
 Runtime, Runner, Bridge, Sandbox, Provider Gateway and MCP Connector always
 receive the locked proxy. Hardened mode also gives Queue and Web receiver
 proxies. Source/destination route scopes are generated from

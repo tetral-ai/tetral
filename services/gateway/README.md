@@ -956,6 +956,12 @@ execution likewise admits only Runtime. Provider Gateway has only the Bridge
 attachment methods; MCP has only the Bridge manifest and result methods.
 Configuration changes require a process restart.
 
+Provider Gateway and MCP Connector always run beside the mandatory routing
+sidecar, injected as a Kubernetes native sidecar. Kubernetes starts the
+application container only after that proxy has started, which supplies the
+start-after-proxy ordering; neither command has its own proxy wait or reads a
+transport-profile setting.
+
 ## Process diagnostics and database pools
 
 Provider Gateway and MCP Connector use the shared

@@ -269,10 +269,10 @@ autoscaling:
     enabled: true
     maxReplicas: 10
 
-# Istiod is installed separately; these workload routes are mandatory in both profiles.
+# Istiod is installed separately; these workload routes are mandatory in both
+# profiles and are not a chart option. The revision must equal the locked Istio
+# revision 1-31-1; any other value is rejected.
 routing:
-  enabled: true
-  version: 1.31.1
   revision: 1-31-1
   trustDomain: cluster.local
 transport:

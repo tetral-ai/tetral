@@ -59,10 +59,6 @@ spec:
               value: "30000"
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: "standard-routed"
-            - name: TETRAL_ROUTING_PROXY_REQUIRED
-              value: "true"
             - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
               value: 0.0.0.0:9091
             - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR

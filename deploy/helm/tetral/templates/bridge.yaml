@@ -63,8 +63,6 @@ spec:
               value: {{ .Values.lifecycle.bridgeDrainMs | quote }}
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.cancelJoinMs | quote }}
-            - name: TETRAL_TRANSPORT_PROFILE
-              value: {{ .Values.transport.profile | quote }}
             - name: TETRAL_ROUTING_PROXY_REQUIRED
               value: "true"
             - name: TETRAL_BRIDGE_API_HTTP_ADDR
