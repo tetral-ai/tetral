@@ -54,7 +54,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Logger == nil {
 		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
 	}
-	server, listener, healthServer, err := buildServer(cfg)
+	server, healthServer, err := buildServer(cfg)
+	if err != nil {
+		return err
+	}
+	listener, err := listenerFor(cfg)
 	if err != nil {
 		return err
 	}
@@ -130,6 +134,8 @@ func forceStopAndJoin(server *grpc.Server, cfg Config) error {
 	}
 }
 
+// NewServer builds the authenticated server without binding; the caller serves
+// its own listener. Run is the composition that binds and serves.
 func NewServer(cfg Config) (*grpc.Server, error) {
 	server, _, err := NewServerWithHealth(cfg)
 	return server, err
@@ -137,20 +143,20 @@ func NewServer(cfg Config) (*grpc.Server, error) {
 
 // NewServerWithHealth exposes the readiness owner to services that coordinate
 // admission and resource joins themselves. Health changes before graceful drain.
+// It never binds; the caller serves its own listener.
 func NewServerWithHealth(cfg Config) (*grpc.Server, *health.Server, error) {
-	server, _, readiness, err := buildServer(cfg)
-	return server, readiness, err
+	return buildServer(cfg)
 }
 
-func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error) {
+func buildServer(cfg Config) (*grpc.Server, *health.Server, error) {
 	if cfg.ServiceName == "" {
-		return nil, nil, nil, fmt.Errorf("service name is required")
+		return nil, nil, fmt.Errorf("service name is required")
 	}
 	if cfg.Authenticator == nil {
-		return nil, nil, nil, fmt.Errorf("authenticator is required")
+		return nil, nil, fmt.Errorf("authenticator is required")
 	}
 	if cfg.Register == nil {
-		return nil, nil, nil, fmt.Errorf("registration callback is required")
+		return nil, nil, fmt.Errorf("registration callback is required")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = workload.ComponentLogger(cfg.ServiceName)
@@ -166,23 +172,23 @@ func buildServer(cfg Config) (*grpc.Server, net.Listener, *health.Server, error)
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	healthv1.RegisterHealthServer(server, healthServer)
 	cfg.Register(server)
-	listener := cfg.Listener
-	if listener == nil {
-		listen := cfg.Listen
-		if listen == nil {
-			listen = net.Listen
-		}
-		address := cfg.ListenAddress
-		if address == "" {
-			address = ":9090"
-		}
-		created, err := listen("tcp", address)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		listener = created
+	return server, healthServer, nil
+}
+
+// listenerFor binds only for Run, which serves and closes what it binds.
+func listenerFor(cfg Config) (net.Listener, error) {
+	if cfg.Listener != nil {
+		return cfg.Listener, nil
 	}
-	return server, listener, healthServer, nil
+	listen := cfg.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	address := cfg.ListenAddress
+	if address == "" {
+		address = ":9090"
+	}
+	return listen("tcp", address)
 }
 
 func authUnaryInterceptor(cfg Config) grpc.UnaryServerInterceptor {

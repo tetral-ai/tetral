@@ -59,6 +59,39 @@ func TestInternalGRPCRegistersCallbackAndHealthService(t *testing.T) {
 	}
 }
 
+// Only Run binds: the constructors return a server for a caller-owned listener
+// and never open one that nothing serves or closes.
+func TestInternalGRPCConstructorsNeverBind(t *testing.T) {
+	binds := 0
+	cfg := Config{
+		ServiceName:   "test-service",
+		Authenticator: &allowingAuthenticator{},
+		Register:      func(*grpc.Server) {},
+		Listen: func(network, address string) (net.Listener, error) {
+			binds++
+			return net.Listen(network, "127.0.0.1:0")
+		},
+	}
+	if _, err := NewServer(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewServerWithHealth(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if binds != 0 {
+		t.Fatalf("constructors bound %d listeners", binds)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg.OnServing = cancel
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if binds != 1 {
+		t.Fatalf("Run bound %d listeners; want 1", binds)
+	}
+}
+
 func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 	var buffer bytes.Buffer
 	metrics := workload.NewGRPCMetrics()
