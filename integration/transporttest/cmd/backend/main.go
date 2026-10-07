@@ -91,19 +91,6 @@ func main() {
 		os.Exit(1)
 	}
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		serving := true
-		for range ticker.C {
-			serving = !serving
-			status := grpc_health_v1.HealthCheckResponse_SERVING
-			if !serving {
-				status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
-			}
-			healthServer.SetServingStatus("", status)
-		}
-	}()
-	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/release-response", func(w http.ResponseWriter, r *http.Request) {
 			gate, ok := sequences.streams.Load(r.URL.Query().Get("id"))

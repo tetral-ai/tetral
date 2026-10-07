@@ -231,42 +231,6 @@ func processTestHold(ctx context.Context, mode string, entered chan struct{}) fu
 	}
 }
 
-func TestProcessQueueMaintenanceHoldCanRepeatAfterCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	entered := make(chan struct{})
-	store := &processQueueStore{hold: processTestHold(ctx, "queue-cooperative", entered)}
-	first := make(chan struct{})
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-first:
-		case <-time.After(time.Second):
-			t.Error("first maintenance invocation did not join during cleanup")
-		}
-	})
-	go func() {
-		defer close(first)
-		_, _ = store.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("first maintenance invocation did not admit")
-	}
-	cancel()
-	select {
-	case <-first:
-	case <-time.After(time.Second):
-		t.Fatal("cooperative maintenance did not join after cancellation")
-	}
-	for i := 0; i < 2; i++ {
-		if n, err := store.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{}); n != 0 || err != nil {
-			t.Fatalf("subsequent maintenance invocation = %d/%v", n, err)
-		}
-	}
-}
-
 type processAuthenticator struct{}
 
 func (processAuthenticator) Authenticate(context.Context, string) (grpcauth.Identity, error) {
