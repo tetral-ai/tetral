@@ -35,10 +35,13 @@ Administrative/schema-owner credentials never enter serving workload Secrets.
    connection in `TETRAL_DATABASE_URL`. The bootstrap command preserves an
    existing workspace; Auth never implicitly creates one.
 3. Pipe the explicit federation policy document into `tetral-auth-policy`,
-   using its protected administrative environment. Import follows bootstrap
-   because grants reference existing workspaces. Include trusted issuer URLs,
-   audience, CA roots and any private destination allowlist; configure Auth's
-   corresponding explicit HTTPS NetworkPolicy destinations independently.
+   using its protected administrative environment; the release image ships
+   the command, and the bootstrap guide gives its
+   [in-cluster invocation](../../docs/bootstrap.md#5-import-the-declared-auth-policy).
+   Import follows bootstrap because grants reference existing workspaces.
+   Include trusted issuer URLs, audience, CA roots and any private destination
+   allowlist; configure Auth's corresponding explicit HTTPS NetworkPolicy
+   destinations independently.
    A failed atomic import leaves prior authority unchanged.
 4. Supply matching serving-role Secrets, signing keys, verified public trust,
    issued native/public leaves and separately installed controller readiness.

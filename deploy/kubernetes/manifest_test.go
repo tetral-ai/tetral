@@ -1411,6 +1411,37 @@ func TestBootstrapSecretTableCoversManifestSecretKeyReferences(t *testing.T) {
 	}
 }
 
+// Every one-shot command the bootstrap guide runs from the release image must
+// be one of the binaries that image builds; the build list is declared, not
+// globbed, so a documented command can otherwise be missing from the image.
+func TestReleaseImageBuildsDocumentedOneShotCommands(t *testing.T) {
+	dockerfile := string(mustReadFile(t, filepath.Join("..", "..", "Dockerfile")))
+	_, build, found := strings.Cut(dockerfile, "go build ")
+	if !found {
+		t.Fatal("release Dockerfile has no go build instruction")
+	}
+	built := map[string]bool{}
+	for _, line := range strings.Split(build, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if field := strings.TrimSpace(strings.TrimSuffix(trimmed, "\\")); strings.HasPrefix(field, "./") {
+			built[filepath.Base(field)] = true
+		}
+		if !strings.HasSuffix(trimmed, "\\") {
+			break
+		}
+	}
+	guide := string(mustReadFile(t, filepath.Join("..", "..", "docs", "bootstrap.md")))
+	commands := regexp.MustCompile(`--command -- /usr/local/bin/([A-Za-z0-9_.-]+)`).FindAllStringSubmatch(guide, -1)
+	if len(commands) == 0 {
+		t.Fatal("docs/bootstrap.md runs no release-image one-shot command")
+	}
+	for _, command := range commands {
+		if !built[command[1]] {
+			t.Errorf("docs/bootstrap.md runs /usr/local/bin/%s, which the release image does not build", command[1])
+		}
+	}
+}
+
 func TestKubernetesManifestTetralAPIHasNoLegacyRuntimeClientConfigOrKubernetesToken(t *testing.T) {
 	documents := readManifestDocuments(t)
 	deployment := requireDocument(t, documents, "api.yaml", "Deployment", "api")

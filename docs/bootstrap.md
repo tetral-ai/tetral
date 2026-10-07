@@ -182,9 +182,11 @@ To run preparation inside Kubernetes using the release image, provision a
 separate operator-managed `database-preparation` Secret with key `url` containing
 the administrative DSN. Provide a `database-trust` ConfigMap with the verified
 public CA in `ca.crt`, and substitute the expected database DNS name below.
-Both one-shot commands require this trust; no database credentials are stored
-in the ConfigMap. The role JSON is streamed over stdin. Keep the completed Pod available for
-`kubectl logs` and the cluster's Pod log collector, if configured:
+Every one-shot database command, including bootstrap and the Auth policy
+import, requires this trust; no database credentials are stored in the
+ConfigMap. The role JSON is streamed over stdin. Keep the completed Pod
+available for `kubectl logs` and the cluster's Pod log collector, if
+configured:
 
 ```bash
 kubectl -n tetral-system run tetral-db-prepare \
@@ -272,8 +274,48 @@ safe. This seeds a workspace row, not an API key.
 
 Apply the installation's explicit federation policy after its workspaces exist
 and before Auth starts. Use the exact installed revision and the protected
-administrative environment used for preparation; do not place that credential
-in serving Secrets:
+administrative connection used for preparation; do not place that credential
+in serving Secrets. The release image ships the command as
+`/usr/local/bin/tetral-auth-policy`. Run it inside Kubernetes with the same
+`database-preparation` Secret and `database-trust` ConfigMap as preparation,
+streaming the policy document over stdin, and keep the completed Pod available
+for `kubectl logs`:
+
+```bash
+kubectl -n tetral-system run tetral-auth-policy \
+  -i --restart=Never \
+  --image=ghcr.io/tetral-ai/tetral@sha256:<tetral-image-digest> \
+  --override-type=strategic \
+  --overrides='{
+    "apiVersion": "v1",
+    "spec": {
+      "containers": [{
+        "name": "tetral-auth-policy",
+        "env": [{
+          "name": "TETRAL_DATABASE_ADMIN_URL",
+          "valueFrom": {
+            "secretKeyRef": {"name": "database-preparation", "key": "url"}
+          }
+        }, {
+          "name": "TETRAL_DATABASE_TLS_CA_PATH", "value": "/etc/tetral/database/ca.crt"
+        }, {
+          "name": "TETRAL_DATABASE_TLS_SERVER_NAME", "value": "<database-server-dns>"
+        }],
+        "volumeMounts": [{"name": "database-trust", "mountPath": "/etc/tetral/database", "readOnly": true}]
+      }],
+      "volumes": [{"name": "database-trust", "configMap": {"name": "database-trust"}}]
+    }
+  }' \
+  --command -- /usr/local/bin/tetral-auth-policy \
+  < /secure/path/tetral-auth-policy.json
+```
+
+Inspect `kubectl -n tetral-system logs tetral-auth-policy` for the sanitized
+change IDs and revisions before deleting the completed Pod with
+`kubectl -n tetral-system delete pod tetral-auth-policy`; delete it before
+reusing the same name for another attempt. Later change sets, including
+`revoke_workspace_grants` and `revoke_access_tokens`, use the same invocation.
+From a source checkout of the same revision, the equivalent command is:
 
 ```bash
 export TETRAL_DATABASE_ADMIN_URL

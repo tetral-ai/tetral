@@ -201,10 +201,13 @@ prevents old bootstrap material from authenticating across an in-place rotation.
 ### Administrative policy changes
 
 Prepare the canonical database and role contract first, then run
-`go run ./services/auth/cmd/tetral-auth-policy < policy.json` with
-`TETRAL_DATABASE_ADMIN_URL`, `TETRAL_DATABASE_TLS_CA_PATH` and
-`TETRAL_DATABASE_TLS_SERVER_NAME`. Keep administrative credentials out of the
-serving Auth environment. The command verifies schema readiness and never
+`tetral-auth-policy < policy.json` with `TETRAL_DATABASE_ADMIN_URL`,
+`TETRAL_DATABASE_TLS_CA_PATH` and `TETRAL_DATABASE_TLS_SERVER_NAME`. The
+release image ships it as `/usr/local/bin/tetral-auth-policy`; the
+[bootstrap guide](../../docs/bootstrap.md#5-import-the-declared-auth-policy)
+gives the one-shot in-cluster invocation, and a source checkout runs
+`go run ./services/auth/cmd/tetral-auth-policy`. Keep administrative
+credentials out of the serving Auth environment. The command verifies schema readiness and never
 migrates, imports default policy at startup, or overwrites omitted entries.
 
 The at-most-one-MiB document is an explicit change set: `federation_rules`,
