@@ -17,21 +17,19 @@ type ToolsetConfig struct {
 	BuiltinFamily string
 }
 
+// SessionToolsetsTx returns the Session's enabled MCP toolsets from its
+// installed_tools_json snapshot, the authoritative installed configuration,
+// inside the caller's transaction.
 func SessionToolsetsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]ToolsetConfig, error) {
-	var agentConfigJSON string
 	var installedToolsJSON string
 	if err := tx.QueryRow(ctx,
-		`SELECT av.config_json,
-		        s.installed_tools_json
-		   FROM sessions s
-		   JOIN agent_versions av
-		     ON av.workspace_id = s.workspace_id
-		    AND av.id = s.agent_version_id
-		  WHERE s.workspace_id = $1
-		    AND s.id = $2`,
+		`SELECT installed_tools_json
+		   FROM sessions
+		  WHERE workspace_id = $1
+		    AND id = $2`,
 		workspaceID,
 		sessionID,
-	).Scan(&agentConfigJSON, &installedToolsJSON); dbconnect.IsNoRows(err) {
+	).Scan(&installedToolsJSON); dbconnect.IsNoRows(err) {
 		return nil, runtimecontrol.PreparationError{Kind: "runtime_session_unavailable", Message: "session agent config is unavailable", Retryable: true}
 	} else if err != nil {
 		return nil, err

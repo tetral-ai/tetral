@@ -28,11 +28,6 @@ type runtimePodLostAffectedThreads struct {
 	ThreadIDs    []string
 }
 
-func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimecontrol.Binding, now time.Time) (int, error) {
-	repaired, _, err := repairLostRuntimeBindingDetailedTx(ctx, tx, workspaceID, sessionID, binding, now)
-	return repaired, err
-}
-
 func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimecontrol.Binding, now time.Time) (int, int, error) {
 	barriers, err := runtimecontrol.ActiveInterruptBarriersTx(ctx, tx, workspaceID, sessionID, "")
 	if err != nil {

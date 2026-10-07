@@ -2736,15 +2736,6 @@ func runtimeTaskNotificationPayloadJSON(plan *RuntimeTaskNotificationPlan, termi
 	return payloadJSON, nil
 }
 
-func normalizeBackgroundTaskTerminalStatus(value string) string {
-	switch value {
-	case "completed", "failed", "cancelled", "expired":
-		return value
-	default:
-		return ""
-	}
-}
-
 func (s *PostgreSQLRuntimeDeliveryStore) resolveRuntimeTarget(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (runtimecontrol.Binding, error) {
 	if s.TargetResolver != nil {
 		return s.TargetResolver.ResolveRuntimeTarget(ctx, tx, job)

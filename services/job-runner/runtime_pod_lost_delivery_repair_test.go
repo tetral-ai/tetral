@@ -490,7 +490,7 @@ func runRuntimePodLostRepairTransaction(ctx context.Context, runtime *sql.DB, se
 	repaired := 0
 	err := client.WithWorkspaceTx(ctx, "default", "test.runtime_pod_lost_delivery_repair", func(tx *dbconnect.Tx) error {
 		var err error
-		repaired, err = repairLostRuntimeBindingTx(ctx, tx, "default", sessionID, binding, now)
+		repaired, _, err = repairLostRuntimeBindingDetailedTx(ctx, tx, "default", sessionID, binding, now)
 		return err
 	})
 	return repaired, err

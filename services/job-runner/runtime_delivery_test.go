@@ -843,28 +843,3 @@ func (s *recordingRuntimeCommandSender) CleanupSession(_ context.Context, target
 	}
 	return &agentruntimev1.CleanupSessionResponse{Outcome: &agentruntimev1.CleanupSessionResponse_Completed{Completed: &agentruntimev1.CleanupSessionCompleted{}}}, nil
 }
-
-func TestBackgroundTaskProcessTerminalStatusFactsRemainDistinct(t *testing.T) {
-	t.Parallel()
-
-	for _, status := range []string{
-		"completed",
-		"failed",
-		"cancelled",
-		"expired",
-	} {
-		status := status
-		t.Run(status, func(t *testing.T) {
-			t.Parallel()
-			if got := normalizeBackgroundTaskTerminalStatus(status); got != status {
-				t.Fatalf("normalizeBackgroundTaskTerminalStatus(%q) = %q; want unchanged", status, got)
-			}
-		})
-	}
-
-	for _, status := range []string{"cancelled_by_cleanup", "stale", "unknown"} {
-		if got := normalizeBackgroundTaskTerminalStatus(status); got != "" {
-			t.Fatalf("normalizeBackgroundTaskTerminalStatus(%q) = %q; want rejection", status, got)
-		}
-	}
-}
