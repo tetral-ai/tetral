@@ -89,7 +89,9 @@ when the changed fixture has no Go import edge.
 Service-owned `k8s/` changes select deployment evidence, including the raw
 manifest invariants, Helm rendering tests and Helm lint. Helm chart changes
 under `deploy/helm/tetral/` also select the integration package, because its
-direct Runtime TLS composition renders that chart. Changes to
+direct Runtime TLS composition renders that chart. OIDC SDK driver changes
+under `integration/testdata/oidc-*` likewise select the integration package,
+because `TestOIDCKeycloakSDK` executes that Bun driver. Changes to
 `deploy/nats/values.yaml` or `values-hardened.yaml` select the integration and
 `internal/testinfra` packages, because the runner's broker and the integration
 TLS cluster project their client policy from those values. Unknown ownership

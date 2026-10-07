@@ -414,7 +414,7 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 			if serviceContract {
 				selections[index].Reason = "shared service contract, Go owners, Bun fixture consumers, cross-service compositions and reverse dependencies"
 			} else if integrationInput {
-				selections[index].Reason = "rendered or projected deployment input consumed by integration and broker fixture compositions"
+				selections[index].Reason = "rendered, executed or projected input consumed by integration and broker fixture compositions"
 			}
 			if authContract && !serviceContract {
 				selections[index].Reason = "authentication contract, public actor/protocol consumers and repository-local reverse dependencies"
@@ -476,11 +476,12 @@ func separatedServiceContractChange(paths []string) bool {
 
 // integrationInputChange reports non-Go inputs that integration compositions
 // render or execute, which Go import traversal cannot see: the direct Runtime
-// TLS fixture renders deploy/helm/tetral, and every local NATS broker projects
+// TLS fixture renders deploy/helm/tetral, the OIDC SDK composition runs the
+// integration/testdata/oidc-* Bun driver, and every local NATS broker projects
 // its client policy from the NATS release values.
 func integrationInputChange(paths []string) bool {
 	for _, path := range paths {
-		for _, prefix := range []string{"deploy/helm/tetral/"} {
+		for _, prefix := range []string{"deploy/helm/tetral/", "integration/testdata/oidc-"} {
 			if strings.HasPrefix(path, prefix) {
 				return true
 			}

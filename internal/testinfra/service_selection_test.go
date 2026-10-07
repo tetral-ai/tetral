@@ -109,16 +109,17 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 	}
 }
 
-// Integration compositions render the Helm chart, an input that Go import
-// traversal cannot see, so a chart-only change also selects the integration
-// package alongside the deployment checks.
+// Integration compositions render the Helm chart and execute the OIDC SDK Bun
+// driver, inputs that Go import traversal cannot see, so a chart-only or
+// driver-only change also selects the integration package. Chart changes keep
+// their deployment checks.
 func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
 	root := serviceSelectionFixture(t)
 	inventory, err := LoadInventory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, changed := range []string{"deploy/helm/tetral/values.yaml"} {
+	for _, changed := range []string{"deploy/helm/tetral/values.yaml", "integration/testdata/oidc-client.ts"} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
 			selections, err := affectedSelections(root, inventory, &revision)
@@ -135,7 +136,7 @@ func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
 			if !slices.Contains(groups["go"].Packages, "github.com/tetral-ai/tetral/integration") {
 				t.Errorf("%s omitted the integration package: %v", changed, groups["go"].Packages)
 			}
-			if _, ok := groups["deployment"]; !ok {
+			if _, ok := groups["deployment"]; strings.HasPrefix(changed, "deploy/") && !ok {
 				t.Errorf("%s omitted deployment evidence", changed)
 			}
 		})

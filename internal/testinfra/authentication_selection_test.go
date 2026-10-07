@@ -11,9 +11,10 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// These protocol/role/lifecycle roots must stay executable in ordinary native
-	// verification. Dependency declarations cannot silently turn into Fast skips
-	// or disappear from the affected public-consumer closure.
+	// These protocol/role/lifecycle roots must stay declared with their native
+	// dependencies, which keeps them out of Fast and in exactly one race shard
+	// (TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards), and must stay
+	// in the affected public-consumer closure.
 	required := map[string][]string{
 		"TestOIDCKeycloakSDK":                                              {"keycloak", "postgresql", "docker", "sdk"},
 		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
@@ -39,55 +40,6 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 		}
 		if !found {
 			t.Errorf("native inventory lost Auth proof %s", name)
-		}
-	}
-	fast, excluded, err := fastGoSelections(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name := range required {
-		for _, selection := range fast {
-			if slices.Contains(selection.Tests, name) {
-				t.Errorf("Fast unexpectedly executes native Auth proof %s", name)
-			}
-		}
-		found := false
-		for _, exclusion := range excluded {
-			if exclusion.Runnable == name {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("Fast failed to account for excluded Auth proof %s", name)
-		}
-	}
-	full, _, err := fullGoSelections(root, "authentication profile contract")
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts := map[string]int{}
-	for index := 0; index < 4; index++ {
-		shard, err := SelectPlan(Plan{Profile: ProfileFull, Selections: full}, []string{"go"}, index, 4)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, selection := range shard.Selections {
-			for name, dependencies := range required {
-				if !slices.Contains(selection.Tests, name) {
-					continue
-				}
-				counts[name]++
-				for _, dependency := range dependencies {
-					if !slices.Contains(selection.Dependencies, dependency) || !slices.Contains(shard.Dependencies, dependency) {
-						t.Errorf("CI shard omitted %s for %s", dependency, name)
-					}
-				}
-			}
-		}
-	}
-	for name := range required {
-		if counts[name] != 1 {
-			t.Errorf("Full Race shards execute %s %d times", name, counts[name])
 		}
 	}
 	revision := Revision{ChangedPaths: []string{"internal/auth/authority_resolver.go"}}
