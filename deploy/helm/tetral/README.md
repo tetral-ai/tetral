@@ -607,6 +607,8 @@ HPA maxima, surge, scheduled processes and possible pool generations.
 and optional correlation to service, process, Session and request scopes. A
 request joins the Auth Check record's `request.id` to the backend records'
 `edge.request.id`, the signed request ID of the verified principal. Proxy access
-logging is disabled, including Git ticket traffic. Kubernetes collection metadata
+logging is disabled for the public edge, including Git ticket traffic, and for
+the internal routing sidecars; proxy failures surface in application records,
+proxy statistics and vendor startup/control output. Kubernetes collection metadata
 is external custody information; it is not an application Session identity.
 Neither inventory prescribes a remote log backend or retention policy.

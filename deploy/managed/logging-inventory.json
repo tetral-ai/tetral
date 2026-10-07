@@ -69,9 +69,10 @@
     "owner": "public edge and routing proxy deployment",
     "sources": [
       "deploy/helm/tetral/templates/edge.yaml",
-      "deploy/kubernetes/edge-gateway/envoy-gateway.yaml"
+      "deploy/kubernetes/edge-gateway/envoy-gateway.yaml",
+      "deploy/istio/istiod-values.yaml"
     ],
-    "access_logs": "Disabled for the public edge, including Git. There is no public proxy access-field or Session join contract.",
+    "access_logs": "Disabled for the public edge, including Git, and for the internal routing sidecars, whose mesh configuration sets no access log file. There is no proxy access-field or Session join contract; proxy failures surface in application records, proxy statistics and vendor startup/control output.",
     "structured_fields": [],
     "failure_mapping": "Auth Check and native application TLS classify edge failures in application records. Proxy startup/control diagnostics are separate vendor output; never parse raw vendor prose as an application error tuple or publish credentials/request headers/query/body."
   },
