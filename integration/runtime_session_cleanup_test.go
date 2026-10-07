@@ -140,7 +140,7 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	}
 	bridgeStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	bridgeStore.RuntimeBindingTokenHMACKey = []byte("cleanup-narrow-tool-signing-key")
-	scope = declareReplacementScope(t, client, scope)
+	scope = declareReplacementScope(t, client, client, scope)
 	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("LoadContext after cleanup Tool settlement: %v", err)

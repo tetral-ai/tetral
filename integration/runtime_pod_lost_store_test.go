@@ -167,7 +167,7 @@ func TestPostgreSQLRuntimePodLossRetentionPreservesTerminalToolAndRepairMembers(
 		string(durableRepairs) != `["`+repairEventID+`"]` {
 		t.Fatalf("durable pod-loss retention = assistant:%d tools:%s repairs:%s", durableAssistant, durableToolUses, durableRepairs)
 	}
-	scope = declareReplacementScope(t, client, scope)
+	scope = declareReplacementScope(t, client, client, scope)
 	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("cold LoadContext after pod-loss terminalization: %v", err)

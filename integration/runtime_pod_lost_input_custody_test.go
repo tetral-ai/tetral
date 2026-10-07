@@ -219,7 +219,8 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	if len(ordered) != 3 || ordered[0] != earlyID || ordered[1] != middleID || ordered[2] != lateID {
 		t.Fatalf("replacement Queue order = %v; want mixed-kind Inbox creation order [%s %s %s]", ordered, earlyID, middleID, lateID)
 	}
-	replacementScope := declareReplacementScope(t, dbconnect.NewClientForTesting(runtime), bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID))
+	runtimeClient := dbconnect.NewClientForTesting(runtime)
+	replacementScope := declareReplacementScope(t, runtimeClient, runtimeClient, bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID))
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
 		SET status='accepted',binding_id=$2,binding_generation=$4,target_pod_uid=$3
 		WHERE workspace_id='default' AND session_id=$1`, sessionID, replacementScope.GetBinding().GetBindingId(), replacementScope.GetBinding().GetTargetPodUid(), replacementScope.GetBinding().GetBindingGeneration()); err != nil {

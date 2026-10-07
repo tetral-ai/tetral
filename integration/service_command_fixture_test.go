@@ -43,9 +43,11 @@ func observedAttemptScope(job jobrunner.RuntimeJob, attempt jobrunner.RuntimeAtt
 }
 
 // A replacement cold scope comes from a real Runner-created binding. The
-// eligibility snapshot supplies the replacement Pod, never a binding row.
-func declareReplacementScope(t *testing.T, client *dbconnect.Client, previous *bridgev1.RuntimeScope) *bridgev1.RuntimeScope {
-	seedFixtureRuntimeProcess(t, client, "tetral-agent-runtime", "pod_replacement")
+// eligibility snapshot supplies the replacement Pod, never a binding row. The
+// registrar registers the replacement process as Bridge does; the runner client
+// places the binding.
+func declareReplacementScope(t *testing.T, registrar, client *dbconnect.Client, previous *bridgev1.RuntimeScope) *bridgev1.RuntimeScope {
+	seedFixtureRuntimeProcess(t, registrar, "tetral-agent-runtime", "pod_replacement")
 	store := jobrunner.NewJobRunnerRuntimeDeliveryStore(client, nil, jobrunner.JobRunnerConfig{AgentRuntimeGRPCPort: 9090}, func() kubernetes.BindingVisibilitySnapshot {
 		return kubernetes.NewBindingVisibilitySnapshotForTest(true, []kubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-replacement", PodUID: "pod_replacement", PodIP: "10.255.0.10"}})
 	})

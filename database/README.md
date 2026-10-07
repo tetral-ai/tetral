@@ -115,6 +115,9 @@ every native test a private cloned database and unique NOBYPASSRLS login. Those 
 test-only grants never define production privileges. Production authorization
 tests use `storagetest.OpenWorkloadDB`: it applies the real installer contract
 to a private clone and authenticates as the selected workload's unique login.
+`OpenWorkload` opens another declared workload's login from the same
+installation, so a cross-owner composition such as the separated Bridge and
+Job Runner suites runs each owner with only its production grants.
 The administrative connection only seeds fixtures, injects missing privileges,
 and inspects results. `RequirePrivilege` revokes one privilege, requires the
 owning operation to fail with SQLSTATE `42501`, and restores the contract through

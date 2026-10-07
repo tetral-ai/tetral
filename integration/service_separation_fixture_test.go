@@ -24,11 +24,16 @@ import (
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
-// These compositions have two independent serving-role pools. The admin pool
-// only supplies initial state, fault injection, and an independent SQL oracle.
+// Job Runner and Bridge each run on an independent pool authenticated as their
+// installed production role, so a missing or over-broad grant on either side of
+// the separation fails these compositions. Queue, public event admission and
+// Sandbox execution are not the owners under test; their stores keep the shared
+// restricted test role (no superuser or BYPASSRLS). The admin pool only supplies
+// initial state, fault injection and an independent SQL oracle.
 type separatedOwners struct {
 	ctx                       context.Context
 	admin, runnerDB, bridgeDB *sql.DB
+	peerDB                    *sql.DB
 	runner                    *jobrunner.PostgreSQLRuntimeDeliveryStore
 	bridge                    *agentruntimebridge.PostgreSQLBridgeAPIStore
 	bridgeTrace               *bridgeExecutionQueryTracer
@@ -41,12 +46,13 @@ func newSeparatedOwners(t *testing.T, suffix string, mcp bool) *separatedOwners 
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Fatal("separated-owner acceptance requires managed PostgreSQL; missing TETRAL_TEST_DATABASE_URL")
 	}
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	peerDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	installed := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 	bridgeTrace := &bridgeExecutionQueryTracer{}
-	bridgeDB := storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, bridgeTrace)
+	bridgeDB := installed.OpenWorkload(t, "bridge", bridgeTrace)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	f := &separatedOwners{ctx: ctx, admin: admin, runnerDB: runtime, bridgeDB: bridgeDB, bridgeTrace: bridgeTrace, sessionID: "sesn_separated_" + suffix, threadID: "thr_separated_" + suffix}
+	f := &separatedOwners{ctx: ctx, admin: admin, runnerDB: installed.DB, bridgeDB: bridgeDB, peerDB: peerDB, bridgeTrace: bridgeTrace, sessionID: "sesn_separated_" + suffix, threadID: "thr_separated_" + suffix}
 	if mcp {
 		seedMCPFamilySession(t, admin, f.sessionID, f.threadID, "claude")
 	} else {
@@ -55,29 +61,30 @@ func newSeparatedOwners(t *testing.T, suffix string, mcp bool) *separatedOwners 
 	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, f.sessionID); err != nil {
 		t.Fatalf("seed Session runtime-status invariant: %v", err)
 	}
-	runnerClient := dbconnect.NewClientForTesting(runtime)
-	seedFixtureRuntimeProcess(t, runnerClient, "tetral-agent-runtime", "pod_separation")
+	runnerClient := dbconnect.NewClientForTesting(installed.DB)
+	bridgeClient := dbconnect.NewClientForTesting(bridgeDB)
+	// Bridge alone registers and promotes Runtime processes.
+	seedFixtureRuntimeProcess(t, bridgeClient, "tetral-agent-runtime", "pod_separation")
 	f.runner = jobrunner.NewJobRunnerRuntimeDeliveryStore(runnerClient, nil, jobrunner.JobRunnerConfig{AgentRuntimeGRPCPort: 9090}, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{{Namespace: "tetral-agent-runtime", PodName: "runtime-separation", PodUID: "pod_separation", PodIP: "127.0.0.1"}})
 	})
 	installFixtureRuntimeLoad(t, f.runner)
-	f.bridge = agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(bridgeDB))
+	f.bridge = agentruntimebridge.NewPostgreSQLBridgeAPIStore(bridgeClient)
 	f.bridge.RuntimeBindingTokenHMACKey = []byte("test-only-separation-token-signing-key")
-	f.queue = queue.NewPostgreSQLStore(runnerClient)
-	var runnerRole, bridgeRole string
-	var super, bypass bool
-	for _, owner := range []struct {
-		db   *sql.DB
-		role *string
-	}{{runtime, &runnerRole}, {bridgeDB, &bridgeRole}} {
-		if err := owner.db.QueryRowContext(ctx, `SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user`).Scan(owner.role, &super, &bypass); err != nil || super || bypass {
-			t.Fatalf("restricted owner role=%q super=%t bypass=%t err=%v", *owner.role, super, bypass, err)
+	f.queue = queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(peerDB))
+	roles := map[string]string{}
+	for owner, db := range map[string]*sql.DB{"job_runner": installed.DB, "bridge": bridgeDB} {
+		var role string
+		var super, bypass bool
+		if err := db.QueryRowContext(ctx, `SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user`).Scan(&role, &super, &bypass); err != nil || super || bypass {
+			t.Fatalf("restricted %s owner role=%q super=%t bypass=%t err=%v", owner, role, super, bypass, err)
 		}
+		roles[owner] = role
 	}
-	if runtime == bridgeDB || runnerRole != bridgeRole {
-		t.Fatal("owner pools must be distinct and derive the same private restricted role")
+	if installed.DB == bridgeDB || roles["job_runner"] == roles["bridge"] {
+		t.Fatal("owner pools must be distinct and authenticate as distinct production roles")
 	}
-	t.Logf("two independent restricted owner pools role=%s; watchdog=60s", runnerRole)
+	t.Logf("independent owner pools authenticate as installed job_runner and bridge roles; watchdog=60s")
 	return f
 }
 
@@ -190,7 +197,7 @@ func (f *separatedOwners) count(t *testing.T, query string, args ...any) int {
 
 func (f *separatedOwners) input(t *testing.T) (jobrunner.RuntimeJob, *queue.Job) {
 	t.Helper()
-	service := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(f.runnerDB)))
+	service := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(f.peerDB)))
 	if _, err := service.AppendClientEvents(f.ctx, workspace.DefaultID, f.sessionID, "separated-input", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserMessage, Content: []sessionevent.ContentBlock{{Type: sessionevent.ContentBlockTypeText, Text: "exercise separated owners"}}}}}); err != nil {
 		t.Fatal(err)
 	}

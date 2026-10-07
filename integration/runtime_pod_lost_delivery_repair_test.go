@@ -59,7 +59,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, fixture.sessionID, fixture.binding, fixture.now); err != nil {
 		t.Fatalf("repair lost wait request: %v", err)
 	}
-	scope = declareReplacementScope(t, store.Client, scope)
+	scope = declareReplacementScope(t, store.Client, store.Client, scope)
 	var waitFailureCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events

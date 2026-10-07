@@ -218,7 +218,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 					if f.count(t, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result' AND COALESCE(payload_json::jsonb->>'tool_use_event_id',payload_json::jsonb->>'tool_use_id')=$2`, f.sessionID, toolID) != 0 || f.count(t, `SELECT count(*) FROM session_pending_tool_uses WHERE session_id=$1 AND tool_use_event_id=$2 AND status='resolving' AND decision='allow' AND model_tool_call_id='call_race'`, f.sessionID, toolID) != 1 {
 						t.Fatal("recovery must preserve original unaccepted resolving route without synthetic Result")
 					}
-					replacement := declareReplacementScope(t, f.runner.Client, scope)
+					replacement := declareReplacementScope(t, f.bridge.Client, f.runner.Client, scope)
 					coldBefore := f.cold(t, replacement)
 					rawBefore, _ := json.Marshal(coldBefore)
 					if !strings.Contains(string(rawBefore), toolID) || !strings.Contains(string(rawBefore), "call_race") {
@@ -287,7 +287,7 @@ func TestPostgreSQLSeparatedOwnersSettlementRecovery(t *testing.T) {
 				if f.count(t, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2 AND execution_state='pending' AND result_json IS NULL`, f.sessionID, acceptedID) != 1 || f.count(t, `SELECT count(*) FROM session_pending_tool_uses WHERE session_id=$1 AND tool_use_event_id=$2 AND status='pending' AND decision IS NULL`, f.sessionID, approvalID) != 1 {
 					t.Fatal("loss changed sibling accepted execution or pending approval")
 				}
-				replacement := declareReplacementScope(t, f.runner.Client, scope)
+				replacement := declareReplacementScope(t, f.bridge.Client, f.runner.Client, scope)
 				if f.count(t, `SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1`, f.sessionID) != 1 || f.count(t, `SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1 AND binding_id=$2 AND binding_generation=$3 AND agent_runtime_pod_uid=$4`, f.sessionID, replacement.Binding.BindingId, replacement.Binding.BindingGeneration, replacement.Binding.TargetPodUid) != 1 {
 					t.Fatal("current binding does not match actual replacement receipt identity")
 				}
@@ -463,7 +463,7 @@ func TestPostgreSQLSeparatedOwnersCustodyReplay(t *testing.T) {
 						}
 					}
 					interrupt := func() {
-						service := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(f.runnerDB)))
+						service := sessionevent.NewService(sessionevent.NewPostgreSQLStore(dbconnect.NewClientForTesting(f.peerDB)))
 						_, err := service.AppendClientEvents(f.ctx, workspace.DefaultID, f.sessionID, "interrupt-separation", sessionevent.AppendRequest{Events: []sessionevent.IncomingEvent{{Type: sessionevent.EventTypeUserInterrupt, SessionThreadID: scope.SessionThreadId}}})
 						if err != nil {
 							t.Fatal(err)
@@ -592,7 +592,7 @@ func separatedExecuteSandbox(t *testing.T, f *separatedOwners, scope *bridgev1.R
 		t.Fatal(err)
 	}
 	queueClient := jobrunner.QueueClientFromGRPC(client)
-	runner := &tetralsandbox.SandboxToolExecutionJobRunner{Queue: &issuedLeaseQueueFixture{QueueClient: queueClient, job: target}, Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(f.runner.Client, 30*time.Minute), Providers: registry, Media: backgroundNotificationMedia{}, Config: tetralsandbox.SandboxToolExecutionRunnerConfig{WorkspaceID: "default", LeaseOwner: "separated-sandbox", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second}}
+	runner := &tetralsandbox.SandboxToolExecutionJobRunner{Queue: &issuedLeaseQueueFixture{QueueClient: queueClient, job: target}, Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(f.peerDB), 30*time.Minute), Providers: registry, Media: backgroundNotificationMedia{}, Config: tetralsandbox.SandboxToolExecutionRunnerConfig{WorkspaceID: "default", LeaseOwner: "separated-sandbox", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second}}
 	if active, err := runner.RunOnceWithActivity(f.ctx); err != nil || !active {
 		t.Fatalf("actual Sandbox Runner terminal commit=%t/%v", active, err)
 	}
