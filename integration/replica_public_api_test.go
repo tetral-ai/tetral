@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	authservice "github.com/tetral-ai/tetral/services/auth"
@@ -111,7 +112,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	if _, err := admin.ExecContext(ctx, `INSERT INTO workspaces(id,type,name,created_at) VALUES('replica_other','workspace','Other',now())`); err != nil {
 		t.Fatal(err)
 	}
-	otherKey, err := auth.NewAPIKeyStore(admin).CreateForWorkspace(ctx, "replica_other", "replica-other")
+	otherKey, err := authtest.SeedIndependentKey(ctx, admin, "replica_other", "replica-other")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -142,7 +142,7 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router, signer := signedMemoryRouter(t, service)
-	key, err := env.store.AuthenticateRawKey(context.Background(), env.envKey)
+	key, err := auth.NewAuthorityResolver(env.runtime, "").AuthenticateKey(context.Background(), env.envKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 		principal auth.Principal
 		want      memory.Actor
 	}{
-		{"key", auth.IndependentKeyPrincipal(key.Workspace, key.APIKeyID), memory.Actor{Type: memory.ActorAPI, APIKeyID: key.APIKeyID}},
+		{"key", key, memory.Actor{Type: memory.ActorAPI, APIKeyID: key.APIKeyID}},
 		{"derived key", derived, memory.Actor{Type: memory.ActorAPI, APIKeyID: key.APIKeyID}},
 		{"human", identityAdmissionFixture(auth.IdentityHuman), memory.Actor{Type: memory.ActorUser, UserID: "identity_human"}},
 		{"service", identityAdmissionFixture(auth.IdentityService), memory.Actor{Type: memory.ActorService, ServiceID: "identity_service"}},

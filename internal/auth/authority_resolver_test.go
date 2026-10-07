@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -21,6 +23,26 @@ func authorityFixture(t *testing.T) (*sql.DB, *AuthorityResolver, *APIKeyStore, 
 	runtime := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	return db, NewAuthorityResolver(runtime, workspace.DefaultID), NewAPIKeyStore(runtime), VerifiedAssertion{ruleID: d.FederationRules[0].ID, ruleRevision: 1, issuer: d.FederationRules[0].Issuer, subject: d.Identities[0].Subject, expiresAt: time.Now().Add(30 * time.Minute)}
 }
+
+// seedIndependentKeyForTest inserts the standard independent key row that
+// CreateForPrincipal issues for an independent principal. Package auth tests
+// cannot import authtest, which imports this package.
+func seedIndependentKeyForTest(ctx context.Context, db *sql.DB, ws workspace.ID, name string) (*CreateAPIKeyResult, error) {
+	raw, err := GenerateAPIKey()
+	if err != nil {
+		return nil, err
+	}
+	keyID := id.New("ak_")
+	createdAt := storage.Now().Format(time.RFC3339)
+	if err := storage.WithWorkspaceTx(ctx, db, string(ws), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES($1,$2,$3,$4,$5,'standard','independent_key',$6)`, keyID, string(ws), name, KeyPrefixFor(raw), DigestAPIKey(raw), createdAt)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return &CreateAPIKeyResult{APIKey: raw, APIKeyMetadata: APIKeyMetadata{ID: keyID, Type: "api_key", WorkspaceID: string(ws), Name: name, KeyPrefix: KeyPrefixFor(raw), KeyKind: KindStandard, CreatedAt: createdAt}}, nil
+}
+
 func requireCredentialRejection(t *testing.T, err error) {
 	t.Helper()
 	var denied *AuthenticationError
@@ -61,7 +83,7 @@ func TestAuthorityResolverDerivedKeysPreserveCeilingAndDurableLineage(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPrincipal, err := (&StoreAuthenticator{Store: store}).Authenticate(ctx, second.APIKey)
+	secondPrincipal, err := resolver.AuthenticateKey(ctx, second.APIKey)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -157,7 +157,7 @@ func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *te
 		t.Fatalf("read main.go: %v", err)
 	}
 	text := string(source)
-	for _, forbidden := range []string{"RefreshBootstrap", "UpsertBootstrap", "ValidateBootstrapKey", "NewAPIKeyStore", "StoreAuthenticator", "x-api-key", "InitializeSchema"} {
+	for _, forbidden := range []string{"RefreshBootstrap", "UpsertBootstrap", "ValidateBootstrapKey", "NewAPIKeyStore", "AuthenticateKey", "x-api-key", "InitializeSchema"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("services/event-stream/cmd/event-stream/main.go references forbidden startup token %q", forbidden)
 		}

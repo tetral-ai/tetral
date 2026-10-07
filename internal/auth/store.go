@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -52,10 +50,11 @@ type CreateAPIKeyResult struct {
 	APIKey string `json:"api_key"`
 }
 
-// APIKeyStore manages scoped credential metadata and issuance. Pre-workspace
-// authentication delegates to AuthorityResolver's fixed digest lookup, current
-// root locks, credential recheck and usage transaction. A caller-supplied lookup
-// flag alone does not confer global table access.
+// APIKeyStore owns workspace-scoped key metadata listing and revocation,
+// bootstrap refresh and CreateForPrincipal issuance. Credential admission
+// belongs to AuthorityResolver: its fixed digest lookup, current root locks,
+// credential recheck and usage transaction. A caller-supplied lookup flag alone
+// does not confer global table access.
 type APIKeyStore struct {
 	db *sql.DB
 }
@@ -63,59 +62,6 @@ type APIKeyStore struct {
 // NewAPIKeyStore constructs an APIKeyStore backed by db.
 func NewAPIKeyStore(db *sql.DB) *APIKeyStore {
 	return &APIKeyStore{db: db}
-}
-
-// CreateForWorkspace inserts a new standard API key for workspaceID.
-// It generates the raw token through GenerateAPIKey, stores its
-// digest + prefix metadata, and returns the create-only response
-// shape including the raw token. The raw token is never persisted in
-// any text or byte column.
-func (s *APIKeyStore) CreateForWorkspace(ctx context.Context, workspaceID workspace.ID, name string) (*CreateAPIKeyResult, error) {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return nil, &ValidationError{Message: "name must not be empty"}
-	}
-	if runeCount(trimmed) > keyMetadataNameMaxRunes {
-		return nil, &ValidationError{Message: fmt.Sprintf("name must be at most %d Unicode code points", keyMetadataNameMaxRunes)}
-	}
-
-	rawToken, err := GenerateAPIKey()
-	if err != nil {
-		return nil, err
-	}
-	digest := DigestAPIKey(rawToken)
-	prefix := KeyPrefixFor(rawToken)
-	now := storage.Now().Format(time.RFC3339)
-	apiKeyID := id.New("ak_")
-
-	var stored APIKeyMetadata
-	if err := storage.WithWorkspaceTx(ctx, s.db, string(workspaceID), func(tx *sql.Tx) error {
-		_, execErr := tx.ExecContext(ctx,
-			`INSERT INTO api_keys (id, workspace_id, name, key_prefix, key_digest, key_kind, authority_kind, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, 'independent_key', $7)`,
-			apiKeyID, string(workspaceID), trimmed, prefix, digest, KindStandard, now,
-		)
-		if execErr != nil {
-			return mapPostgreSQLError(execErr)
-		}
-		stored = APIKeyMetadata{
-			ID:          apiKeyID,
-			Type:        "api_key",
-			WorkspaceID: string(workspaceID),
-			Name:        trimmed,
-			KeyPrefix:   prefix,
-			KeyKind:     KindStandard,
-			CreatedAt:   now,
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return &CreateAPIKeyResult{
-		APIKeyMetadata: stored,
-		APIKey:         rawToken,
-	}, nil
 }
 
 // ListActiveForWorkspace returns active (non-revoked) API key
@@ -240,27 +186,6 @@ func (s *APIKeyStore) RevokeForWorkspace(ctx context.Context, workspaceID worksp
 		}
 		return nil
 	})
-}
-
-// AuthenticationResult retains the exact typed principal resolved for the key.
-// Workspace/APIKeyID fields preserve the existing local caller contract.
-type AuthenticationResult struct {
-	Principal Principal
-	APIKeyID  string
-	Workspace workspace.Workspace
-}
-
-// AuthenticateRawKey checks current authority and credential usage atomically.
-// Derived keys keep their identity-grant revisions and immutable ceiling.
-func (s *APIKeyStore) AuthenticateRawKey(ctx context.Context, rawToken string) (*AuthenticationResult, error) {
-	if rawToken == "" {
-		return nil, &AuthenticationError{Message: "missing api key"}
-	}
-	principal, err := NewAuthorityResolver(s.db, "").AuthenticateKey(ctx, rawToken)
-	if err != nil {
-		return nil, err
-	}
-	return &AuthenticationResult{APIKeyID: principal.APIKeyID, Workspace: principal.Workspace, Principal: principal}, nil
 }
 
 // UpsertBootstrap atomically refreshes the bootstrap api_keys row

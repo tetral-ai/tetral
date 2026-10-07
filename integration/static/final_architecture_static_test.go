@@ -69,7 +69,7 @@ func TestFinalArchitectureEventStreamIsImplementedReadOnlyService(t *testing.T) 
 			"ReadCommandResult",
 			"CancelCommand",
 			"NewAPIKeyStore",
-			"StoreAuthenticator",
+			"AuthenticateKey",
 			"x-api-key",
 			"InitializeSchema",
 		})

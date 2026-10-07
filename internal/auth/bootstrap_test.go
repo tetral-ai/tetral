@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -59,15 +60,17 @@ func TestRefreshBootstrapValidatesBeforeUpsert(t *testing.T) {
 
 func TestRefreshBootstrapInsertsBootstrapRowOnFreshSchema(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(context.Background(), store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("RefreshBootstrap: %v", err)
 	}
 	// Auth must succeed for the env key.
-	result, err := store.AuthenticateRawKey(context.Background(), envKey)
+	result, err := resolver.AuthenticateKey(context.Background(), envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey for bootstrap: %v", err)
+		t.Fatalf("AuthenticateKey for bootstrap: %v", err)
 	}
 	if result.Workspace.ID != workspace.DefaultID {
 		t.Errorf("authenticated workspace = %q; want %q", result.Workspace.ID, workspace.DefaultID)
@@ -76,7 +79,9 @@ func TestRefreshBootstrapInsertsBootstrapRowOnFreshSchema(t *testing.T) {
 
 func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	ctx := context.Background()
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)
@@ -85,7 +90,7 @@ func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 		t.Fatalf("first refresh: %v", err)
 	}
 	// The first key authenticates initially.
-	if _, err := store.AuthenticateRawKey(ctx, first); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, first); err != nil {
 		t.Fatalf("first key must authenticate before rotation: %v", err)
 	}
 
@@ -93,18 +98,20 @@ func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 		t.Fatalf("rotate refresh: %v", err)
 	}
 	// The first key must no longer authenticate.
-	if _, err := store.AuthenticateRawKey(ctx, first); err == nil {
+	if _, err := resolver.AuthenticateKey(ctx, first); err == nil {
 		t.Error("first env key still authenticates after rotation; bootstrap rotate did not invalidate it")
 	}
 	// The second key must authenticate.
-	if _, err := store.AuthenticateRawKey(ctx, second); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, second); err != nil {
 		t.Fatalf("second env key must authenticate after rotation: %v", err)
 	}
 }
 
 func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	ctx := context.Background()
 
 	// Seed bootstrap, then create a standard key, then rotate
@@ -114,7 +121,7 @@ func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 		t.Fatalf("first refresh: %v", err)
 	}
 
-	created, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "standard-key")
+	created, err := authtest.SeedIndependentKey(ctx, authDB, workspace.DefaultID, "standard-key")
 	if err != nil {
 		t.Fatalf("create standard key: %v", err)
 	}
@@ -127,14 +134,16 @@ func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 	}
 
 	// Standard key must still authenticate.
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err != nil {
 		t.Errorf("standard key invalidated by bootstrap rotation: %v", err)
 	}
 }
 
 func TestRefreshBootstrapNoOpOnUnchangedDigest(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
@@ -181,21 +190,23 @@ func TestRefreshBootstrapNoOpOnUnchangedDigest(t *testing.T) {
 		t.Errorf("bootstrap created_at changed across no-op refresh: first=%q second=%q (must not be touched)", firstCreatedAt, secondCreatedAt)
 	}
 
-	if _, err := store.AuthenticateRawKey(ctx, envKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, envKey); err != nil {
 		t.Errorf("env key must still authenticate after no-op refresh: %v", err)
 	}
 }
 
 func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, envKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, envKey); err != nil {
 		t.Fatalf("env key must authenticate before revoke: %v", err)
 	}
 
@@ -210,14 +221,14 @@ func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 	if err := store.RevokeForWorkspace(ctx, workspace.DefaultID, firstID); err != nil {
 		t.Fatalf("revoke bootstrap row: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, envKey); err == nil {
+	if _, err := resolver.AuthenticateKey(ctx, envKey); err == nil {
 		t.Fatal("revoked bootstrap env key still authenticates before refresh")
 	}
 
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("reactivating refresh: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, envKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, envKey); err != nil {
 		t.Fatalf("env key must authenticate after reactivating refresh: %v", err)
 	}
 
@@ -247,31 +258,33 @@ func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 
 func TestRefreshBootstrapDoesNotReactivateRevokedStandardKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(storagetest.OpenWorkloadDB(t, db, "auth").DB)
+	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
+	store := auth.NewAPIKeyStore(authDB)
+	resolver := auth.NewAuthorityResolver(authDB, "")
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	created, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "revoked-standard")
+	created, err := authtest.SeedIndependentKey(ctx, authDB, workspace.DefaultID, "revoked-standard")
 	if err != nil {
 		t.Fatalf("create standard key: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err != nil {
 		t.Fatalf("standard key must authenticate before revoke: %v", err)
 	}
 	if err := store.RevokeForWorkspace(ctx, workspace.DefaultID, created.ID); err != nil {
 		t.Fatalf("revoke standard key: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err == nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err == nil {
 		t.Fatal("revoked standard key still authenticates before refresh")
 	}
 
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, strings.Repeat("b", 64)); err != nil {
 		t.Fatalf("rotate refresh: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err == nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err == nil {
 		t.Fatal("RefreshBootstrap reactivated a revoked standard key")
 	}
 

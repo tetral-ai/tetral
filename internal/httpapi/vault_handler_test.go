@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -1062,7 +1063,7 @@ func TestVaultAndCredentialHTTPArchivedFilteringAndWorkspaceIsolation(t *testing
 	requireIDs(t, listCredentialIDsViaHTTP(t, router, env.envKey, "/v1/vaults/"+credentialVaultID+"/credentials?include_archived=true"), activeCredentialID, archivedCredentialID)
 
 	env.seedWorkspace(t, "workspace_b", "B")
-	workspaceBKey, err := env.store.CreateForWorkspace(defaultWorkspaceContext(), "workspace_b", "b-key")
+	workspaceBKey, err := authtest.SeedIndependentKey(defaultWorkspaceContext(), env.runtime, "workspace_b", "b-key")
 	if err != nil {
 		t.Fatalf("create workspace_b key: %v", err)
 	}

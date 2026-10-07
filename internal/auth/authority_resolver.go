@@ -89,8 +89,8 @@ func readKeySnapshot(row *sql.Row) (credentialSnapshot, error) {
 	c.authority.PolicyVersion = p.Int64
 	c.authority.Scope = ResourceReference{WorkspaceID: c.workspaceID, Type: "workspace"}
 	if c.authority.Kind == AuthorityIndependentKey {
-		c.authority.PolicyVersion = PolicyVersion
-		c.authority.Operations = RegisteredOperations()
+		// The schema keeps independent rows free of lineage columns.
+		c.authority = IndependentKeyPrincipal(workspace.Workspace{ID: c.workspaceID}, c.id).Authority
 	} else if json.Unmarshal(ops, &c.authority.Operations) != nil {
 		return c, authRejected()
 	}
@@ -204,7 +204,9 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 		return Principal{}, err
 	}
 	p := Principal{Workspace: ws, Credential: Credential{ID: c.id, Kind: CredentialAPIKey}, Authority: c.authority}
-	if bearer {
+	if c.authority.Kind == AuthorityIndependentKey {
+		p = IndependentKeyPrincipal(ws, c.id)
+	} else if bearer {
 		p.Credential.Kind = CredentialAccessToken
 	} else {
 		p.APIKeyID = c.id

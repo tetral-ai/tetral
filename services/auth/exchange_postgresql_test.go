@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -188,7 +189,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		}
 	})
 	t.Run("SelectedCredentialPrecedence", func(t *testing.T) {
-		key, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "selected independent key")
+		key, err := authtest.SeedIndependentKey(ctx, runtime, workspace.DefaultID, "selected independent key")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +234,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 		}
 	})
 	t.Run("RepeatedMixedCaseSelectedKeysOnWire", func(t *testing.T) {
-		key, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "wire selected key")
+		key, err := authtest.SeedIndependentKey(ctx, runtime, workspace.DefaultID, "wire selected key")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -108,7 +108,7 @@ func TestAuthTokenPrunerRetentionAndBatch(t *testing.T) {
 		seedPruneToken(t, admin, "at_revoked_recent", cutoff.Add(time.Hour), true)
 		seedPruneToken(t, admin, "at_live", cutoff.Add(25*time.Hour), false)
 		seedPruneToken(t, admin, "at_future", cutoff.Add(48*time.Hour), false)
-		key, err := NewAPIKeyStore(w.DB).CreateForWorkspace(context.Background(), workspace.DefaultID, "pruner-surviving-independent-key")
+		key, err := seedIndependentKeyForTest(context.Background(), w.DB, workspace.DefaultID, "pruner-surviving-independent-key")
 		if err != nil {
 			t.Fatal(err)
 		}

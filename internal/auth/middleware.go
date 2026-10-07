@@ -24,39 +24,23 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return principal, ok
 }
 
-// Authenticator resolves a raw API key string to the public-safe
-// principal it belongs to. The middleware uses this interface so
-// production wiring (an APIKeyStore-backed implementation) and test
-// fakes share one shape. Authenticate must not log or echo rawKey.
+// Authenticator resolves a raw API key string to the public-safe principal it
+// belongs to for the raw x-api-key Middleware. That middleware is an in-process
+// test harness; production public services admit only the Auth-signed
+// principal through InternalPrincipalMiddleware. Authenticate must not log or
+// echo rawKey.
 type Authenticator interface {
 	Authenticate(ctx context.Context, rawKey string) (Principal, error)
 }
 
-// AuthenticatorFunc adapts a plain function to the Authenticator
-// interface. Useful for tests and for the static wrapper used by
-// the legacy NewRouter signature.
+// AuthenticatorFunc adapts a plain function, such as
+// AuthorityResolver.AuthenticateKey or a test fake, to the Authenticator
+// interface.
 type AuthenticatorFunc func(ctx context.Context, rawKey string) (Principal, error)
 
 // Authenticate calls f.
 func (f AuthenticatorFunc) Authenticate(ctx context.Context, rawKey string) (Principal, error) {
 	return f(ctx, rawKey)
-}
-
-// StoreAuthenticator adapts the shared resolver to local key-only routers.
-type StoreAuthenticator struct {
-	Store *APIKeyStore
-}
-
-// Authenticate preserves the typed authority returned by the current resolver.
-func (a *StoreAuthenticator) Authenticate(ctx context.Context, rawKey string) (Principal, error) {
-	if a == nil || a.Store == nil {
-		return Principal{}, &AuthenticationError{Message: "authentication unavailable"}
-	}
-	result, err := a.Store.AuthenticateRawKey(ctx, rawKey)
-	if err != nil {
-		return Principal{}, err
-	}
-	return result.Principal, nil
 }
 
 // requestIDFromContext is the reflective accessor used by the audit
@@ -86,12 +70,13 @@ type AuditRecorder interface {
 	RecordAuthEvent(context.Context, AuditEvent)
 }
 
-// Middleware constructs the HTTP middleware that authenticates
-// `x-api-key` and attaches the resolved workspace.Workspace to the
-// request context. The errorWriter parameter is supplied by the
-// httpapi package so the middleware uses the same centralized error
-// envelope as every other Engine handler. requestID extracts the
-// chi request id from context for the audit log line; pass a noop
+// Middleware constructs the raw-key HTTP harness that authenticates
+// `x-api-key` and attaches the resolved workspace.Workspace to the request
+// context. It is an in-process test harness; production public
+// services receive the Auth-signed principal instead. The errorWriter
+// parameter is supplied by the httpapi package so the middleware uses the same
+// centralized error envelope as every other Engine handler. requestID extracts
+// the chi request id from context for the audit log line; pass a noop
 // returning "" if the caller does not propagate request ids.
 //
 // Successful admission stays quiet. Failure/error events carry no raw key

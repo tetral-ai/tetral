@@ -138,14 +138,15 @@ func (w *statusTrackingWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// authMiddleware composes the auth.Middleware with the centralized
-// writeError envelope and the local RequestIDFromContext extractor,
-// returning a chi-compatible middleware constructor.
+// authMiddleware composes the raw-key test harness with the centralized
+// writeError envelope and the local RequestIDFromContext extractor. Production
+// /v1 routes use internalPrincipalMiddleware instead.
 func authMiddleware(authenticator auth.Authenticator, logger *slog.Logger) func(http.Handler) http.Handler {
 	return PublicAuthMiddleware(authenticator, logger)
 }
 
-// PublicAuthMiddleware authenticates x-api-key and reports failures through the standard public error envelope.
+// PublicAuthMiddleware is the raw x-api-key test harness. It authenticates the
+// key and reports failures through the standard public error envelope.
 func PublicAuthMiddleware(authenticator auth.Authenticator, logger *slog.Logger) func(http.Handler) http.Handler {
 	return auth.MiddlewareWithAudit(authenticator, WriteError, RequestIDFromContext, authLogRecorder{logger: logger})
 }

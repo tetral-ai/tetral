@@ -101,9 +101,8 @@ func newTestDBFromStorage(t *testing.T) *sql.DB {
 func newAuthenticatedRouter(t *testing.T, sessionHandler *httpapi.SessionHandler, options ...httpapi.RouterOption) http.Handler {
 	t.Helper()
 	authDB := newTestDBFromStorage(t)
-	authStore := auth.NewAPIKeyStore(authDB)
 	allOptions := []httpapi.RouterOption{
-		httpapi.WithAuthenticator(&auth.StoreAuthenticator{Store: authStore}),
+		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(authDB, "").AuthenticateKey)),
 	}
 	allOptions = append(allOptions, options...)
 	return httpapi.NewRouter(sessionHandler, "", allOptions...)

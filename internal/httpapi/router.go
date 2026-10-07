@@ -14,11 +14,11 @@ import (
 )
 
 // NewRouter builds a chi router with all middleware and routes
-// registered. Callers that serve /v1 routes must pass
-// WithAuthenticator(...) so the auth middleware can attach an
-// authenticated workspace to the request context. The apiKey
-// parameter is retained for source compatibility but no longer
-// creates a default-workspace production fallback.
+// registered. Production public services pass
+// WithInternalPrincipalVerifier so /v1 routes admit only the Auth-signed,
+// request-bound principal. Without it, /v1 routes use the raw x-api-key
+// test harness installed by WithAuthenticator. The apiKey parameter is
+// unused.
 func NewRouter(sessionHandler *SessionHandler, apiKey string, options ...RouterOption) http.Handler {
 	router := chi.NewRouter()
 
@@ -134,9 +134,9 @@ func WithSessionEventListHandler(h SessionEventListHandler) RouterOption {
 	return func(o *routerOptions) { o.sessionEventList = h }
 }
 
-// WithAuthenticator installs the auth.Authenticator used by /v1
-// routes. Production wiring uses this option so bootstrap and
-// standard PostgreSQL-backed keys authenticate.
+// WithAuthenticator installs the auth.Authenticator for the raw x-api-key
+// test harness. It applies only when no internal principal verifier is
+// installed; production public services use WithInternalPrincipalVerifier.
 func WithAuthenticator(a auth.Authenticator) RouterOption {
 	return func(o *routerOptions) { o.authenticator = a }
 }
@@ -165,8 +165,8 @@ func applyRouterOptionDefaults(opts *routerOptions) {
 	}
 }
 
-// resolveAuthenticator picks the explicit authenticator supplied via
-// WithAuthenticator if present. Without one, /v1 routes fail closed
+// resolveAuthenticator picks the raw-key harness authenticator supplied via
+// WithAuthenticator if present. Without one, harness /v1 routes fail closed
 // during authentication rather than manufacturing workspace.DefaultID.
 func resolveAuthenticator(_ string, opts *routerOptions) auth.Authenticator {
 	if opts.authenticator != nil {

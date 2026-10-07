@@ -60,8 +60,10 @@ const (
 	AuthorityIdentityGrant  = "identity_grant"
 )
 
-// IndependentKeyPrincipal is used only after resolving a durable independent
-// key. It is an explicit trusted construction step, never a signed-token fallback.
+// IndependentKeyPrincipal is the single definition of independent
+// full-workspace authority. AuthorityResolver admission uses it after resolving
+// a durable independent key row; it is an explicit trusted construction step,
+// never a signed-token fallback.
 func IndependentKeyPrincipal(ws workspace.Workspace, keyID string) Principal {
 	return Principal{Workspace: ws, APIKeyID: keyID, Credential: Credential{ID: keyID, Kind: CredentialAPIKey}, Authority: Authority{
 		Kind: AuthorityIndependentKey, PolicyVersion: PolicyVersion, Operations: RegisteredOperations(), Scope: ResourceReference{WorkspaceID: ws.ID, Type: "workspace"},

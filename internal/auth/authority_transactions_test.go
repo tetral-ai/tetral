@@ -124,7 +124,7 @@ func TestAuthorityResolverCredentialExpiryAfterLockWait(t *testing.T) {
 					id = p.Credential.ID
 					table = "auth_access_tokens"
 				} else {
-					result, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "expiry barrier")
+					result, err := seedIndependentKeyForTest(ctx, store.db, workspace.DefaultID, "expiry barrier")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -295,7 +295,7 @@ func TestAuthorityResolverAdmissionAndRevocationLockOrder(t *testing.T) {
 		admin, resolver, store, _ := authorityFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		key, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "revoke first")
+		key, err := seedIndependentKeyForTest(ctx, store.db, workspace.DefaultID, "revoke first")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +319,7 @@ func TestAuthorityResolverAdmissionAndRevocationLockOrder(t *testing.T) {
 		admin, resolver, store, _ := authorityFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		key, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "admit first")
+		key, err := seedIndependentKeyForTest(ctx, store.db, workspace.DefaultID, "admit first")
 		if err != nil {
 			t.Fatal(err)
 		}

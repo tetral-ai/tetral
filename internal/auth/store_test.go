@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -26,16 +27,29 @@ func seedDefaultBootstrap(t *testing.T, store *auth.APIKeyStore) string {
 	return envKey
 }
 
-func TestCreateForWorkspaceReturnsRawKeyOnceAndStoresMetadataOnly(t *testing.T) {
+// bootstrapPrincipal seeds the default bootstrap key and admits it through the
+// production resolver, yielding the independent principal that issues keys.
+func bootstrapPrincipal(t *testing.T, db *sql.DB, store *auth.APIKeyStore) auth.Principal {
+	t.Helper()
+	envKey := seedDefaultBootstrap(t, store)
+	principal, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), envKey)
+	if err != nil {
+		t.Fatalf("authenticate bootstrap key: %v", err)
+	}
+	return principal
+}
+
+func TestCreateForPrincipalReturnsRawKeyOnceAndStoresMetadataOnly(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
+	issuer := bootstrapPrincipal(t, db, store)
 
-	created, err := store.CreateForWorkspace(context.Background(), workspace.DefaultID, "ci-key")
+	created, err := store.CreateForPrincipal(context.Background(), issuer, "ci-key")
 	if err != nil {
-		t.Fatalf("CreateForWorkspace: %v", err)
+		t.Fatalf("CreateForPrincipal: %v", err)
 	}
 	if created.APIKey == "" {
-		t.Fatal("CreateForWorkspace must return raw api_key on creation")
+		t.Fatal("CreateForPrincipal must return raw api_key on creation")
 	}
 	if !strings.HasPrefix(created.APIKey, auth.TokenPrefix) {
 		t.Errorf("api_key %q does not start with %q", created.APIKey, auth.TokenPrefix)
@@ -77,13 +91,14 @@ func TestCreateForWorkspaceReturnsRawKeyOnceAndStoresMetadataOnly(t *testing.T) 
 	}
 }
 
-func TestCreateForWorkspaceRejectsEmptyName(t *testing.T) {
+func TestCreateForPrincipalRejectsEmptyName(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
+	issuer := bootstrapPrincipal(t, db, store)
 	for _, name := range []string{"", "   ", "\t\n"} {
-		_, err := store.CreateForWorkspace(context.Background(), workspace.DefaultID, name)
+		_, err := store.CreateForPrincipal(context.Background(), issuer, name)
 		if err == nil {
-			t.Errorf("CreateForWorkspace accepted blank name %q", name)
+			t.Errorf("CreateForPrincipal accepted blank name %q", name)
 			continue
 		}
 		var validation *auth.ValidationError
@@ -93,13 +108,14 @@ func TestCreateForWorkspaceRejectsEmptyName(t *testing.T) {
 	}
 }
 
-func TestCreateForWorkspaceRejectsOversizedName(t *testing.T) {
+func TestCreateForPrincipalRejectsOversizedName(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
+	issuer := bootstrapPrincipal(t, db, store)
 	tooLong := strings.Repeat("x", 257)
-	_, err := store.CreateForWorkspace(context.Background(), workspace.DefaultID, tooLong)
+	_, err := store.CreateForPrincipal(context.Background(), issuer, tooLong)
 	if err == nil {
-		t.Fatal("CreateForWorkspace accepted name with 257 code points; want rejection")
+		t.Fatal("CreateForPrincipal accepted name with 257 code points; want rejection")
 	}
 	var validation *auth.ValidationError
 	if !errors.As(err, &validation) {
@@ -107,31 +123,15 @@ func TestCreateForWorkspaceRejectsOversizedName(t *testing.T) {
 	}
 }
 
-func TestCreateForWorkspaceProducesUniqueRawTokens(t *testing.T) {
-	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
-	seen := map[string]bool{}
-	for i := 0; i < 5; i++ {
-		created, err := store.CreateForWorkspace(context.Background(), workspace.DefaultID, "key-"+string(rune('a'+i)))
-		if err != nil {
-			t.Fatalf("CreateForWorkspace iter %d: %v", i, err)
-		}
-		if seen[created.APIKey] {
-			t.Fatalf("duplicate raw token across calls: %q", created.APIKey)
-		}
-		seen[created.APIKey] = true
-	}
-}
-
 func TestListActiveForWorkspaceReturnsMetadataOnly(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	ctx := context.Background()
-	first, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "first")
+	first, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "first")
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
-	second, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "second")
+	second, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "second")
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestListActiveForWorkspaceExcludesRevoked(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	ctx := context.Background()
-	created, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "revoke-me")
+	created, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "revoke-me")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestListActiveForWorkspaceHonorsLimitAndCursor(t *testing.T) {
 	store := auth.NewAPIKeyStore(db)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		if _, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "k"+string(rune('a'+i))); err != nil {
+		if _, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "k"+string(rune('a'+i))); err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestListActiveForWorkspaceRejectsCrossWorkspaceCursor(t *testing.T) {
 		 ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatalf("seed workspace_b: %v", err)
 	}
-	bID, err := store.CreateForWorkspace(ctx, "workspace_b", "b-key")
+	bID, err := authtest.SeedIndependentKey(ctx, admin, "workspace_b", "b-key")
 	if err != nil {
 		t.Fatalf("create workspace_b key: %v", err)
 	}
@@ -238,18 +238,19 @@ func TestListActiveForWorkspaceRejectsCrossWorkspaceCursor(t *testing.T) {
 func TestRevokeForWorkspaceMarksRowAndBlocksReauth(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
+	resolver := auth.NewAuthorityResolver(db, "")
 	ctx := context.Background()
-	created, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "revoke")
+	created, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "revoke")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err != nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err != nil {
 		t.Fatalf("authenticate before revoke: %v", err)
 	}
 	if err := store.RevokeForWorkspace(ctx, workspace.DefaultID, created.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := store.AuthenticateRawKey(ctx, created.APIKey); err == nil {
+	if _, err := resolver.AuthenticateKey(ctx, created.APIKey); err == nil {
 		t.Error("revoked api key still authenticates")
 	}
 
@@ -280,7 +281,7 @@ func TestRevokeForWorkspaceReturnsNotFoundForAlreadyRevoked(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	ctx := context.Background()
-	created, err := store.CreateForWorkspace(ctx, workspace.DefaultID, "twice")
+	created, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "twice")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestRevokeForWorkspaceCannotCrossWorkspace(t *testing.T) {
 		 ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatalf("seed workspace_b: %v", err)
 	}
-	bKey, err := store.CreateForWorkspace(ctx, "workspace_b", "b-key")
+	bKey, err := authtest.SeedIndependentKey(ctx, admin, "workspace_b", "b-key")
 	if err != nil {
 		t.Fatalf("create workspace_b key: %v", err)
 	}
@@ -321,13 +322,13 @@ func TestRevokeForWorkspaceCannotCrossWorkspace(t *testing.T) {
 	}
 }
 
-func TestAuthenticateRawKeyReturnsBootstrapWorkspace(t *testing.T) {
+func TestAuthenticateKeyReturnsBootstrapWorkspace(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	envKey := seedDefaultBootstrap(t, store)
-	result, err := store.AuthenticateRawKey(context.Background(), envKey)
+	result, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 	if result.Workspace.ID != workspace.DefaultID {
 		t.Errorf("Workspace.ID = %q; want %q", result.Workspace.ID, workspace.DefaultID)
@@ -340,16 +341,15 @@ func TestAuthenticateRawKeyReturnsBootstrapWorkspace(t *testing.T) {
 	}
 }
 
-func TestStoreAuthenticatorPropagatesAPIKeyIDInPrincipal(t *testing.T) {
+func TestAuthenticateKeyPropagatesAPIKeyIDInPrincipal(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
-	created, err := store.CreateForWorkspace(context.Background(), workspace.DefaultID, "principal-key")
+	created, err := authtest.SeedIndependentKey(context.Background(), db, workspace.DefaultID, "principal-key")
 	if err != nil {
-		t.Fatalf("CreateForWorkspace: %v", err)
+		t.Fatalf("SeedIndependentKey: %v", err)
 	}
-	principal, err := (&auth.StoreAuthenticator{Store: store}).Authenticate(context.Background(), created.APIKey)
+	principal, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), created.APIKey)
 	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 	if principal.APIKeyID != created.ID {
 		t.Errorf("Principal.APIKeyID = %q; want %q", principal.APIKeyID, created.ID)
@@ -362,11 +362,11 @@ func TestStoreAuthenticatorPropagatesAPIKeyIDInPrincipal(t *testing.T) {
 	}
 }
 
-func TestAuthenticateRawKeyRejectsUnknownKey(t *testing.T) {
+func TestAuthenticateKeyRejectsUnknownKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	_ = seedDefaultBootstrap(t, store)
-	_, err := store.AuthenticateRawKey(context.Background(), "tetral_sk_unknown_"+strings.Repeat("x", 32))
+	_, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), "tetral_sk_unknown_"+strings.Repeat("x", 32))
 	if err == nil {
 		t.Fatal("expected AuthenticationError for unknown key")
 	}
@@ -376,10 +376,9 @@ func TestAuthenticateRawKeyRejectsUnknownKey(t *testing.T) {
 	}
 }
 
-func TestAuthenticateRawKeyRejectsEmpty(t *testing.T) {
+func TestAuthenticateKeyRejectsEmpty(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	store := auth.NewAPIKeyStore(db)
-	_, err := store.AuthenticateRawKey(context.Background(), "")
+	_, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error for empty key")
 	}

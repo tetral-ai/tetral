@@ -56,9 +56,9 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
-	principal, err := env.store.AuthenticateRawKey(defaultWorkspaceContext(), env.envKey)
+	principal, err := auth.NewAuthorityResolver(env.runtime, "").AuthenticateKey(defaultWorkspaceContext(), env.envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 
 	code, body := performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores", env.envKey, `{"name":"http-store","metadata":{"team":"runtime"}}`)
@@ -602,9 +602,9 @@ func decodeMemoryJSON(t *testing.T, body string, target any) {
 
 func authenticatedAPIKeyID(t *testing.T, env *authTestEnv) string {
 	t.Helper()
-	result, err := env.store.AuthenticateRawKey(defaultWorkspaceContext(), env.envKey)
+	result, err := auth.NewAuthorityResolver(env.runtime, "").AuthenticateKey(defaultWorkspaceContext(), env.envKey)
 	if err != nil {
-		t.Fatalf("AuthenticateRawKey: %v", err)
+		t.Fatalf("AuthenticateKey: %v", err)
 	}
 	if result.APIKeyID == "" {
 		t.Fatal("authenticated API key id is empty")

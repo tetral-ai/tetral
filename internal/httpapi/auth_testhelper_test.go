@@ -21,11 +21,10 @@ const bootstrapEnvKey = "tetral_test_bootstrap_key_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 // authTestEnv groups the dependencies the api_key + workspace HTTP
 // tests share: a runtime *sql.DB, an admin *sql.DB for fixture
-// seeding, the runtime-role api-key store, and the bootstrap raw key.
+// seeding, and the bootstrap raw key.
 type authTestEnv struct {
 	runtime *sql.DB
 	admin   *sql.DB
-	store   *auth.APIKeyStore
 	envKey  string
 }
 
@@ -39,7 +38,6 @@ func newAuthTestEnv(t *testing.T) *authTestEnv {
 	return &authTestEnv{
 		runtime: runtime,
 		admin:   admin,
-		store:   store,
 		envKey:  bootstrapEnvKey,
 	}
 }
@@ -50,7 +48,7 @@ func newAuthTestEnv(t *testing.T) *authTestEnv {
 // route families that still belong here.
 func (e *authTestEnv) router(opts ...httpapi.RouterOption) http.Handler {
 	options := []httpapi.RouterOption{
-		httpapi.WithAuthenticator(&auth.StoreAuthenticator{Store: e.store}),
+		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(e.runtime, "").AuthenticateKey)),
 	}
 	options = append(options, opts...)
 	return httpapi.NewRouter(nil, "", options...)

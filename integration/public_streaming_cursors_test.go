@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/id"
@@ -232,7 +232,7 @@ func publicProjectionForeignKey(t *testing.T, f *publicProjectionFixture) string
 	if _, err := workspace.NewSeeder(f.db).Seed(f.ctx, ws, "foreign projection control"); err != nil {
 		t.Fatal(err)
 	}
-	key, err := auth.NewAPIKeyStore(f.pools.OpenWorkload(t, "auth", nil)).CreateForWorkspace(f.ctx, ws, fmt.Sprintf("foreign-%s", f.session))
+	key, err := authtest.SeedIndependentKey(f.ctx, f.pools.OpenWorkload(t, "auth", nil), ws, fmt.Sprintf("foreign-%s", f.session))
 	if err != nil {
 		t.Fatal(err)
 	}
