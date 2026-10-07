@@ -29,7 +29,7 @@ module, following the `bridge` precedent); the binary is at
 | `TETRAL_WEB_API_KEYS` | Ordered JSON array of platform backend keys (pool order) |
 | `TETRAL_WEB_CONNECTOR_GRPC_ADDR` | gRPC listen address (default `0.0.0.0:9092`) |
 | `TETRAL_WEB_CONNECTOR_METRICS_ADDR` | Prometheus / health listen address (default `0.0.0.0:9464`) |
-| `TETRAL_SERVICE_DRAIN_TIMEOUT_MS` | gRPC drain, default10000ms, range1..20000ms; leaves10s for joins and proxy shutdown inside the30s Pod grace |
+| `TETRAL_DRAIN_TIMEOUT_MS` | gRPC drain, default10000ms, range1..20000ms; leaves10s for joins and proxy shutdown inside the30s Pod grace |
 | `TETRAL_BLOB_TLS_CA_PATH` / `TETRAL_BLOB_TLS_SERVER_NAME` | Required object-store trust bundle and exact DNS identity; production uses native verified HTTPS |
 | `TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY` | HMAC key for runtime binding-token verification |
 
@@ -445,7 +445,7 @@ backend client-error taxonomy is recorded as `unknown_client_error` with the
 actual HTTP status; arbitrary dependency response names never enter diagnostics.
 
 The command validates `TETRAL_CANCEL_JOIN_TIMEOUT_MS` (default 5000) together
-with `TETRAL_SERVICE_DRAIN_TIMEOUT_MS`: their sum must fit within 25000 ms,
+with `TETRAL_DRAIN_TIMEOUT_MS`: their sum must fit within 25000 ms,
 leaving the web-connector Pod's proxy allocation. One executable deadline covers
 service drain, cancellation, all joins and dependency cleanup. An uncooperative
 producer causes exit status 1 without closing dependencies under live work.

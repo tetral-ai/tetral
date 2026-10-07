@@ -19,7 +19,7 @@ describe("ProviderGateway command failure ownership", () => {
     let app:ReturnType<typeof createProviderGatewayApp>|undefined;
     let worker:Promise<unknown>|undefined;
     await withEnv(async()=>{
-      process.env.TETRAL_SERVICE_DRAIN_TIMEOUT_MS="200";
+      process.env.TETRAL_DRAIN_TIMEOUT_MS="200";
       process.env.TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS="1000";
       const command=runProviderGatewayCommand({logger:{info:()=>undefined,error:()=>undefined},
         dependencyBuilder:async input=>{

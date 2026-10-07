@@ -38,7 +38,7 @@ spec:
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
               value: "tetral-object-store.tetral-system.svc.cluster.local"
-            - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
+            - name: TETRAL_DRAIN_TIMEOUT_MS
               value: "10000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"

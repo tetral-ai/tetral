@@ -165,7 +165,7 @@ malformed value is a startup failure (`ConfigFromEnv`).
 | `TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS` | `30` | reclaim cadence; required positive |
 | `TETRAL_QUEUE_LEASE_RECLAIM_LIMIT` | `100` | per-scan batch size; required positive |
 | `TETRAL_CANCEL_JOIN_TIMEOUT_MS` | `5000` | positive cancellation/join allocation; drain plus join fits within 30000 ms (25000 ms with the hardened proxy) |
-| `TETRAL_QUEUE_DRAIN_TIMEOUT_MS` | `10000` | concurrent RPC/HTTP/maintenance completion window; 1–25000 ms, leaving cancellation/join time inside the 30-second Pod grace |
+| `TETRAL_DRAIN_TIMEOUT_MS` | `10000` | concurrent RPC/HTTP/maintenance completion window; 1–25000 ms, leaving cancellation/join time inside the 30-second Pod grace |
 
 Production database startup requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME` alongside `TETRAL_DATABASE_URL`. The shared

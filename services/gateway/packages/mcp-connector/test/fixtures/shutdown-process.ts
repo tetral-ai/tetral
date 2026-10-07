@@ -37,7 +37,7 @@ const review = Bun.serve({
 Object.assign(process.env, commandEnv(), {
   TETRAL_MCP_CONNECTOR_GRPC_ADDR: "127.0.0.1:0",
   TETRAL_MCP_CONNECTOR_HTTP_ADDR: "127.0.0.1:0",
-  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: credentialMode ? "200" : "2000",
+  TETRAL_DRAIN_TIMEOUT_MS: credentialMode ? "200" : "2000",
   TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: credentialMode ? "1000" : "3000",
   ...(credentialMode ? { TETRAL_MCP_CREDENTIAL_TIMEOUT_MS: "10" } : {}),
   KUBERNETES_API_SERVER_URL: review.url.toString(),

@@ -69,3 +69,17 @@ func TestQueueExplicitProxyReservesJoinAllocation(t *testing.T) {
 		t.Fatal("explicit proxy was omitted from shutdown allocation")
 	}
 }
+
+func TestQueueDrainUsesTheSharedApplicationDrainKey(t *testing.T) {
+	if EnvDrainTimeoutMS != "TETRAL_DRAIN_TIMEOUT_MS" {
+		t.Fatalf("Queue drain key=%s", EnvDrainTimeoutMS)
+	}
+	cfg, err := ConfigFromEnv(configEnv{"TETRAL_DRAIN_TIMEOUT_MS": "2000"})
+	if err != nil || cfg.DrainTimeout != 2*time.Second {
+		t.Fatalf("shared drain key=%s/%v", cfg.DrainTimeout, err)
+	}
+	cfg, err = ConfigFromEnv(configEnv{"TETRAL_QUEUE_DRAIN_TIMEOUT_MS": "2000"})
+	if err != nil || cfg.DrainTimeout != 10*time.Second {
+		t.Fatalf("unrecognized drain key changed the default=%s/%v", cfg.DrainTimeout, err)
+	}
+}

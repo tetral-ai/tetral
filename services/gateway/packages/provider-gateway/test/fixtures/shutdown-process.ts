@@ -11,7 +11,7 @@ import { commandEnv, commandFixture } from "./command-process.js";
 const [sink = "normal", trigger = "SIGTERM", mode = "held"] =
   process.argv.slice(2);
 Object.assign(process.env, commandEnv(), {
-  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: "2000",
+  TETRAL_DRAIN_TIMEOUT_MS: "2000",
   TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: "3000",
 });
 const emit = (event: string) =>

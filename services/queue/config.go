@@ -29,7 +29,7 @@ const (
 	EnvRetryBaseMS                     = "TETRAL_QUEUE_RETRY_BASE_MS"
 	EnvRetryCapMS                      = "TETRAL_QUEUE_RETRY_CAP_MS"
 	EnvRetryMaxAttempts                = "TETRAL_QUEUE_RETRY_MAX_ATTEMPTS"
-	EnvDrainTimeoutMS                  = "TETRAL_QUEUE_DRAIN_TIMEOUT_MS"
+	EnvDrainTimeoutMS                  = "TETRAL_DRAIN_TIMEOUT_MS"
 	defaultLeaseReclaimIntervalSeconds = 30
 	defaultLeaseReclaimLimit           = 100
 	defaultRetryBaseMS                 = 1000

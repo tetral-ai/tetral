@@ -270,7 +270,7 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
 	objects := uniqueObjects(t, renderChart(t, helm, chart))
-	for role, settings := range map[string]map[string]string{"bridge": {"TETRAL_DRAIN_TIMEOUT_MS": "40000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "job-runner": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "sandbox": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "provider-gateway": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "mcp-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "web-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "queue": {"TETRAL_QUEUE_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}} {
+	for role, settings := range map[string]map[string]string{"bridge": {"TETRAL_DRAIN_TIMEOUT_MS": "40000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "job-runner": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "sandbox": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "provider-gateway": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "mcp-connector": {"TETRAL_DRAIN_TIMEOUT_MS": "30000", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "web-connector": {"TETRAL_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}, "queue": {"TETRAL_DRAIN_TIMEOUT_MS": "10000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS": "5000"}} {
 		env := transportEnv(t, objects["apps/v1|Deployment|tetral-system|"+role])
 		for k, v := range settings {
 			if env[k] != v {
@@ -286,7 +286,7 @@ func TestDeploymentLifecycleBudgets(t *testing.T) {
 		renderChart(t, helm, chart, "lifecycle."+owner+"DrainMs=49999")
 	}
 	changed := uniqueObjects(t, renderChart(t, helm, chart, "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200"))
-	for role, expected := range map[string]map[string]string{"provider-gateway": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "200", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1000"}, "mcp-connector": {"TETRAL_SERVICE_DRAIN_TIMEOUT_MS": "250", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1200"}} {
+	for role, expected := range map[string]map[string]string{"provider-gateway": {"TETRAL_DRAIN_TIMEOUT_MS": "200", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1000"}, "mcp-connector": {"TETRAL_DRAIN_TIMEOUT_MS": "250", "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS": "1200"}} {
 		env := transportEnv(t, changed["apps/v1|Deployment|tetral-system|"+role])
 		for key, value := range expected {
 			if env[key] != value {
@@ -417,11 +417,7 @@ func TestQueueAndWebDeploymentJoinBudget(t *testing.T) {
 		changed := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "lifecycle.cancelJoinMs=1000", "lifecycle.queueDrainMs=200", "lifecycle.webDrainMs=250"))
 		for role, drain := range map[string]string{"queue": "200", "web-connector": "250"} {
 			env := transportEnv(t, changed["apps/v1|Deployment|tetral-system|"+role])
-			key := "TETRAL_QUEUE_DRAIN_TIMEOUT_MS"
-			if role == "web-connector" {
-				key = "TETRAL_SERVICE_DRAIN_TIMEOUT_MS"
-			}
-			if env[key] != drain || env["TETRAL_CANCEL_JOIN_TIMEOUT_MS"] != "1000" {
+			if env["TETRAL_DRAIN_TIMEOUT_MS"] != drain || env["TETRAL_CANCEL_JOIN_TIMEOUT_MS"] != "1000" {
 				t.Fatalf("%s %s actual drain/join projection=%v", profile, role, env)
 			}
 		}

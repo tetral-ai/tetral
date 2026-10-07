@@ -19,7 +19,7 @@ const (
 	DefaultReaderEndpoint          = "https://r.jina.ai/"
 	DefaultGRPCAddress             = "0.0.0.0:9092"
 	DefaultMetricsAddress          = "0.0.0.0:9464"
-	EnvDrainTimeout                = "TETRAL_SERVICE_DRAIN_TIMEOUT_MS"
+	EnvDrainTimeout                = "TETRAL_DRAIN_TIMEOUT_MS"
 	EnvSearchEndpoint              = "TETRAL_WEB_SEARCH_ENDPOINT"
 	EnvReaderEndpoint              = "TETRAL_WEB_READER_ENDPOINT"
 	EnvAPIKeys                     = "TETRAL_WEB_API_KEYS" //nolint:gosec // configuration name, not a value

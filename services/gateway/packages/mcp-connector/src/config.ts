@@ -155,7 +155,7 @@ const ConfigKeys = [
   "TETRAL_DATABASE_URL",
   "TETRAL_DATABASE_TLS_CA_PATH",
   "TETRAL_DATABASE_TLS_SERVER_NAME",
-  "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+  "TETRAL_DRAIN_TIMEOUT_MS",
   "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
   "TETRAL_DATABASE_POOL_MAX",
   "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
@@ -193,7 +193,7 @@ function loadMcpConnectorConfig(env: Record<string, string | undefined>): McpCon
   const caPath = env.TETRAL_DATABASE_TLS_CA_PATH,
     serverName = env.TETRAL_DATABASE_TLS_SERVER_NAME;
   const drainValue =
-    env.TETRAL_SERVICE_DRAIN_TIMEOUT_MS ??
+    env.TETRAL_DRAIN_TIMEOUT_MS ??
     String(ServiceLifecycleDefaults.drainTimeoutMs);
   const drainTimeoutMs = /^[1-9][0-9]*$/.test(drainValue)
     ? Number(drainValue)

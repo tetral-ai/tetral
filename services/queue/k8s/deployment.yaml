@@ -40,7 +40,7 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
-            - name: TETRAL_QUEUE_DRAIN_TIMEOUT_MS
+            - name: TETRAL_DRAIN_TIMEOUT_MS
               value: "10000"
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: "5000"

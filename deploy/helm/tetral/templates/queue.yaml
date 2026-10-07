@@ -71,7 +71,7 @@ spec:
             - /usr/local/bin/tetral-queue
           env:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" false) | trim | indent 12 }}
-            - name: TETRAL_QUEUE_DRAIN_TIMEOUT_MS
+            - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.queueDrainMs | quote }}
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.cancelJoinMs | quote }}

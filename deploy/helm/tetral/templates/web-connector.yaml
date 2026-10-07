@@ -65,7 +65,7 @@ spec:
             - /usr/local/bin/web-connector
           env:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" false "blob" true "bun" false) | trim | indent 12 }}
-            - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
+            - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.webDrainMs | quote }}
             - name: TETRAL_CANCEL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.cancelJoinMs | quote }}

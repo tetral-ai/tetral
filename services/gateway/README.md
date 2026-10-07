@@ -133,7 +133,7 @@ enters the platform pool. The gateway does not own Runtime turn retries.
 Ops plane is bare `Bun.serve` on a separate port (`/healthz`, `/readyz`,
 `/metrics`; `packages/provider-gateway/src/http-server.ts`). SIGTERM withdraws
 readiness and admission immediately. Provider and MCP allow a configured 30-second business drain
-(`TETRAL_SERVICE_DRAIN_TIMEOUT_MS`), followed by a configured five-second
+(`TETRAL_DRAIN_TIMEOUT_MS`), followed by a configured five-second
 cancellation and join phase (`TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`).
 Both phases and the five-second proxy cleanup allocation must fit the
 60-second Pod grace. Admitted requests may finish during drain; cancellation
@@ -987,7 +987,7 @@ The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
 five controls accept canonical positive
 safe integers. Missing values use defaults; Provider Gateway also treats explicit
 empty values as defaults, while MCP Connector rejects explicit empties.
-`TETRAL_SERVICE_DRAIN_TIMEOUT_MS` and `TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`
+`TETRAL_DRAIN_TIMEOUT_MS` and `TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`
 follow the same per-process rule: Provider Gateway treats an empty value as
 omitted, and MCP Connector rejects it. The pool values configure each owned SQL
 generation. Explicit database TLS requires both

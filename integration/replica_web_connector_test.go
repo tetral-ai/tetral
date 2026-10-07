@@ -373,7 +373,7 @@ func testReplicaWebCommandDrain(t *testing.T, force bool) {
 	}
 	defer func() { _ = logFile.Close() }()
 	commandEnv := append(os.Environ(),
-		"TETRAL_DEPLOYMENT_ENVIRONMENT=test", "TETRAL_SERVICE_VERSION=replica-fixture", "TETRAL_SERVICE_DRAIN_TIMEOUT_MS=2000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS=3000",
+		"TETRAL_DEPLOYMENT_ENVIRONMENT=test", "TETRAL_SERVICE_VERSION=replica-fixture", "TETRAL_DRAIN_TIMEOUT_MS=2000", "TETRAL_CANCEL_JOIN_TIMEOUT_MS=3000",
 		"TETRAL_WEB_SEARCH_ENDPOINT="+external.URL+"/search", "TETRAL_WEB_READER_ENDPOINT="+external.URL+"/reader", "TETRAL_WEB_API_KEYS=[\"fixture\"]",
 		"TETRAL_WEB_CONNECTOR_GRPC_ADDR="+addresses[0], "TETRAL_WEB_CONNECTOR_METRICS_ADDR="+addresses[1], "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY="+replicaWebKey,
 		"TETRAL_INTERNAL_GRPC_AUDIENCE=tetral-internal-grpc", "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS=tetral-agent-runtime/agent-runtime",

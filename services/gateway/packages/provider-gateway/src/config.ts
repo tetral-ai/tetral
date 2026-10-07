@@ -83,7 +83,7 @@ const ConfigSchema = z.strictObject({
   TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY: z.string().min(32).max(4096),
   TETRAL_DATABASE_TLS_CA_PATH: AddressSchema.optional(),
   TETRAL_DATABASE_TLS_SERVER_NAME: AddressSchema.optional(),
-  TETRAL_SERVICE_DRAIN_TIMEOUT_MS: z.string().optional(),
+  TETRAL_DRAIN_TIMEOUT_MS: z.string().optional(),
   TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: z.string().optional(),
   TETRAL_DATABASE_URL: z.string().min(1).max(4096),
   TETRAL_DATABASE_POOL_MAX: z.string().optional(),
@@ -110,7 +110,7 @@ const ProviderGatewayEnvKeys = [
   "TETRAL_DATABASE_URL",
   "TETRAL_DATABASE_TLS_CA_PATH",
   "TETRAL_DATABASE_TLS_SERVER_NAME",
-  "TETRAL_SERVICE_DRAIN_TIMEOUT_MS",
+  "TETRAL_DRAIN_TIMEOUT_MS",
   "TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS",
   "TETRAL_DATABASE_POOL_MAX",
   "TETRAL_DATABASE_POOL_IDLE_TIMEOUT_SECONDS",
@@ -151,7 +151,7 @@ export function loadProviderGatewayConfig(env: Record<string, string | undefined
   const caPath = parsed.data.TETRAL_DATABASE_TLS_CA_PATH,
     serverName = parsed.data.TETRAL_DATABASE_TLS_SERVER_NAME;
   const drainTimeoutMs = parsePositiveInteger(
-    parsed.data.TETRAL_SERVICE_DRAIN_TIMEOUT_MS,
+    parsed.data.TETRAL_DRAIN_TIMEOUT_MS,
     ServiceLifecycleDefaults.drainTimeoutMs,
   );
   const cancelJoinTimeoutMs = parsePositiveInteger(

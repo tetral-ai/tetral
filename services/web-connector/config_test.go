@@ -75,6 +75,22 @@ func TestDrainBudgetLeavesRoomForJoinAndProxy(t *testing.T) {
 	}
 }
 
+func TestWebDrainUsesTheSharedApplicationDrainKey(t *testing.T) {
+	base := func() mapEnv {
+		return mapEnv{EnvAPIKeys: `["fixture"]`, EnvBindingHMACKey: "binding-verifier-key-with-at-least-32-bytes"}
+	}
+	env := base()
+	env["TETRAL_DRAIN_TIMEOUT_MS"] = "2000"
+	if cfg, err := LoadConfig(env); err != nil || cfg.DrainTimeout != 2*time.Second {
+		t.Fatalf("shared drain key=%v/%v", cfg.DrainTimeout, err)
+	}
+	env = base()
+	env["TETRAL_SERVICE_DRAIN_TIMEOUT_MS"] = "2000"
+	if cfg, err := LoadConfig(env); err != nil || cfg.DrainTimeout != 10*time.Second {
+		t.Fatalf("unrecognized drain key changed the default=%v/%v", cfg.DrainTimeout, err)
+	}
+}
+
 func TestWebLifecycleConfigFitsPodApplicationAllocation(t *testing.T) {
 	for _, tc := range []struct {
 		drain, join string

@@ -48,7 +48,7 @@ spec:
             - /app/dist/provider-gateway/src-command.js
           env:
 {{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" false "bun" true) | trim | indent 12 }}
-            - name: TETRAL_SERVICE_DRAIN_TIMEOUT_MS
+            - name: TETRAL_DRAIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.providerDrainMs | quote }}
             - name: TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS
               value: {{ .Values.lifecycle.providerJoinMs | quote }}

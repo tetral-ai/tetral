@@ -57,7 +57,7 @@ test("SDK close retains a timed-out credential transaction until actual join and
 test("reusable MCP command retains SQL past client deadline until raw credential join; cooperative close succeeds", async () => {
   const saved = { ...process.env };
   Object.assign(process.env, commandEnv(), {
-    TETRAL_SERVICE_DRAIN_TIMEOUT_MS: "200",
+    TETRAL_DRAIN_TIMEOUT_MS: "200",
     TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS: "1000",
     TETRAL_MCP_CREDENTIAL_TIMEOUT_MS: "10",
     TETRAL_DATABASE_STATEMENT_TIMEOUT_MS: "30000",
