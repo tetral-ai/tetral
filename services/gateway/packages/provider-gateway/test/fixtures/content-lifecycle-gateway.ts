@@ -44,6 +44,8 @@ export interface ContentLifecycleGatewayFixtureOptions {
  readonly fragmentCodeUnits?:number;
  readonly deltaDelayMs?:number;
  readonly sourceYieldEveryRecords?:number;
+ /** Enqueue this many consecutive SSE records per source chunk; each record still reaches the SDK as its own event. */
+ readonly sourceRecordsPerChunk?:number;
  readonly sourcePackaging?:"single-chunk";
  readonly assemblyBounds?:ProviderAssemblyBounds;
  readonly bindingKey?:string;
@@ -69,6 +71,8 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
  if(!Number.isSafeInteger(fragmentCodeUnits)||fragmentCodeUnits<1||fragmentCodeUnits>65536||!Number.isSafeInteger(textCodeUnits)||textCodeUnits<0||textCodeUnits>16*1024*1024)throw new Error("invalid fixture controls");
  if(options.textCodeUnitsCycle!==undefined&&(options.textCodeUnitsCycle.length!==2||options.textCodeUnitsCycle.some(value=>!Number.isSafeInteger(value)||value<1||value>16*1024*1024-2)))throw new Error("invalid fixture size cycle");
  if(options.sourceYieldEveryRecords!==undefined&&(!Number.isSafeInteger(options.sourceYieldEveryRecords)||options.sourceYieldEveryRecords<1||options.sourceYieldEveryRecords>8192))throw new Error("invalid fixture source batching");
+ // Chunking skips the per-record gates, so it excludes every option that holds or paces individual records.
+ if(options.sourceRecordsPerChunk!==undefined&&(!Number.isSafeInteger(options.sourceRecordsPerChunk)||options.sourceRecordsPerChunk<1||options.sourceRecordsPerChunk>8192||options.holdFinish||options.holdAfterFirstComplete||options.concurrentProviderBarrier!==undefined||options.deltaDelayMs!==undefined||options.sourceYieldEveryRecords!==undefined||options.sourcePackaging!==undefined))throw new Error("invalid fixture source chunking");
  if(options.sourcePackaging!==undefined&&(options.sourcePackaging!=="single-chunk"||options.holdFinish||options.holdAfterFirstComplete||options.concurrentProviderBarrier!==undefined||options.textCodeUnitsCycle!==undefined))throw new Error("invalid fixture source packaging");
  const preparedSource=options.sourcePackaging==="single-chunk"?(()=>{const records=Array.from(sseScript(scenario,textCodeUnits,fragmentCodeUnits,options.blockCount??3,options.emptyRecords??10000));return {bytes:new TextEncoder().encode(records.join("")),recordCount:records.length};})():undefined;
  const finishGate=gate(options.holdFinish??false),prefixGate=gate(options.holdAfterFirstComplete??false);
@@ -141,7 +145,9 @@ export async function createContentLifecycleGatewayFixture(options:ContentLifecy
      if(closed)return;
      if(next.value.startsWith("event: content_block_delta")){const data=JSON.parse(next.value.split("\n")[1]!.slice(6));if(data.delta?.type==="text_delta")sourceTextCodeUnits+=data.delta.text.length;}
      if(options.sourceYieldEveryRecords!==undefined&&localSourceRecords>0&&localSourceRecords%options.sourceYieldEveryRecords===0)await new Promise(resolve=>setTimeout(resolve,0));
-     if(closed)return;localSourceRecords++;sourceRecords++;controller.enqueue(new TextEncoder().encode(next.value));}catch(error){controller.error(error);close();}},
+     if(closed)return;localSourceRecords++;sourceRecords++;let chunk=next.value;
+     for(let chunked=1;chunked<(options.sourceRecordsPerChunk??1);chunked++){const more=script.next();if(more.done)break;chunk+=more.value;localSourceRecords++;sourceRecords++;}
+     controller.enqueue(new TextEncoder().encode(chunk));}catch(error){controller.error(error);close();}},
    cancel(){sourceCancellations++;close();},
   });
   return new Response(body,{headers:{"content-type":"text/event-stream"}});

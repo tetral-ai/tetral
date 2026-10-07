@@ -425,8 +425,12 @@ it preserves the stated invariants and passes the named suites.
   the golden wire suite
   (`packages/provider-gateway/test/golden/*` — captured outbound request bytes
   and headers, plus recorded SSE replay per provider including cache-hit usage
-  numbers), and the cancellation/timeout cases in `service.test.ts` /
-  `grpc-server.test.ts`.
+  numbers), the cancellation/timeout cases in `service.test.ts` /
+  `grpc-server.test.ts`, and `assembly-retention.test.ts`, which drives the
+  8 MiB one-character text and three near-16 MiB blocks through the pinned SDK
+  adapter, assembler and writer over real gRPC, compares exact bytes with
+  independently generated digests, and requires released assembler, SDK and
+  writer owners, including cancellation with a held block and a delayed reader.
 
 ### Attachment resolution
 

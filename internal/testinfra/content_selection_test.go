@@ -34,7 +34,7 @@ func TestContentChangesSelectDurableAndTypeScriptConsumers(t *testing.T) {
 		"integration/content_process_recovery_test.go",
 		"integration/content_resource_lifecycle_test.go",
 		"integration/content_transport_limits_test.go",
-		"integration/testdata/content-lifecycle-client.ts",
+		"services/agent-runtime/packages/runtime-pod/test/fixtures/content-lifecycle-sdk.ts",
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}

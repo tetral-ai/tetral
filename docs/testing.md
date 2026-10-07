@@ -52,7 +52,8 @@ includes both Go owners, cross-service integration tests and Runtime/Gateway
 consumers; Go imports alone cannot describe their RPC and Bun test dependencies.
 Content lifecycle changes include the Runtime context and client adapters,
 Gateway assembly and transport, Bridge declarations and context loading, and
-the `integration/content_*` tests and `integration/testdata/content-*` fixtures.
+the `integration/content_*` tests and the content-lifecycle drivers under the
+Runtime pod and Provider Gateway `test/fixtures/` directories.
 Each selects the durable Go compositions and both TypeScript consumers, even
 when the changed fixture has no Go import edge.
 Service-owned `k8s/` changes select deployment evidence, including the raw
