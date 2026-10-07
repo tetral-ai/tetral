@@ -86,11 +86,23 @@ python3 deploy/managed/validate-inventory.py \
   --observed observed-resources.json
 ```
 
-Select the optional Cilium/native-certificate/issuer-policy flags only for their
-rendered installation features. The check never contacts or mutates a cluster.
+The `--public-edge`, `--cilium`, `--native-certificates` and
+`--auth-issuer-network` flags select optional canonical sets and apply only to
+this default check. A bound render already fixes its feature set, so
+`--expected-dir` rejects them. The check never contacts or mutates a cluster.
 Omitting `--require-complete` produces explicitly partial evidence and cannot
-establish installation completeness. A surviving superseded owned Deployment, autoscaler, network policy, Service or
-RBAC grant is a failed inventory check even when the replacement workloads and
-public edge are healthy.
-Unrelated resources without matching ownership are preserved; controller/CRD
-prerequisites remain independently verified rather than silently adopted.
+establish installation completeness. A surviving superseded owned Deployment,
+autoscaler, network policy, Service or RBAC grant is a failed inventory check
+even when the replacement workloads and public edge are healthy.
+
+An observed object is Tetral-owned when it carries
+`app.kubernetes.io/part-of: tetral` or when its identity is declared by any
+resource set in `resource-inventory.json`, by the Auth issuer policy or by the
+bound render. Chart-owned edge, routing and security objects carry no ownership
+label; every declared identity lives in a Tetral namespace or is a Tetral
+workload's cluster RBAC name, so the declaration alone establishes ownership.
+An owned object outside the selected set fails as `unexpected_owned_resource`,
+for example a public edge Gateway left after the edge is disabled or a
+hardened-only policy left after switching to the standard profile. Undeclared,
+unlabeled resources are preserved; controller/CRD prerequisites remain
+independently verified rather than silently adopted.

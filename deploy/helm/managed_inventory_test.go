@@ -2,6 +2,7 @@ package helm_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,14 +57,15 @@ func TestManagedInventoryBindsRenderedOverridesAndRetiresPreviousFleet(t *testin
 		}
 		return path
 	}
-	check := func(profile, expected string, resources []map[string]any, complete bool) (map[string]any, error) {
+	// An empty expected directory selects the canonical default sets; flags
+	// name the optional sets that the observed installation enables.
+	check := func(profile, expected string, resources []map[string]any, complete bool, flags ...string) (map[string]any, error) {
 		t.Helper()
 		args := []string{"--profile", profile, "--observed", writeObserved(resources)}
 		if expected != "" {
 			args = append(args, "--expected-dir", expected)
-		} else {
-			args = append(args, "--public-edge")
 		}
+		args = append(args, flags...)
 		if complete {
 			args = append(args, "--require-complete")
 		}
@@ -72,13 +74,63 @@ func TestManagedInventoryBindsRenderedOverridesAndRetiresPreviousFleet(t *testin
 		_ = json.Unmarshal(output, &result)
 		return result, err
 	}
-	resources := readExpected(defaults)
-	for _, expected := range []string{"", defaults} {
-		result, err := check("standard-routed", expected, resources, true)
-		if err != nil || result["coverage"] != "complete_resource_set" {
-			t.Fatalf("complete default inventory: %v %#v", err, result)
+	hasFailure := func(result map[string]any, reason string, identity ...string) bool {
+		failures, _ := result["failures"].([]any)
+		for _, item := range failures {
+			failure, _ := item.(map[string]any)
+			resource, _ := failure["resource"].([]any)
+			if failure["reason"] != reason || len(resource) != len(identity) {
+				continue
+			}
+			matches := true
+			for index, part := range identity {
+				matches = matches && resource[index] == part
+			}
+			if matches {
+				return true
+			}
 		}
+		return false
 	}
+	resources := readExpected(defaults)
+	if result, err := check("standard-routed", "", resources, true, "--public-edge"); err != nil || result["coverage"] != "complete_resource_set" {
+		t.Fatalf("complete canonical default inventory: %v %#v", err, result)
+	}
+	if result, err := check("standard-routed", defaults, resources, true); err != nil || result["coverage"] != "complete_resource_set" {
+		t.Fatalf("complete bound default inventory: %v %#v", err, result)
+	}
+	// Chart-owned edge, routing and security objects carry no ownership label.
+	// Their declared identity still makes a leftover one an owned survivor.
+	t.Run("unlabeled-declared-survivor", func(t *testing.T) {
+		result, err := check("standard-routed", "", resources, true)
+		if err == nil || !hasFailure(result, "unexpected_owned_resource", "gateway.networking.k8s.io/v1", "Gateway", "tetral-system", "tetral-public-edge") {
+			t.Fatalf("public edge Gateway left after disabling the edge accepted: %v %#v", err, result)
+		}
+	})
+	t.Run("profile-switch-leftover", func(t *testing.T) {
+		hardenedOnly := map[string]any{"apiVersion": "security.istio.io/v1", "kind": "PeerAuthentication", "metadata": map[string]any{"namespace": "tetral-system", "name": "tetral-queue-protected"}}
+		observed := append(append([]map[string]any{}, resources...), hardenedOnly)
+		result, err := check("standard-routed", defaults, observed, true)
+		if err == nil || !hasFailure(result, "unexpected_owned_resource", "security.istio.io/v1", "PeerAuthentication", "tetral-system", "tetral-queue-protected") {
+			t.Fatalf("hardened-only policy left after switching to standard accepted: %v %#v", err, result)
+		}
+	})
+	t.Run("unrelated-unlabeled-preserved", func(t *testing.T) {
+		unrelated := map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"namespace": "tetral-system", "name": "operator-notes"}}
+		observed := append(append([]map[string]any{}, resources...), unrelated)
+		if result, err := check("standard-routed", "", observed, true, "--public-edge"); err != nil {
+			t.Fatalf("undeclared unlabeled resource rejected: %v %#v", err, result)
+		}
+	})
+	t.Run("flags-with-expected-dir", func(t *testing.T) {
+		for _, flag := range []string{"--public-edge", "--cilium", "--native-certificates", "--auth-issuer-network"} {
+			output, err := run("validate-inventory.py", "--profile", "standard-routed", "--observed", writeObserved(resources), "--expected-dir", defaults, flag)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(output), "feature flags are fixed by the bound render") {
+				t.Fatalf("%s with a bound render was not a usage error: %v %s", flag, err, output)
+			}
+		}
+	})
 	t.Run("previous-owned-fleet-survival", func(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join(root, "deploy", "managed", "resource-inventory.json"))
 		if err != nil {

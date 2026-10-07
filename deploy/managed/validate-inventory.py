@@ -4,6 +4,14 @@
 This command reads a previously collected JSON list; it never contacts a cluster
 or deletes resources. Supply all selected controller/app resources to establish
 complete installation evidence; controller prerequisites retain separate owners.
+
+An observed object is Tetral-owned when it carries app.kubernetes.io/part-of=tetral
+or when its identity is declared by any resource set, the optional Auth issuer
+policy or the bound installation render. Chart-owned edge, routing and security
+objects carry no ownership label, so the declared identity is what recognizes a
+leftover object outside the selected set. Undeclared, unlabeled objects are
+preserved. The feature flags select canonical default sets only; a bound render
+already fixes its feature set, so --expected-dir rejects them.
 """
 import argparse
 import json
@@ -21,6 +29,8 @@ parser.add_argument('--native-certificates', action='store_true')
 parser.add_argument('--auth-issuer-network', action='store_true')
 parser.add_argument('--require-complete', action='store_true')
 args = parser.parse_args()
+if args.expected_dir and (args.public_edge or args.cilium or args.native_certificates or args.auth_issuer_network):
+    parser.error('feature flags are fixed by the bound render; omit them with --expected-dir')
 root = Path(__file__).resolve().parent.parent.parent
 inventory = json.loads((root / 'deploy/managed/resource-inventory.json').read_text())
 if inventory['schema'] != 'tetral.managed-resource-inventory/v1':
@@ -42,8 +52,11 @@ if args.native_certificates:
     sets.append('native-certificates-optional')
 expected = {identity(resource) for name in sets for resource in inventory['resourceSets'][name]}
 expected_source = 'canonical_defaults'
+auth_issuer_policy = ('networking.k8s.io/v1', 'NetworkPolicy', 'tetral-system', 'auth-issuer-https')
+declared = {identity(resource) for resources in inventory['resourceSets'].values() for resource in resources}
+declared.add(auth_issuer_policy)
 if args.auth_issuer_network:
-    expected.add(('networking.k8s.io/v1', 'NetworkPolicy', 'tetral-system', 'auth-issuer-https'))
+    expected.add(auth_issuer_policy)
 if args.expected_dir:
     sys.path.insert(0, str(root / 'deploy'))
     from manifest_projection import documents, identity as rendered_identity
@@ -58,6 +71,7 @@ if args.expected_dir:
     if len(set(actual_rendered_ids)) != len(actual_rendered_ids) or sorted(actual_rendered_ids) != sorted(bound_ids):
         parser.error('expected identity inventory differs from actual rendered resources')
     expected = set(bound_ids)
+    declared.update(bound_ids)
     expected_source = 'bound_installation_render'
 if expected.intersection(identity(resource) for resource in inventory['removals']):
     parser.error('expected installation contains a superseded resource identity')
@@ -77,7 +91,7 @@ for resource in observed:
     retired = retirements.get(key)
     if retired and all(labels.get(name) == value for name, value in retired['requiredLabels'].items()):
         failures.append({'reason': 'superseded_owned_resource_survives', 'resource': key})
-    elif labels.get('app.kubernetes.io/part-of') == 'tetral' and key not in expected:
+    elif (labels.get('app.kubernetes.io/part-of') == 'tetral' or key in declared) and key not in expected:
         failures.append({'reason': 'unexpected_owned_resource', 'resource': key})
 if args.require_complete:
     failures.extend({'reason': 'missing_expected_resource', 'resource': key} for key in sorted(expected - seen))
