@@ -639,24 +639,24 @@ async function observeFailedRunCloseoutStep<
 	return observed.result;
 }
 
-export async function finishIdleWithRetry(options: ThreadLoopRuntimeOptions, envelope: SessionEventWriterFinishIdleEnvelope, controls: FinishIdleOperationControls = {}): Promise<SessionEventWriterFinishIdleResult> {
+/**
+ * Rejoins one FinishIdle capture/closeout operation until it succeeds, is stale or
+ * deterministically rejected, exhausts the ordinary failure budget, or the shared settlement
+ * phase deadline passes. Wait expiries rejoin the same operation without spending ordinary
+ * failures; outside drain no phase deadline exists. The phase deadline is also each attempt's
+ * transport deadline, so expiry cancels and joins the actual call.
+ */
+export async function finishIdleWithRetry(options: ThreadLoopRuntimeOptions, envelope: SessionEventWriterFinishIdleEnvelope): Promise<SessionEventWriterFinishIdleResult> {
     if (options.sessionEventWriter.finishIdle === undefined) {
         return writerUnavailable(envelope.sessionId, envelope.durableTurnId);
     }
     let ordinaryFailures = 0;
     let waitExpiries = 0;
     const operationControls = (): FinishIdleOperationControls => {
-        const deadlineEpochMs = Math.min(controls.deadlineEpochMs ?? Infinity, options.phaseDeadline?.() ?? Infinity);
-        return {
-            ...(controls.signal === undefined ? {} : {
-                signal: controls.signal
-            }),
-            ...(Number.isFinite(deadlineEpochMs) ? {
-                deadlineEpochMs
-            } : {}),
-        };
+        const deadlineEpochMs = options.phaseDeadline?.() ?? Infinity;
+        return Number.isFinite(deadlineEpochMs) ? { deadlineEpochMs } : {};
     };
-    const stopped = (): boolean => controls.signal?.aborted === true ||
+    const stopped = (): boolean =>
         Date.now() >= (operationControls().deadlineEpochMs ?? Infinity);
     const terminal = (): SessionEventWriterFinishIdleResult => ({
         ok: false,
@@ -690,20 +690,14 @@ export async function finishIdleWithRetry(options: ThreadLoopRuntimeOptions, env
         const backoffControls = operationControls();
         const controller = new AbortController();
         const cancel = (): void => controller.abort();
-        backoffControls.signal?.addEventListener("abort", cancel, {
-            once: true
-        });
         const remaining = (backoffControls.deadlineEpochMs ?? Infinity) - Date.now();
         const timer = Number.isFinite(remaining) ? setTimeout(cancel, Math.max(0, remaining)) : undefined;
         try {
-            if (backoffControls.signal?.aborted)
-                cancel();
             await options.runtime.sleep(Math.min(backoffMs, Math.max(0, remaining)), controller.signal);
         }
         finally {
             if (timer !== undefined)
                 clearTimeout(timer);
-            backoffControls.signal?.removeEventListener("abort", cancel);
         }
     }
 }

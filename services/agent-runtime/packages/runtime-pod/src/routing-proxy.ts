@@ -1,4 +1,3 @@
-/** Startup depends on the routed proxy attached to this Pod, with a fixed local readiness target. */
 /** Both named SDS resources must have accepted initial resources before admission. */
 export async function hardenedRoutingListenerReady(timeoutMs: number): Promise<boolean> {
   try {
@@ -66,6 +65,11 @@ export function hardenedRoutingSecretsReady(parsed: unknown): boolean {
   return required.size === 0;
 }
 
+/**
+ * Startup depends on the routed proxy attached to this Pod, with a fixed local readiness target:
+ * it waits at most 30 seconds for `127.0.0.1:15021/healthz/ready` and, in the hardened profile,
+ * for both direct-listener SDS resources reported by the local admin endpoint.
+ */
 export async function waitForRoutingProxy(
   profile: "standard-routed" | "hardened" = "standard-routed",
 ): Promise<void> {

@@ -1585,10 +1585,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
 		envelope: SessionEventWriterFinishIdleEnvelope,
 		controls: FinishIdleOperationControls = {},
 	): Promise<SessionEventWriterFinishIdleResult> {
-		const callOptions = {
-			...(controls.signal === undefined ? {} : { signal: controls.signal }),
-			...(controls.deadlineEpochMs === undefined ? {} : { deadline: controls.deadlineEpochMs }),
-		};
+		const callOptions =
+			controls.deadlineEpochMs === undefined ? {} : { deadline: controls.deadlineEpochMs };
 		try {
 			const metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
@@ -2029,7 +2027,7 @@ function finishIdle(
 	client: AgentRuntimeBridgeServiceClient,
 	request: FinishIdleRequest,
 	metadata: Metadata,
-	options: { readonly signal?: AbortSignal; readonly deadline?: number },
+	options: { readonly deadline?: number },
 ): Promise<FinishIdleResponse> {
 	return bridgeUnaryCall(client, "finishIdle", request, metadata, options);
 }

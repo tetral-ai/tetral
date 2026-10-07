@@ -1414,11 +1414,13 @@ export type SessionEventWriterToolSettlementAttempt =
 	  }
 	| { readonly ok: false; readonly error: SessionEventWriterError };
 
-/** Controls the FinishIdle operation lifetime separately from any observing caller. */
+/**
+ * Bounds the owned FinishIdle operation by the shared settlement phase. A failed-run closeout
+ * observer never supplies these controls: its observation window may expire while the operation
+ * stays owned.
+ */
 export interface FinishIdleOperationControls {
-	/** Cancels the owned operation, never a separately owned closeout observation. */
-	readonly signal?: AbortSignal;
-	/** Absolute operation/settlement boundary; an RPC attempt cannot reset it. */
+	/** Absolute settlement boundary; an RPC attempt cannot reset it. */
 	readonly deadlineEpochMs?: number;
 }
 

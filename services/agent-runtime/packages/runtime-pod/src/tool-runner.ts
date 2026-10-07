@@ -190,18 +190,6 @@ type CancelCommandResult =
 	| { readonly type: "duplicate"; readonly resultJson: string }
 	| { readonly type: "stale" };
 
-const SandboxBackgroundCommandMaxAttempts = 5;
-const SandboxBackgroundProviderTimeoutMs = 45_000;
-const SandboxBackgroundQueueRetryCapMs = 60_000;
-const SandboxBackgroundResultCommitMarginMs = 30_000;
-// This is an observation bound, not a retry budget. It covers the Sandbox
-// runner's existing attempts, provider timeout, capped Queue backoff, and the
-// final durable-result commit margin before Runtime gives up observing it.
-const SandboxBackgroundCommandObservationTimeoutMs =
-	SandboxBackgroundCommandMaxAttempts * SandboxBackgroundProviderTimeoutMs +
-	(SandboxBackgroundCommandMaxAttempts - 1) * SandboxBackgroundQueueRetryCapMs +
-	SandboxBackgroundResultCommitMarginMs;
-
 type AuthorizeWebToolExecutionResult =
 	| { readonly type: "authorized" }
 	| { readonly type: "stale" };
@@ -694,6 +682,9 @@ export class RuntimePodToolRunner {
 			),
 		};
 		const cancellationSignal = new AbortController().signal;
+		// Each CancelCommand attempt is bounded by the Bridge method policy (35 seconds by
+		// default). Runtime observes the same cancellation operation for at most the writer
+		// retry policy's attempts and backoffs, then reports the result as unavailable.
 		for (
 			let attempt = 0;
 			attempt < SessionEventWriterRetryPolicy.attempts;
@@ -705,7 +696,6 @@ export class RuntimePodToolRunner {
 						this.bridgeClient,
 						durableRequest,
 						await this.metadata(),
-						SandboxBackgroundCommandObservationTimeoutMs,
 					),
 				);
 				if (result.type === "stale") {
@@ -2579,9 +2569,7 @@ function acceptSandboxExecution(
 		request,
 		metadata,
 		{},
-	).catch((error) => {
-		throw error;
-	});
+	);
 }
 
 function awaitSandboxExecution(
@@ -2660,7 +2648,6 @@ function cancelCommand(
 	client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
 	request: CancelCommandRequest,
 	metadata: Metadata,
-	timeoutMs: number,
 ): Promise<CancelCommandResponse> {
 	return bridgeUnaryCall<CancelCommandResponse>(
 		client as AgentRuntimeBridgeServiceClient,
@@ -2668,9 +2655,7 @@ function cancelCommand(
 		request,
 		metadata,
 		{},
-	).catch((error) => {
-		throw error;
-	});
+	);
 }
 
 function authorizeWebToolExecution(
@@ -2973,6 +2958,11 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
+// RunWeb and RunMcpTool are outside the Bridge method policy: their execution budgets belong to
+// the Web Connector and to the MCP Connector's shared execution budget, so Bridge per-attempt
+// deadlines and drain clipping must not apply. During quiesce these calls end with the Tool route
+// abort at the current-step deadline, and close() cancels and joins any remaining call before the
+// channel closes.
 const toolCallOwners = new WeakMap<
 	object,
 	{

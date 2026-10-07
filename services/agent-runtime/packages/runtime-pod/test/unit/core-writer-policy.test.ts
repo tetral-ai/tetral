@@ -485,56 +485,52 @@ test("actual command quiesce preserves current budgets then caps final and retai
     }
 }, 15000);
 
-test("FinishIdle owning caller cancellation and earlier deadline join without rejoin", async () => {
-    for (const mode of ["cancel", "deadline"] as const) {
-        const server = new Server();
-        let calls = 0, active = 0;
-        let entered!: () => void;
-        const admission = new Promise<void>(resolve => {
-            entered = resolve;
-        });
-        server.addService(AgentRuntimeBridgeServiceService, {
-            finishIdle: (call: {
-                once(name: string, handler: () => void): void;
-            }) => {
-                calls++;
-                active++;
-                call.once("cancelled", () => {
-                    active--;
-                });
-                entered();
+test("FinishIdle settlement phase deadline cancels and joins the actual call without rejoin", async () => {
+    const server = new Server();
+    let calls = 0, active = 0;
+    let entered!: () => void;
+    const admission = new Promise<void>(resolve => {
+        entered = resolve;
+    });
+    server.addService(AgentRuntimeBridgeServiceService, {
+        finishIdle: (call: {
+            once(name: string, handler: () => void): void;
+        }) => {
+            calls++;
+            active++;
+            call.once("cancelled", () => {
+                active--;
+            });
+            entered();
+        },
+    });
+    const assembled = await assembly(await bind(server), {
+        TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS: "7000"
+    });
+    try {
+        // The production caller supplies only the shared settlement phase deadline.
+        const phaseDeadline = Date.now() + 100;
+        const result = finishIdleWithRetry({
+            ...assembled.options.threadLoop,
+            phaseDeadline: () => phaseDeadline,
+        }, {
+            ...scope, durableTurnId: "original_caller", stopReason: {
+                type: "end_turn"
             },
         });
-        const assembled = await assembly(await bind(server), {
-            TETRAL_BRIDGE_FINISH_IDLE_TIMEOUT_MS: "7000"
+        await admission;
+        expect(await result).toMatchObject({
+            ok: false, error: {
+                retryable: false
+            }
         });
-        const controller = new AbortController();
-        try {
-            const result = finishIdleWithRetry(assembled.options.threadLoop, {
-                ...scope, durableTurnId: "original_caller", stopReason: {
-                    type: "end_turn"
-                },
-            }, mode === "cancel" ? {
-                signal: controller.signal
-            } : {
-                deadlineEpochMs: Date.now() + 100
-            });
-            await admission;
-            if (mode === "cancel")
-                controller.abort();
-            expect(await result).toMatchObject({
-                ok: false, error: {
-                    retryable: false
-                }
-            });
-            await waitFor(() => active === 0);
-            expect(calls).toBe(1);
-        }
-        finally {
-            await assembled.dependencies.app.shutdown();
-            await assembled.dependencies.coreHosts.close();
-            await stop(server);
-        }
+        await waitFor(() => active === 0);
+        expect(calls).toBe(1);
+    }
+    finally {
+        await assembled.dependencies.app.shutdown();
+        await assembled.dependencies.coreHosts.close();
+        await stop(server);
     }
 });
 

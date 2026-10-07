@@ -515,11 +515,15 @@ writes, and promotion are stale.
 
 `TETRAL_TRANSPORT_PROFILE=standard-routed` binds `0.0.0.0:19090`.
 `hardened` binds the application to `127.0.0.1:9090`, with the routing proxy's
-external TLS listener on 19443. `TETRAL_ROUTING_PROXY_REQUIRED=true` is mandatory.
-Startup checks the fixed local proxy readiness endpoint. Hardened startup also
-requires successful initial updates for both named direct-listener SDS resources
-through the fixed local Envoy admin endpoint; a listening socket alone is not
-sufficient. Runtime does not read the proxy's private key.
+external TLS listener on 19443. `TETRAL_RUNTIME_POD_GRPC_PORT` must equal the
+selected profile's application port (19090 or 9090), and
+`TETRAL_ROUTING_PROXY_REQUIRED` accepts only `true`. Startup waits at most 30
+seconds for the fixed local proxy readiness endpoint
+(`127.0.0.1:15021/healthz/ready`). Hardened startup also requires successful
+initial updates for both named direct-listener SDS resources through the fixed
+local Envoy admin endpoint (`127.0.0.1:15000`); a listening socket alone is not
+sufficient. Runtime does not read the proxy's private key. A failed cross-field
+check reports the keys involved, never their values.
 
 Shutdown withdraws admission immediately and joins command ingress while each
 Session independently reaches its next current-step checkpoint. A committed
@@ -565,6 +569,10 @@ has at most that maximum remaining at the transition; its actual handle cancels
 and callback joins before retry or client close. A two-second total settlement
 window with the default five-second attempt maximum is valid: the shorter
 shared window wins. Attempts cannot reset either phase or extend process grace.
+`RunWeb` and `RunMcpTool` are outside this Bridge method policy: their execution
+budgets belong to the Web Connector and to the MCP Connector's shared execution
+budget, so during quiesce they end with the Tool route abort at the current-step
+deadline, and client close cancels and joins any remaining call.
 
 Core ordinary writer and accepted-input consumers await the adapter's actual
 transport result before retrying. The generated Bridge owner supplies parsed
@@ -580,12 +588,14 @@ short write. A joined retryable wait expiry rejoins the identical declaration,
 serially, with 100/300 ms backoffs capped at 300 ms. It does not exhaust the
 ordinary three-failure budget. Other retryable failures retain their separate
 three attempts and 100/300 ms backoffs; stale and deterministic rejection stop
-immediately. Explicit FinishIdle operation cancellation or an absolute caller
-or settlement deadline cancels and joins the actual unary call and stops rejoin.
-These operation controls must not carry a failed-run observation signal: the
-independent three-second memo observer may expire while the same raw FinishIdle
-remains owned, and later observation rejoins that memo. Ordinary Core interruption
-also retains non-abandonable closeout ownership until the actual callback joins.
+immediately. The settlement phase deadline, set when shutdown begins, is the
+only outer bound: it cancels and joins the actual unary call and stops rejoin.
+Outside drain no caller deadline applies, and wait expiries rejoin the same
+capture until success, stale or deterministic rejection, or three ordinary
+failures. The independent three-second failed-run memo observer never supplies
+these operation controls; it may expire while the same raw FinishIdle remains
+owned, and later observation rejoins that memo. Ordinary Core interruption also
+retains non-abandonable closeout ownership until the actual callback joins.
 
 Failed-run closeout is distinct: its existing three-second memo observation
 window may expire while separately owned settlement continues. Later observers

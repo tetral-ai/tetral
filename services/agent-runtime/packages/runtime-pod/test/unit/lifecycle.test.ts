@@ -281,6 +281,40 @@ describe("Runtime Pod lifecycle", () => {
     ).toBe(false);
   });
 
+  test("cross-field configuration failures name only the keys involved", () => {
+    for (const scenario of [
+      {
+        env: { TETRAL_RUNTIME_POD_GRPC_PORT: "19091" },
+        message: "TETRAL_RUNTIME_POD_GRPC_PORT must equal the TETRAL_TRANSPORT_PROFILE port",
+        value: "19091",
+      },
+      {
+        env: { TETRAL_TRANSPORT_PROFILE: "hardened", TETRAL_RUNTIME_POD_GRPC_PORT: "19090" },
+        message: "TETRAL_RUNTIME_POD_GRPC_PORT must equal the TETRAL_TRANSPORT_PROFILE port",
+        value: "19090",
+      },
+      {
+        env: { TETRAL_RUNTIME_REPORT_TIMEOUT_MS: "2500" },
+        message:
+          "TETRAL_RUNTIME_REPORT_TIMEOUT_MS must be shorter than TETRAL_RUNTIME_REPORT_INTERVAL_MS",
+        value: "2500",
+      },
+      {
+        env: { TETRAL_RUNTIME_REPORT_INTERVAL_MS: "12500" },
+        message:
+          "TETRAL_RUNTIME_REPORT_INTERVAL_MS must be shorter than TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
+        value: "12500",
+      },
+    ]) {
+      const parsed = loadRuntimePodConfig({ ...validEnv(), ...scenario.env });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.error).toEqual({ kind: "config_error", message: scenario.message });
+        expect(JSON.stringify(parsed.error)).not.toContain(scenario.value);
+      }
+    }
+  });
+
   test("dependency, listener, and auth-client failures are startup_error without raw details", async () => {
     for (const scenario of [
       {

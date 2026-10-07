@@ -47,7 +47,6 @@ export interface RuntimePodConfig {
 	};
 	readonly grpcBindAddress: string;
 	readonly transportProfile: "standard-routed" | "hardened";
-	readonly routingProxyRequired: true;
 	readonly httpBindAddress: string;
 	readonly kubernetesApiServerUrl: string;
 	readonly kubernetesApiCaCertPath: string;
@@ -207,7 +206,8 @@ const RuntimePodEnvKeys = [
 
 /**
  * Validates an already projected Runtime Pod environment object and normalizes its values.
- * Invalid fields return the same bounded configuration error rather than schema diagnostics.
+ * Invalid fields return one bounded configuration error rather than schema diagnostics; a failed
+ * cross-field check names only the fixed keys involved, never a supplied value.
  */
 export function loadRuntimePodConfig(
 	env: Record<string, string | undefined>,
@@ -245,8 +245,17 @@ export function loadRuntimePodConfig(
 	const approvalReviewerModel = parseModelRef(
 		parsed.data.TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL,
 	);
+	if (approvalReviewerModel === undefined) {
+		return configError("invalid runtime pod identity");
+	}
+	// Cross-field failures name only the fixed keys involved, never a supplied value.
 	const expectedPort =
 		parsed.data.TETRAL_TRANSPORT_PROFILE === "hardened" ? "9090" : "19090";
+	if (parsed.data.TETRAL_RUNTIME_POD_GRPC_PORT !== expectedPort) {
+		return configError(
+			"TETRAL_RUNTIME_POD_GRPC_PORT must equal the TETRAL_TRANSPORT_PROFILE port",
+		);
+	}
 	const reportPolicy = bridgeMethodPolicies.reportRuntimeProcess;
 	const reportIntervalMs = Number(
 		parsed.data.TETRAL_RUNTIME_REPORT_INTERVAL_MS,
@@ -254,20 +263,20 @@ export function loadRuntimePodConfig(
 	const processFreshnessMs = Number(
 		parsed.data.TETRAL_RUNTIME_PROCESS_FRESHNESS_MS,
 	);
-	if (
-		approvalReviewerModel === undefined ||
-		parsed.data.TETRAL_RUNTIME_POD_GRPC_PORT !== expectedPort ||
-		reportPolicy.kind !== "fixed" ||
-		reportPolicy.timeoutMs >= reportIntervalMs ||
-		reportIntervalMs >= processFreshnessMs
-	) {
-		return {
-			ok: false,
-			error: {
-				kind: "config_error",
-				message: "invalid runtime pod identity",
-			},
-		};
+	if (reportPolicy.kind !== "fixed") {
+		return configError(
+			"TETRAL_RUNTIME_REPORT_TIMEOUT_MS must be a fixed attempt timeout",
+		);
+	}
+	if (reportPolicy.timeoutMs >= reportIntervalMs) {
+		return configError(
+			"TETRAL_RUNTIME_REPORT_TIMEOUT_MS must be shorter than TETRAL_RUNTIME_REPORT_INTERVAL_MS",
+		);
+	}
+	if (reportIntervalMs >= processFreshnessMs) {
+		return configError(
+			"TETRAL_RUNTIME_REPORT_INTERVAL_MS must be shorter than TETRAL_RUNTIME_PROCESS_FRESHNESS_MS",
+		);
 	}
 	return {
 		ok: true,
@@ -310,7 +319,6 @@ export function loadRuntimePodConfig(
 				serviceAccount: jobRunner.serviceAccount,
 			},
 			transportProfile: parsed.data.TETRAL_TRANSPORT_PROFILE,
-			routingProxyRequired: true,
 			grpcBindAddress: `${parsed.data.TETRAL_TRANSPORT_PROFILE === "hardened" ? "127.0.0.1" : "0.0.0.0"}:${expectedPort}`,
 			httpBindAddress: parsed.data.TETRAL_RUNTIME_POD_HTTP_ADDR,
 			kubernetesApiServerUrl: parsed.data.KUBERNETES_API_SERVER_URL,
@@ -353,6 +361,10 @@ export function loadRuntimePodConfigFromEnv(env: Record<string, string | undefin
     projected[key] = env[key];
   }
   return loadRuntimePodConfig(projected);
+}
+
+function configError(message: string): RuntimePodConfigResult {
+	return { ok: false, error: { kind: "config_error", message } };
 }
 
 function parseSingleServiceAccount(value: string): { readonly namespace: string; readonly serviceAccount: string } | undefined {
