@@ -86,13 +86,13 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(actual, wantPayload) || errorsCount != 1 || idleCount != 1 || inboxStatus != "dead_lettered" {
-				t.Fatalf("configured non-GitHub public settlement = %s errors%d idle%d inbox%s", payload, errorsCount, idleCount, inboxStatus)
+				t.Fatalf("configured non-GitHub public settlement = %s errors %d idle %d inbox %s", payload, errorsCount, idleCount, inboxStatus)
 			}
 			if err := admin.QueryRow(`SELECT readiness,manifest_generation FROM session_mcp_manifests WHERE workspace_id=$1 AND session_id=$2 AND mcp_server_name=$3`, job.WorkspaceID, job.SessionID, serverName).Scan(&readiness, &generation); err != nil {
 				t.Fatal(err)
 			}
 			if readiness != "unready" || generation != 1 {
-				t.Fatalf("configured failure manifest = %s generation%d", readiness, generation)
+				t.Fatalf("configured failure manifest = %s generation %d", readiness, generation)
 			}
 		})
 	}

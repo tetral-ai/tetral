@@ -218,7 +218,7 @@ func (h *mcpDurableComposition) awaitManifestOutcomes(want int) {
 			return
 		}
 		if time.Now().After(deadline) {
-			h.t.Fatalf("manifest callbacks=%d want%d", actual, want)
+			h.t.Fatalf("manifest callbacks=%d want %d", actual, want)
 		}
 		select {
 		case <-h.ctx.Done():

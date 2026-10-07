@@ -144,7 +144,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 			mcp.action(map[string]any{"kind": "reset"})
 			mcp.action(map[string]any{"kind": "configure", "adapter": adapter, "version": "v2"})
 			mcp.action(map[string]any{"kind": "notify", "adapter": adapter})
-			waitMCPDelivery(ctx, t, "actual notification commits generation8", func() bool {
+			waitMCPDelivery(ctx, t, "actual notification commits generation 8", func() bool {
 				var generation int64
 				_ = admin.QueryRow(`SELECT manifest_generation FROM session_mcp_manifests WHERE session_id=$1 AND mcp_server_name=$2`, session, "work-"+adapter).Scan(&generation)
 				return generation == 8
@@ -268,7 +268,7 @@ func TestPostgreSQLMCPManifestDeliveryUpdatesRuntimeCatalog(t *testing.T) {
 				t.Fatal(err)
 			}
 			if generation != 8 || otherGeneration != 7 || jobs != 1 || status != queue.StatusAcknowledged {
-				t.Fatalf("durable custody/catalog=%d/%d jobs%d status%s", generation, otherGeneration, jobs, status)
+				t.Fatalf("durable custody/catalog=%d/%d jobs %d status %s", generation, otherGeneration, jobs, status)
 			}
 			evidence, _ := json.Marshal(map[string]any{"case_id": "runtime-manifest-delivery", "variant": adapter, "versions": mcp.startup.Versions, "substitutions": []string{"local MCP HTTP peer", "controlled provider stream", "verified service-account identity", "controlled Kubernetes ready target snapshot", "empty successful Sandbox capture provider", "fixture Blob store"}, "barriers": []string{"actual SDK notification before Bridge acceptance", "actual Queue issued lease before Runner delivery", "actual Runtime apply response before Queue ACK", "provider snapshot before and after update", "both Connector owners joined before replacement Bridge cold load", "entire old Runtime joined before replacement Bridge cold load"}, "endpoint": json.RawMessage(endpointObservation), "warm": warm, "replacement": fresh, "sql": map[string]any{"generation": generation, "other_server_generation": otherGeneration, "jobs": jobs, "queue_status": status}, "busy": busy})
 			t.Logf("case_evidence=%s", evidence)
@@ -302,7 +302,7 @@ type deliveryProviderRequest struct {
 func assertDeliveryGeneration(t *testing.T, o deliveryRuntimeObservation, want int) {
 	t.Helper()
 	if o.CurrentGeneration != want {
-		t.Fatalf("actual Runtime generation=%d want%d observation=%+v", o.CurrentGeneration, want, o)
+		t.Fatalf("actual Runtime generation=%d want %d observation=%+v", o.CurrentGeneration, want, o)
 	}
 }
 func assertDeliveryProvider(t *testing.T, p deliveryProviderRequest, extra bool, generation int) {
@@ -314,7 +314,7 @@ func assertDeliveryProvider(t *testing.T, p deliveryProviderRequest, extra bool,
 		hasExtra = hasExtra || name == "read_extra"
 	}
 	if !hasEcho || !hasOther || hasExtra != extra || p.Generation != generation || p.ModelRequestID == "" {
-		t.Fatalf("actual provider catalog=%+v expected extra%v generation%d", p, extra, generation)
+		t.Fatalf("actual provider catalog=%+v expected extra %v generation %d", p, extra, generation)
 	}
 }
 func mustMCPDeliveryExec(t *testing.T, db *sql.DB, q string, args ...any) {
@@ -434,7 +434,7 @@ func (c *mcpDeliveryChild) action(action map[string]any) json.RawMessage {
 	c.t.Helper()
 	result, err := c.tryAction(action)
 	if err != nil {
-		c.t.Fatalf("owned child action kind%v err%v result%s stderr%s", action["kind"], err, result, c.stderr.String())
+		c.t.Fatalf("owned child action kind %v err %v result %s stderr %s", action["kind"], err, result, c.stderr.String())
 	}
 	return result
 }
@@ -461,12 +461,12 @@ func (c *mcpDeliveryChild) close() {
 		select {
 		case err := <-done:
 			if err != nil {
-				c.t.Errorf("owned child exit=%v stderr%s", err, c.stderr.String())
+				c.t.Errorf("owned child exit=%v stderr %s", err, c.stderr.String())
 			}
 		case <-time.After(8 * time.Second):
 			_ = c.command.Process.Kill()
 			<-done
-			c.t.Errorf("owned child cleanup deadline stderr%s", c.stderr.String())
+			c.t.Errorf("owned child cleanup deadline stderr %s", c.stderr.String())
 		}
 		c.t.Log("case_cleanup=owned-child-joined")
 	})
@@ -589,6 +589,6 @@ func assertDeliveryEvents(t *testing.T, o deliveryRuntimeObservation, adapter st
 		}
 	}
 	if applied != 1 || stale != 1 {
-		t.Fatalf("actual Runtime application event counts applied%d stale%d events%+v", applied, stale, o.Events)
+		t.Fatalf("actual Runtime application event counts applied %d stale %d events %+v", applied, stale, o.Events)
 	}
 }

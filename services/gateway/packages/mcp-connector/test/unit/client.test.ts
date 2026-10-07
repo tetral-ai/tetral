@@ -989,7 +989,7 @@ test("cache key framing cannot collide when identity fields contain delimiter ch
  try{await client.listTools({...validIdentity(),workspaceId:"w\0s",sessionId:"t"});await client.listTools({...validIdentity(),workspaceId:"w",sessionId:"s\0t"});expect(initialized).toBe(2);expect(client.connectionCount()).toBe(2);}finally{await client.closeAll();}
 });
 
-test("virtual29-minute reuse resets idle expiry; old30-minute callback cannot evict and expiry30minutes after success closes",async()=>{
+test("virtual 29-minute reuse resets idle expiry; old 30-minute callback cannot evict and expiry 30 minutes after success closes",async()=>{
  let clock=0,sequence=0;const active=new Map<number,{callback:()=>void;due:number}>();const sdk=new RecordingSDKClient();
  const client=new McpSDKClient({serverResolver:fixtureServerResolver,credentialResolver:new RotatingCredentialResolver(["A"]),onToolsListChanged:async()=>undefined,createClient:()=>sdk,createTransport:input=>input,setTimer:(callback,ms)=>{expect(ms).toBe(1800000);const id=++sequence;active.set(id,{callback,due:clock+ms});return id as unknown as ReturnType<typeof setTimeout>;},clearTimer:timer=>{active.delete(timer as unknown as number);}});
  const advance=async(ms:number)=>{clock=ms;for(const [id,timer]of [...active])if(timer.due<=clock){active.delete(id);timer.callback();}await flushMicrotasks(10);};

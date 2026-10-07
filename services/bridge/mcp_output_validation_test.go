@@ -166,7 +166,7 @@ func TestPostgreSQLMCPOutputValidationSettlesRejectedResults(t *testing.T) {
 						t.Fatal(err)
 					}
 					if resultEvents != 1 || receipts != 1 {
-						t.Fatalf("Runtime terminal public results/settlement receipts=%d/%d want1/1", resultEvents, receipts)
+						t.Fatalf("Runtime terminal public results/settlement receipts=%d/%d want 1/1", resultEvents, receipts)
 					}
 					var publicJSON string
 					if err := h.admin.QueryRow(`SELECT payload_json FROM session_events WHERE workspace_id='default' AND session_id='sesn_mcp_durable' AND type='agent.mcp_tool_result' AND payload_json::jsonb->>'mcp_tool_use_id'=$1`, event).Scan(&publicJSON); err != nil {

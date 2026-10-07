@@ -132,7 +132,7 @@ func TestPostgreSQLMCPClientRecreationReconcilesManifest(t *testing.T) {
 					}
 				}
 				if originI != 1 || originL != 1 || originC != wantCalls || verificationL != wantJobs || proof.Counts.List != 1+wantJobs {
-					t.Fatalf("recreation readiness/verification counts=%d/%d/%d/%d totalL%d: %s", originI, originL, originC, verificationL, proof.Counts.List, execution)
+					t.Fatalf("recreation readiness/verification counts=%d/%d/%d/%d total L %d: %s", originI, originL, originC, verificationL, proof.Counts.List, execution)
 				}
 				h.assertManifest(server, wantTools, wantETag, wantGeneration, "ready", wantJobs)
 				// A second, independent new client reports the same snapshot through its

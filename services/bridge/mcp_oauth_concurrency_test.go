@@ -65,11 +65,11 @@ func (h *mcpDurableComposition) assertOAuthCounts(adapter string, f, i, l, c, e 
 		}
 	}
 	if observed.IssuerCalls != f || oi != i || ol != l || oc != c || observed.Counts.Effects != e {
-		h.t.Fatalf("OAuth origin F/I/L/C/effects=%d/%d/%d/%d/%d want%d/%d/%d/%d/%d (verification L%d): %s", observed.IssuerCalls, oi, ol, oc, observed.Counts.Effects, f, i, l, c, e, vl, output)
+		h.t.Fatalf("OAuth origin F/I/L/C/effects=%d/%d/%d/%d/%d want %d/%d/%d/%d/%d (verification L %d): %s", observed.IssuerCalls, oi, ol, oc, observed.Counts.Effects, f, i, l, c, e, vl, output)
 	}
 	for key, n := range observed.RemainingFaults {
 		if n != 0 {
-			h.t.Fatalf("unreached fault %q remaining%d", key, n)
+			h.t.Fatalf("unreached fault %q remaining %d", key, n)
 		}
 	}
 	return output
@@ -140,7 +140,7 @@ func testMCPOAuthConcurrentOwners(t *testing.T) {
 						}
 					}
 					if winner != 1 || reused != 1 {
-						t.Fatalf("row-lock outcomes winner%d reused%d", winner, reused)
+						t.Fatalf("row-lock outcomes winner %d reused %d", winner, reused)
 					}
 					for _, r := range proof.Requests {
 						if r.CredentialLabel != adapter+"-rotation-1" {

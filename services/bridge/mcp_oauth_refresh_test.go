@@ -133,7 +133,7 @@ func TestPostgreSQLMCPOAuthRefreshSharesCredentialRotation(t *testing.T) {
 					}
 				}
 				if proof.IssuerCalls != row.f || originI != row.i || originL != row.l || originC != row.c || proof.Counts.List != originL+verificationL {
-					t.Fatalf("literal OAuth F/I/L/C=%d/%d/%d/%d want%d/%d/%d/%d verificationL%d: %s", proof.IssuerCalls, originI, originL, originC, row.f, row.i, row.l, row.c, verificationL, output)
+					t.Fatalf("literal OAuth F/I/L/C=%d/%d/%d/%d want %d/%d/%d/%d verification L %d: %s", proof.IssuerCalls, originI, originL, originC, row.f, row.i, row.l, row.c, verificationL, output)
 				}
 				effects := 0
 				if row.success && !row.listing {
@@ -287,7 +287,7 @@ func (h *mcpDurableComposition) assertMCPOAuthRotation(adapter string, before []
 	}
 	remaining := time.Until(parsedExpiry)
 	if remaining < 3540*time.Second || remaining > 3660*time.Second {
-		h.t.Fatal("encrypted credential expiry differs from issuer3600second lifetime")
+		h.t.Fatal("encrypted credential expiry differs from issuer 3600-second lifetime")
 	}
 	h.assertNoMCPOAuthSecrets(adapter, public)
 	if auth.AccessToken != fmt.Sprintf("fixture-%s-rotated-%d", adapter, refreshes) || auth.Refresh.RefreshToken != fmt.Sprintf("fixture-%s-refresh-%d", adapter, refreshes) {
