@@ -14,8 +14,9 @@ type nativePreviewMetrics struct {
 	currentBytes, currentFrames   atomic.Int64
 }
 
-// Local elapsed observations use time.Since's monotonic clock. Fixed cumulative
-// buckets are counter samples with only constant le labels; no identity labels.
+// Local elapsed observations use time.Since's monotonic clock. Each latency is
+// one fixed-bucket histogram family through the shared exposition, with only
+// constant le labels and no identity labels.
 type deliveryLatency struct {
 	count, nanos atomic.Uint64
 	buckets      [6]atomic.Uint64
@@ -34,14 +35,16 @@ func (l *deliveryLatency) observe(elapsed time.Duration) {
 	}
 }
 func (l *deliveryLatency) samples(prefix, help string) []workload.Metric {
-	result := []workload.Metric{
-		{Name: prefix + "_seconds_count", Help: help + " observation count.", Type: "counter", Value: float64(l.count.Load())},
-		{Name: prefix + "_seconds_sum", Help: help + " summed local elapsed seconds.", Type: "counter", Value: float64(l.nanos.Load()) / float64(time.Second)},
-	}
+	family := prefix + "_seconds"
+	help += " latency in local elapsed seconds."
+	var result []workload.Metric
 	for i, upper := range [...]string{"0.001", "0.01", "0.1", "1", "10", "+Inf"} {
-		result = append(result, workload.Metric{Name: prefix + "_seconds_bucket", Help: help + " cumulative local elapsed buckets.", Type: "counter", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(l.buckets[i].Load())})
+		result = append(result, workload.Metric{Name: family + "_bucket", Family: family, Help: help, Type: "histogram", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(l.buckets[i].Load())})
 	}
-	return result
+	return append(result,
+		workload.Metric{Name: family + "_count", Family: family, Help: help, Type: "histogram", Value: float64(l.count.Load())},
+		workload.Metric{Name: family + "_sum", Family: family, Help: help, Type: "histogram", Value: float64(l.nanos.Load()) / float64(time.Second)},
+	)
 }
 
 type PreviewMetrics struct {

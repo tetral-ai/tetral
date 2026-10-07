@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -109,8 +110,18 @@ func TestPreviewMetricsMonotonicLatencyBucketsAndRequestOwnership(t *testing.T) 
 		t.Fatal("cancel/reset cleanup leaked request ownership")
 	}
 	for _, sample := range samples {
-		if strings.Contains(sample.Name, "latency") && sample.Type != "counter" {
-			t.Fatal("latency observations are not monotonic counters")
+		if !strings.Contains(sample.Name, "latency") {
+			continue
+		}
+		family := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(sample.Name, "_bucket"), "_count"), "_sum")
+		if sample.Type != "histogram" || sample.Family != family || (family != "event_stream_formal_delivery_latency_seconds" && family != "event_stream_preview_delivery_latency_seconds") {
+			t.Fatalf("latency sample %s is not part of its histogram family: type=%s family=%s", sample.Name, sample.Type, sample.Family)
+		}
+	}
+	text := workload.RuntimeMetricsTextWith(samples)
+	for _, family := range []string{"event_stream_formal_delivery_latency_seconds", "event_stream_preview_delivery_latency_seconds"} {
+		if strings.Count(text, "# TYPE "+family+" histogram\n") != 1 || strings.Contains(text, "# TYPE "+family+"_") {
+			t.Fatalf("latency family %s lacks exactly one histogram header:\n%s", family, text)
 		}
 	}
 }
