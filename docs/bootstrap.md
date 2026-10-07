@@ -75,11 +75,17 @@ workloads.
 | `sandbox-daytona` | `DAYTONA_API_KEY` |
 | `sandbox-r2-parent` | `TETRAL_R2_PARENT_API_TOKEN`, `TETRAL_R2_PARENT_ACCESS_KEY` |
 | `tetral-blob` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` |
-| `tetral-database` | `bridge-url`, `cleanup-url`, `gateway-url`, `git-proxy-url`, `TETRAL_POSTGRES_DSN` |
+| `tetral-database` | `bridge-url`, `cleanup-url`, `git-proxy-url`, `job-runner-url`, `mcp-connector-url`, `provider-gateway-url`, `TETRAL_POSTGRES_DSN` |
 | `tetral-event-stream-database` | `url` |
 
 When `edge.enabled=true`, also create the TLS Secret selected by
 `edge.tlsSecretName` (`git-proxy-tls` by default) with `tls.crt` and `tls.key`.
+
+Each `tetral-database` key holds the serving DSN of one database workload role
+from `database/roles.json`; a workload receives only its own key. Every
+PostgreSQL and object-store consumer also mounts the `tetral-store-trust`
+ConfigMap with the public `database-ca.crt` and `object-store-ca.crt`; Helm
+selects it with `transport.storeTrustConfigMap`. Create it beside the Secrets.
 
 ### `sandbox-r2-parent` takes two different kinds of credential
 

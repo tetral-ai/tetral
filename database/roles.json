@@ -62,13 +62,12 @@
       }
     },
     "bridge": {
-      "sequences": ["session_runtime_binding_generation_seq"],
       "tables": {
         "workspaces": ["SELECT"],
         "sessions": ["SELECT", "INSERT", "UPDATE"],
         "session_threads": ["SELECT", "INSERT", "UPDATE"],
-        "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-        "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE"],
+        "sandbox_lifecycle_operations": ["SELECT", "UPDATE"],
         "session_resources": ["SELECT", "INSERT", "UPDATE"],
         "session_memory_store_resources": ["SELECT", "INSERT", "UPDATE"],
         "session_events": ["SELECT", "INSERT", "UPDATE"],
@@ -78,16 +77,16 @@
         "session_thread_context_prefixes": ["SELECT", "INSERT", "UPDATE"],
         "session_turn_retries": ["SELECT", "INSERT", "UPDATE"],
         "session_pending_tool_uses": ["SELECT", "INSERT", "UPDATE"],
-        "session_transient_attachments": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-        "session_background_tasks": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_transient_attachments": ["SELECT", "INSERT", "UPDATE"],
+        "session_background_tasks": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_status": ["SELECT", "INSERT", "UPDATE"],
-        "session_runtime_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_runtime_bindings": ["SELECT", "UPDATE", "DELETE"],
         "session_bridge_operations": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_tool_results": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_output_captures": ["SELECT", "INSERT", "UPDATE"],
-        "sandbox_output_capture_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-        "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "sandbox_output_capture_operations": ["SELECT", "INSERT", "UPDATE"],
+        "sandbox_output_capture_blobs": ["SELECT", "INSERT", "UPDATE"],
         "request_usage_details": ["SELECT", "INSERT", "UPDATE"],
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -119,12 +118,19 @@
         "tetral_schema_migrations": ["SELECT"]
       }
     },
-    "gateway": {
+    "provider_gateway": {
       "tables": {
         "sessions": ["SELECT"],
-        "session_provider_auth": ["SELECT", "INSERT", "UPDATE"],
+        "session_provider_auth": ["SELECT"],
         "credentials": ["SELECT", "UPDATE"],
         "platform_provider_keys": ["SELECT"],
+        "tetral_schema_migrations": ["SELECT"]
+      }
+    },
+    "mcp_connector": {
+      "tables": {
+        "sessions": ["SELECT"],
+        "credentials": ["SELECT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },

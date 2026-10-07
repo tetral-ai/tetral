@@ -148,6 +148,8 @@ These owner tests pin the serving paths repaired after role restriction:
 | sandbox | Media publication | `session_transient_attachments INSERT`; `services/sandbox/tool_media_test.go` checks staged Blob bytes and recovery |
 | sandbox | Background task/command settlement and child-close fence | `session_threads SELECT/UPDATE`, `session_events SELECT/UPDATE`, `session_bridge_operations SELECT`; `services/sandbox/background_command_store_test.go` uses the Sandbox role for all store cases; `background_settlement_role_test.go` checks committed control without a close receipt, atomic parking and replay |
 | bridge / job_runner | Process custody promotion and Session process fencing | Bridge alone writes registry/arbitration; Runner reads and executes the lock-only function; `services/bridge/runtime_process_test.go` and installer role tests check locks and denied mutation |
+| bridge | Placement and Session cleanup are Job Runner-owned | no binding-generation sequence, no `session_runtime_bindings INSERT`, no Session-cleanup `DELETE` and no lifecycle-operation `INSERT`; Bridge keeps binding `UPDATE/DELETE` for release and termination; `database/apply_roles_postgresql_test.go` requires SQLSTATE `42501` for each removed statement |
+| provider_gateway / mcp_connector | Separate Gateway workload credentials | Provider Gateway reads `session_provider_auth` and `platform_provider_keys` and rotates `credentials`; MCP Connector reads Session vault references and reads/rotates its `credentials` with no provider binding or platform-key access; `database/apply_roles_postgresql_test.go` runs Bun and command readiness under both roles and requires SQLSTATE `42501` for MCP Connector's provider credential reads |
 | bridge | Durable Memory mutation | `memory_stores UPDATE`; `services/bridge/bridge_api_tools_test.go` checks committed content and idempotent replay |
 | bridge | Compaction Request End | `session_thread_context_prefixes UPDATE`; `services/bridge/runtime_compaction_role_test.go` checks main-thread checkpoint, child-prefix consumption, rollback and replay |
 | bridge | Runtime context skill index | `skill_versions SELECT`; `services/bridge/bridge_api_context_test.go` checks configured version metadata |
@@ -173,8 +175,8 @@ Authorization changes must also inspect other callers: API control-plane stores,
 Bridge Runtime APIs, Job Runner placement/delivery/recovery and Session cleanup,
 Sandbox lifecycle/execution/projection and
 background command settlement, API event admission's child-close fence, Queue
-lease and maintenance, Auth key management, Cleanup admission, Gateway credential
-resolution, Git Proxy ticket/credential reads, and Event Stream's dedicated
+lease and maintenance, Auth key management, Cleanup admission, Provider Gateway and MCP
+Connector credential resolution, Git Proxy ticket/credential reads, and Event Stream's dedicated
 read-only store. Agent Runtime has no database role and persists through Bridge.
 This inventory guides review; the tests above do not claim dynamic coverage of
 every branch of every workload.

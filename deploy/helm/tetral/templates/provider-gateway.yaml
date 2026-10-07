@@ -68,7 +68,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.tetralDatabase | quote }}
-                  key: gateway-url
+                  key: provider-gateway-url
             - name: ENGINE_VAULT_KEY
               valueFrom:
                 secretKeyRef:

@@ -45,11 +45,11 @@ func separatedContracts() map[string]separatedContract {
 			ingress: map[int][]networkPolicyPeer{8081: {metrics}}, egress: map[int][]networkPolicyPeer{5432: {sys("tetral-postgres")}, 8080: {runtime}, 9090: {sys("queue")}, 19090: {runtime}, 9091: {sys("mcp-connector")}}},
 		"provider-gateway": {container: "provider-gateway", ports: map[string]int{"http": 8080, "provider-grpc": 9090}, servicePorts: map[string]int{"http": 8080, "provider-grpc": 9090}, httpEnv: "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", httpAddr: "0.0.0.0:8080", probePort: "http", health: "/healthz", ready: "/readyz",
 			env:     map[string]string{"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS": "tetral-agent-runtime/agent-runtime", "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR": "0.0.0.0:9090", "TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH": "/var/run/secrets/tetral-internal-grpc/bridge/token", "TETRAL_BRIDGE_API_GRPC_ADDR": "bridge.tetral-system.svc.cluster.local:9090"},
-			secrets: map[string]string{"TETRAL_DATABASE_URL": "tetral-database/gateway-url", "ENGINE_VAULT_KEY": "api-secrets/engine-vault-key", "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "runtime-binding-token/hmac-key"},
+			secrets: map[string]string{"TETRAL_DATABASE_URL": "tetral-database/provider-gateway-url", "ENGINE_VAULT_KEY": "api-secrets/engine-vault-key", "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "runtime-binding-token/hmac-key"},
 			ingress: map[int][]networkPolicyPeer{8080: {metrics}, 9090: {runtime}}, egress: map[int][]networkPolicyPeer{5432: {sys("tetral-postgres")}, 9090: {sys("bridge")}}},
 		"mcp-connector": {container: "mcp-connector", ports: map[string]int{"mcp-http": 8081, "mcp-grpc": 9091}, servicePorts: map[string]int{"mcp-http": 8081, "mcp-grpc": 9091}, httpEnv: "TETRAL_MCP_CONNECTOR_HTTP_ADDR", httpAddr: "0.0.0.0:8081", probePort: "mcp-http", health: "/healthz", ready: "/readyz",
 			env:     map[string]string{"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS": "tetral-agent-runtime/agent-runtime", "TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS": "tetral-system/bridge,tetral-system/job-runner", "TETRAL_MCP_CONNECTOR_GRPC_ADDR": "0.0.0.0:9091", "TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH": "/var/run/secrets/tetral-internal-grpc/bridge/token", "TETRAL_BRIDGE_API_GRPC_ADDR": "bridge.tetral-system.svc.cluster.local:9090"},
-			secrets: map[string]string{"TETRAL_DATABASE_URL": "tetral-database/gateway-url", "ENGINE_VAULT_KEY": "api-secrets/engine-vault-key", "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "runtime-binding-token/hmac-key"},
+			secrets: map[string]string{"TETRAL_DATABASE_URL": "tetral-database/mcp-connector-url", "ENGINE_VAULT_KEY": "api-secrets/engine-vault-key", "TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY": "runtime-binding-token/hmac-key"},
 			ingress: map[int][]networkPolicyPeer{8081: {metrics}, 9091: {runtime, sys("bridge"), sys("job-runner")}}, egress: map[int][]networkPolicyPeer{5432: {sys("tetral-postgres")}, 9090: {sys("bridge")}}},
 		"web-connector": {container: "web-connector", ports: map[string]int{"web-metrics": 9464, "web-grpc": 9092}, servicePorts: map[string]int{"web-metrics": 9464, "web-grpc": 9092}, httpEnv: "TETRAL_WEB_CONNECTOR_METRICS_ADDR", httpAddr: "0.0.0.0:9464", probePort: "web-metrics", health: "/health", ready: "/ready",
 			env:     map[string]string{"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS": "tetral-agent-runtime/agent-runtime", "TETRAL_WEB_CONNECTOR_GRPC_ADDR": "0.0.0.0:9092"},
@@ -63,6 +63,11 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 	for _, d := range docs {
 		if d.name == "gateway" || d.name == "gateway-tokenreview" || d.name == "bridge-visibility" {
 			t.Fatalf("retired combined resource remains: %s/%s", d.kind, d.name)
+		}
+		// Provider Gateway and MCP Connector each authenticate with their own
+		// database role; neither may fall back to the shared Gateway key.
+		if strings.Contains(d.text, "key: gateway-url") {
+			t.Fatalf("%s/%s reads the retired shared Gateway database key", d.kind, d.name)
 		}
 	}
 	for name, c := range separatedContracts() {

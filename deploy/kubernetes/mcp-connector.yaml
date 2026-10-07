@@ -85,7 +85,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: "tetral-database"
-                  key: gateway-url
+                  key: mcp-connector-url
             - name: ENGINE_VAULT_KEY
               valueFrom:
                 secretKeyRef:

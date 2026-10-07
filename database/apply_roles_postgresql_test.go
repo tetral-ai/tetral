@@ -3,6 +3,7 @@ package database_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/database"
@@ -93,16 +95,21 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		}
 		assertExactWorkloadPrivileges(t, admin, roleContract, declarations)
 		assertProcessRegistryPrivileges(t, databaseName, admin, declarations)
+		assertBridgeLacksRunnerPlacementAndCleanupWrites(t, databaseName, declarations.Roles["bridge"])
+		assertMCPConnectorLacksProviderCredentialReads(t, databaseName, declarations.Roles["mcp_connector"])
 		assertGoServingReadinessAcceptsEveryWorkloadRole(t, databaseName, roleContract, declarations)
-		assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles["gateway"])
-		assertGatewayCommandsAcceptOrdinaryRole(t, databaseName, declarations.Roles["gateway"])
-		if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{declarations.Roles["gateway"].Name}.Sanitize() + " BYPASSRLS"); err != nil {
-			t.Fatal(err)
+		for _, workload := range []string{"provider_gateway", "mcp_connector"} {
+			assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles[workload])
+			assertGatewayCommandsAcceptOrdinaryRole(t, databaseName, declarations.Roles[workload])
+			if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{declarations.Roles[workload].Name}.Sanitize() + " BYPASSRLS"); err != nil {
+				t.Fatal(err)
+			}
+			assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles[workload])
 		}
-		assertGatewayCommandsRejectPrivilegedRole(t, databaseName, declarations.Roles["gateway"])
 
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `SELECT 1 FROM queue_jobs LIMIT 1`)
-		assertWorkloadDenied(t, databaseName, declarations.Roles["gateway"], `SELECT 1 FROM session_events LIMIT 1`)
+		assertWorkloadDenied(t, databaseName, declarations.Roles["provider_gateway"], `SELECT 1 FROM session_events LIMIT 1`)
+		assertWorkloadDenied(t, databaseName, declarations.Roles["mcp_connector"], `SELECT 1 FROM session_events LIMIT 1`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["queue"], `TRUNCATE queue_jobs`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["bridge"], `CREATE TABLE forbidden_bridge_ddl (id integer)`)
 		assertWorkloadDenied(t, databaseName, declarations.Roles["auth"], `BEGIN; SELECT set_config('tetral.queue_maintenance','true',true); SELECT 1 FROM queue_jobs LIMIT 1; COMMIT`)
@@ -194,7 +201,7 @@ func assertBunReadinessAcceptsServingRole(t *testing.T, databaseName string, cre
 		if strings.Contains(string(output), dsn) || strings.Contains(string(output), credential.Name) {
 			t.Fatal("Bun readiness failure disclosed database identity")
 		}
-		t.Fatalf("Bun readiness rejected gateway serving role: %v: %s", err, output)
+		t.Fatalf("Bun readiness rejected Gateway workload serving role: %v: %s", err, output)
 	}
 }
 
@@ -488,6 +495,55 @@ func assertWorkloadDenied(t *testing.T, databaseName string, credential database
 	}
 }
 
+// assertWorkloadPrivilegeDenied requires the privilege check itself to reject
+// the statement. PostgreSQL checks table and sequence privileges before
+// constraints and RLS, so a re-added grant cannot hide behind another error.
+func assertWorkloadPrivilegeDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {
+	t.Helper()
+	connection := openManagedRole(t, databaseName, credential)
+	defer func() { _ = connection.Close(context.Background()) }()
+	_, err := connection.Exec(context.Background(), statement)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("statement %q: want SQLSTATE 42501, got %v", statement, err)
+	}
+}
+
+// Runtime placement and Session cleanup belong to Job Runner. Bridge keeps the
+// binding UPDATE/DELETE needed by release and termination, but cannot allocate
+// a binding generation, create a binding, or delete Session cleanup custody.
+func assertBridgeLacksRunnerPlacementAndCleanupWrites(t *testing.T, databaseName string, bridge database.RoleCredential) {
+	t.Helper()
+	statements := []string{
+		`SELECT nextval('session_runtime_binding_generation_seq')`,
+		`INSERT INTO session_runtime_bindings DEFAULT VALUES`,
+		`INSERT INTO sandbox_lifecycle_operations DEFAULT VALUES`,
+	}
+	for _, table := range []string{
+		"session_sandbox_bindings", "session_transient_attachments", "session_background_tasks",
+		"sandbox_output_capture_operations", "sandbox_output_capture_blobs", "sandbox_lifecycle_operations",
+	} {
+		statements = append(statements, "DELETE FROM "+table)
+	}
+	for _, statement := range statements {
+		assertWorkloadPrivilegeDenied(t, databaseName, bridge, statement)
+	}
+}
+
+// MCP Connector resolves only its own Vault credentials. Provider session
+// bindings and platform provider keys belong to Provider Gateway.
+func assertMCPConnectorLacksProviderCredentialReads(t *testing.T, databaseName string, mcpConnector database.RoleCredential) {
+	t.Helper()
+	for _, statement := range []string{
+		`SELECT 1 FROM platform_provider_keys LIMIT 1`,
+		`SELECT 1 FROM session_provider_auth LIMIT 1`,
+		`INSERT INTO session_provider_auth DEFAULT VALUES`,
+		`UPDATE session_provider_auth SET provider_id=provider_id`,
+	} {
+		assertWorkloadPrivilegeDenied(t, databaseName, mcpConnector, statement)
+	}
+}
+
 func seedRLSRows(t *testing.T, admin *sql.DB) {
 	t.Helper()
 	for _, workspaceID := range []string{"ws_contract_a", "ws_contract_b"} {
@@ -628,7 +684,7 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 			assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], statement)
 		}
 	}
-	for _, workload := range []string{"api", "auth", "queue", "sandbox", "gateway", "git_proxy", "cleanup", "event_stream"} {
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream"} {
 		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
 	}
 	assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM public.runtime_processes'`)

@@ -356,8 +356,9 @@ it preserves the stated invariants and passes the named suites.
   checks the migration stamp, exact live Workspace-RLS catalog, and effective
   serving role after SQL-client construction and before any SQL-backed store or
   resolver is built.
-- **Invariants.** The separate migration owner constructs schema. Gateway and
-  MCP serving roles are NOSUPERUSER and NOBYPASSRLS; both fail closed through a
+- **Invariants.** The separate migration owner constructs schema. The
+  `provider_gateway` and `mcp_connector` serving roles are distinct,
+  NOSUPERUSER and NOBYPASSRLS; both fail closed through a
   stable error that retains no role name, DSN, credential, or driver text when
   the stamp, live policies, or role posture differs from the repository-owned
   contract.

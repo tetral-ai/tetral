@@ -1374,6 +1374,84 @@ func TestKubernetesManifestServiceLocalSecretExamples(t *testing.T) {
 	}
 }
 
+// The bootstrap Secret table is the operator inventory and the Sandbox example
+// carries the tetral-database keys. Every key a canonical workload reads through
+// secretKeyRef must appear in both, so a new per-workload key cannot ship
+// undocumented. Edge TLS Secrets are selected by values and are not referenced
+// by the default manifests.
+func TestBootstrapSecretTableCoversManifestSecretKeyReferences(t *testing.T) {
+	reference := regexp.MustCompile(`secretKeyRef:\n +name: ([^\n]+)\n +key: ([^\n]+)`)
+	referenced := map[string]map[string]bool{}
+	for _, document := range readManifestDocuments(t) {
+		for _, match := range reference.FindAllStringSubmatch(document.text, -1) {
+			name, key := cleanManifestListValue(strings.TrimSpace(match[1])), cleanManifestListValue(strings.TrimSpace(match[2]))
+			if referenced[name] == nil {
+				referenced[name] = map[string]bool{}
+			}
+			referenced[name][key] = true
+		}
+	}
+	if len(referenced["tetral-database"]) == 0 {
+		t.Fatal("canonical manifests reference no tetral-database keys")
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "bootstrap.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	documented := map[string]map[string]bool{}
+	inTable := false
+	for _, line := range strings.Split(string(body), "\n") {
+		switch {
+		case line == "| Secret | Required keys |":
+			inTable = true
+		case !inTable || strings.HasPrefix(line, "| ---"):
+		case strings.HasPrefix(line, "| `"):
+			cells := strings.Split(line, "|")
+			if len(cells) != 4 {
+				t.Fatalf("malformed bootstrap Secret row %q", line)
+			}
+			keys := map[string]bool{}
+			for _, key := range strings.Split(cells[2], ",") {
+				keys[strings.Trim(strings.TrimSpace(key), "`")] = true
+			}
+			documented[strings.Trim(strings.TrimSpace(cells[1]), "`")] = keys
+		default:
+			inTable = false
+		}
+	}
+	for name, keys := range referenced {
+		for key := range keys {
+			if !documented[name][key] {
+				t.Errorf("docs/bootstrap.md Secret table omits %s/%s read by a canonical manifest", name, key)
+			}
+		}
+	}
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "services", "sandbox", "k8s", "secret.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exampleKeys := map[string]bool{}
+	for _, document := range strings.Split(string(example), "\n---\n") {
+		if !strings.Contains(document, "\n  name: tetral-database\n") {
+			continue
+		}
+		_, stringData, found := strings.Cut(document, "\nstringData:\n")
+		if !found {
+			t.Fatal("tetral-database example has no stringData")
+		}
+		for _, match := range regexp.MustCompile(`(?m)^  ([A-Za-z0-9_-]+):`).FindAllStringSubmatch(stringData, -1) {
+			exampleKeys[match[1]] = true
+		}
+	}
+	for key := range referenced["tetral-database"] {
+		if !exampleKeys[key] {
+			t.Errorf("services/sandbox/k8s/secret.example.yaml omits tetral-database/%s", key)
+		}
+	}
+}
+
 func TestKubernetesManifestTetralAPIHasNoLegacyRuntimeClientConfigOrKubernetesToken(t *testing.T) {
 	documents := readManifestDocuments(t)
 	deployment := requireDocument(t, documents, "api.yaml", "Deployment", "api")

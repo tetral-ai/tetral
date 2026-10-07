@@ -93,6 +93,11 @@ preparation and workspace seeding run independently before any service starts.
    When `edge.enabled=true`, also create the TLS Secret selected by
    `edge.tlsSecretName` (`git-proxy-tls` by default).
 
+   Also create the `tetral-store-trust` ConfigMap selected by
+   `transport.storeTrustConfigMap`, carrying the public `database-ca.crt` and
+   `object-store-ca.crt`. Every PostgreSQL and object-store consumer mounts it;
+   see [Internal routing and protected stores](#internal-routing-and-protected-stores).
+
 6. **Label the ingress-controller namespace.** The public NetworkPolicies are
    always rendered and admit port 8080 only from namespaces carrying:
 
@@ -292,7 +297,10 @@ For a fresh installation, prepare the empty database and roles, seed bootstrap
 state, then install matching workloads. All database consumers verify the exact
 current schema and their scoped serving role before readiness. Runner uses the
 separate `job_runner` role through `tetral-database/job-runner-url`; it cannot
-inherit Bridge's process-registry writes.
+inherit Bridge's process-registry writes. Provider Gateway and MCP Connector use
+the separate `provider_gateway` and `mcp_connector` roles through
+`tetral-database/provider-gateway-url` and `tetral-database/mcp-connector-url`;
+MCP Connector cannot read provider session bindings or platform provider keys.
 
 A future rollout requires independently demonstrated schema, protocol and
 handoff compatibility. Preserve `maxUnavailable: 0`, bounded surge and the
@@ -325,7 +333,9 @@ Two follow-ups are intentionally outside this chart:
 
 Bridge, Job Runner, Sandbox, Provider Gateway, MCP Connector and Web Connector each own
 one Deployment, ServiceAccount, Service and metrics/probe port. The chart
-removes the former combined Gateway resources and shared `gateway` identity.
+removes the former combined Gateway resources and the shared `gateway`
+ServiceAccount; the database role contract likewise has no shared `gateway`
+role.
 Their declared Deployment replica defaults are one. Set `replicas.api`, `replicas.auth`, `replicas.bridge`,
 `replicas.jobRunner`, `replicas.sandbox`, `replicas.providerGateway`, `replicas.mcpConnector` or
 `replicas.webConnector` independently to a positive integer.
@@ -350,8 +360,11 @@ profile-selected direct command port alongside that probe port.
 Bridge alone serves its durable API and has no visibility watch grant. Separate
 receiver identities hold TokenReview create permission; Runner has no inbound
 TokenReview role. Internal RPC tokens use `tetral-internal-grpc`, while projected
-Kubernetes API reviewer/watch tokens retain the API audience. Existing Secret
-names and keys remain supported, with grants limited to each owning process.
+Kubernetes API reviewer/watch tokens retain the API audience. Each database
+workload is granted only its own serving DSN: Bridge, Job Runner, Provider
+Gateway, MCP Connector, Cleanup, Git Proxy and Sandbox read their own
+`tetral-database` keys, and API, Auth, Queue and Event Stream read their own
+database Secrets.
 Raw, service-owned and rendered Helm tests assert exact ports, selectors,
 credential paths, RBAC and NetworkPolicy peers, including denied inherited access.
 
