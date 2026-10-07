@@ -186,6 +186,16 @@ The readable CI topology is:
   each week, plus daily compatibility, repository-health, and online dependency
   audits. A later pass is recorded but never erases the first failure.
 
+`internal/testinfra/go_shard_weights.json` balances the four Go Race shards.
+Each package listed there is split across shards by top-level test, weighted by
+the test's measured duration or the package's `default_ms`; other packages stay
+whole with relative weights. In the integration entry, every top-level test
+that ran longer than about ten seconds carries its `Elapsed` duration from the
+`go test -json` evidence of all four Go Race shards of Pull Request
+Verification run 37512221678, collected on the `calibrated_at` date. Recalibrate
+from the same per-test evidence of a current run, combining every shard of a
+sliced package.
+
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or
 the audit execution plumbing changes. The main-branch workflow does not repeat
