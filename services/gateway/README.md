@@ -1011,7 +1011,7 @@ The CLI normally emits no phase observations. An operator or test caller can
 explicitly set `TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD` to an inherited descriptor
 number (3–1024) for a private regular file with mode `0600`. The caller owns the
 file, descriptor and cleanup; stdout, stderr, stdin and SQL execution are unchanged.
-The Backpressure integration fixture opts in only for its three real CLI calls.
+The native-close integration test opts in and asserts the close phase chain.
 
 At most nine records (4096 bytes) contain only a closed `phase` name and monotonic
 `elapsed_ms`: CLI entry, stdin begin/complete, insert query begin/complete, body

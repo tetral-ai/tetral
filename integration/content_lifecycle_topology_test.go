@@ -1,17 +1,14 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,12 +145,10 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	command.Dir = "../services/gateway"
 	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin), "ENGINE_VAULT_KEY="+sdkIntegrationVaultKey)
 	command.Stdin = strings.NewReader("content-fixture-provider-key")
-	observeKey := observeBackpressurePlatformKey(t, command)
 	keyStarted := time.Now()
 	keyErr := command.Run()
 	keyElapsed := time.Since(keyStarted).Milliseconds()
 	keyState, parentState := keyContext.Err(), ctx.Err()
-	observeKey()
 	if keyErr != nil {
 		exitCode := -1
 		if command.ProcessState != nil {
@@ -261,134 +256,6 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		t.Cleanup(overrides.StopProvider)
 	}
 	return &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, sdk: sdk, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault}
-}
-
-// This rail is restricted to the three real CLI calls in the Backpressure root.
-// The extra descriptor contains only closed phase/time records; child stdio stays
-// discarded because native SQL/close errors can contain credentials.
-func observeBackpressurePlatformKey(t *testing.T, command *exec.Cmd) func() {
-	t.Helper()
-	switch t.Name() {
-	case "TestPostgreSQLPublicStreamingBackpressure/socket-deadline/injected=false",
-		"TestPostgreSQLPublicStreamingBackpressure/socket-deadline/injected=true",
-		"TestPostgreSQLPublicStreamingBackpressure/twenty-cycles-and-active-writer-SIGTERM":
-	default:
-		return func() {}
-	}
-	if runtime.GOOS == "windows" { // os/exec cannot inherit ExtraFiles there.
-		t.Log("platform_key_cli_phases status=unavailable")
-		return func() {}
-	}
-	file, err := os.CreateTemp(t.TempDir(), "platform-key-phases-")
-	if err != nil {
-		t.Log("platform_key_cli_phases status=unavailable")
-		return func() {}
-	}
-	t.Cleanup(func() { _ = file.Close() })
-	command.ExtraFiles = []*os.File{file} // The child inherits this private 0600 file as fd3.
-	command.Env = append(command.Env, "TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD=3")
-	return func() {
-		stat, statErr := file.Stat()
-		_, seekErr := file.Seek(0, io.SeekStart)
-		data, readErr := io.ReadAll(io.LimitReader(file, 4097))
-		closeErr := file.Close()
-		if statErr != nil || !stat.Mode().IsRegular() || stat.Mode().Perm() != 0600 || seekErr != nil || readErr != nil || closeErr != nil || len(data) == 0 || len(data) > 4096 {
-			t.Log("platform_key_cli_phases status=unavailable")
-			return
-		}
-		phases, valid := decodePlatformKeyPhases(data)
-		if !valid {
-			t.Log("platform_key_cli_phases status=invalid")
-			return
-		}
-		status := "partial"
-		if phases[len(phases)-1].Phase == "exit_begin" {
-			status = "complete"
-		}
-		// Re-encode validated enums/times instead of echoing untrusted child bytes.
-		encoded, _ := json.Marshal(phases)
-		t.Logf("platform_key_cli_phases status=%s count=%d records=%s", status, len(phases), encoded)
-	}
-}
-
-type platformKeyPhase struct {
-	Phase     string   `json:"phase"`
-	ElapsedMS *float64 `json:"elapsed_ms"`
-}
-
-func decodePlatformKeyPhases(data []byte) ([]platformKeyPhase, bool) {
-	if len(data) == 0 || len(data) > 4096 || data[len(data)-1] != '\n' {
-		return nil, false
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var phases []platformKeyPhase
-	last := 0.0
-	// Successful insert has eight phases. A body failure may replace the
-	// remaining body prefix, but native close rejection stays an incomplete tail.
-	expected := []string{"cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "close_begin", "close_complete", "exit_begin"}
-	next := 0
-	for {
-		var phase platformKeyPhase
-		err := decoder.Decode(&phase)
-		if err == io.EOF {
-			return phases, len(phases) > 0
-		}
-		if err != nil || len(phases) >= 9 || phase.ElapsedMS == nil || math.IsNaN(*phase.ElapsedMS) || math.IsInf(*phase.ElapsedMS, 0) || *phase.ElapsedMS < last || next >= len(expected) {
-			return nil, false
-		}
-		if phase.Phase == "body_error" && next >= 1 && next <= 5 && (len(phases) == 0 || phases[len(phases)-1].Phase != "body_error") {
-			next = 5
-		} else if phase.Phase == expected[next] {
-			next++
-		} else {
-			return nil, false
-		}
-		last = *phase.ElapsedMS
-		phases = append(phases, phase)
-	}
-}
-
-func TestPlatformKeyPhaseObservationValidation(t *testing.T) {
-	encode := func(names ...string) []byte {
-		var result []byte
-		for index, name := range names {
-			result = append(result, []byte(fmt.Sprintf("{\"phase\":%q,\"elapsed_ms\":%d}\n", name, index))...)
-		}
-		return result
-	}
-	for _, data := range [][]byte{
-		encode("cli_enter"),
-		encode("cli_enter", "stdin_begin", "stdin_complete", "query_begin"),
-		encode("cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "close_begin", "close_complete", "exit_begin"),
-		encode("cli_enter", "body_error", "close_begin", "close_complete", "exit_begin"),
-		encode("cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "body_error", "close_begin", "close_complete", "exit_begin"),
-	} {
-		if _, valid := decodePlatformKeyPhases(data); !valid {
-			t.Fatal("valid bounded phase prefix rejected")
-		}
-	}
-	for _, data := range [][]byte{
-		nil,
-		encode("query_begin"),
-		encode("cli_enter", "stdin_complete"),
-		encode("cli_enter", "body_error", "body_error"),
-		encode("cli_enter", "close_begin", "body_error"),
-		encode("cli_enter", "secret-sentinel"),
-		[]byte("{\"phase\":\"cli_enter\"}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":null}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":-1}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":1e309}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":0,\"error\":\"secret-sentinel\"}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":2}\n{\"phase\":\"stdin_begin\",\"elapsed_ms\":1}\n"),
-		[]byte("{\"phase\":\"cli_enter\",\"elapsed_ms\":0}"),
-		[]byte(strings.Repeat(" ", 4097)),
-		append(encode("cli_enter", "stdin_begin", "stdin_complete", "query_begin", "query_complete", "body_error", "close_begin", "close_complete", "exit_begin"), encode("exit_begin")...),
-	} {
-		if _, valid := decodePlatformKeyPhases(data); valid {
-			t.Fatal("invalid phase observation accepted")
-		}
-	}
 }
 
 type contentLostReceiptStore struct {
