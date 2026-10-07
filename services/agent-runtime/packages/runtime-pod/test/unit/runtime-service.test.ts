@@ -587,6 +587,32 @@ describe("RuntimeControlService method-specific ingress", () => {
 		expect(JSON.stringify(fixture.logger.records)).not.toContain("different");
 	});
 
+	test("records a command addressed to an older boot as a trusted process mismatch", async () => {
+		const fixture = makeFixture();
+		await fixture.service
+			.acceptInput(
+				acceptInput({ runtimeProcessId: "process-retired" }),
+				metadata(),
+			)
+			.catch(() => undefined);
+		expect(fixture.host.inputs).toEqual([]);
+		expect(
+			fixture.logger.records.filter(
+				(record) => record.event === "runtime_command_rejected",
+			),
+		).toEqual([
+			expect.objectContaining({
+				phase: "selected_pod",
+				reason: "runtime_process_mismatch",
+				"grpc.code": "FailedPrecondition",
+				"workspace.id": "wksp_1",
+				"session.id": "sesn_1",
+				"binding.id": "bind_1",
+				"runtime.process.id": "process-retired",
+			}),
+		]);
+	});
+
 	test("keeps applied and duplicate outcomes consistent when the logger sink throws", async () => {
 		const fixture = makeFixture();
 		fixture.logger.throwOnWrite = true;

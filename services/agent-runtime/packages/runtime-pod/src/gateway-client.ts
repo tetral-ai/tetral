@@ -206,7 +206,6 @@ export class RuntimePodGatewayClient implements GatewayClient {
 		}
 		if (this.stopping) throw new Error("Gateway client closing");
 		if (options.abortSignal?.aborted) {
-			logProviderStreamOpened(this.options.logger, request);
 			return {
 				events: Stream.empty,
 				completion: Promise.resolve({

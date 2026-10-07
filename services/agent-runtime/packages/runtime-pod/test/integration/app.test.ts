@@ -95,13 +95,21 @@ async function startAppFixture(options: {
   readonly tokenReviewClient?: RuntimeTokenReviewClient;
 } = {}) {
   const app = createRuntimePodApp({
-    runtimeProcessId: "process-test",
+    runtimeProcess: {
+      runtimeProcessId: "process-test",
+      register: async () => undefined,
+      report: async () => undefined,
+      release: async () => {
+        throw new Error("app fixture owns no Session binding");
+      },
+      close: async () => undefined,
+    },
+    quiesce: async () => undefined,
     config: validConfig(),
     logger: { info: () => undefined, error: () => undefined },
     tokenReviewClient: options.tokenReviewClient ?? new AllowingTokenReviewClient(),
     commandRunHost: options.runHost ?? new RecordingRunHost(Promise.resolve()),
     cleanupRunHost: options.cleanupRunHost ?? new RecordingCleanupHost(Promise.resolve({ ok: true, sessionId: "sesn_1", cleaned: true })),
-    drainTimeoutMs: 250,
   });
   const started = await app.start();
   const grpcAddress = `127.0.0.1:${started.grpcPort}`;
@@ -148,7 +156,8 @@ function validConfig(): RuntimePodConfig {
     transportProfile: "standard-routed",
     maxLocalSessions: 256,
     maxConcurrentTools: 8,
-    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 60000, settlementTimeoutMs: 15000, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 5000, proxyJoinTimeoutMs: 5000 },
+    // Short phase windows bound a stuck in-flight command without changing the admission contract.
+    lifecycle: { reportIntervalMs: 2000, processFreshnessMs: 10000, currentStepTimeoutMs: 250, settlementTimeoutMs: 250, settlementAttemptTimeoutMs: 5000, localJoinTimeoutMs: 250, proxyJoinTimeoutMs: 5000 },
     platformModels: {
       approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
     },

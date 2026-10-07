@@ -1113,6 +1113,14 @@ export class RuntimeControlService {
 				return response;
 			}
 			if (execution.request.runtimeProcessId !== this.options.runtimeProcessId) {
+				recordRejection(
+					{
+						phase: "selected_pod",
+						reason: "runtime_process_mismatch",
+						grpcCode: "FailedPrecondition",
+					},
+					true,
+				);
 				throw new GrpcStatusError(status.FAILED_PRECONDITION, "runtime process is stale");
 			}
 			if (!this.activeBindingMatches(execution.request)) {

@@ -80,6 +80,7 @@ export type RuntimeIngressRejectionReason =
 	| "runtime_not_accepting"
 	| "invalid_request"
 	| "selected_pod_mismatch"
+	| "runtime_process_mismatch"
 	| "binding_mismatch"
 	| "identity_conflict"
 	| "invalid_content"
@@ -365,11 +366,14 @@ function startupCauseClass(cause: unknown): string {
 	return "unknown";
 }
 
-/** Builds a typed shutdown failure record for active-run settlement or drain timeout failure. */
+/**
+ * Builds a typed shutdown failure record for checkpoint expiry, an incomplete binding handoff,
+ * active-run settlement failure or drain timeout.
+ */
 export function shutdownFailureLogRecord(input: {
 	readonly event:
-		| "runtime_process_report_failed"
-      | "runtime_checkpoint_expired"
+		| "runtime_checkpoint_expired"
+		| "runtime_binding_handoff_incomplete"
 		| "shutdown_active_run_settlement_failed"
 		| "shutdown_drain_timeout";
 	readonly message: string;
@@ -385,6 +389,28 @@ export function shutdownFailureLogRecord(input: {
 			errorClass: "shutdown_error",
 			errorCode: input.event,
 			messageSafe: input.message,
+		}),
+	};
+}
+
+/**
+ * Builds the bounded record for a failed steady-state process report. The first failure and each
+ * later summary carry the consecutive failure count; recovery is recorded separately.
+ */
+export function runtimeProcessReportFailureLogRecord(input: {
+	readonly failedCount: number;
+}): RuntimePodLogRecord {
+	return {
+		event: "runtime_process_report_failed",
+		"event.kind": "runtime_process_report_failed",
+		operation: "runtime_process.report",
+		component: "agent-runtime",
+		message: "runtime process report failed",
+		"failed.count": input.failedCount,
+		...semanticErrorFields({
+			errorClass: "dependency_error",
+			errorCode: "runtime_process_report_failed",
+			messageSafe: "runtime process report failed",
 		}),
 	};
 }

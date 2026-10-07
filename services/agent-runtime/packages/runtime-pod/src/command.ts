@@ -503,7 +503,6 @@ export async function buildRuntimePodCommandDependencies(input: {
 		commandRunHost: coreHosts.commandRunHost,
 		controlInputCommitter,
 		cleanupRunHost: coreHosts.cleanupRunHost,
-		shutdownActiveRuns: coreHosts.shutdownActiveRuns,
 		metrics,
 		bootstrap: {
 			runtime: () =>

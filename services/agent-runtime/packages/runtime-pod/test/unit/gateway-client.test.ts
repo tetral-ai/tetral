@@ -94,14 +94,17 @@ describe("Runtime Pod Gateway client", () => {
     }
   });
 
-  test("preserves an already classified abort before the first event", async () => {
+  test("preserves an already classified abort before the first event without opening a stream", async () => {
     const records: unknown[] = [];
+    let transportCalls = 0;
     const abortController = new AbortController();
     abortController.abort();
     const client = new RuntimePodGatewayClient({
       address: "gateway.test:9090",
       tokenPath: "/var/run/token",
-      client: recordingGatewayClient(() => undefined),
+      client: recordingGatewayClient(() => {
+        transportCalls++;
+      }),
       metadataFactory: async () => new Metadata(),
       logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
     });
@@ -112,7 +115,8 @@ describe("Runtime Pod Gateway client", () => {
     await Effect.runPromise(Stream.runCollect(handle.events));
 
     expect(await handle.completion).toEqual({ outcome: "cancelled", cancelKind: "caller" });
-    expect(records).toEqual([expect.objectContaining({ event: "runtime_provider_stream_opened" })]);
+    expect(transportCalls).toBe(0);
+    expect(records).toEqual([]);
   });
 
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {

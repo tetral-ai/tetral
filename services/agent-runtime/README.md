@@ -527,7 +527,11 @@ check reports the keys involved, never their values.
 
 Shutdown withdraws admission immediately and joins command ingress while each
 Session independently reaches its next current-step checkpoint. A committed
-DRAINING report gates binding release. Defaults allocate 60 seconds for current
+DRAINING report gates binding release. A rejected release leaves only that
+Session's binding in place for Job Runner's fenced loss repair and is recorded as
+an incomplete handoff; it never stops another Session's release. Owned clients
+close only after every Session has released, failed, or reached the settlement
+deadline. Defaults allocate 60 seconds for current
 steps, 15 seconds for settlement and release, five seconds for local joins, and
 five seconds for proxy joins, within the 90-second Pod grace period. An idle
 Session releases immediately; one slow Session does not delay another Session's

@@ -185,8 +185,6 @@ describe("Runtime Pod static boundaries", () => {
     const futureObligationMarker = ["TO", "DO"].join("");
 
     expect(lifecycle).not.toContain(futureObligationMarker);
-    expect(lifecycle).toContain("shutdownActiveRuns");
-    expect(lifecycle).toContain("drainTimeoutMs");
     expect(lifecycle).toContain("runtime pod shutdown drain timed out");
   });
 

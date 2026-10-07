@@ -181,6 +181,16 @@ function fakeLifecycle() {
 			grpc: async () => undefined,
 			authClient: async () => undefined,
 		},
+		runtimeProcess: {
+			runtimeProcessId: "process-test",
+			register: async () => undefined,
+			report: async () => undefined,
+			release: async () => {
+				throw new Error("listener fixture owns no Session binding");
+			},
+			close: async () => undefined,
+		},
+		shutdownHooks: { quiesce: async () => undefined },
 	});
 }
 

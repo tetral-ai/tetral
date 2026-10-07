@@ -40,13 +40,14 @@ const config: RuntimePodConfig = {
   skillGuidance: { descriptionBudgetBytes: 32768 },
 };
 const app = createRuntimePodApp({
-  config, runtimeProcessId: input.processId,
+  config,
   runtimeProcess: { runtimeProcessId: input.processId,
     register: async () => { registrations++; },
     report: async (phase) => { if(registrations!==1) throw new Error("process is not registered"); if(phase==="accepting") acceptingReports++; },
     release: async () => { throw new Error("fixture owns no handoff receipt"); },
     close: async () => { processClosed=true; },
   },
+  quiesce: async () => undefined,
   logger: { info: () => undefined, error: () => undefined },
   tokenReviewClient: { createTokenReview: async ({ token }) => ({ authenticated: token === "fixture-runner", audiences: ["tetral-internal-grpc"], username: "system:serviceaccount:tetral-system:job-runner" }) },
   commandRunHost: host,

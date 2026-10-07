@@ -3623,14 +3623,22 @@ export function layer(
 							ingressDone = true;
 						},
 					);
-					const drains = new Map<SessionEntry, Fiber.Fiber<void, never>>();
+					// Each Session drains in its own fiber and settles to an Exit, so one
+					// Session's failed release or settlement-deadline expiry cannot stop
+					// another Session's handoff. A failed Session keeps its binding for
+					// fenced loss repair; quiesce reports the failure only after every
+					// started drain has settled.
+					const drains = new Map<
+						SessionEntry,
+						Fiber.Fiber<Exit.Exit<void, never>, never>
+					>();
 					for (;;) {
 						for (const [entry, scope] of quiesceEntries)
 							if (!drains.has(entry)) {
 								drains.set(
 									entry,
 									yield* Effect.forkIn(
-										drainEntry(entry, scope),
+										drainEntry(entry, scope).pipe(Effect.exit),
 										installationScope,
 									),
 								);
@@ -3642,11 +3650,17 @@ export function layer(
 							);
 						yield* Effect.sleep("10 millis");
 					}
-					yield* Effect.forEach([...drains.values()], Fiber.join, {
+					const exits = yield* Effect.forEach([...drains.values()], Fiber.join, {
 						concurrency: "unbounded",
-						discard: true,
 					});
 					admissionClosed = true;
+					const incomplete = exits.filter(Exit.isFailure).length;
+					if (incomplete > 0)
+						return yield* Effect.die(
+							new Error(
+								`Runtime handoff incomplete for ${incomplete} Session(s)`,
+							),
+						);
 				});
 
 			const shutdownActiveRuns = (): Effect.Effect<void> =>

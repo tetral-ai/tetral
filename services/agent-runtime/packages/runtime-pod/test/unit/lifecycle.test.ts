@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { status } from "@grpc/grpc-js";
+import { RuntimeHandoffDisposition } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type { RuntimeQuiesceOptions } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import { loadRuntimePodConfig } from "../../src/config.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { GrpcStatusError, RuntimePodLifecycle } from "../../src/lifecycle.js";
+import type { RuntimeProcessPort } from "../../src/runtime-process.js";
 
 describe("Runtime Pod lifecycle", () => {
   test("registration and accepting ACK gate readiness; freshness expires between reports", async () => {
@@ -41,7 +44,7 @@ describe("Runtime Pod lifecycle", () => {
       shutdownHooks: { quiesce: async () => undefined },
     });
     const startup = lifecycle.start();
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await waitFor(() => phases.length === 2, "registration and accepting report");
     expect(phases).toEqual(["registered", "accepting"]);
     expect(lifecycle.ready()).toEqual({ ready: false });
     acceptingAck();
@@ -63,13 +66,13 @@ describe("Runtime Pod lifecycle", () => {
     const core = new Promise<void>((resolve) => {
       releaseCore = resolve;
     });
+    const producerSettled = deferred<void>("producer settlement");
     let closed = false,
       joined = false;
     const lifecycle = new RuntimePodLifecycle({
-      config: validConfig(),
+      config: shortShutdownConfig(),
       logger: { info: () => undefined, error: () => undefined },
       bootstrap: successfulBootstrap(),
-      drainTimeoutMs: 10,
       runtimeProcess: {
         runtimeProcessId: "boot-joined",
         register: async () => undefined,
@@ -90,18 +93,23 @@ describe("Runtime Pod lifecycle", () => {
     await lifecycle.start();
     const result = lifecycle
       .runCommand(async () => {
-        await producer;
+        try {
+          await producer;
+        } finally {
+          producerSettled.resolve(undefined);
+        }
       })
       .catch((error) => error);
     const shutdown = lifecycle.shutdown().then(() => {
       joined = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // The public command promise rejects when the settlement window expires.
     expect((await result).code).toBe(status.FAILED_PRECONDITION);
     expect(closed).toBe(false);
     expect(joined).toBe(false);
     releaseProducer();
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await producerSettled.promise;
+    // Runtime Core is still held, so the process client must remain open.
     expect(closed).toBe(false);
     releaseCore();
     await shutdown;
@@ -142,7 +150,7 @@ describe("Runtime Pod lifecycle", () => {
         shutdownHooks: { quiesce: async () => undefined },
       });
       await lifecycle.start();
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await waitFor(() => reports >= 5, "five accepting reports");
       expect(reports).toBeGreaterThanOrEqual(5);
       expect(lifecycle.ready()).toEqual({ ready: true });
       await lifecycle.shutdown();
@@ -154,7 +162,13 @@ describe("Runtime Pod lifecycle", () => {
             (record) => record.event === "runtime_process_report_recovered",
           );
         expect(failures).toHaveLength(1);
-        expect(failures[0]?.["failed.count"]).toBe(1);
+        expect(failures[0]).toMatchObject({
+          "failed.count": 1,
+          operation: "runtime_process.report",
+          "error.code": "runtime_process_report_failed",
+        });
+        expect(failures[0]?.operation).not.toBe("shutdown");
+        expect(failures[0]?.kind).not.toBe("shutdown_error");
         expect(recovered).toHaveLength(1);
         expect(recovered[0]?.["failed.count"]).toBe(3);
       }
@@ -171,6 +185,8 @@ describe("Runtime Pod lifecycle", () => {
         grpc: async () => undefined,
         authClient: async () => undefined,
       },
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
 
     expect(lifecycle.health()).toEqual({ ok: true });
@@ -179,6 +195,7 @@ describe("Runtime Pod lifecycle", () => {
     await lifecycle.start();
 
     expect(lifecycle.ready()).toEqual({ ready: true });
+    await lifecycle.shutdown();
   });
 
   test("a throwing diagnostic callback cannot retain ready admission after failed bootstrap", async () => {
@@ -197,6 +214,8 @@ describe("Runtime Pod lifecycle", () => {
           if (failCore) throw new Error("PRIVATE_BOOTSTRAP_SENTINEL");
         },
       },
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
     await lifecycle.start();
     expect(lifecycle.ready()).toEqual({ ready: true });
@@ -211,6 +230,7 @@ describe("Runtime Pod lifecycle", () => {
     expect(() => lifecycle.runCommand(async () => "must not run")).toThrow(
       "runtime pod shutting down",
     );
+    await lifecycle.shutdown();
   });
 
   test("config/env failure is classified as config_error and readiness remains false", async () => {
@@ -231,6 +251,8 @@ describe("Runtime Pod lifecycle", () => {
       config: parsed,
       logger: createJsonLogger({ write: (line) => sink.push(line) }),
       bootstrap: successfulBootstrap(),
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
     await lifecycle.start();
 
@@ -352,6 +374,8 @@ describe("Runtime Pod lifecycle", () => {
         config: validConfig(),
         logger: createJsonLogger({ write: (line) => sink.push(line) }),
         bootstrap: scenario.bootstrap,
+        runtimeProcess: fakeRuntimeProcess(),
+        shutdownHooks: idleCore(),
       });
 
       await lifecycle.start();
@@ -375,22 +399,22 @@ describe("Runtime Pod lifecycle", () => {
     }
   });
 
-  test("shutdown flips ready false, rejects new commands, drains started commands, and only settles hot active runs", async () => {
-    let shutdownActiveRunCalls = 0;
-    const inFlight = deferred("normal ACK");
+  test("shutdown flips ready false, rejects new commands, drains started commands, and quiesces Runtime Core once", async () => {
+    let quiesceCalls = 0;
+    const inFlight = deferred<string>("normal ACK");
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
       logger: createJsonLogger({ write: () => undefined }),
       bootstrap: successfulBootstrap(),
+      runtimeProcess: fakeRuntimeProcess(),
       shutdownHooks: {
-        shutdownActiveRuns: async () => {
-          shutdownActiveRunCalls++;
+        quiesce: async () => {
+          quiesceCalls++;
         },
       },
-      drainTimeoutMs: 50,
     });
     await lifecycle.start();
-    const accepted = lifecycle.trackCommand(inFlight.promise);
+    const accepted = lifecycle.runCommand(async () => await inFlight.promise);
 
     const shutdown = lifecycle.shutdown();
     expect(lifecycle.ready()).toEqual({ ready: false });
@@ -400,15 +424,17 @@ describe("Runtime Pod lifecycle", () => {
     await expect(accepted).resolves.toBe("normal ACK");
     await shutdown;
 
-    expect(shutdownActiveRunCalls).toBe(1);
+    expect(quiesceCalls).toBe(1);
   });
 
   test("metrics snapshot reports readiness, admission, and in-flight commands", async () => {
-    const inFlight = deferred("metrics ACK");
+    const inFlight = deferred<string>("metrics ACK");
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
       logger: createJsonLogger({ write: () => undefined }),
       bootstrap: successfulBootstrap(),
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
 
     expect(lifecycle.metricsSnapshot()).toEqual({
@@ -418,7 +444,7 @@ describe("Runtime Pod lifecycle", () => {
     });
 
     await lifecycle.start();
-    const accepted = lifecycle.trackCommand(inFlight.promise);
+    const accepted = lifecycle.runCommand(async () => await inFlight.promise);
     expect(lifecycle.metricsSnapshot()).toMatchObject({
       ready: true,
       accepting: true,
@@ -428,22 +454,21 @@ describe("Runtime Pod lifecycle", () => {
     inFlight.resolve("metrics ACK");
     await expect(accepted).resolves.toBe("metrics ACK");
     expect(lifecycle.metricsSnapshot().inFlightCommands).toBe(0);
+    await lifecycle.shutdown();
   });
 
   test("shutdown drain timeout returns safe failure without cleanup, unbind, event writes, or raw details", async () => {
     const lifecycle = new RuntimePodLifecycle({
-      config: validConfig(),
+      config: shortShutdownConfig(),
       logger: createJsonLogger({ write: () => undefined }),
       bootstrap: successfulBootstrap(),
-      shutdownHooks: {
-        shutdownActiveRuns: async () => undefined,
-      },
-      drainTimeoutMs: 1,
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
     await lifecycle.start();
 
     const owned = deferred<void>("owned command release");
-    const blocked = lifecycle.trackCommand(owned.promise);
+    const blocked = lifecycle.runCommand(async () => await owned.promise);
     let closed = false;
     const shutdown = lifecycle.shutdown().then(() => {
       closed = true;
@@ -460,12 +485,12 @@ describe("Runtime Pod lifecycle", () => {
       config: validConfig(),
       logger: createJsonLogger({ write: (line) => sink.push(line) }),
       bootstrap: successfulBootstrap(),
+      runtimeProcess: fakeRuntimeProcess(),
       shutdownHooks: {
-        shutdownActiveRuns: async () => {
+        quiesce: async () => {
           throw new Error("bearer token raw provider payload runtime-pod-a 10.0.0.1");
         },
       },
-      drainTimeoutMs: 50,
     });
     await lifecycle.start();
 
@@ -488,14 +513,125 @@ describe("Runtime Pod lifecycle", () => {
     }
   });
 
+  test("one Session's rejected release does not stop another Session's handoff or close the client early", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const releaseB = deferred<void>("Session B release");
+    const releases: string[] = [];
+    let closed = false,
+      closedBeforeB = false,
+      bReleased = false;
+    const lifecycle = new RuntimePodLifecycle({
+      config: validConfig(),
+      logger: {
+        info: (record) => records.push(record),
+        error: (record) => records.push(record),
+      },
+      bootstrap: successfulBootstrap(),
+      runtimeProcess: {
+        ...fakeRuntimeProcess(),
+        release: async (request) => {
+          releases.push(request.sessionId);
+          if (request.sessionId === "sesn_a")
+            throw new GrpcStatusError(
+              status.FAILED_PRECONDITION,
+              "binding is not checkpointed",
+            );
+          await releaseB.promise;
+          bReleased = true;
+          return {
+            operationId: request.operationId,
+            handoffId: "handoff_b",
+            releasedBinding: {
+              bindingId: request.bindingId,
+              bindingGeneration: request.bindingGeneration,
+              targetPodUid: "uid-a",
+              runtimeProcessId: "process-test",
+            },
+            threads: [
+              {
+                sessionThreadId: "thrd_b",
+                disposition:
+                  RuntimeHandoffDisposition.RUNTIME_HANDOFF_DISPOSITION_RECOVER,
+                queueJobId: "job_b",
+              },
+            ],
+          };
+        },
+        close: async () => {
+          closed = true;
+          closedBeforeB = !bReleased;
+        },
+      },
+      // Runtime Core releases each Session independently and settles after all of them.
+      shutdownHooks: {
+        quiesce: async (options) => {
+          const outcomes = await Promise.allSettled(
+            [sessionScope("sesn_a"), sessionScope("sesn_b")].map((scope) =>
+              options.release(scope, options.settlementDeadline),
+            ),
+          );
+          if (outcomes.some((outcome) => outcome.status === "rejected"))
+            throw new Error("Runtime handoff incomplete");
+        },
+      },
+    });
+    await lifecycle.start();
+
+    const shutdown = lifecycle.shutdown();
+    await waitFor(
+      () =>
+        releases.length === 2 &&
+        records.some(
+          (record) => record.event === "runtime_binding_handoff_incomplete",
+        ),
+      "both Session releases and the rejected handoff record",
+    );
+    const incomplete = records.filter(
+      (record) => record.event === "runtime_binding_handoff_incomplete",
+    );
+    expect(incomplete).toHaveLength(1);
+    expect(incomplete[0]).toMatchObject({
+      "session.id": "sesn_a",
+      "binding.id": "bind_sesn_a",
+      "binding.generation": 7,
+      "grpc.code": "FailedPrecondition",
+      operation: "shutdown",
+    });
+    expect(typeof incomplete[0]?.["operation.id"]).toBe("string");
+    expect(closed).toBe(false);
+
+    releaseB.resolve(undefined);
+    await shutdown;
+
+    expect(closed).toBe(true);
+    expect(closedBeforeB).toBe(false);
+    expect(
+      records.filter(
+        (record) => record.event === "runtime_binding_handoff_committed",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        "session.id": "sesn_b",
+        "handoff.id": "handoff_b",
+        "thread.id": "thrd_b",
+      }),
+    ]);
+    expect(
+      records.filter(
+        (record) => record.event === "runtime_binding_handoff_incomplete",
+      ),
+    ).toHaveLength(1);
+  });
+
   test("shutdown drain timeout aborts command leases before late handler mutation", async () => {
     const sink: string[] = [];
     const gate = deferred<void>("handler release");
     const lifecycle = new RuntimePodLifecycle({
-      config: validConfig(),
+      config: shortShutdownConfig(),
       logger: createJsonLogger({ write: (line) => sink.push(line) }),
       bootstrap: successfulBootstrap(),
-      drainTimeoutMs: 1,
+      runtimeProcess: fakeRuntimeProcess(),
+      shutdownHooks: idleCore(),
     });
     await lifecycle.start();
 
@@ -563,6 +699,52 @@ function validConfig() {
   return loadRuntimePodConfig(validEnv());
 }
 
+/** Millisecond current-step, settlement and join windows expire held work deterministically. */
+function shortShutdownConfig() {
+  return loadRuntimePodConfig({
+    ...validEnv(),
+    TETRAL_RUNTIME_DRAIN_TIMEOUT_MS: "1",
+    TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS: "1",
+    TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS: "1",
+  });
+}
+
+function fakeRuntimeProcess(): RuntimeProcessPort {
+  return {
+    runtimeProcessId: "process-test",
+    register: async () => undefined,
+    report: async () => undefined,
+    release: async () => {
+      throw new Error("unexpected release");
+    },
+    close: async () => undefined,
+  };
+}
+
+function idleCore(): { readonly quiesce: (options: RuntimeQuiesceOptions) => Promise<void> } {
+  return { quiesce: async () => undefined };
+}
+
+function sessionScope(sessionId: string) {
+  return {
+    workspaceId: "wksp_1",
+    sessionId,
+    sessionThreadId: `thrd_${sessionId}`,
+    bindingId: `bind_${sessionId}`,
+    bindingGeneration: 7,
+    targetPodUid: "uid-a",
+    runtimeProcessId: "process-test",
+  };
+}
+
+async function waitFor(condition: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 function successfulBootstrap() {
   return {
     runtime: async () => undefined,
@@ -587,7 +769,7 @@ function deferred<T>(valueLabel: string): {
 
 async function expectNewCommandRejected(lifecycle: RuntimePodLifecycle): Promise<void> {
   try {
-    await lifecycle.trackCommand(Promise.resolve("new"));
+    await lifecycle.runCommand(async () => "new");
     throw new Error("new command accepted");
   } catch (error) {
     expect(error).toBeInstanceOf(GrpcStatusError);

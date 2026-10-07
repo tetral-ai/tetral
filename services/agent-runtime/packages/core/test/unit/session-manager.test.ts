@@ -7702,6 +7702,51 @@ describe("SessionManager", () => {
 		});
 	});
 
+	test("quiesce keeps releasing other Sessions after one release rejects and reports the failure last", async () => {
+		const loop = makeControlledThreadLoop();
+		await withSessionManager(sessionManagerLayer(loop), async (manager) => {
+			await Effect.runPromise(manager.acceptInput(acceptedInput("held")));
+			await waitForRuns(loop, 1);
+			await Effect.runPromise(
+				manager.preloadThread({
+					...threadControl("rejected"),
+					runtimeBindingToken: "binding-token",
+					contextEntries: [],
+				}),
+			);
+			const order: string[] = [];
+			const drain = Effect.runPromise(
+				manager.quiesce({
+					currentStepDeadline: Date.now() + 1000,
+					settlementDeadline: Date.now() + 2000,
+					release: async (scope) => {
+						if (scope.sessionId === "rejected") {
+							order.push("rejected");
+							throw new Error("controlled release rejection");
+						}
+						order.push(`released:${scope.sessionId}`);
+					},
+				}),
+			).then(
+				() => {
+					order.push("quiesce:resolved");
+				},
+				() => {
+					order.push("quiesce:rejected");
+				},
+			);
+			await waitForCondition(
+				() => order.includes("rejected"),
+				"rejected independent release",
+			);
+			// The held Session reaches its checkpoint only after the other release failed.
+			loop.runs[0]!.release({ type: "checkpoint_yield" });
+			await drain;
+			expect(order).toEqual(["rejected", "released:held", "quiesce:rejected"]);
+			expect(loop.runs).toHaveLength(1);
+		});
+	});
+
 	test("checkpoint expiry joins parent and reviewer and lands both failed closeouts before release", async () => {
 		const closed: string[] = [];
 		const loop = makeControlledThreadLoop({

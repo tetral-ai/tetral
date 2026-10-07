@@ -2,8 +2,9 @@
  * Assembles the Runtime Pod process boundary from injected configuration and adapters. The command
  * entry point calls this module, which wires caller authentication, command handling, cleanup,
  * lifecycle management, and the gRPC and operational HTTP listeners. Startup reports success only
- * after both listeners exist and lifecycle readiness is true; shutdown closes command admission
- * before draining work and stopping the listeners.
+ * after both listeners exist and the lifecycle has registered this boot and opened readiness;
+ * shutdown closes command admission, hands each resident Session off at its checkpoint, then
+ * closes owned clients and stops the listeners.
  */
 import type { RuntimeTokenReviewClient, ServiceAccountIdentity } from "./auth.js";
 import { authenticateRuntimeCaller } from "./auth.js";
@@ -25,15 +26,15 @@ import type { ContainerMemoryObservation } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
 
 /**
- * Dependencies and optional lifecycle hooks used to assemble one Runtime Pod application.
- * Production composition supplies the boundary clients and run hosts, while tests can replace
- * bootstrap stages and commit adapters without introducing process-global state.
+ * Dependencies and optional bootstrap stages used to assemble one Runtime Pod application.
+ * Production composition supplies the process registry port, Runtime Core quiesce, boundary
+ * clients and run hosts, while tests can replace bootstrap stages and commit adapters without
+ * introducing process-global state.
  */
 export interface RuntimePodAppOptions {
   readonly readContainerMemory?: () => ContainerMemoryObservation | undefined;
-  readonly runtimeProcessId?: string;
-  readonly runtimeProcess?: RuntimeProcessPort;
-  readonly quiesce?: (options: RuntimeQuiesceOptions) => Promise<void>;
+  readonly runtimeProcess: RuntimeProcessPort;
+  readonly quiesce: (options: RuntimeQuiesceOptions) => Promise<void>;
   readonly closeClients?: () => Promise<void>;
   readonly config: RuntimePodConfig;
   readonly logger: RuntimePodLogger;
@@ -41,8 +42,6 @@ export interface RuntimePodAppOptions {
   readonly commandRunHost: RuntimeSessionRunHost;
   readonly controlInputCommitter?: RuntimeControlInputCommitter;
   readonly cleanupRunHost: RuntimeCoreCleanupHost;
-  readonly shutdownActiveRuns?: () => Promise<void>;
-  readonly drainTimeoutMs?: number;
   readonly metrics?: RuntimePodMetricsSource | undefined;
   readonly bootstrap?: Partial<RuntimePodBootstrap>;
 }
@@ -71,10 +70,7 @@ export interface RuntimePodApp {
 export function createRuntimePodApp(
   options: RuntimePodAppOptions,
 ): RuntimePodApp {
-  const runtimeProcessId =
-    options.runtimeProcess?.runtimeProcessId ??
-    options.runtimeProcessId ??
-    crypto.randomUUID();
+  const runtimeProcessId = options.runtimeProcess.runtimeProcessId;
   const authenticator = runtimeAuthenticator(options.tokenReviewClient, {
     namespace: options.config.jobRunner.namespace,
     name: options.config.jobRunner.serviceAccount,
@@ -99,12 +95,9 @@ export function createRuntimePodApp(
   let boundGrpcPort: number | undefined;
   let stopping: Promise<void> | undefined;
   const lifecycle = new RuntimePodLifecycle({
-    ...(options.runtimeProcess !== undefined
-      ? { runtimeProcess: options.runtimeProcess }
-      : {}),
+    runtimeProcess: options.runtimeProcess,
     config: { ok: true, config: options.config },
     logger: options.logger,
-    ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
     bootstrap: {
       runtime: options.bootstrap?.runtime ?? (async () => undefined),
       core: options.bootstrap?.core ?? (async () => undefined),
@@ -122,12 +115,7 @@ export function createRuntimePodApp(
         await options.bootstrap?.grpc?.();
       },
     },
-    shutdownHooks: {
-      ...(options.quiesce !== undefined ? { quiesce: options.quiesce } : {}),
-      ...(options.shutdownActiveRuns !== undefined
-        ? { shutdownActiveRuns: options.shutdownActiveRuns }
-        : {}),
-    },
+    shutdownHooks: { quiesce: options.quiesce },
   });
 
   return {

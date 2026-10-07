@@ -6,6 +6,7 @@ import { Writable } from "node:stream";
 import { createDiagnosticStreamSink } from "@tetral/ts-observability";
 import { runRuntimePodCommand } from "../../src/command.js";
 import { createJsonLogger } from "../../src/logger.js";
+import type { RuntimeProcessPort } from "../../src/runtime-process.js";
 import { commandEnv, commandFixture, failureSentinel } from "../fixtures/command-process.js";
 
 describe("RuntimePod command failure ownership", () => {
@@ -111,7 +112,7 @@ describe("RuntimePod command failure ownership", () => {
 					dependencyBuilder: async (input) => {
 						const fixture = commandFixture("none");
 						const dependencies = await fixture.options.dependencyBuilder!(input);
-						const app = createRuntimePodApp({ config: { ...input.config, grpcBindAddress: "127.0.0.1:0" }, logger: input.logger, tokenReviewClient: dependencies.tokenReviewClient, commandRunHost: {} as never, cleanupRunHost: {} as never, shutdownActiveRuns: async () => { events.push("drain"); }, });
+						const app = createRuntimePodApp({ config: { ...input.config, grpcBindAddress: "127.0.0.1:0" }, logger: input.logger, tokenReviewClient: dependencies.tokenReviewClient, commandRunHost: {} as never, cleanupRunHost: {} as never, runtimeProcess: fixtureRuntimeProcess(), quiesce: async () => { events.push("drain"); }, });
 						return {
 							...dependencies,
 							coreHosts: { ...dependencies.coreHosts, close: async () => { events.push("next.close"); } },
@@ -158,6 +159,7 @@ describe("RuntimePod command failure ownership", () => {
 					app = createRuntimePodApp({
 						config: input.config, logger: input.logger, tokenReviewClient: dependencies.tokenReviewClient,
 						commandRunHost: {} as never, cleanupRunHost: {} as never, bootstrap: { core: async () => { throw new Error(failureSentinel); } },
+						runtimeProcess: fixtureRuntimeProcess(), quiesce: async () => undefined,
 					});
 					return {
 						...dependencies, app,
@@ -227,4 +229,16 @@ async function withEnv(run: () => Promise<void>): Promise<void> {
 		for (const key of Object.keys(process.env)) delete process.env[key];
 		Object.assign(process.env, saved);
 	}
+}
+
+function fixtureRuntimeProcess(): RuntimeProcessPort {
+	return {
+		runtimeProcessId: "command-failure-process",
+		register: async () => undefined,
+		report: async () => undefined,
+		release: async () => {
+			throw new Error("command fixture owns no Session binding");
+		},
+		close: async () => undefined,
+	};
 }

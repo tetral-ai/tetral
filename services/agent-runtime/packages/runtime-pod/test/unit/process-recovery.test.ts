@@ -32,11 +32,15 @@ test("actual current ACCEPTING ACK recovers expired freshness through a Bridge o
             (record) => record.event === "runtime_process_freshness_expired",
           ),
         ).toBe(true);
-        expect(
-          fixture.records.filter(
-            (record) => record.event === "runtime_process_report_failed",
-          ),
-        ).toHaveLength(1);
+        const failures = fixture.records.filter(
+          (record) => record.event === "runtime_process_report_failed",
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({
+          operation: "runtime_process.report",
+        });
+        expect(failures[0]?.operation).not.toBe("shutdown");
+        expect(failures[0]?.kind).not.toBe("shutdown_error");
         const recovered = fixture.records.filter(
           (record) => record.event === "runtime_process_report_recovered",
         );
