@@ -11,10 +11,9 @@ import (
 // Labels are finite operation outcomes. Pod, Session and process identities
 // belong in the single owning attempt log, never unbounded metric labels.
 type RuntimePlacementMetrics struct {
-	mutex                        sync.Mutex
-	probes, attempts             map[string]float64
-	probeSeconds, attemptSeconds float64
-	operations                   *workload.OperationMetrics
+	mutex            sync.Mutex
+	probes, attempts map[string]float64
+	operations       *workload.OperationMetrics
 }
 
 // The zero value is used by owning resolvers and tests. Every access, including
@@ -52,7 +51,6 @@ func (m *RuntimePlacementMetrics) observeProbe(outcome string, elapsed time.Dura
 		m.probes = map[string]float64{}
 	}
 	m.probes[outcome]++
-	m.probeSeconds += elapsed.Seconds()
 	m.operationMetricsLocked().Observe("runtime_placement_probe", runtimePlacementMetricOutcome(outcome), elapsed)
 }
 func (m *RuntimePlacementMetrics) observeAttempt(outcome string, elapsed time.Duration) {
@@ -65,7 +63,6 @@ func (m *RuntimePlacementMetrics) observeAttempt(outcome string, elapsed time.Du
 		m.attempts = map[string]float64{}
 	}
 	m.attempts[outcome]++
-	m.attemptSeconds += elapsed.Seconds()
 	m.operationMetricsLocked().Observe("runtime_placement", runtimePlacementMetricOutcome(outcome), elapsed)
 }
 func (m *RuntimePlacementMetrics) Collector() workload.MetricsCollector {
@@ -75,7 +72,9 @@ func (m *RuntimePlacementMetrics) Collector() workload.MetricsCollector {
 		}
 		m.mutex.Lock()
 		defer m.mutex.Unlock()
-		metrics := []workload.Metric{{Name: "runtime_placement_probe_seconds_total", Help: "Total Runtime placement probe duration.", Type: "counter", Value: m.probeSeconds}, {Name: "runtime_placement_seconds_total", Help: "Total Runtime placement attempt duration.", Type: "counter", Value: m.attemptSeconds}}
+		// Durations are exported only through the operation histogram; these
+		// counters keep the fine-grained reasons its outcome label folds together.
+		var metrics []workload.Metric
 		for _, outcome := range []string{"eligible", "registry_unavailable", "timeout", "cancelled", "transport_error", "http_error", "invalid_metrics", "not_accepting", "capacity_excluded", "response_too_large"} {
 			metrics = append(metrics, workload.Metric{Name: "runtime_placement_probe_total", Help: "Runtime placement probe outcomes.", Type: "counter", Labels: []workload.MetricLabel{{Name: "outcome", Value: outcome}}, Value: m.probes[outcome]})
 		}

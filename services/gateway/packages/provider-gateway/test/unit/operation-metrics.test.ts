@@ -20,12 +20,13 @@ test("fixed duration buckets keep exact boundaries, all outcomes and one unknown
   expect(operationDurationBuckets).toEqual([.001,.005,.01,.025,.05,.1,.25,.5,1,2.5,5,10,30,60,120,300,900,1800]);
 });
 
-test("Gateway stages and MCP terminal calls render seconds histograms while preserving old series", () => {
+test("Gateway stages render only seconds histograms and MCP terminal calls keep their call series", () => {
   const gateway = new ProviderGatewayMetricsRegistry();
   gateway.observeProviderStage({stage:"provider_first_fragment",outcome:"cancelled",kind:"none",durationMs:250,canonicalBytes:0,encodedBytes:0});
   const gatewayText = gateway.render({ready:true});
   expect(gatewayText).toContain('operation="provider_first_fragment",outcome="cancelled",le="0.25"} 1');
-  expect(gatewayText).toContain("providergateway_provider_first_fragment_ms_sum 250");
+  expect(gatewayText).not.toContain("providergateway_provider_first_fragment_");
+  expect(gatewayText).not.toContain("providergateway_provider_stage_");
   const mcp = new McpConnectorMetricsRegistry();
   for (const tool of ["foreign-tool-one", "foreign-tool-two"]) { mcp.recordRunTool({tool,status:"tool_error",errorKind:"mcp_timeout",durationSeconds:5}); mcp.operations.observe("RunMcpTool","timeout",5); }
   const mcpText = mcp.render();

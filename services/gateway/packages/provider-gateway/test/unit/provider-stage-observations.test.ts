@@ -33,9 +33,15 @@ describe("Provider stage completion samples", () => {
     now=27;writer.callback!();await Promise.resolve();expect(writer.writes).toBe(1);expect(metrics.render({ready:true})).not.toContain("providergateway_complete_frame_pending_bytes 0\n");
     now=40;writer.emit("drain");await operation;
     expect(metrics.render({ready:true})).toContain("providergateway_complete_frame_pending_bytes 0\n");
-    expect(metrics.render({ready:true})).toContain("providergateway_provider_first_fragment_ms_sum 5\n");
-    expect(metrics.render({ready:true})).toContain("providergateway_provider_first_complete_ms_sum 15\n");
-    expect(metrics.render({ready:true})).toContain("providergateway_complete_frame_write_ms_sum 7\n");
+    // The 5/15/7 ms stage durations land in independent histogram buckets;
+    // the recording sink below keeps their exact millisecond values.
+    const stageSeries=(stage:string)=>`service="provider-gateway",operation="${stage}",outcome="success"`;
+    const histogram=metrics.render({ready:true});
+    for(const [stage,inside,outside] of [["provider_first_fragment","0.005","0.001"],["provider_first_complete","0.025","0.01"],["complete_frame_write","0.01","0.005"]] as const){
+      expect(histogram).toContain(`tetral_operation_duration_seconds_count{${stageSeries(stage)}} 1\n`);
+      expect(histogram).toContain(`tetral_operation_duration_seconds_bucket{${stageSeries(stage)},le="${inside}"} 1\n`);
+      expect(histogram).toContain(`tetral_operation_duration_seconds_bucket{${stageSeries(stage)},le="${outside}"} 0\n`);
+    }
     if(sink==="recording"){
       const stageSamples=samples.filter(record=>record.event==="provider.stage_completed");
       expect(stageSamples.map(record=>[record.stage,record.duration_ms])).toEqual([["complete_frame_write",7],["provider_first_fragment",5],["provider_first_complete",15]]);

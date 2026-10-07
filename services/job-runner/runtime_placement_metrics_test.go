@@ -30,11 +30,6 @@ func TestRuntimePlacementZeroValueMetricsConcurrentCollectorAndHooks(t *testing.
 	}
 	counts, sums := map[string]float64{}, map[string]float64{}
 	for _, sample := range samples {
-		if sample.Name == "runtime_placement_probe_seconds_total" || sample.Name == "runtime_placement_seconds_total" {
-			if sample.Value != 200 {
-				t.Fatalf("legacy sum changed: %+v", sample)
-			}
-		}
 		for _, label := range sample.Labels {
 			if label.Name == "operation" {
 				if sample.Name == "tetral_operation_duration_seconds_count" {

@@ -390,17 +390,11 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 				t.Fatalf("distinguishing finite metric reason=%v want%d", reasons, wantCount)
 			}
 			probeCount, attemptCount := 0.0, 0.0
-			probeSeconds, attemptSeconds, legacyProbeSeconds, legacyAttemptSeconds := 0.0, 0.0, 0.0, 0.0
+			probeSeconds, attemptSeconds := 0.0, 0.0
 			for _, sample := range samples {
 				labels := map[string]string{}
 				for _, label := range sample.Labels {
 					labels[label.Name] = label.Value
-				}
-				if sample.Name == "runtime_placement_probe_seconds_total" {
-					legacyProbeSeconds = sample.Value
-				}
-				if sample.Name == "runtime_placement_seconds_total" {
-					legacyAttemptSeconds = sample.Value
 				}
 				if sample.Name == "tetral_operation_duration_seconds_count" {
 					if labels["operation"] == "runtime_placement_probe" {
@@ -419,8 +413,8 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 					}
 				}
 			}
-			if probeCount != float64(wantCount) || attemptCount != 1 || probeSeconds != legacyProbeSeconds || attemptSeconds != legacyAttemptSeconds || attemptSeconds <= 0 {
-				t.Fatalf("actual joined timing population count=%v/%v sum=%v/%v legacy=%v/%v", probeCount, attemptCount, probeSeconds, attemptSeconds, legacyProbeSeconds, legacyAttemptSeconds)
+			if probeCount != float64(wantCount) || attemptCount != 1 || attemptSeconds <= 0 {
+				t.Fatalf("actual joined timing population count=%v/%v sum=%v/%v", probeCount, attemptCount, probeSeconds, attemptSeconds)
 			}
 		})
 	}

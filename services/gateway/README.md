@@ -1293,8 +1293,10 @@ not evidence of client delivery or a valid Agent turn.
 `providergateway_provider_streams_active` and
 `providergateway_provider_stream_capacity` expose current admitted work and its
 configured admission bound. `providergateway_admission_rejections_total` counts
-only concurrent-turn admission refusal. Existing provider stream/stage counters,
-millisecond sums, assembly gauges and pending-frame bytes retain their meaning.
+only concurrent-turn admission refusal. Provider stream counters, assembly
+gauges and pending-frame bytes keep their meaning. Stage durations are exported
+only through `tetral_operation_duration_seconds` and the raw
+`provider.stage_completed` samples.
 
 MCP operations are `RunMcpTool`, `ListMcpTools`, `shutdown_drain` and
 `shutdown_cancel_join`. Execution records one owning duration across claim,

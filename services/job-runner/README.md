@@ -417,14 +417,16 @@ Registry, transport, invalid-response, visibility, policy and randomness
 failures are `error`. An exhausted attempt means no eligible candidate was
 found; the original probe reason counters retain the exclusion/dependency cause.
 
-`runtime_placement_probe_total`, `runtime_placement_total`,
-`runtime_placement_probe_seconds_total` and `runtime_placement_seconds_total`
-retain their complete legacy values and units. The histogram uses the same
-owning elapsed samples and exported collector, with race-safe zero-value
-initialization. No pod, process, Session or request labels enter this family.
+`runtime_placement_probe_total{outcome}` and `runtime_placement_total{outcome}`
+count the fine-grained probe and attempt reasons that the histogram's
+success/rejected/error outcome folds together; placement durations are exported
+only through the histogram. Both use the same owning hooks and exported
+collector, with race-safe zero-value initialization. No pod, process, Session
+or request labels enter these families.
 `TestPostgreSQLRuntimePlacementDiagnosticReasons` exercises actual registry and
-HTTP probe boundaries and compares completed populations and legacy durations;
-the concurrent collector test separately checks initialization and retention.
+HTTP probe boundaries and compares completed histogram populations with the
+distinguishing reason counters; the concurrent collector test separately checks
+initialization and retention.
 
 Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
