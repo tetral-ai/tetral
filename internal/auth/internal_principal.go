@@ -12,10 +12,35 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
+// InternalPrincipalAudience is the only audience public services accept.
 const InternalPrincipalAudience = "tetral-public-api"
+
+// MaxInternalPrincipalBytes bounds a compact signed token before any decoding
+// or signature work, so oversized input costs no parsing.
 const MaxInternalPrincipalBytes = 32 * 1024
+
+// MaxInternalPrincipalTTL is the longest lifetime (exp minus iat) a signer may
+// mint and a verifier accepts.
 const MaxInternalPrincipalTTL = 5 * time.Minute
 
+// Signed request metadata bounds shared by MintWithRequestMetadata and Verify.
+const (
+	maxInternalPrincipalMethodBytes       = 16
+	maxInternalPrincipalPathBytes         = 4096
+	maxInternalPrincipalRequestIDBytes    = 256
+	maxInternalPrincipalForwardedForBytes = 1024
+	// internalPrincipalIssuedAtSkew tolerates clock skew between Auth and the
+	// receiving service: iat may be at most this far ahead of the verifier clock.
+	internalPrincipalIssuedAtSkew = 5 * time.Second
+)
+
+// InternalPrincipalClaims is the Auth-signed request admission snapshot. aud
+// must equal InternalPrincipalAudience. method and path bind the token to the
+// exact original request. iat and exp bound its lifetime to at most
+// MaxInternalPrincipalTTL. jti is a bounded unique token ID, and request_id and
+// forwarded_for carry bounded audit metadata. The workspace, credential,
+// identity and authority fields form the discriminated principal union that
+// Principal.Validate checks.
 type InternalPrincipalClaims struct {
 	WorkspaceID  string     `json:"workspace_id"`
 	APIKeyID     string     `json:"api_key_id,omitempty"`
@@ -149,7 +174,7 @@ func (s *InternalPrincipalSigner) MintWithRequestMetadata(principal Principal, m
 	if err := principal.Validate(); err != nil {
 		return "", err
 	}
-	if method == "" || len(method) > 16 || path == "" || len(path) > 4096 || len(requestID) > 256 || len(forwardedFor) > 1024 {
+	if method == "" || len(method) > maxInternalPrincipalMethodBytes || path == "" || len(path) > maxInternalPrincipalPathBytes || len(requestID) > maxInternalPrincipalRequestIDBytes || len(forwardedFor) > maxInternalPrincipalForwardedForBytes {
 		return "", &ValidationError{Message: "invalid request metadata"}
 	}
 	if ttl <= 0 || ttl > MaxInternalPrincipalTTL {
@@ -172,6 +197,8 @@ func (s *InternalPrincipalSigner) MintWithRequestMetadata(principal Principal, m
 	return signCompactJSON(s.privateKey, "tetral-internal-principal", claims)
 }
 
+// Verify applies InternalPrincipalVerifier.Verify with the signer's own public
+// key.
 func (s *InternalPrincipalSigner) Verify(token string, method string, path string) (Principal, InternalPrincipalClaims, error) {
 	if s == nil {
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "internal principal verification unavailable"}
@@ -180,6 +207,15 @@ func (s *InternalPrincipalSigner) Verify(token string, method string, path strin
 	return verifier.Verify(token, method, path)
 }
 
+// Verify admits a signed principal only for the exact request it was minted
+// for. It requires a token of at most MaxInternalPrincipalBytes; an
+// EdDSA header with the internal-principal typ; a valid signature, checked
+// before the payload is decoded; strict JSON for header and payload; the
+// public-service audience; the exact method and path; an exp in the future; an
+// iat at most internalPrincipalIssuedAtSkew ahead of the verifier clock; exp
+// after iat with a lifetime of at most MaxInternalPrincipalTTL; bounded method,
+// path, request ID, forwarded-for and jti values; and a principal union that
+// passes Principal.Validate.
 func (v *InternalPrincipalVerifier) Verify(token string, method string, path string) (Principal, InternalPrincipalClaims, error) {
 	if v == nil {
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "internal principal verification unavailable"}
@@ -199,7 +235,7 @@ func (v *InternalPrincipalVerifier) Verify(token string, method string, path str
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "internal principal expired"}
 	}
 	issuedAt, issuedErr := time.Parse(time.RFC3339, claims.IssuedAt)
-	if issuedErr != nil || issuedAt.After(v.now().UTC().Add(5*time.Second)) || !expiresAt.After(issuedAt) || expiresAt.Sub(issuedAt) > MaxInternalPrincipalTTL || claims.Method == "" || len(claims.Method) > 16 || len(claims.Path) > 4096 || claims.Path == "" || len(claims.RequestID) > 256 || len(claims.ForwardedFor) > 1024 || !boundedIdentity(claims.TokenID) {
+	if issuedErr != nil || issuedAt.After(v.now().UTC().Add(internalPrincipalIssuedAtSkew)) || !expiresAt.After(issuedAt) || expiresAt.Sub(issuedAt) > MaxInternalPrincipalTTL || claims.Method == "" || len(claims.Method) > maxInternalPrincipalMethodBytes || len(claims.Path) > maxInternalPrincipalPathBytes || claims.Path == "" || len(claims.RequestID) > maxInternalPrincipalRequestIDBytes || len(claims.ForwardedFor) > maxInternalPrincipalForwardedForBytes || !boundedIdentity(claims.TokenID) {
 		return Principal{}, InternalPrincipalClaims{}, &AuthenticationError{Message: "invalid internal principal"}
 	}
 	principal := Principal{
@@ -230,6 +266,11 @@ func signCompactJSON(privateKey ed25519.PrivateKey, tokenType string, payload an
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
+// verifyCompactJSON bounds the token size before decoding anything and verifies
+// the Ed25519 signature before decoding the payload, so unauthenticated bytes
+// never reach the payload decoder. Header and payload use DecodeStrictJSON,
+// which rejects duplicate fields, excessive nesting and trailing values (and
+// unknown payload fields) rather than relying on last-wins parsing.
 func verifyCompactJSON(publicKey ed25519.PublicKey, token string, tokenType string, payload any) error {
 	if len(token) > MaxInternalPrincipalBytes {
 		return &AuthenticationError{Message: "invalid internal principal"}

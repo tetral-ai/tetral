@@ -122,7 +122,7 @@ unauthenticated.
 
 | Step | Rule | Failure |
 | --- | --- | --- |
-| Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
+| Principal | Verify the `auth` signed principal's signature, audience, expiry, method, and path. The token is at most 32 KiB of strict JSON, issued no more than five seconds ahead of the receiver clock, with a lifetime of at most five minutes. Workspace authority comes from `Principal.workspace_id` only. | `401 authentication_error` |
 | Operation | Every registered business route, including authenticated stubs, declares a semantic action from `internal/auth`. The common Authorizer checks the verified principal's explicit operation ceiling against its typed workspace before any resource lookup. | `403 permission_error` |
 | Selector binding | Client-supplied `workspace_id`, `session_id`, `vault_id`, etc. are selectors, never authority. Every query binds `Principal.workspace_id` plus the route selector. | — |
 | Cross-workspace / missing | Never falls back to another workspace, default resource, or default credential. | `404 not_found_error`, or `403 permission_error` where an authenticated-but-forbidden action exists |

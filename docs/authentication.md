@@ -11,8 +11,9 @@ that rule's organization namespace, exact issuer, and stable subject, then grant
 that identity a workspace role. Login does not create Engine membership. Email,
 display names, groups, and request headers do not select an Engine identity.
 
-The currently assignable role is `workspace_full_access`. Public operations use
-the shared authorization policy and retain workspace isolation. Resource-level
+The currently assignable role is `workspace_full_access`. It covers every public
+operation registered by the running Engine. Public operations use the shared
+authorization policy and retain workspace isolation. Resource-level
 permission filtering and organization membership management are separate
 features.
 
@@ -116,7 +117,8 @@ A service identity retains its service actor. Its Engine identity ID, external
 provider subject, and optional service-account selector serve different purposes.
 
 An identity-derived API key retains the issuing identity's rule and workspace
-grant lineage and cannot widen its operation or workspace ceiling. It has its
+grant lineage and the operation set recorded when it was created; it cannot
+widen that operation ceiling or its workspace. It has its
 own expiry and revocation. Expiring or revoking the parent bearer token does not
 revoke that separately issued key; disabling or revising the identity, rule, or
 grant invalidates the shared authority. Revoking one derived key does not

@@ -315,7 +315,7 @@ func (s *AuthorityResolver) Issue(ctx context.Context, proof VerifiedAssertion, 
 		}
 		if selected == "" || selected == ws {
 			matches++
-			authority = Authority{Kind: AuthorityIdentityGrant, RuleID: proof.ruleID, IdentityID: identity.ID, GrantID: grantID, RuleRevision: proof.ruleRevision, IdentityRevision: identityRevision, GrantRevision: revision, PolicyVersion: policy, Operations: RegisteredOperations(), Scope: ResourceReference{WorkspaceID: workspace.ID(ws), Type: "workspace"}}
+			authority = Authority{Kind: AuthorityIdentityGrant, RuleID: proof.ruleID, IdentityID: identity.ID, GrantID: grantID, RuleRevision: proof.ruleRevision, IdentityRevision: identityRevision, GrantRevision: revision, PolicyVersion: policy, Scope: ResourceReference{WorkspaceID: workspace.ID(ws), Type: "workspace"}}
 		}
 	}
 	err = rows.Err()

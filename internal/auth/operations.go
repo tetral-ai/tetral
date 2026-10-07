@@ -269,8 +269,12 @@ func OperationForRoute(method, pattern string) (Operation, bool) {
 	return "", false
 }
 
-// RoleOperations resolves the only assignable product role. Restricted scopes
-// remain valid admission snapshots, but are not an assignable product role.
+// RoleOperations is the shared role-policy owner. workspace_full_access, the
+// only role the schema CHECK and policy import accept, means every operation
+// registered by the running Engine. Restricted scopes remain valid admission
+// snapshots, but are not an assignable product role. Maintainers must bump
+// PolicyVersion when a role's meaning changes; nothing derives PolicyVersion
+// from the registry.
 func RoleOperations(role string) ([]Operation, error) {
 	if role != WorkspaceFullAccess {
 		return nil, &ValidationError{Message: "unsupported workspace role"}

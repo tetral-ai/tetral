@@ -14,8 +14,19 @@ lifecycle. The serving binary is `services/auth/cmd/tetral-auth`.
 Authentication identifies a credential and its truthful actor. Authorization is
 separate: every registered public business route invokes the shared operation
 gate against signed authority and trusted resource facts from its owning store.
-Only `workspace_full_access` is assignable. It resolves to explicit registered
-semantic actions; a newly added action does not inherit a wildcard permission.
+Only `workspace_full_access` is assignable; the schema and policy import accept
+no other role. It means every operation in the code-owned registry at admission
+time, and an unregistered operation name is always denied. Exchanged tokens and
+independent keys therefore gain a newly registered operation once the serving
+code includes it, while identity-derived keys keep the operation ceiling
+recorded at their issuance.
+
+`PolicyVersion` is a code constant recorded on grants, access tokens and
+identity-derived keys. When it changes, every access token and identity-derived
+key issued under the old version is permanently rejected, and new exchanges fail
+until grants are re-imported; the import records the new version and advances
+each grant's revision. Independent keys are unaffected. Maintainers bump it when
+a role's meaning changes; nothing derives it from the registry.
 
 The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no

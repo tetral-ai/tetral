@@ -96,9 +96,12 @@ func (s *APIKeyStore) CreateForPrincipal(ctx context.Context, p Principal, name 
 	if p.Authority.Kind == AuthorityIndependentKey {
 		_, err = tx.ExecContext(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at) VALUES($1,$2,$3,$4,$5,'standard','independent_key',$6)`, keyID, string(p.Workspace.ID), trimmed, KeyPrefixFor(raw), DigestAPIKey(raw), now)
 	} else {
-		// Current role and the immutable issuer ceiling intersect. The only current
-		// production role contains all operations; retaining this intersection makes
-		// restricted fixtures exercise exactly the same issuance boundary.
+		// The child's effective operations are the intersection of the grant's
+		// current role operations and the issuer's immutable ceiling. Schema and
+		// policy import restrict every grant to workspace_full_access, so the
+		// current role resolves to RoleOperations(WorkspaceFullAccess). A
+		// restricted issuer ceiling (a fixture, or a derived key issuing another
+		// key) therefore bounds the child.
 		effective := []Operation{}
 		currentOperations, roleErr := RoleOperations(WorkspaceFullAccess)
 		if roleErr != nil {
