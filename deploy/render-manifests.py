@@ -6,7 +6,6 @@ and composition order stay stable; new shared routing/security objects remain in
 shared deployment files. This renders locally and never accesses a cluster.
 """
 from pathlib import Path
-import re
 import json
 import subprocess
 
@@ -30,19 +29,17 @@ for path in sorted((ROOT / "deploy/kubernetes").glob("*.yaml")):
         continue
     keys = [identity(block) for block in documents(path.read_text())]
     missing = [key for key in keys if key not in objects]
-    if any(key[0] != "cilium.io/v2" or key[1] != "CiliumNetworkPolicy" for key in missing):
+    if missing:
         raise ValueError(f"owned fragment contains an unexpected missing resource: {path}: {missing}")
-    keys = [key for key in keys if key in objects]
     write(path, [objects[key] for key in keys])
     used.update(keys)
 for path in sorted((ROOT / "services").glob("*/k8s/**/*.yaml")):
-    if path.name == "secret.example.yaml" or "profiles" in path.parts:
+    if path.name == "secret.example.yaml":
         continue
     keys = [identity(block) for block in documents(path.read_text())]
     missing = [key for key in keys if key not in objects]
-    if any(key[0] != "cilium.io/v2" or key[1] != "CiliumNetworkPolicy" for key in missing):
+    if missing:
         raise ValueError(f"owned fragment contains an unexpected missing resource: {path}: {missing}")
-    keys = [key for key in keys if key in objects]
     write(path, [objects[key] for key in keys])
 new = {key: block for key, block in objects.items() if key not in used}
 routing = [block for key, block in new.items() if key[1] in ("DestinationRule", "VirtualService")]
@@ -83,6 +80,7 @@ def resource_list(blocks):
     return [dict(zip(("apiVersion", "kind", "namespace", "name"), key)) for key in sorted(identity(block) for block in blocks)]
 managed = ROOT / "deploy/managed"
 managed.mkdir(parents=True, exist_ok=True)
+native = subprocess.check_output(["helm", "template", "tetral", str(ROOT / "deploy/helm/tetral"), "--set", "transport.profile=hardened", "--set", "nativeCertificates.enabled=true"], text=True)
 inventory = {
     "schema": "tetral.managed-resource-inventory/v1",
     "dependencyLock": "deploy/dependencies.lock.json",
@@ -92,6 +90,7 @@ inventory = {
         "public-edge-standard": resource_list(edge_blocks),
         "public-edge-hardened": resource_list(block for block in documents(hardened_edge) if identity(block)[1] in edge_kinds),
         "cilium-optional": resource_list(block for block in documents(cilium) if identity(block)[1] == "CiliumNetworkPolicy"),
+        "native-certificates-optional": resource_list(block for block in documents(native) if identity(block)[1] == "Certificate"),
     },
     "independentPrerequisites": [
         {"owner": "istio", "renderer": "deploy/istio/render.py"},
@@ -102,8 +101,4 @@ inventory = {
     "removals": json.loads((managed / "previous-resource-dispositions.json").read_text())["retirements"],
     "preserve": ["unrelated controllers and Gateway API CRD ownership", "stores, databases, object namespaces and unrelated applications"],
 }
-(managed / "resource-inventory.json").write_text(json.dumps(inventory, indent=2) + "\n")
-
-native = subprocess.check_output(["helm", "template", "tetral", str(ROOT / "deploy/helm/tetral"), "--set", "transport.profile=hardened", "--set", "nativeCertificates.enabled=true"], text=True)
-inventory["resourceSets"]["native-certificates-optional"] = resource_list(block for block in documents(native) if identity(block)[1] == "Certificate")
 (managed / "resource-inventory.json").write_text(json.dumps(inventory, indent=2) + "\n")
