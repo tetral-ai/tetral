@@ -64,6 +64,18 @@ func TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads(t *testing.T) {
 			if metrics.activeStreams.Load() != 1 {
 				t.Fatal("live SSE connection not owned")
 			}
+			// Only the opted-in Session viewer owns preview state, so the final
+			// zero-gauge check proves its release rather than its absence.
+			wantPreview := int64(0)
+			if mode == "session_preview" {
+				wantPreview = 1
+			}
+			transport.mu.Lock()
+			installed := len(transport.subscriptions)
+			transport.mu.Unlock()
+			if metrics.viewers.Load() != wantPreview || metrics.subscriptions.Load() != wantPreview || int64(installed) != wantPreview {
+				t.Fatalf("live preview ownership viewers=%d subscriptions=%d installed=%d want %d", metrics.viewers.Load(), metrics.subscriptions.Load(), installed, wantPreview)
+			}
 			cancel()
 			select {
 			case <-queryCanceled:

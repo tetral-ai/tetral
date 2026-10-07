@@ -3,15 +3,22 @@ package eventstream_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
+// This source guard rejects any database-client call other than the workspace
+// read-only transaction helper. The behavioral guards are
+// TestPostgreSQLRequestFinalMessagesAndPreviewAdmission and
+// TestPostgreSQLSessionChangeLifecyclePreservesDeletion, which open the reader
+// through the SELECT-only event_stream role.
 func TestPostgreSQLReaderUsesReadOnlyTransactions(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	clientCall := regexp.MustCompile(`\.client\.(\w+)\(`)
 	count := 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -22,15 +29,19 @@ func TestPostgreSQLReaderUsesReadOnlyTransactions(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(source)
-		if strings.Contains(text, ".WithWorkspaceTx(") {
+		if strings.Contains(text, ".WithWorkspaceTx") {
 			t.Fatalf("%s uses read-write workspace transactions", name)
 		}
-		count += strings.Count(text, ".WithWorkspaceReadOnlyTx(")
+		for _, call := range clientCall.FindAllStringSubmatch(text, -1) {
+			if call[1] != "WithWorkspaceReadOnlyTx" {
+				t.Fatalf("%s calls database client method %s outside a read-only workspace transaction", name, call[1])
+			}
+			count++
+		}
 	}
 	if count == 0 {
 		t.Fatal("reader must use workspace read-only transactions")
 	}
-
 }
 
 func TestPostgreSQLReaderSessionListUsesImmutableGlobalOrder(t *testing.T) {
