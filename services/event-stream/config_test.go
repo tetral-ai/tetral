@@ -93,4 +93,11 @@ func TestNATSHeartbeatConfigRangesAndFailFast(t *testing.T) {
 			t.Fatalf("typed fail-fast config=%+v error=%v", config, err)
 		}
 	}
+	// Zero timeouts select the owning defaults; negative values fail before
+	// credential reads, the server requirement and any dial.
+	for _, config := range []NATSConfig{{ConnectTimeout: -time.Second}, {ReconnectWait: -time.Second}} {
+		if _, err := NewNATSPreviewTransport(t.Context(), config, DefaultStreamConfig(), nil, nil); err == nil || err.Error() != "invalid NATS timeout settings" {
+			t.Fatalf("typed fail-fast config=%+v error=%v", config, err)
+		}
+	}
 }

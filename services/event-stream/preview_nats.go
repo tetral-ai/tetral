@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -41,6 +40,11 @@ func nativePreviewChannelCapacity(c StreamConfig) (int, error) {
 	return min(c.SubscriptionMaxBytes/natsBrokerPayloadCeiling-3, c.SubscriptionMaxFrames-3), nil
 }
 
+// NATSConfig is the typed subscriber configuration. Zero ConnectTimeout,
+// ReconnectWait, PingInterval and MaxPingsOutstanding select the owning
+// defaults; negative or out-of-range values are rejected before credentials or
+// network startup. ReconnectWait is the supervisor's fresh-connection retry
+// interval: the client itself never reconnects.
 type NATSConfig struct {
 	Servers                                           []string
 	UserPath, PasswordPath, CAPath, CertPath, KeyPath string
@@ -164,15 +168,21 @@ type natsPreviewSubscription struct {
 	closeDone    chan struct{}
 }
 
+// NewNATSPreviewTransport starts the process-owned subscriber supervisor and
+// native dispatcher. A nil metrics set is replaced by an unobserved one, and a
+// nil logger by the event-stream component logger.
 func NewNATSPreviewTransport(ctx context.Context, config NATSConfig, streamConfig StreamConfig, metrics *PreviewMetrics, logger *slog.Logger) (*NATSPreviewTransport, error) {
 	config = config.heartbeatDefaults()
 	if err := config.validateHeartbeat(); err != nil {
 		return nil, err
 	}
-	if config.ConnectTimeout <= 0 {
+	if config.ConnectTimeout < 0 || config.ReconnectWait < 0 {
+		return nil, workload.NewConfigError("invalid NATS timeout settings")
+	}
+	if config.ConnectTimeout == 0 {
 		config.ConnectTimeout = natsConnectTimeout
 	}
-	if config.ReconnectWait <= 0 {
+	if config.ReconnectWait == 0 {
 		config.ReconnectWait = natsReconnectWait
 	}
 	if !config.Enabled() {
@@ -444,10 +454,10 @@ func (t *NATSPreviewTransport) connect() (*nats.Conn, error) {
 			<-aborted
 		}
 	}()
-	dialer := &natsContextDialer{lifetime: t.ctx, attempt: attemptCtx, initial: initial, timeout: t.config.ConnectTimeout}
-	var tlsDialer *natsTLSDialer
 	heartbeat := t.config.heartbeatDefaults()
-	options := []nats.Option{nats.SetCustomDialer(dialer), nats.SkipHostLookup(), nats.Name("tetral-event-stream"), nats.UserInfo(user, password), nats.Timeout(t.config.ConnectTimeout), nats.ReconnectWait(t.config.ReconnectWait), nats.PingInterval(heartbeat.PingInterval), nats.MaxPingsOutstanding(heartbeat.MaxPingsOutstanding), nats.NoReconnect(), nats.ReconnectBufSize(0),
+	// The client never redials (NoReconnect); after loss the supervisor builds a
+	// fresh connection, so every socket belongs to this attempt's owner.
+	options := []nats.Option{nats.SkipHostLookup(), nats.Name("tetral-event-stream"), nats.UserInfo(user, password), nats.Timeout(t.config.ConnectTimeout), nats.PingInterval(heartbeat.PingInterval), nats.MaxPingsOutstanding(heartbeat.MaxPingsOutstanding), nats.NoReconnect(),
 		nats.DisconnectErrHandler(func(connection *nats.Conn, _ error) {
 			t.metrics.disconnects.Add(1)
 			t.loss(connection, nil, "nats_disconnect")
@@ -459,15 +469,13 @@ func (t *NATSPreviewTransport) connect() (*nats.Conn, error) {
 		}),
 	}
 	if t.trust != nil {
-		tlsDialer = &natsTLSDialer{ctx: t.ctx, attempt: attemptCtx, initial: initial, owner: t.trust, timeout: t.config.ConnectTimeout}
-		options = append(options, nats.Secure(&tls.Config{MinVersion: tls.VersionTLS12}), nats.TLSHandshakeFirst(), nats.SetCustomDialer(tlsDialer))
+		options = append(options, nats.Secure(&tls.Config{MinVersion: tls.VersionTLS12}), nats.TLSHandshakeFirst(), nats.SetCustomDialer(&natsTLSDialer{attempt: attemptCtx, initial: initial, owner: t.trust, timeout: t.config.ConnectTimeout}))
+	} else {
+		options = append(options, nats.SetCustomDialer(&natsContextDialer{attempt: attemptCtx, initial: initial, timeout: t.config.ConnectTimeout}))
 	}
 	t.mu.Lock()
 	servers := append([]string(nil), t.servers...)
 	t.mu.Unlock()
-	if len(servers) == 0 { // Direct owning connection-budget fixtures.
-		servers = t.config.Servers
-	}
 	connection, err := nats.Connect(strings.Join(servers, ","), options...)
 	if err == nil && (connection.MaxPayload() <= 0 || connection.MaxPayload() > natsBrokerPayloadCeiling) {
 		connection.Close()
@@ -480,10 +488,6 @@ func (t *NATSPreviewTransport) connect() (*nats.Conn, error) {
 		}
 		err = budgetErr
 		connection = nil
-	}
-	dialer.connected.Store(true)
-	if tlsDialer != nil {
-		tlsDialer.connected.Store(true)
 	}
 	return connection, err
 }
@@ -617,12 +621,10 @@ func (t *NATSPreviewTransport) Close() {
 }
 
 type natsTLSDialer struct {
-	ctx       context.Context
-	attempt   context.Context
-	connected atomic.Bool
-	initial   *natsConnectAttempt
-	owner     *transportsecurity.Owner
-	timeout   time.Duration
+	attempt context.Context
+	initial *natsConnectAttempt
+	owner   *transportsecurity.Owner
+	timeout time.Duration
 }
 
 func (*natsTLSDialer) SkipTLSHandshake() bool { return true }
@@ -636,50 +638,36 @@ func (d *natsTLSDialer) Dial(network, address string) (net.Conn, error) {
 		return nil, err
 	}
 	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: d.timeout}, Config: config}
-	parent := d.ctx
-	if !d.connected.Load() {
-		parent = d.attempt
-	}
-	ctx, cancel := context.WithTimeout(parent, d.timeout)
+	ctx, cancel := context.WithTimeout(d.attempt, d.timeout)
 	defer cancel()
 	connection, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
-	if !d.connected.Load() {
-		return d.initial.register(connection)
-	}
-	return connection, nil
+	return d.initial.register(connection)
 }
 
 type natsContextDialer struct {
-	lifetime, attempt context.Context
-	timeout           time.Duration
-	connected         atomic.Bool
-	initial           *natsConnectAttempt
+	attempt context.Context
+	timeout time.Duration
+	initial *natsConnectAttempt
 }
 
 func (d *natsContextDialer) Dial(network, address string) (net.Conn, error) {
-	parent := d.lifetime
-	if !d.connected.Load() {
-		parent = d.attempt
-	}
-	ctx, cancel := context.WithTimeout(parent, d.timeout)
+	ctx, cancel := context.WithTimeout(d.attempt, d.timeout)
 	defer cancel()
 	connection, err := (&net.Dialer{Timeout: d.timeout}).DialContext(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
-	if !d.connected.Load() {
-		return d.initial.register(connection)
-	}
-	return connection, nil
+	return d.initial.register(connection)
 }
 
-// NATS resets socket deadlines while reading INFO. Close every provisional
-// socket at the single attempt deadline so DNS/TLS/INFO and multiple seeds
-// cannot each consume another full budget. Successful sockets leave this owner
-// before its context is canceled and use the process lifetime on reconnect.
+// NATS resets socket deadlines while reading INFO. The attempt owner closes
+// every provisional socket at the single attempt deadline so DNS/TLS/INFO and
+// multiple seeds cannot each consume another full budget. A successful socket
+// leaves this owner at finish(). The client never redials (NoReconnect); after
+// loss the supervisor builds a fresh connection with a new attempt owner.
 type natsConnectAttempt struct {
 	ctx         context.Context
 	mu          sync.Mutex

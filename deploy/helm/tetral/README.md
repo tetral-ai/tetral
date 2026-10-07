@@ -524,8 +524,9 @@ trust/role certificate paths and excludes 4222 from Gateway's mesh capture.
 
 `preview.gateway` configures the bounded publication queue, batch byte/frame
 limits, connect/flush deadlines, retry cap, credential poll interval, and native
-NATS heartbeat settings. `preview.subscriber` configures connect/reconnect
-deadlines and its own native NATS heartbeat settings. `eventStream`
+NATS heartbeat settings. `preview.subscriber` configures the connect deadline,
+the supervisor's fresh-connection retry interval and its own native NATS
+heartbeat settings. `eventStream`
 configures formal polling/heartbeat/write deadlines, preview setup timeout,
 hub/viewer/subscription byte and frame limits, and active request limit.
 Defaults are projections of the typed service defaults. The chart rejects

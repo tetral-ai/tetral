@@ -450,7 +450,7 @@ func TestNATSNativeRejectsBrokerCeilingAndOversizeFrames(t *testing.T) {
 		fixture := newNativeProtocolFixture(t, 1048577)
 		config := fixtureNATSCredentials(t)
 		config.Servers = []string{"nats://" + fixture.listener.Addr().String()}
-		transport := &NATSPreviewTransport{config: config, ctx: t.Context(), metrics: NewPreviewMetrics(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		transport := &NATSPreviewTransport{config: config, servers: config.Servers, ctx: t.Context(), metrics: NewPreviewMetrics(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 		connection, err := transport.connect()
 		if err == nil || connection != nil {
 			t.Fatal("over-ceiling broker admitted")

@@ -74,7 +74,7 @@ func TestNATSSubscriberConnectBudgetCoversTLSAndINFO(t *testing.T) {
 	config := fixtureNATSCredentials(t)
 	_, port, _ := net.SplitHostPort(listener.Addr().String())
 	config.Servers = []string{"tls://localhost:" + port}
-	transport := &NATSPreviewTransport{config: config, ctx: t.Context(), trust: trust, metrics: NewPreviewMetrics(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	transport := &NATSPreviewTransport{config: config, servers: config.Servers, ctx: t.Context(), trust: trust, metrics: NewPreviewMetrics(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	result := make(chan error, 1)
 	started := time.Now()
 	go func() {

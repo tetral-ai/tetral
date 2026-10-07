@@ -370,10 +370,15 @@ matching section here.
 All settings are parsed and validated once before serving. With every
 `TETRAL_NATS_*` setting absent, preview transport is disabled and formal SSE
 continues normally. To enable it, supply comma-separated `TETRAL_NATS_SERVERS`,
-`TETRAL_NATS_USER_PATH`, and `TETRAL_NATS_PASSWORD_PATH`. `TETRAL_NATS_CONNECT_TIMEOUT_MS` and `TETRAL_NATS_RECONNECT_WAIT_MS` each
-default to 1000 and accept positive millisecond values up to 5000. Credentials are loaded
-from mounted files; server URLs cannot carry credentials, query strings or
-paths. Broker unavailability does not withdraw core-service readiness.
+`TETRAL_NATS_USER_PATH`, and `TETRAL_NATS_PASSWORD_PATH`.
+`TETRAL_NATS_CONNECT_TIMEOUT_MS` bounds one whole connection attempt, and
+`TETRAL_NATS_RECONNECT_WAIT_MS` is the supervisor's retry interval for building
+a fresh connection; the official client itself never reconnects. Each defaults
+to 1000 and accepts positive millisecond values up to 5000. In the typed
+`NATSConfig`, a zero timeout selects that default and a negative one fails
+before startup. Credentials are loaded from mounted files; server URLs cannot
+carry credentials, query strings or paths. Broker unavailability does not
+withdraw core-service readiness.
 
 The Go subscriber's native broker heartbeat uses `TETRAL_NATS_PING_INTERVAL_MS`
 (default 120000 milliseconds, range 1–3600000) and
