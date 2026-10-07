@@ -54,7 +54,9 @@ for (const protectedTransport of [false, true]) {
       await observed(() => peers.observations().accepted === 1 && (!protectedTransport || peers.observations().tlsRecords === 1));
       const started = performance.now(); controller.abort();
       await expect(connecting).rejects.toThrow();
-      expect(performance.now() - started).toBeLessThan(250);
+      // Half the 1000 ms connect deadline: the abort joins the socket without
+      // waiting for that deadline, with room for scheduler delay.
+      expect(performance.now() - started).toBeLessThan(500);
       await observed(() => peers.observations().closed === 1);
       expect(peers.observations().active).toBe(0);
     } finally { await peers.close(); }
