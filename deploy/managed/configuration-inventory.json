@@ -1027,7 +1027,6 @@
         "TETRAL_DATABASE_URL",
         "TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS",
         "TETRAL_GIT_PROXY_HTTP_ADDR",
-        "TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER",
         "TETRAL_GIT_PROXY_METRICS_ADDR",
         "TETRAL_GIT_PROXY_PUBLIC_BASE_URL"
       ],
@@ -1037,7 +1036,7 @@
         "metrics_address": ":8081"
       },
       "units": "seconds, listener addresses",
-      "unset_zero": "Whitespace empty defaults; positive grace; legacy cutover explicit boolean.",
+      "unset_zero": "Whitespace empty defaults; positive grace.",
       "constraints": "Drain grace also ticket rotation accept window; distinct listener/TLS config; ticket body/query never logged.",
       "projection": "Fixed portable drain1800/Pod grace1805, secret refs/nativeHTTP trust; keep Git retention/relay policies independent.",
       "proofs": [

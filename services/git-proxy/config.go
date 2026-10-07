@@ -21,7 +21,6 @@ const (
 	EnvDeploymentEnvironment = workload.EnvDeploymentEnvironment
 	EnvServiceVersion        = workload.EnvServiceVersion
 	EnvDrainGraceSeconds     = "TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS"
-	EnvLegacyPathCutover     = "TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER"
 
 	DefaultHTTPAddress    = ":8080"
 	DefaultMetricsAddress = ":8081"
@@ -41,7 +40,6 @@ type Config struct {
 	DeploymentEnvironment string
 	ServiceVersion        string
 	DrainGrace            time.Duration
-	LegacyPathCutover     bool
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -98,16 +96,6 @@ func ConfigFromEnv(env Env) (Config, error) {
 			return Config{}, workload.NewConfigError(EnvDrainGraceSeconds + " must be a positive integer")
 		}
 		cfg.DrainGrace = time.Duration(seconds) * time.Second
-	}
-	if raw := strings.TrimSpace(env.Getenv(EnvLegacyPathCutover)); raw != "" {
-		switch raw {
-		case "true":
-			cfg.LegacyPathCutover = true
-		case "false":
-			cfg.LegacyPathCutover = false
-		default:
-			return Config{}, workload.NewConfigError(EnvLegacyPathCutover + " must be true or false")
-		}
 	}
 	return cfg, nil
 }

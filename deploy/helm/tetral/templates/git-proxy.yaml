@@ -53,8 +53,6 @@ spec:
               value: "https://{{ .Values.gitProxyHost }}"
             - name: TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS
               value: "1800"
-            - name: TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER
-              value: "true"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: {{ .Values.observability.deploymentEnvironment | quote }}
             - name: TETRAL_SERVICE_VERSION

@@ -35,7 +35,6 @@ type HandlerOptions struct {
 	Limiter             *TicketConnectionLimiter
 	MaxRequestBodyBytes int64
 	IdleProgressTimeout time.Duration
-	LegacyPathCutover   bool
 }
 
 func (o HandlerOptions) withDefaults() HandlerOptions {
@@ -91,7 +90,7 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		options.AccessLogger.LogAccess(request.Context(), record)
 	}()
 
-	parsed, ok := parseGitRequest(request, options.LegacyPathCutover)
+	parsed, ok := parseGitRequest(request)
 	if !ok {
 		http.NotFound(tracker, request)
 		return
@@ -100,9 +99,6 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	record.Operation = string(parsed.Endpoint)
 
 	token := request.Header.Get(gitTicketHeader)
-	if token == "" {
-		token = parsed.LegacyTicket
-	}
 	ticket, err := p.TicketValidator.Validate(request.Context(), token)
 	if err != nil {
 		reason := ticketRejectionReason(token, err)

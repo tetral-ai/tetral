@@ -1463,7 +1463,6 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 		"TETRAL_GIT_PROXY_METRICS_ADDR":        ":8081",
 		"TETRAL_GIT_PROXY_PUBLIC_BASE_URL":     "https://git.tetral.example",
 		"TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS": "1800",
-		"TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER": "true",
 		"TETRAL_DEPLOYMENT_ENVIRONMENT":        "local",
 		"TETRAL_SERVICE_VERSION":               "dev",
 	} {
@@ -1483,6 +1482,9 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
 		"TETRAL_INTERNAL_GRPC_AUDIENCE",
 		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
+		// Git Proxy reads its ticket only from X-Tetral-Git-Ticket; no setting
+		// enables a URL-borne ticket.
+		"TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER",
 	} {
 		requireNotContains(t, deployment, forbidden)
 	}

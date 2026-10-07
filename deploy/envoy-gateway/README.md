@@ -73,7 +73,8 @@ backend forwarding. HTTP redirect has no business backend.
 
 Git has a separate hostname and ticket boundary. It preserves only the exact
 `X-Tetral-Git-Ticket` header from that prefix; all other `X-Tetral-` and all
-`X-Original-` names are removed. API credentials are removed on Git routes.
+`X-Original-` names are removed. Git Proxy reads its ticket only from that
+header and never from the URL. API credentials are removed on Git routes.
 Access logging is disabled across the public Gateway, including Git paths and
 queries. Application records provide sanitized correlation and outcomes;
 headers, tokens, bodies and query values are excluded from proxy logs.

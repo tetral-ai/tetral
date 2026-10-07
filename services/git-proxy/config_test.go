@@ -23,7 +23,6 @@ func TestConfigFromEnvLoadsGitProxyRuntimeSurface(t *testing.T) {
 		EnvDeploymentEnvironment: " test ",
 		EnvServiceVersion:        " unit ",
 		EnvDrainGraceSeconds:     "42",
-		EnvLegacyPathCutover:     "true",
 	})
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
@@ -33,7 +32,7 @@ func TestConfigFromEnvLoadsGitProxyRuntimeSurface(t *testing.T) {
 		cfg.DatabaseURL == "" ||
 		cfg.DeploymentEnvironment != "test" ||
 		cfg.ServiceVersion != "unit" ||
-		cfg.DrainGrace != 42*time.Second || !cfg.LegacyPathCutover {
+		cfg.DrainGrace != 42*time.Second {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	if cfg.PublicBaseURL == nil || cfg.PublicBaseURL.String() != "https://git.tetral.example" {
@@ -53,7 +52,6 @@ func TestConfigFromEnvRequiresSafeCredentialAndDatabaseShape(t *testing.T) {
 		{name: "public base", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvPublicBaseURL: "http://git.tetral.example?token=secret"}, want: EnvPublicBaseURL},
 		{name: "public base path", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvPublicBaseURL: "https://git.tetral.example/base"}, want: EnvPublicBaseURL},
 		{name: "drain", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvDrainGraceSeconds: "0"}, want: EnvDrainGraceSeconds},
-		{name: "legacy cutover", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvLegacyPathCutover: "yes"}, want: EnvLegacyPathCutover},
 		{name: "metrics same as public", env: envMap{EnvDatabaseURL: "postgres://runtime@postgres/tetral", EnvVaultKey: validVaultKey(), EnvHTTPAddress: "127.0.0.1:8080", EnvMetricsAddress: "127.0.0.1:8080"}, want: EnvMetricsAddress},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +80,7 @@ func TestBuildHTTPHandlerKeepsProbesOutOfGitRelay(t *testing.T) {
 	assertProbe(t, handler, "/metrics/", 404, "404 page not found\n")
 	readiness.MarkReady()
 	assertProbe(t, handler, "/ready", 200, "ready\n")
-	assertProbe(t, handler, "/ticket/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", 204, "")
+	assertProbe(t, handler, "/github.com/tetral-ai/tetral/info/refs?service=git-upload-pack", 204, "")
 	if proxyCalls != 1 {
 		t.Fatalf("proxyCalls = %d; want only the git route to hit proxy", proxyCalls)
 	}

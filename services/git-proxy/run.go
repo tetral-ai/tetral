@@ -52,10 +52,9 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 			NewPostgreSQLRepositoryTokenResolver(client, encryptor),
 		),
 		HandlerOptions{
-			PublicBaseURL:     cfg.PublicBaseURL,
-			LegacyPathCutover: cfg.LegacyPathCutover,
-			AccessLogger:      NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion), WithAccessLogLogger(logger)),
-			Metrics:           metrics,
+			PublicBaseURL: cfg.PublicBaseURL,
+			AccessLogger:  NewJSONAccessLogger(os.Stderr, WithAccessLogResource(cfg.DeploymentEnvironment, cfg.ServiceVersion), WithAccessLogLogger(logger)),
+			Metrics:       metrics,
 		},
 	))
 	metricsHandler := BuildMetricsHTTPHandler(readiness, metrics, runtime.DBStatsProvider, logger)

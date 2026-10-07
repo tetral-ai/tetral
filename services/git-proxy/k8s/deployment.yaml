@@ -56,8 +56,6 @@ spec:
               value: "https://git.tetral.example"
             - name: TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS
               value: "1800"
-            - name: TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER
-              value: "true"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION

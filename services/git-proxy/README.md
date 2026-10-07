@@ -14,8 +14,8 @@ a compile-time constant (`githubHost` in `relay.go`), so the request-time SSRF
 surface is structurally zero. Go standard library only (`net/http`,
 `net/http/httputil`, `crypto/sha256`, `crypto/subtle`) plus `engine/internal`
 packages for store access, AES-GCM decryption, and structured logging. The core
-request pipeline runs across `routes.go` (grammar + ticket and owner/repo
-extraction), `ticket.go` (validation), `credential.go` (token lookup and
+request pipeline runs across `routes.go` (grammar + owner/repo extraction),
+`ticket.go` (ticket validation), `credential.go` (token lookup and
 injection), `policy.go` (allowlist decision), `relay.go`
 (`httputil.ReverseProxy` wiring), and `observability.go` (logging) — this is the
 pipeline, not the full tree. `cmd/git-proxy/main.go` is a thin shim over `run.go`, which holds
@@ -69,10 +69,9 @@ POST /git-receive-pack
 
 Dumb-protocol `GET /info/refs` without `service`, any `/info/lfs/` path, any
 non-`github.com` host segment, and any other method are `404`. The upstream URL
-relays the `.git` suffix exactly as received. A bounded migration flag
-`TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER` (default off — the target end state)
-gates a legacy fifth shape carrying the ticket as the leading URL segment; with
-it off, URL-borne tickets are never accepted.
+relays the `.git` suffix exactly as received. A ticket is accepted only in
+`X-Tetral-Git-Ticket`: any leading path segment other than `github.com`,
+including a ticket placed in the URL, is `404` and is never validated.
 
 ### Ticket states
 
@@ -238,7 +237,7 @@ detector on. What proves what:
 | Guarantee | Test(s) |
 | --- | --- |
 | four accepted shapes; everything else `404` before upstream | `TestParseGitRequestWhitelist`, `TestParseGitRequestRejectsNonWhitelistedEndpoints`, `TestProxyRejectsInvalidRoutesBeforeUpstream`, `TestProxyRejectsMalformedQueryBeforeUpstream` |
-| legacy path segment gated behind the cutover flag | `TestParseGitRequestLegacyPathRequiresCutover`, `TestProxyDedicatedHeaderAndLegacyCutoverTable` |
+| ticket accepted only from `X-Tetral-Git-Ticket`; a URL-borne ticket is `404` with no validation or upstream call | `TestParseGitRequestRejectsURLBorneTicket`, `TestProxyAcceptsTicketOnlyFromHeader` |
 | ticket live/rotated-grace accept, hash-mismatch reject | `TestTicketValidatorLiveAndRotatedGrace`, `TestTicketValidatorRejectsHashMismatch`, `TestProxyRejectsBadTicketsBeforeUpstream`, `TestProxyAllowsTwoRequestOperationAcrossTicketRotationGrace` |
 | credential arms (inject / anonymous / `424`) | `git-credential-vectors.json` via `TestGitCredentialVectorFileIsExercisedCompletely`, `TestProxyInjectsAuthorizationOnlyForAllowlistedRepositories` |
 | per-request re-read observes rotation without cache; excludes detached/deleting rows | `TestPostgreSQLRepositoryTokenResolverObservesRotationWithoutCache`, `TestPostgreSQLRepositoryTokenResolverExcludesDetachedAndDeletingRows` |
