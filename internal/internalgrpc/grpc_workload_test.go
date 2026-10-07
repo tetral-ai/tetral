@@ -22,7 +22,7 @@ func TestRunGRPCWorkloadMetricsIncludeDatabaseStats(t *testing.T) {
 		"TETRAL_INTERNAL_GRPC_AUDIENCE":            grpcauth.Audience,
 		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS": "tetral/runtime",
 	}, GRPCWorkloadParams{
-		ServiceName:       "test-grpc-workload",
+		ServiceName:       "bridge",
 		HTTPListenEnvKey:  "TEST_HTTP_ADDR",
 		HTTPListenDefault: "127.0.0.1:0",
 		GRPCListenEnvKey:  "TEST_GRPC_ADDR",
@@ -106,7 +106,7 @@ func TestRunGRPCWorkloadJoinsCancelledServer(t *testing.T) {
 					"TETRAL_INTERNAL_GRPC_AUDIENCE":            grpcauth.Audience,
 					"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS": "tetral/runtime",
 				}, GRPCWorkloadParams{
-					ServiceName: "test-join", HTTPListenDefault: "127.0.0.1:0", GRPCListenDefault: "127.0.0.1:0",
+					ServiceName: "bridge", HTTPListenDefault: "127.0.0.1:0", GRPCListenDefault: "127.0.0.1:0",
 					ShutdownTimeout:  5 * time.Millisecond,
 					NewAuthenticator: func(grpcauth.Config) (Authenticator, error) { return grpcWorkloadAuthenticator{}, nil },
 					RunInternalGRPC: func(ctx context.Context, cfg Config) error {

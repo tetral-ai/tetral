@@ -124,8 +124,16 @@ HTTP and internal gRPC metrics retain their existing count/sum series and add
 HTTP operations are the nine standard verbs, with `http_unknown_method` for
 other input. gRPC operations are exact full methods from the registered service
 and health descriptors; other methods share `unknown_method`. Service names are
-the closed workload domain. Request paths, tools, tenant and request IDs never
-become labels in this family. Existing legacy labels retain their prior contract.
+the closed workload domain: `NewHTTPMetrics`, `NewGRPCMetrics` and
+`NewOperationMetrics` require the owner's service constant, and constructing a
+registry for any other name is a startup programming error that panics rather
+than relabeling samples. Service-specific operations, including Queue's drain
+phases, are registered by their owner with `SetOperations` or the constructor's
+operation list. Request paths, tools, tenant and request IDs never become labels
+in this family. Existing legacy labels retain their prior contract. HTTP, gRPC
+and service-owned registries can all contribute to this family in one process;
+the shared `/metrics` renderer emits each family once, as one contiguous group
+after its single header.
 
 Upper bucket bounds in seconds are `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, +Inf`. Exact bounds are inclusive;
@@ -149,8 +157,9 @@ not proof of a valid Agent turn. Existing owning admission/completion ledgers
 retain unfinished operations independently.
 
 Shutdown samples bracket actual `shutdown_http_drain`, `shutdown_http_join`,
-`shutdown_grpc_drain`, `shutdown_grpc_cancel_join`, `shutdown_queue_drain` and
-`shutdown_queue_cancel_join` operations. A drain sample measures the actual
+`shutdown_grpc_drain` and `shutdown_grpc_cancel_join` operations, which every
+registry recognizes. Owners register their own phases, such as Queue's
+`shutdown_queue_drain` and `shutdown_queue_cancel_join`. A drain sample measures the actual
 graceful wait and records `timeout` when its cutoff expires. A join sample is
 recorded only after the actual owner joins, including a join that outlives its
 budget. HTTP drain and join share the same absolute `ShutdownTimeout` deadline;

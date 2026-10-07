@@ -53,9 +53,9 @@ func TestWorkloadHealthRouterServesRuntimeMetrics(t *testing.T) {
 }
 
 func TestWorkloadHealthRouterServesServiceCollectors(t *testing.T) {
-	httpMetrics := workload.NewHTTPMetrics()
+	httpMetrics := workload.NewHTTPMetrics("bridge")
 	httpMetrics.ObserveHTTPRequest(http.MethodPost, http.StatusCreated, 1500*time.Millisecond)
-	grpcMetrics := workload.NewGRPCMetrics()
+	grpcMetrics := workload.NewGRPCMetrics("bridge")
 	grpcMetrics.ObserveGRPCRequest("/tetral.test.v1.Service/Call", "OK", 2*time.Second)
 	handler := workload.HealthRouter(workload.NewReadiness(),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
@@ -111,7 +111,7 @@ type fakeDBStatsProvider struct {
 func (p fakeDBStatsProvider) Stats() sql.DBStats { return p.stats }
 
 func TestWorkloadHealthRouterRecordsHTTPMetrics(t *testing.T) {
-	metrics := workload.NewHTTPMetrics()
+	metrics := workload.NewHTTPMetrics("api")
 	handler := workload.HealthRouter(workload.NewReadiness(),
 		workload.WithHTTPMetrics(metrics),
 		workload.WithMetricsCollector("http", metrics.Collector()),

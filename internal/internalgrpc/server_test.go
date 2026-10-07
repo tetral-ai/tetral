@@ -94,7 +94,7 @@ func TestInternalGRPCConstructorsNeverBind(t *testing.T) {
 
 func TestInternalGRPCAuthenticatesBeforeDispatchAndLogsSafely(t *testing.T) {
 	var buffer bytes.Buffer
-	metrics := workload.NewGRPCMetrics()
+	metrics := workload.NewGRPCMetrics("queue")
 	dispatches := 0
 	client, cleanup := newInternalGRPCClient(t, Config{
 		ServiceName:   "test-service",

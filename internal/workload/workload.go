@@ -183,12 +183,10 @@ type durationMetricsRecord struct {
 	sumSeconds float64
 }
 
-func NewHTTPMetrics(service ...string) *HTTPMetrics {
-	name := "unknown"
-	if len(service) != 0 {
-		name = service[0]
-	}
-	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(name, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "http_unknown_method")}
+// NewHTTPMetrics requires the owning service name from the closed workload
+// domain; see NewOperationMetrics.
+func NewHTTPMetrics(service string) *HTTPMetrics {
+	return &HTTPMetrics{records: map[httpMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "http_unknown_method")}
 }
 
 func (m *HTTPMetrics) ObserveHTTPRequest(method string, statusCode int, duration time.Duration) {
@@ -251,12 +249,10 @@ func (m *HTTPMetrics) Collector() MetricsCollector {
 	}
 }
 
-func NewGRPCMetrics(service ...string) *GRPCMetrics {
-	name := "unknown"
-	if len(service) != 0 {
-		name = service[0]
-	}
-	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(name)}
+// NewGRPCMetrics requires the owning service name from the closed workload
+// domain; see NewOperationMetrics.
+func NewGRPCMetrics(service string) *GRPCMetrics {
+	return &GRPCMetrics{records: map[grpcMetricsKey]durationMetricsRecord{}, Operations: NewOperationMetrics(service)}
 }
 
 func (m *GRPCMetrics) ObserveGRPCRequest(method string, code string, duration time.Duration) {
@@ -412,10 +408,32 @@ func runtimeMetricsText(extra []Metric) string {
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_heap_free_bytes", Help: "Free bytes reserved for the Go heap.", Type: "gauge", Value: metricSampleValue(samples[3])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_cycles_total", Help: "Completed Go GC cycles.", Type: "counter", Value: metricSampleValue(samples[4])})
 	writeMetric(&builder, emittedHeaders, Metric{Name: "go_gc_pause_seconds_total", Help: "Cumulative Go GC pause CPU seconds.", Type: "counter", Value: metricSampleValue(samples[5])})
-	for _, metric := range extra {
+	for _, metric := range groupMetricFamilies(extra) {
 		writeMetric(&builder, emittedHeaders, metric)
 	}
 	return builder.String()
+}
+
+// groupMetricFamilies stably reorders samples so each family is contiguous.
+// The text exposition format requires every sample of a family to follow its
+// single HELP/TYPE header, and several owning registries (HTTP, gRPC and
+// service-owned) contribute to the shared operation histogram. Families keep
+// their first-appearance order; samples keep collector order within a family.
+func groupMetricFamilies(metrics []Metric) []Metric {
+	var order []string
+	byFamily := map[string][]Metric{}
+	for _, metric := range metrics {
+		family := defaultString(metric.Family, metric.Name)
+		if _, seen := byFamily[family]; !seen {
+			order = append(order, family)
+		}
+		byFamily[family] = append(byFamily[family], metric)
+	}
+	grouped := make([]Metric, 0, len(metrics))
+	for _, family := range order {
+		grouped = append(grouped, byFamily[family]...)
+	}
+	return grouped
 }
 
 func metricsText(ctx context.Context, collectors []namedMetricsCollector) string {

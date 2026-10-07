@@ -1,11 +1,13 @@
 package tetralqueue
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,9 +43,12 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 			releaseHTTP := func() { httpOnce.Do(func() { close(httpRelease) }) }
 			defer releaseHTTP()
 			done := make(chan error, 1)
+			// The JSON handler serializes concurrent writes; the buffer is read
+			// only after Run has joined every writer.
+			var logs bytes.Buffer
 			go func() {
 				done <- Run(ctx, Config{GRPCAddress: "rpc", HTTPAddress: "127.0.0.1:0", LeaseReclaimInterval: time.Millisecond, DrainTimeout: 200 * time.Millisecond}, store, RuntimeConfig{
-					Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), MaintenanceStore: store,
+					Logger: slog.New(slog.NewJSONHandler(&logs, nil)), MaintenanceStore: store,
 					Listen: func(network, address string) (net.Listener, error) {
 						if address == "rpc" {
 							return listener, nil
@@ -107,6 +112,21 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 				}
 			case <-watchdog.Done():
 				t.Fatal("Queue did not join within watchdog")
+			}
+			// Queue registers its own drain phases, so the completed phase keeps
+			// its owning operation name instead of collapsing to unknown_method.
+			wantPhases := []string{"shutdown_queue_drain/success"}
+			if force {
+				wantPhases = []string{"shutdown_queue_drain/timeout", "shutdown_queue_cancel_join/success"}
+			}
+			var phases []string
+			for _, record := range decodeJSONLogRecords(t, logs.Bytes()) {
+				if record["msg"] == "workload.shutdown.phase_completed" {
+					phases = append(phases, fmt.Sprintf("%v/%v", record["operation"], record["outcome"]))
+				}
+			}
+			if !reflect.DeepEqual(phases, wantPhases) {
+				t.Fatalf("Queue shutdown phases=%v want %v", phases, wantPhases)
 			}
 			select {
 			case err := <-rpcDone:

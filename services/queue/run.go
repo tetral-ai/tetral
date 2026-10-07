@@ -69,6 +69,9 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics("queue")
 	grpcMetrics := workload.NewGRPCMetrics("queue")
+	// Queue owns these drain phases; the shared registry only knows the
+	// generic HTTP and gRPC shutdown operations.
+	grpcMetrics.Operations.SetOperations([]string{"shutdown_queue_drain", "shutdown_queue_cancel_join"})
 	grpcOptions := append(internalgrpc.QueueRPCServerOptions(),
 		grpc.WaitForHandlers(true),
 		grpc.ChainUnaryInterceptor(internalgrpc.MetricsUnaryInterceptor(grpcMetrics)),

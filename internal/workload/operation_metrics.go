@@ -30,14 +30,19 @@ type OperationMetrics struct {
 	records    map[operationKey]operationObservation
 }
 
+// NewOperationMetrics constructs one owner's registry. Callers pass their
+// owning service constant; a name outside the closed workload domain is a
+// startup programming error, so it panics instead of relabeling samples. Only
+// the shared HTTP and gRPC shutdown phases are registered here; an owner adds
+// its own phases, such as Queue's drain, through SetOperations.
 func NewOperationMetrics(service string, operations ...string) *OperationMetrics {
 	switch service {
 	case "api", "auth", "queue", "bridge", "sandbox", "job-runner", "event-stream", "web-connector", "git-proxy", "cleanup":
 	default:
-		service = "unknown"
+		panic("workload: operation metrics service " + strconv.Quote(service) + " is outside the closed workload domain")
 	}
 	m := &OperationMetrics{service: service, operations: map[string]bool{}, records: map[operationKey]operationObservation{}}
-	for _, operation := range append(operations, "shutdown_http_drain", "shutdown_http_join", "shutdown_grpc_drain", "shutdown_grpc_cancel_join", "shutdown_queue_drain", "shutdown_queue_cancel_join") {
+	for _, operation := range append(operations, "shutdown_http_drain", "shutdown_http_join", "shutdown_grpc_drain", "shutdown_grpc_cancel_join") {
 		m.operations[operation] = true
 	}
 	return m
