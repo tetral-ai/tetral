@@ -79,8 +79,14 @@ later key. Auth never calls its own HTTP surface or duplicates authority SQL.
 Auth validates the actual HTTP method and request URI attributes, optional raw
 `:method`/`:path` consistency, and exactly one bounded request ID and forwarded-for.
 Envoy's `HttpRequest.Id` is a stream identifier, independent of `x-request-id`.
-The generated header supplies the signed principal's request ID. The edge owns
-fresh request-ID generation and trusted source forwarding. `X-Original-*` and
+The generated header supplies the signed principal's request ID, which Check
+diagnostics record as `request.id`. API, Auth API-key and Event Stream handlers
+keep their own `req_` request ID for the `request-id` response header, error
+envelopes and `request.id`; after verifying the principal they record its signed
+request ID as `edge.request.id`, so Check and backend records of one request
+join. That claim is diagnostic correlation only and authorizes nothing. The
+signed forwarded-for value is audit metadata that no service reads today. The
+edge owns fresh request-ID generation and trusted source forwarding. `X-Original-*` and
 `X-Tetral-*` values never supply authority. `url.ParseRequestURI` produces the
 same decoded `URL.Path` used by Go HTTP handlers, excluding the query from the
 signature. A Check uses at most five seconds and preserves a shorter caller

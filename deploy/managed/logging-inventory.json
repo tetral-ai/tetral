@@ -48,9 +48,10 @@
     },
     "request": {
       "join_keys": [
-        "request.id"
+        "request.id",
+        "edge.request.id"
       ],
-      "presence": "Optional; trusted edge-generated request ID for protected Check/backend requests. Correlation is scoped to the observed deployment and request lifetime."
+      "presence": "Optional. Auth Check records carry the edge-generated request ID as request.id. API, Auth API-key and Event Stream records carry their own request ID as request.id (also the public request-id response header and error request_id) and, once the Auth-signed principal is verified, its request_id claim as edge.request.id. Join Check request.id to backend edge.request.id. Records written before principal verification have no edge.request.id; an incoming X-Request-Id header never supplies it. Correlation is scoped to the observed deployment and request lifetime."
     }
   },
   "external_collection_custody": {
@@ -117,6 +118,7 @@
       ],
       "optional_fields": [
         "request.id",
+        "edge.request.id",
         "http.request.method",
         "http.response.status_code",
         "duration.ms",
@@ -124,10 +126,12 @@
         "error.code",
         "error.message_safe"
       ],
-      "emission_policy": "Slow/failing HTTP summary, fast healthy path quiet. RPC normal success/cancel Debug, ordinary rejection Info; classified transport/dependency faults elevated by owning boundary. URLs/query/body/headers/errors are not log data.",
+      "emission_policy": "Slow/failing HTTP summary, fast healthy path quiet. RPC normal success/cancel Debug, ordinary rejection Info; classified transport/dependency faults elevated by owning boundary. Public HTTP boundary and auth decision records add edge.request.id from the verified signed principal. URLs/query/body/headers/errors are not log data.",
       "proofs": [
         "internal/workload/http_server_diagnostics_test.go",
-        "internal/workload/component_logger_test.go"
+        "internal/workload/component_logger_test.go",
+        "internal/httpapi/middleware_test.go",
+        "internal/auth/edge_request_id_test.go"
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
     },
@@ -153,7 +157,7 @@
         "error.code",
         "error.message_safe"
       ],
-      "emission_policy": "Successful Check stages Debug; current non-success Check recorder Warn and bounded by shared failure limiter. Auth diagnostics carry fixed safe classifications and applicable trusted positive revisions, never incoming headers/credentials/assertions. Listener lifecycle Info, panic/internal failure Error.",
+      "emission_policy": "Successful Check stages Debug; current non-success Check recorder Warn and bounded by shared failure limiter. request.id is the edge-generated request ID, which the minted principal signs as its request_id claim. Auth diagnostics carry fixed safe classifications and applicable trusted positive revisions, never incoming headers/credentials/assertions. Listener lifecycle Info, panic/internal failure Error.",
       "proofs": [
         "services/auth/ext_authz_test.go",
         "services/auth/auth_diagnostics_test.go",

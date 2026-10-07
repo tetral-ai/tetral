@@ -168,24 +168,29 @@ func (cfg RouterConfig) principalFromRequest(w http.ResponseWriter, r *http.Requ
 	if principal, ok := auth.PrincipalFromContext(r.Context()); ok {
 		return principal, true
 	}
+	principal, _, ok := cfg.verifyPrincipal(w, r)
+	return principal, ok
+}
+
+func (cfg RouterConfig) verifyPrincipal(w http.ResponseWriter, r *http.Request) (auth.Principal, auth.InternalPrincipalClaims, bool) {
 	if cfg.Store == nil || cfg.Signer == nil {
 		writeAuthError(w, r, &auth.AuthenticationError{Message: "authentication unavailable"})
-		return auth.Principal{}, false
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
 	token := r.Header.Get("X-Tetral-Internal-Principal")
 	if token == "" {
 		err := &auth.AuthenticationError{Message: "missing internal principal"}
 		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
 		writeAuthError(w, r, err)
-		return auth.Principal{}, false
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
-	principal, _, err := cfg.Signer.Verify(token, r.Method, r.URL.Path)
+	principal, claims, err := cfg.Signer.Verify(token, r.Method, r.URL.Path)
 	if err != nil {
 		auth.RecordDecision(r.Context(), "signed_principal", err, auth.AuditEvent{})
 		writeAuthError(w, r, err)
-		return auth.Principal{}, false
+		return auth.Principal{}, auth.InternalPrincipalClaims{}, false
 	}
-	return principal, true
+	return principal, claims, true
 }
 
 func decodeStrictBody(w http.ResponseWriter, r *http.Request, target any) error {
@@ -222,11 +227,17 @@ func parseLimit(raw string) int {
 
 func (cfg RouterConfig) signedPrincipalMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := cfg.principalFromRequest(w, r)
+		ctx := r.Context()
+		principal, ok := auth.PrincipalFromContext(ctx)
 		if !ok {
-			return
+			var claims auth.InternalPrincipalClaims
+			principal, claims, ok = cfg.verifyPrincipal(w, r)
+			if !ok {
+				return
+			}
+			ctx = auth.WithVerifiedEdgeRequestID(ctx, claims)
 		}
-		ctx := auth.WithPrincipal(r.Context(), principal)
+		ctx = auth.WithPrincipal(ctx, principal)
 		ctx = workspace.WithContext(ctx, principal.Workspace)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -603,7 +603,9 @@ with their owners. Database capacity is independently checked across replicas,
 HPA maxima, surge, scheduled processes and possible pool generations.
 
 `deploy/managed/logging-inventory.json` maps actual sanitized application fields
-and optional correlation to service, process and Session scopes. Proxy access
+and optional correlation to service, process, Session and request scopes. A
+request joins the Auth Check record's `request.id` to the backend records'
+`edge.request.id`, the signed request ID of the verified principal. Proxy access
 logging is disabled, including Git ticket traffic. Kubernetes collection metadata
 is external custody information; it is not an application Session identity.
 Neither inventory prescribes a remote log backend or retention policy.

@@ -37,8 +37,10 @@ const (
 // InternalPrincipalClaims is the Auth-signed request admission snapshot. aud
 // must equal InternalPrincipalAudience. method and path bind the token to the
 // exact original request. iat and exp bound its lifetime to at most
-// MaxInternalPrincipalTTL. jti is a bounded unique token ID, and request_id and
-// forwarded_for carry bounded audit metadata. The workspace, credential,
+// MaxInternalPrincipalTTL. jti is a bounded unique token ID. request_id is the
+// edge-generated request ID, which receivers record only for diagnostic
+// correlation (see WithVerifiedEdgeRequestID); forwarded_for is bounded audit
+// metadata with no current reader. The workspace, credential,
 // identity and authority fields form the discriminated principal union that
 // Principal.Validate checks.
 type InternalPrincipalClaims struct {

@@ -16,13 +16,14 @@ func InternalPrincipalMiddleware(verifier *InternalPrincipalVerifier, errorWrite
 				errorWriter(w, r, err)
 				return
 			}
-			principal, _, err := verifier.Verify(token, r.Method, r.URL.Path)
+			principal, claims, err := verifier.Verify(token, r.Method, r.URL.Path)
 			if err != nil {
 				RecordDecision(r.Context(), "signed_principal", err, AuditEvent{})
 				errorWriter(w, r, err)
 				return
 			}
-			ctx := WithPrincipal(r.Context(), principal)
+			ctx := WithVerifiedEdgeRequestID(r.Context(), claims)
+			ctx = WithPrincipal(ctx, principal)
 			ctx = workspace.WithContext(ctx, principal.Workspace)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

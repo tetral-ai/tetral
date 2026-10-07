@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -33,10 +34,12 @@ import (
 	internalevents "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/gitticket"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 	"github.com/tetral-ai/tetral/internal/vault"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	api "github.com/tetral-ai/tetral/services/api"
 	authservice "github.com/tetral-ai/tetral/services/auth"
@@ -59,6 +62,9 @@ type translatedPublicEdge struct {
 	gitGate                              atomic.Pointer[edgeGitGate]
 	apiRequests, eventRequests, gitCalls atomic.Int64
 	authExchanges                        atomic.Int64
+	// Production diagnostic sinks of the Check adapter and API router; the
+	// logging correlation assertion reads their structured records.
+	checkRecords, apiRecords syncBuffer
 }
 
 func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
@@ -86,7 +92,11 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		issuerVerifier := auth.NewAssertionVerifier(ctx)
 		t.Cleanup(issuerVerifier.Close)
 		authHandler := transporttest.Must(authservice.BuildRouter(ctx, authservice.RouterBuildConfig{RawDatabase: authDB, AssertionVerifier: issuerVerifier, Config: authservice.Config{BootstrapAPIKey: bootstrapKey, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: private, InternalPrincipalTTL: time.Minute}}))
-		adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: time.Minute}))
+		checkDiagnostics := workload.DefaultDiagnosticConfig()
+		checkDiagnostics.Level = slog.LevelDebug
+		checkLog := workload.NewProcessLogger(&edge.checkRecords, "auth", "test", "edge", checkDiagnostics)
+		t.Cleanup(checkLog.CloseWithBudget)
+		adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: time.Minute, Logger: checkLog.Logger}))
 		edge.startCheck(ctx, t, fixture, profile, adapter)
 		edge.startHTTP(ctx, t, fixture, profile, "auth", "127.0.0.2:8080", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == "POST" && r.URL.Path == "/v1/oauth/token" {
@@ -105,7 +115,9 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 			objects = stores()
 		}
 		edge.objects = objects
-		apiHandler := transporttest.Must(api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiDB), RawDatabase: apiDB, VaultKey: sdkIntegrationVaultKey, DataDir: data, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_edge_public"}, BlobStore: objects, PrincipalVerifier: verifier}))
+		apiLog := workload.NewProcessLogger(&edge.apiRecords, "api", "test", "edge", workload.DefaultDiagnosticConfig())
+		t.Cleanup(apiLog.CloseWithBudget)
+		apiHandler := transporttest.Must(api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiDB), RawDatabase: apiDB, VaultKey: sdkIntegrationVaultKey, DataDir: data, Logger: apiLog.Logger, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_edge_public"}, BlobStore: objects, PrincipalVerifier: verifier}))
 		if owner, ok := apiHandler.(io.Closer); ok {
 			t.Cleanup(func() {
 				if err := owner.Close(); err != nil {
@@ -358,6 +370,14 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 		}
 		return false
 	})
+	// The API handler is already reading this body. Holding the suffix past
+	// the API's slow-request threshold makes its default-verbosity boundary
+	// record exist for the logging correlation assertion below.
+	select {
+	case <-time.After(httpapi.DefaultSlowRequestThreshold + 250*time.Millisecond):
+	case <-edge.ctx.Done():
+		t.Fatal("edge fixture ended while holding the upload suffix")
+	}
 	unblock()
 	if err := <-producerJoined; err != nil {
 		t.Fatal("upload producer did not join")
@@ -390,9 +410,63 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 	if err != nil || !bytes.Equal(persisted, []byte(body)) {
 		t.Fatal("multipart boundary or body changed in actual object store")
 	}
+	edge.assertEdgeRequestCorrelation(t, response.Header.Get("request-id"))
 	// Generate the real decimal limit plus one without allocating it. API owns
 	// 413 and temporary-file cleanup, not a proxy request-buffer filter.
 	edge.assertOverLimitUpload(t, files.MaxFileBytes+1)
+}
+
+// One edge request joins across services by structured fields: the API record
+// keeps the API request ID returned to the client as request.id and carries the
+// edge-generated ID as edge.request.id, which is the request.id of exactly one
+// Auth Check admission record.
+func (edge *translatedPublicEdge) assertEdgeRequestCorrelation(t *testing.T, apiRequestID string) {
+	t.Helper()
+	if !strings.HasPrefix(apiRequestID, "req_") {
+		t.Fatal("API response omitted its own request ID")
+	}
+	var apiRecord map[string]any
+	publicWait(t, "API boundary record for the held edge upload", func() bool {
+		for _, record := range edgeDiagnosticRecords(t, edge.apiRecords.Bytes()) {
+			if record["event"] == "http.request" && record["request.id"] == apiRequestID {
+				apiRecord = record
+				return true
+			}
+		}
+		return false
+	})
+	edgeRequestID, _ := apiRecord["edge.request.id"].(string)
+	if apiRecord["event.kind"] != "slow_request" || apiRecord["url.path"] != "/v1/files" || edgeRequestID == "" || edgeRequestID == apiRequestID {
+		t.Fatalf("API boundary record lacks a distinct verified edge request ID: %v", apiRecord)
+	}
+	admissions := 0
+	for _, record := range edgeDiagnosticRecords(t, edge.checkRecords.Bytes()) {
+		if record["request.id"] == edgeRequestID {
+			if record["event"] != "auth.admission.success" {
+				t.Fatalf("edge request ID joined an unexpected Check record: %v", record)
+			}
+			admissions++
+		}
+	}
+	if admissions != 1 {
+		t.Fatalf("Check admission records for the edge request = %d; want 1", admissions)
+	}
+}
+
+func edgeDiagnosticRecords(t *testing.T, output []byte) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(output), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("diagnostic record is not structured JSON: %v", err)
+		}
+		records = append(records, record)
+	}
+	return records
 }
 
 func (edge *translatedPublicEdge) assertOverLimitUpload(t *testing.T, size int64) {

@@ -51,6 +51,7 @@
   "duration.ms",
   "duration.seconds",
   "duration_ms",
+  "edge.request.id",
   "environment.generation",
   "environment.id",
   "error.capture_detail",

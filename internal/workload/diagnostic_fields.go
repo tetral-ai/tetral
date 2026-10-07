@@ -55,6 +55,7 @@ var approvedDiagnosticFields = map[string]bool{
 	"duration.ms":                       true,
 	"duration.seconds":                  true,
 	"duration_ms":                       true,
+	"edge.request.id":                   true,
 	"environment.generation":            true,
 	"environment.id":                    true,
 	"error.capture_detail":              true,

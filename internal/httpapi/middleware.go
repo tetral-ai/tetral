@@ -74,7 +74,8 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
-			ctx := auth.WithAuditRecorder(r.Context(), authLogRecorder{logger: logger})
+			ctx := auth.WithEdgeRequestIDRecorder(r.Context())
+			ctx = auth.WithAuditRecorder(ctx, authLogRecorder{logger: logger})
 			next.ServeHTTP(tracker, r.WithContext(ctx))
 			duration := time.Since(start)
 			if opts.metrics != nil {
@@ -97,6 +98,7 @@ func RequestLogMiddleware(logger *slog.Logger, slowThreshold time.Duration, opti
 				slog.Int("http.response.status_code", tracker.status),
 				slog.Int64("duration.ms", duration.Milliseconds()),
 			}
+			attrs = appendEdgeRequestID(ctx, attrs)
 			if tracker.status >= http.StatusInternalServerError {
 				attrs = append(attrs,
 					slog.String("error.class", "http_error"),
@@ -223,6 +225,17 @@ func PublicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handl
 	}
 }
 
+// appendEdgeRequestID adds the verified edge request ID under edge.request.id.
+// request.id remains this service's own request ID, which is also the public
+// request-id response header; the edge ID joins this record to the Auth Check
+// record of the same request.
+func appendEdgeRequestID(ctx context.Context, attrs []any) []any {
+	if edgeRequestID := auth.EdgeRequestIDFromContext(ctx); edgeRequestID != "" {
+		attrs = append(attrs, slog.String("edge.request.id", edgeRequestID))
+	}
+	return attrs
+}
+
 func safeRequestPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/v1/api_keys/") {
 		return "/v1/api_keys/{api_key_id}"
@@ -237,6 +250,7 @@ func (r authLogRecorder) recordDecision(ctx context.Context, event auth.AuditEve
 		return
 	}
 	attrs := []any{slog.String("operation", "auth."+event.Stage), slog.String("component", "auth"), slog.String("auth.stage", event.Stage), slog.String("auth.result", event.Result), slog.String("request.id", RequestIDFromContext(ctx))}
+	attrs = appendEdgeRequestID(ctx, attrs)
 	if event.Operation != "" {
 		attrs = append(attrs, slog.String("auth.operation", string(event.Operation)))
 	}
