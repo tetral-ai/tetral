@@ -196,6 +196,13 @@ Verification run 37512221678, collected on the `calibrated_at` date. Recalibrate
 from the same per-test evidence of a current run, combining every shard of a
 sliced package.
 
+Report-only coverage runs `go test ./...` once without Race, so the integration
+package executes every top-level test sequentially in one binary. Its Go
+budget is 60 minutes: more than twice that package's measured Race total of
+about 26 minutes, and longer than the other tests plus the SDK wrapper's
+24-minute context. The coverage job's 80-minute limit leaves room for
+dependency setup, compilation, and the Bun coverage commands around it.
+
 Online Bun dependency audits are deliberately separated from deterministic
 security checks. Pull requests run them when a `package.json`, `bun.lock`, or
 the audit execution plumbing changes. The main-branch workflow does not repeat

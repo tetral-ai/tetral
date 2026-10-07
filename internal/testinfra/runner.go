@@ -260,6 +260,16 @@ func goPackageTimeout(packages []string) string {
 	return "-timeout=20m"
 }
 
+// Report-only coverage runs every Go package once without Race, so the
+// integration package executes all of its top-level tests sequentially in one
+// binary instead of in duration-balanced Race slices. Those slices measured
+// about 26 minutes in total (docs/testing.md names the source run). The budget
+// is more than twice that total, and it exceeds the remaining tests plus the
+// SDK wrapper's 24-minute context, so the wrapper reports its own deadline
+// before the package watchdog fires. The main-branch coverage job limit holds
+// this budget plus dependency setup, compilation and the Bun coverage commands.
+const coverageGoTestTimeout = "-timeout=60m"
+
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
 	case "repository":
@@ -382,7 +392,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return []commandSpec{
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
-			{Arguments: []string{"go", "test", "-count=1", "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
+			{Arguments: []string{"go", "test", "-count=1", coverageGoTestTimeout, "-covermode=atomic", "-coverprofile=" + filepath.Join(outputDir, "go-coverage.out"), "./..."}},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "runtime-coverage"), "packages/core/test/unit/", "packages/protocol/test/unit/", "packages/runtime-pod/test/unit/"}, WorkingDir: "services/agent-runtime"},
 			{Arguments: []string{"bun", "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + filepath.Join(outputDir, "gateway-coverage"), "packages/protocol/test/unit/", "packages/lowering/test/", "packages/provider-gateway/test/unit/", "packages/provider-gateway/test/golden/", "packages/mcp-connector/test/unit/"}, WorkingDir: "services/gateway"},
 		}, nil
