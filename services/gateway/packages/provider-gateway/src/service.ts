@@ -291,9 +291,17 @@ export class ProviderGatewayServiceShell {
     }
   }
 
+  /**
+   * Stops admission, lets admitted workers finish until `drainDeadline`, then aborts their provider
+   * and attachment work and waits for them to join until `deadline`. A worker suspended on a stream
+   * write held by HTTP/2 flow control cannot observe that abort, so when the cancellation and join
+   * window expires `closeStreams` force-closes the remaining streams before the final join and the
+   * missed-deadline error.
+   */
   async shutdown(
     deadline: Date,
     drainDeadline: Date = deadline,
+    closeStreams?: () => void,
   ): Promise<void> {
     this.stopping = true;
     const joined = Promise.all([...this.workers.values()]);
@@ -327,6 +335,7 @@ export class ProviderGatewayServiceShell {
       // Keep ownership through forced cancellation even when a dependency ignores it.
       // Commands may close required clients only after this promise has joined.
       if (expired) {
+        closeStreams?.();
         await joined;
         throw new Error(
           "Provider workers did not join before shutdown deadline",

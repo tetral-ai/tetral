@@ -137,7 +137,12 @@ readiness and admission immediately. Provider and MCP allow a configured 30-seco
 cancellation and join phase (`TETRAL_SERVICE_CANCEL_JOIN_TIMEOUT_MS`).
 Both phases and the five-second proxy cleanup allocation must fit the
 60-second Pod grace. Admitted requests may finish during drain; cancellation
-then joins remaining stream, SDK, and unary workers. A missed join deadline
+then aborts provider and attachment work and joins remaining stream, SDK, and
+unary workers, so an aborted provider request can still write its terminal
+error. When that cancellation and join window expires, Provider Gateway
+force-closes its remaining streams, including writes held by HTTP/2 flow
+control, so their workers can join; Runtime treats the closed stream as an
+interruption under its recovery contract. A missed join deadline
 is reported after the owned workers join, so dependency closure cannot
 overtake work. Listener and client close reuse the same remaining budget. SQL closes last, after producers join,
 with a five-second allocation clipped to the remaining application deadline.

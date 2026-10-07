@@ -134,7 +134,9 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
       let failed = false,
         firstFailure: unknown;
       try {
-        await service.shutdown(deadline, drainDeadline);
+        await service.shutdown(deadline, drainDeadline, () =>
+          grpcServer?.server.forceShutdown(),
+        );
       } catch (error) {
         failed = true;
         firstFailure = error;

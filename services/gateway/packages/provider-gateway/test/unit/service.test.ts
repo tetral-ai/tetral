@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
@@ -18,6 +19,7 @@ import { encryptAES256GCM } from "../../src/providers/crypto.js";
 import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
+import { writeProviderStreamEvents } from "../../src/grpc-server.js";
 import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
 import { createJsonLogger } from "../../src/logger.js";
 import type { GatewayLogger } from "../../src/logger.js";
@@ -52,6 +54,62 @@ describe("ProviderGatewayServiceShell", () => {
     expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
     await service.shutdown(new Date(Date.now()+30));
   });
+  test("closes a stream held by flow control only after the cancellation join window and joins its worker", async () => {
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          await never();
+        },
+      },
+    });
+    // The transport never drains, so the worker stays suspended on its first write.
+    const stream = new ProviderStreamFixture(false);
+    const written = writeProviderStreamEvents(stream, service.streamProviderRequest(signedProviderRequest(), metadata()));
+    await stream.waitForWrites(1);
+    const closedAt: number[] = [];
+    const started = Date.now();
+    const outcome = await service
+      .shutdown(new Date(started + 150), new Date(started + 50), () => {
+        closedAt.push(Date.now());
+        stream.cancel();
+      })
+      .then(() => undefined, (error: unknown) => error);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe("Provider workers did not join before shutdown deadline");
+    expect(closedAt).toHaveLength(1);
+    expect(closedAt[0]! - started).toBeGreaterThanOrEqual(145);
+    expect(Date.now() - started).toBeLessThan(150 + 1000);
+    await written;
+    expect(stream.writes).toHaveLength(1);
+    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+  });
+
+  test("a cooperative worker aborted at the drain cutoff writes its terminal error without forced stream closure", async () => {
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamer: {
+        stream: async function* () {
+          yield textEvent(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+          await never();
+        },
+      },
+    });
+    const stream = new ProviderStreamFixture(true);
+    const written = writeProviderStreamEvents(stream, service.streamProviderRequest(signedProviderRequest(), metadata()));
+    await stream.waitForWrites(1);
+    let closes = 0;
+    const started = Date.now();
+    await service.shutdown(new Date(started + 1000), new Date(started + 50), () => {
+      closes++;
+    });
+    await written;
+
+    expect(closes).toBe(0);
+    expect(stream.writes.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR);
+    expect(service.metricsText()).toContain("providergateway_provider_streams_active 0");
+  });
+
   test("authorizes before request validation or provider-unavailable response construction", async () => {
     const authenticator = new RecordingAuthenticator({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
     const service = createService(authenticator);
@@ -2186,6 +2244,42 @@ function finishEvent(): ProviderStreamEvent {
       metadataJson: "{}",
     },
   };
+}
+
+/** Minimal writable provider stream; a non-draining fixture models HTTP/2 flow-control backpressure. */
+class ProviderStreamFixture extends EventEmitter {
+  cancelled = false;
+  readonly writes: ProviderStreamEvent[] = [];
+  private waiters: Array<() => void> = [];
+
+  constructor(private readonly accepting: boolean) {
+    super();
+  }
+
+  write(event: ProviderStreamEvent): boolean {
+    this.writes.push(event);
+    for (const waiter of this.waiters.splice(0)) waiter();
+    return this.accepting;
+  }
+
+  cancel(): void {
+    this.cancelled = true;
+    this.emit("cancelled");
+  }
+
+  async waitForWrites(count: number): Promise<void> {
+    while (this.writes.length < count) {
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+  }
+}
+
+function signedProviderRequest() {
+  const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+  return validProviderRequest({
+    ...base,
+    runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+  });
 }
 
 function never(): Promise<never> {
