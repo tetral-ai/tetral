@@ -33,6 +33,35 @@ func TestBridgeLifecyclePolicyConfiguration(t *testing.T) {
 		t.Fatal("accepted admission exceeding enclosing drain")
 	}
 }
+func TestBridgeLifecyclePolicyFailsClosed(t *testing.T) {
+	if err := NewPostgreSQLBridgeAPIStore(nil).LifecyclePolicy.Validate(); err != nil {
+		t.Fatalf("constructor default policy=%v", err)
+	}
+	for name, mutate := range map[string]func(*BridgeLifecyclePolicy){
+		"zero drain":                  func(p *BridgeLifecyclePolicy) { p.DrainTimeout = 0 },
+		"zero join":                   func(p *BridgeLifecyclePolicy) { p.CancelJoinTimeout = 0 },
+		"zero wait":                   func(p *BridgeLifecyclePolicy) { p.OutputCaptureWait = 0 },
+		"admission reaches drain":     func(p *BridgeLifecyclePolicy) { p.AdmissionTimeout = p.DrainTimeout },
+		"release reaches drain":       func(p *BridgeLifecyclePolicy) { p.ReleaseTimeout = p.DrainTimeout },
+		"drain exceeds allocation":    func(p *BridgeLifecyclePolicy) { p.DrainTimeout = 50*time.Second + time.Millisecond },
+		"drain and join exceed grace": func(p *BridgeLifecyclePolicy) { p.CancelJoinTimeout = 10*time.Second + time.Millisecond },
+	} {
+		policy := DefaultBridgeLifecyclePolicy()
+		mutate(&policy)
+		if policy.Validate() == nil {
+			t.Fatalf("%s policy accepted", name)
+		}
+	}
+	// A partially configured in-process store rejects admission before any phase deadline
+	// or database work instead of running with a zero admission budget.
+	store := NewPostgreSQLBridgeAPIStore(nil)
+	store.LifecyclePolicy = BridgeLifecyclePolicy{DrainTimeout: 40 * time.Second}
+	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{Scope: bridgeAPIScope("sesn_policy", "thr_policy", "bind_policy", 1, "pod_policy"), ToolUseEventId: "tool_policy"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("partial policy admission=%v", err)
+	}
+}
+
 func TestPostgreSQLBridgeConfiguredWaitAndCallerCancellation(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	tracer := &bridgeExecutionQueryTracer{}

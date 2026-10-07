@@ -20,7 +20,11 @@ func (s *PostgreSQLBridgeAPIStore) ReleaseRuntimeBinding(ctx context.Context, re
 	if s == nil || s.Client == nil {
 		return nil, status.Error(codes.Unavailable, "runtime release store is unavailable")
 	}
-	timeout := s.lifecyclePolicy().ReleaseTimeout
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	timeout := lifecycle.ReleaseTimeout
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var response *bridgev1.ReleaseRuntimeBindingResponse

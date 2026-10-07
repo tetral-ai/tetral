@@ -486,7 +486,11 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 	maxOutputTokens int,
 ) (commandOperationResult, error) {
 	waitParent := ctx
-	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return commandOperationResult{}, policyErr
+	}
+	ctx, cancelAdmission := context.WithTimeout(ctx, lifecycle.AdmissionTimeout)
 	defer cancelAdmission()
 	if kind != "poll" && kind != "stdin" {
 		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background command kind is invalid")
@@ -614,7 +618,11 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	reason string,
 ) (commandOperationResult, error) {
 	waitParent := ctx
-	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return commandOperationResult{}, policyErr
+	}
+	ctx, cancelAdmission := context.WithTimeout(ctx, lifecycle.AdmissionTimeout)
 	defer cancelAdmission()
 	requestID := operationID
 	if requestID == "" || toolUseEventID == "" {
@@ -789,7 +797,11 @@ func backgroundCommandReceiptID(requestID string) string {
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (result commandOperationResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().BackgroundResultWait)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return commandOperationResult{}, policyErr
+	}
+	ctx, cancel := context.WithTimeout(ctx, lifecycle.BackgroundResultWait)
 	defer cancel()
 	defer func() { err = bridgeContextError(ctx, err) }()
 	// This background-command result wait keeps its own 25 ms poll; it is

@@ -39,7 +39,11 @@ const (
 // Sandbox Service. The execution row and refs-only Queue job become visible
 // together, and the ACK returns immediately after that transaction commits.
 func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
-	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	ctx, cancelAdmission := context.WithTimeout(ctx, lifecycle.AdmissionTimeout)
 	defer cancelAdmission()
 	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
@@ -352,7 +356,11 @@ func sandboxExecutionIdentityMatches(existing runtimeToolResult, tool runtimecon
 // the generation and forces an immediate re-read. PostgreSQL is the only
 // result authority; notification and reconnect catch-up hints schedule re-reads.
 func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (runtimeToolResult, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().SandboxResultWait)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return runtimeToolResult{}, policyErr
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, lifecycle.SandboxResultWait)
 	defer cancel()
 	resultHub := s.executionResultWake()
 	resultKey := sandboxExecutionResultKey(request.GetScope(), request.GetToolUseEventId())
@@ -419,7 +427,11 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 //     (cold return); this package must not grow a cross-session fan-out.
 func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error) {
 	waitParent := ctx
-	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	ctx, cancelAdmission := context.WithTimeout(ctx, lifecycle.AdmissionTimeout)
 	defer cancelAdmission()
 	if err := validateDurableToolTarget(request.GetScope(), request.GetToolUseEventId()); err != nil {
 		return nil, err
@@ -791,7 +803,11 @@ func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolNa
 }
 
 func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, duplicate bool) (response *bridgev1.RunMemoryResponse, err error) {
-	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().MemoryProjectionWait)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	ctx, cancel := context.WithTimeout(ctx, lifecycle.MemoryProjectionWait)
 	defer cancel()
 	defer func() { err = bridgeContextError(ctx, err) }()
 	ticker := time.NewTicker(100 * time.Millisecond)

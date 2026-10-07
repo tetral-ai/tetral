@@ -150,7 +150,10 @@ report budgets share the Runtime contract:
 | `TETRAL_BRIDGE_OUTPUT_CAPTURE_WAIT_TIMEOUT_MS` | 30000 |
 
 Report timeout must be shorter than report interval, which must be shorter than
-freshness. Admission and release attempts must fit within the drain budget.
+freshness. Admission and release attempts must fit within the drain budget. An
+in-process store whose lifecycle policy has a non-positive phase or violates
+these phase limits rejects the RPCs that use it with `FailedPrecondition` rather
+than substituting defaults.
 Admission commits and waits have separate budgets: a successful admission never
 keeps a transaction open while waiting for Sandbox, memory projection, background
 command or output capture. Caller deadlines clip the owning phase; cancellation

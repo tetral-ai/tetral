@@ -172,6 +172,7 @@ func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIS
 	return &PostgreSQLBridgeAPIStore{
 		Client:                     client,
 		ProcessPolicy:              runtimecontrol.DefaultProcessPolicy(),
+		LifecyclePolicy:            DefaultBridgeLifecyclePolicy(),
 		Clock:                      func() time.Time { return storage.Now() },
 		RuntimeBindingTokenTTL:     defaultRuntimeBindingTokenTTL,
 		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,

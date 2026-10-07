@@ -60,7 +60,11 @@ type adoptedOutputCapture struct {
 }
 
 func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Context, request *bridgev1.FinishIdleRequest, sourceKind string, key string, declarationDigest string, now time.Time) (finishIdleCapture, error) {
-	ctx, cancelAdmission := context.WithTimeout(ctx, s.lifecyclePolicy().AdmissionTimeout)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return finishIdleCapture{}, policyErr
+	}
+	ctx, cancelAdmission := context.WithTimeout(ctx, lifecycle.AdmissionTimeout)
 	defer cancelAdmission()
 	var capture finishIdleCapture
 	err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.ensure_output_capture", func(tx *dbconnect.Tx) error {
@@ -158,7 +162,11 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForFinishIdleOutputCapture(ctx context.Context, scope *bridgev1.RuntimeScope, key string, capture finishIdleCapture) (result finishIdleCapture, err error) {
-	ctx, cancel := context.WithTimeout(ctx, s.lifecyclePolicy().OutputCaptureWait)
+	lifecycle, policyErr := s.lifecyclePolicy()
+	if policyErr != nil {
+		return finishIdleCapture{}, policyErr
+	}
+	ctx, cancel := context.WithTimeout(ctx, lifecycle.OutputCaptureWait)
 	defer cancel()
 	defer func() { err = bridgeContextError(ctx, err) }()
 	if capture.Generation == 0 || capture.State == "staged" || capture.State == "skipped_unavailable" || capture.State == "adopted" {

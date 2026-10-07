@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -42,19 +43,37 @@ func BridgeLifecyclePolicyFromEnv(getenv func(string) string) (BridgeLifecyclePo
 		}
 		*value = time.Duration(ms) * time.Millisecond
 	}
-	if p.AdmissionTimeout >= p.DrainTimeout || p.ReleaseTimeout >= p.DrainTimeout {
-		return BridgeLifecyclePolicy{}, workload.NewConfigError("Bridge admission and release attempts must fit within drain timeout")
-	}
-	if p.DrainTimeout > 50*time.Second || p.CancelJoinTimeout > 50*time.Second-p.DrainTimeout {
-		return BridgeLifecyclePolicy{}, workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	if err := p.Validate(); err != nil {
+		return BridgeLifecyclePolicy{}, err
 	}
 	return p, nil
 }
-func (s *PostgreSQLBridgeAPIStore) lifecyclePolicy() BridgeLifecyclePolicy {
-	if s.LifecyclePolicy == (BridgeLifecyclePolicy{}) {
-		return DefaultBridgeLifecyclePolicy()
+
+// Validate applies the same phase constraints to environment-derived and in-process
+// policies: every phase is positive, admission and release attempts fit inside the
+// drain, and drain plus cancellation join fit the 50-second application allocation.
+func (p BridgeLifecyclePolicy) Validate() error {
+	for _, phase := range []time.Duration{p.DrainTimeout, p.CancelJoinTimeout, p.AdmissionTimeout, p.ReleaseTimeout, p.SandboxResultWait, p.BackgroundResultWait, p.MemoryProjectionWait, p.OutputCaptureWait} {
+		if phase <= 0 {
+			return workload.NewConfigError("Bridge lifecycle phases must be positive durations")
+		}
 	}
-	return s.LifecyclePolicy
+	if p.AdmissionTimeout >= p.DrainTimeout || p.ReleaseTimeout >= p.DrainTimeout {
+		return workload.NewConfigError("Bridge admission and release attempts must fit within drain timeout")
+	}
+	if p.DrainTimeout > 50*time.Second || p.CancelJoinTimeout > 50*time.Second-p.DrainTimeout {
+		return workload.NewConfigError("drain and cancellation join exceed the Pod application shutdown allocation")
+	}
+	return nil
+}
+
+// lifecyclePolicy returns the store's validated phase policy. An invalid policy fails
+// the RPC closed instead of substituting defaults for a partially configured store.
+func (s *PostgreSQLBridgeAPIStore) lifecyclePolicy() (BridgeLifecyclePolicy, error) {
+	if err := s.LifecyclePolicy.Validate(); err != nil {
+		return BridgeLifecyclePolicy{}, status.Error(codes.FailedPrecondition, "bridge lifecycle policy is unavailable")
+	}
+	return s.LifecyclePolicy, nil
 }
 func bridgeContextError(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() != nil {
