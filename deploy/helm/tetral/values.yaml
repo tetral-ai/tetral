@@ -391,11 +391,11 @@ lifecycle:
 
 # Optional native leaf automation. The issuer is an operator-installed,
 # separately scoped intermediate; signing material never enters this chart.
+# Leaf lifetimes are fixed by the chart at 24h with an 8h renewal lead and
+# per-renewal key rotation; they are a security contract, not a value.
 nativeCertificates:
   enabled: false
   issuerName: tetral-native
-  duration: 24h
-  renewBefore: 8h
 
 # Federation URLs, CA trust and private CIDRs are imported by tetral-auth-policy
 # into Auth's durable registry. Only Auth may make the corresponding native

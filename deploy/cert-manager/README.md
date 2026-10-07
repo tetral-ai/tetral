@@ -50,6 +50,13 @@ cannot broaden trust or enable a plaintext fallback.
 
 CA rotation distributes old-plus-new trust first, switches issuance, proves
 fresh handshakes with new leaves, drains old connections and only then removes
-old trust. Local controlled certificates test consumer reload and identity;
-they do not prove the production cert-manager renewal schedule or Kubernetes
-projection delay. Record those observations in the actual installation.
+old trust. The Go credential loader and the Bun database pool owner leave an
+expired anchor out of a mounted bundle. Their generation stays usable until its
+latest retained anchor expires, and a generation with a leaf also only while
+that leaf's verified chain is valid, so an old CA that expires during the
+overlap does not stop new handshakes. A not-yet-valid anchor makes the whole
+update invalid: the previous generation stays active, and a later observation
+activates the bundle once that anchor is valid. Local controlled certificates
+test consumer reload and identity; they do not prove the production
+cert-manager renewal schedule or Kubernetes projection delay. Record those
+observations in the actual installation.

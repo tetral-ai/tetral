@@ -191,6 +191,11 @@ func TestManagedInventoryBindsRenderedOverridesAndRetiresPreviousFleet(t *testin
 			t.Fatal("native Runtime certificate missing")
 		}
 		requireManifestPathString(t, runtime, "runtime.example.test", "spec", "dnsNames", 0)
+		// Native leaves keep the fixed 24-hour lifetime, eight-hour renewal lead
+		// and per-renewal key rotation; no chart value selects another lifecycle.
+		requireManifestPathString(t, runtime, "24h", "spec", "duration")
+		requireManifestPathString(t, runtime, "8h", "spec", "renewBefore")
+		requireManifestPathString(t, runtime, "Always", "spec", "privateKey", "rotationPolicy")
 		if result, err := check("hardened", overridden, selected, true); err != nil || result["expectedSource"] != "bound_installation_render" {
 			t.Fatalf("valid override rejected: %v %#v", err, result)
 		}

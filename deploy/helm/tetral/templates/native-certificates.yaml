@@ -20,8 +20,8 @@ spec:
     name: {{ $root.Values.nativeCertificates.issuerName | quote }}
     kind: ClusterIssuer
     group: cert-manager.io
-  duration: {{ $root.Values.nativeCertificates.duration }}
-  renewBefore: {{ $root.Values.nativeCertificates.renewBefore }}
+  duration: 24h
+  renewBefore: 8h
   privateKey:
     algorithm: ECDSA
     size: 256

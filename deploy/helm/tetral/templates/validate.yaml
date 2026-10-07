@@ -148,5 +148,4 @@ that silently permits more than the default did.
 {{- if eq .Values.transport.profile "standard-routed" }}{{ fail "nativeCertificates.enabled requires the hardened native-certificate profile" }}{{ end }}
 {{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" .Values.transport.runtimeServerName) }}{{ fail "transport.runtimeServerName must be a concrete DNS identity for native issuance" }}{{ end }}
 {{- if not .Values.nativeCertificates.issuerName }}{{ fail "nativeCertificates.issuerName must reference the operator-bound intermediate ClusterIssuer" }}{{ end }}
-{{- if or (ne .Values.nativeCertificates.duration "24h") (ne .Values.nativeCertificates.renewBefore "8h") }}{{ fail "native certificate duration and renewal must retain the validated 24h/8h lifecycle" }}{{ end }}
 {{- end }}
