@@ -941,8 +941,9 @@ final failure summaries use Error. Existing stream/timeout/discovery/review
 classifications remain admitted by the shared scalar vocabulary.
 
 The [Bun PostgreSQL pool owner](../../internal/ts-dbconnect/README.md) supplies
-max10 connections, idle30 seconds, lifetime1800 seconds, connection30 seconds,
-and statement30000 milliseconds. All five controls accept canonical positive
+`max` 10 connections, `idleTimeout` 30 seconds, `maxLifetime` 1800 seconds, a
+30-second `connectionTimeout` and `statementTimeoutMs` 30000 milliseconds. All
+five controls accept canonical positive
 safe integers. Missing values use defaults; Provider Gateway also treats explicit
 empty values as defaults, while MCP Connector rejects explicit empties. These
 values configure the SQL constructor once at boot; Go's independently owned pool
