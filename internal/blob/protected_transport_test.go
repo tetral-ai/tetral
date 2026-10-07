@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,11 +65,16 @@ func (a storeAuthority) leaf(t *testing.T) tls.Certificate {
 }
 
 func TestProtectedHTTPGenerationsPinBodiesAndPendingTrust(t *testing.T) {
-	r1 := makeStoreAuthority(t, "R1", time.Now().Add(time.Hour))
+	// Every anchor of the first two generations expires within seconds; a
+	// generation stays valid until its latest retained anchor expires.
+	r1 := makeStoreAuthority(t, "R1", time.Now().Add(3*time.Second))
 	short := makeStoreAuthority(t, "short", time.Now().Add(3*time.Second))
 	r3 := makeStoreAuthority(t, "R3", time.Now().Add(time.Hour))
+	var serving atomic.Pointer[tls.Certificate]
+	r1Leaf, r3Leaf := r1.leaf(t), r3.leaf(t)
+	serving.Store(&r1Leaf)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(bytes.Repeat([]byte("x"), 8192)) }))
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{r1.leaf(t)}}
+	server.TLS = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return serving.Load(), nil }}
 	server.StartTLS()
 	defer server.Close()
 	trust := filepath.Join(t.TempDir(), "ca.pem")
@@ -119,11 +125,16 @@ func TestProtectedHTTPGenerationsPinBodiesAndPendingTrust(t *testing.T) {
 	if !pendingLatest {
 		t.Fatal("third update allocated another transport or lost pending latest")
 	}
-	// The owner already has valid latest trust, but active's short CA expires
-	// while the older admitted body keeps both transport generations occupied.
-	ctx, cancel := context.WithDeadline(t.Context(), short.cert.NotAfter.Add(time.Second))
+	// The owner already has valid latest trust, but every anchor of the active
+	// generation expires while the older admitted body keeps both transport
+	// generations occupied.
+	activeExpiry := short.cert.NotAfter
+	if r1.cert.NotAfter.After(activeExpiry) {
+		activeExpiry = r1.cert.NotAfter
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), activeExpiry.Add(time.Second))
 	defer cancel()
-	for time.Now().Before(short.cert.NotAfter) {
+	for time.Now().Before(activeExpiry) {
 		select {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
@@ -146,6 +157,7 @@ func TestProtectedHTTPGenerationsPinBodiesAndPendingTrust(t *testing.T) {
 	if !activatedLatest {
 		t.Fatal("body EOF/Close release or latest activation failed")
 	}
+	serving.Store(&r3Leaf)
 	third, err := client.Get(server.URL)
 	if err != nil {
 		t.Fatal("latest valid trust was not activated", err)

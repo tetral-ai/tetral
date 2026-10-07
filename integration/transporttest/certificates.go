@@ -28,6 +28,12 @@ type Leaf struct {
 
 func serial() (*big.Int, error) { return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120)) }
 func NewAuthority(name string) (*Authority, error) {
+	return NewAuthorityWithValidity(name, time.Now().Add(-30*time.Second), time.Now().Add(time.Hour))
+}
+
+// NewAuthorityWithValidity builds a root with an explicit validity window, so
+// expired and not-yet-valid anchors need no host clock change.
+func NewAuthorityWithValidity(name string, from, until time.Time) (*Authority, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -36,7 +42,7 @@ func NewAuthority(name string) (*Authority, error) {
 	if err != nil {
 		return nil, err
 	}
-	cert := &x509.Certificate{SerialNumber: id, Subject: pkix.Name{CommonName: name}, NotBefore: time.Now().Add(-30 * time.Second), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+	cert := &x509.Certificate{SerialNumber: id, Subject: pkix.Name{CommonName: name}, NotBefore: from, NotAfter: until, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 	der, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
 	if err != nil {
 		return nil, err

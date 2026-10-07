@@ -83,7 +83,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	var directTLS *transportsecurity.Owner
 	var directDial []grpc.DialOption
 	if cfg.TransportProfile == "hardened" {
-		directTLS, err = transportsecurity.OpenFromEnv(ctx, env.Getenv, "runtime-direct")
+		directTLS, err = transportsecurity.OpenRuntimeDirectFromEnv(ctx, env.Getenv)
 		if err != nil {
 			return workload.LogStartupFailure(logger, jobrunner.ServiceNameJobRunner, err)
 		}

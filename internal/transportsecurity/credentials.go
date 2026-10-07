@@ -88,17 +88,20 @@ func Open(ctx context.Context, cfg Config) (*Owner, error) {
 	return o, nil
 }
 
-// OpenFromEnv uses one purpose's mount references; it never shares a leaf across purposes.
-func OpenFromEnv(ctx context.Context, getenv func(string) string, purpose string) (*Owner, error) {
-	prefix := map[string]string{"runtime-direct": "TETRAL_RUNTIME_DIRECT_TLS_", "database": "TETRAL_DATABASE_TLS_", "blob": "TETRAL_BLOB_TLS_"}[purpose]
-	if prefix == "" {
-		return nil, errors.New("unknown TLS purpose")
-	}
-	return Open(ctx, Config{CAPath: getenv(prefix + "CA_PATH"), CertPath: getenv(prefix + "CERT_PATH"), KeyPath: getenv(prefix + "KEY_PATH"), Purpose: purpose})
+// OpenRuntimeDirectFromEnv opens the hardened direct Runtime client generation
+// from its mount references. Database and object-store owners read their own
+// trust settings, so no other purpose is opened from the environment here.
+func OpenRuntimeDirectFromEnv(ctx context.Context, getenv func(string) string) (*Owner, error) {
+	const prefix = "TETRAL_RUNTIME_DIRECT_TLS_"
+	return Open(ctx, Config{CAPath: getenv(prefix + "CA_PATH"), CertPath: getenv(prefix + "CERT_PATH"), KeyPath: getenv(prefix + "KEY_PATH"), Purpose: "runtime-direct"})
 }
 
 // Reload retains a previous valid generation on malformed updates. All handshake
 // constructors still enforce its expiry, so retention cannot extend validity.
+// Trust anchors past their validity are left out of a generation rather than
+// invalidating it; a not-yet-valid anchor keeps the update invalid, so the
+// last-known-good generation stays active and a later observation activates
+// the bundle once the anchor is valid.
 func (o *Owner) Reload() error {
 	o.reloadMutex.Lock()
 	defer o.reloadMutex.Unlock()
@@ -181,8 +184,6 @@ func (o *Owner) IsCurrentTLSConfig(config *tls.Config) bool {
 	return err == nil && config != nil && config.RootCAs == g.roots
 }
 
-// ReloadFailures records rejected observations without exposing material.
-func (o *Owner) ReloadFailures() uint64 { return o.reloadFailures.Load() }
 func (o *Owner) Close() error {
 	o.once.Do(func() {
 		o.closed.Store(true)
@@ -234,7 +235,8 @@ func load(cfg Config) (*generation, error) {
 	roots := x509.NewCertPool()
 	rest := data[0]
 	expiry := time.Time{}
-	count := 0
+	count, retained := 0, 0
+	now := time.Now()
 	for len(strings.TrimSpace(string(rest))) > 0 {
 		block, remaining := pem.Decode(rest)
 		if block == nil || block.Type != "CERTIFICATE" {
@@ -244,20 +246,31 @@ func load(cfg Config) (*generation, error) {
 		if err != nil || !cert.IsCA {
 			return nil, errors.New("TLS trust bundle contains an invalid CA")
 		}
-		now := time.Now()
-		if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
-			return nil, errors.New("TLS trust bundle is outside its validity period")
-		}
-		roots.AddCert(cert)
-		if expiry.IsZero() || cert.NotAfter.Before(expiry) {
-			expiry = cert.NotAfter
-		}
 		count++
 		rest = remaining
+		if now.Before(cert.NotBefore) {
+			return nil, errors.New("TLS trust bundle contains a CA that is not yet valid")
+		}
+		// An expired anchor cannot validate any chain. Leaving it out keeps an
+		// old CA that expires during a planned overlap from disabling the
+		// generation that still holds the current CA.
+		if !now.Before(cert.NotAfter) {
+			continue
+		}
+		roots.AddCert(cert)
+		retained++
+		if cert.NotAfter.After(expiry) {
+			expiry = cert.NotAfter
+		}
 	}
 	if count == 0 {
 		return nil, errors.New("TLS trust bundle is empty")
 	}
+	if retained == 0 {
+		return nil, errors.New("TLS trust bundle has no currently valid CA")
+	}
+	// Without a leaf the generation admits handshakes until its last retained
+	// anchor expires; a leaf further bounds it by its verified chain below.
 	g := &generation{roots: roots, trustFingerprint: sha256.Sum256(data[0]), expires: expiry}
 	copy(g.fingerprint[:], h.Sum(nil))
 	if len(data) == 3 {
@@ -277,13 +290,28 @@ func load(cfg Config) (*generation, error) {
 			}
 			intermediates.AddCert(c)
 		}
-		if _, err = leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		chains, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+		if err != nil {
 			return nil, errors.New("TLS leaf generation cannot be verified")
+		}
+		// The leaf is presentable while at least one verified chain, leaf
+		// included, is entirely within its validity period.
+		chainExpiry := time.Time{}
+		for _, chain := range chains {
+			end := chain[0].NotAfter
+			for _, member := range chain[1:] {
+				if member.NotAfter.Before(end) {
+					end = member.NotAfter
+				}
+			}
+			if end.After(chainExpiry) {
+				chainExpiry = end
+			}
 		}
 		pair.Leaf = leaf
 		g.leaf = &pair
-		if leaf.NotAfter.Before(g.expires) {
-			g.expires = leaf.NotAfter
+		if chainExpiry.Before(g.expires) {
+			g.expires = chainExpiry
 		}
 	}
 	return g, nil
@@ -329,8 +357,13 @@ func requireURI(s tls.ConnectionState, want string) error {
 	return errors.New("TLS peer role is not allowed")
 }
 
-// ServerTLSConfig selects the current complete generation for every handshake.
+// ServerTLSConfig selects the current complete generation for every mutual-TLS
+// handshake. Every native listener verifies its caller's certificate and exact
+// role identity, so the client role URI is mandatory.
 func (o *Owner) ServerTLSConfig(peerURI string) (*tls.Config, error) {
+	if peerURI == "" {
+		return nil, errors.New("TLS server requires the exact client role identity")
+	}
 	makeConfig := func() (*tls.Config, error) {
 		g, err := o.snapshot()
 		if err != nil {
@@ -339,14 +372,14 @@ func (o *Owner) ServerTLSConfig(peerURI string) (*tls.Config, error) {
 		if g.leaf == nil {
 			return nil, errors.New("TLS server leaf is required")
 		}
-		c := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{*g.leaf}, SessionTicketsDisabled: true}
-		if peerURI != "" {
-			c.MinVersion = tls.VersionTLS13
-			c.ClientCAs = g.roots
-			c.ClientAuth = tls.RequireAndVerifyClientCert
-			c.VerifyConnection = func(s tls.ConnectionState) error { return requireURI(s, peerURI) }
-		}
-		return c, nil
+		return &tls.Config{
+			MinVersion:             tls.VersionTLS13,
+			Certificates:           []tls.Certificate{*g.leaf},
+			SessionTicketsDisabled: true,
+			ClientCAs:              g.roots,
+			ClientAuth:             tls.RequireAndVerifyClientCert,
+			VerifyConnection:       func(s tls.ConnectionState) error { return requireURI(s, peerURI) },
+		}, nil
 	}
 	c, err := makeConfig()
 	if err != nil {
@@ -355,6 +388,8 @@ func (o *Owner) ServerTLSConfig(peerURI string) (*tls.Config, error) {
 	c.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) { return makeConfig() }
 	return c, nil
 }
+
+// GRPCServerCredentials applies ServerTLSConfig, including its mandatory client role URI.
 func (o *Owner) GRPCServerCredentials(peerURI string) (credentials.TransportCredentials, error) {
 	c, err := o.ServerTLSConfig(peerURI)
 	if err != nil {
