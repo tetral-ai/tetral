@@ -56,8 +56,6 @@ spec:
               value: local
             - name: TETRAL_SERVICE_VERSION
               value: dev
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:

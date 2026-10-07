@@ -34,8 +34,6 @@ spec:
               value: ":8080"
             - name: TETRAL_EVENT_STREAM_METRICS_ADDR
               value: ":8081"
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_EVENT_STREAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:

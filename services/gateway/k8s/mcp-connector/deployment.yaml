@@ -45,8 +45,6 @@ spec:
               value: bridge.tetral-system.svc.cluster.local:9090
             - name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/bridge/token
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:

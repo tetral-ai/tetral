@@ -27,8 +27,6 @@ spec:
               command:
                 - /usr/local/bin/tetral-cleanup
               env:
-                - name: TETRAL_SCHEMA_MODE
-                  value: verify
                 - name: TETRAL_DATABASE_URL
                   valueFrom:
                     secretKeyRef:

@@ -100,8 +100,6 @@ spec:
                 secretKeyRef:
                   name: auth-internal-principal
                   key: private_key_b64
-            - name: TETRAL_SCHEMA_MODE
-              value: verify
             - name: TETRAL_DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -44,20 +44,23 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 		t.Fatalf("glob top-level manifests: %v", err)
 	}
 
+	// The census names every database-connected container; each one appears in
+	// TestSchemaOwnershipServingProcessesOnlyVerify, which proves from its
+	// startup source that it only verifies the schema and never migrates it.
 	local := discoverDatabaseContainers(t, localFiles)
 	top := discoverDatabaseContainers(t, topFiles)
 	want := []string{
-		"api=verify",
-		"auth=verify",
-		"bridge-api=verify",
-		"cleanup=verify",
-		"event-stream=verify",
-		"git-proxy=verify",
-		"job-runner=verify",
-		"mcp-connector=verify",
-		"provider-gateway=verify",
-		"queue=verify",
-		"sandbox=verify",
+		"api",
+		"auth",
+		"bridge-api",
+		"cleanup",
+		"event-stream",
+		"git-proxy",
+		"job-runner",
+		"mcp-connector",
+		"provider-gateway",
+		"queue",
+		"sandbox",
 	}
 	if strings.Join(local, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("service-local DB container census = %v, want %v", local, want)
@@ -196,7 +199,7 @@ func TestSchemaOwnershipGatewayChecksumsMatchGoRegistry(t *testing.T) {
 
 func discoverDatabaseContainers(t *testing.T, files []string) []string {
 	t.Helper()
-	classified := map[string]string{}
+	discovered := map[string]bool{}
 	for _, path := range files {
 		text := readSchemaOwnershipFile(t, path)
 		lines := strings.Split(text, "\n")
@@ -219,39 +222,15 @@ func discoverDatabaseContainers(t *testing.T, files []string) []string {
 				(!databaseEnvironmentPattern.MatchString(block) && !databaseConfigurationSourcePattern.MatchString(block)) {
 				continue
 			}
-			mode := schemaModeFromContainerBlock(block)
-			if mode == "" {
-				t.Errorf("DB-connected container %s in %s has no literal TETRAL_SCHEMA_MODE", match[2], path)
-				mode = "<missing>"
-			}
-			if previous, duplicate := classified[match[2]]; duplicate && previous != mode {
-				t.Errorf("container %s mode drift: %s vs %s", match[2], previous, mode)
-			}
-			classified[match[2]] = mode
+			discovered[match[2]] = true
 		}
 	}
 	var result []string
-	for name, mode := range classified {
-		result = append(result, name+"="+mode)
+	for name := range discovered {
+		result = append(result, name)
 	}
 	sort.Strings(result)
 	return result
-}
-
-func schemaModeFromContainerBlock(block string) string {
-	lines := strings.Split(block, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "- name: TETRAL_SCHEMA_MODE" {
-			continue
-		}
-		for next := index + 1; next < len(lines) && next <= index+3; next++ {
-			trimmed := strings.TrimSpace(lines[next])
-			if strings.HasPrefix(trimmed, "value:") {
-				return strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "value:")), `"'`)
-			}
-		}
-	}
-	return ""
 }
 
 func schemaOwnershipEngineRoot(t *testing.T) string {
