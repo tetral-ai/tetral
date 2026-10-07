@@ -264,8 +264,9 @@ func grantWorkloadTables(ctx context.Context, tx pgx.Tx, role string, workload W
 		}
 	}
 	for _, function := range workload.Functions {
-		// LoadRoleContract admits only this fixed signature. Operator input
-		// supplies the role identifier, never a function or SQL expression.
+		// LoadRoleContract admits only allowlisted function signatures
+		// (roles.go). Operator input supplies the role identifier, never a
+		// function or SQL expression.
 		if _, err := tx.Exec(ctx, "GRANT EXECUTE ON FUNCTION public."+function+" TO "+role); err != nil {
 			return err
 		}

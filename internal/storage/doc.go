@@ -46,17 +46,19 @@
 //   - The single version-one baseline is the fresh-install identity.
 //     MigrateSchema never upgrades a predecessor schema.
 //   - The DDL is ordinary table/index DDL with row-level security, plus the
-//     sessions agent-version trigger and the lock-only runtime process
-//     function (SECURITY DEFINER with a fixed search_path, owned by the
-//     migration role). It stays portable across self-managed PostgreSQL and
-//     managed providers. The complete database preparation command
-//     additionally requires a PostgreSQL superuser for its current role
-//     installer; managed-provider customer administrators without that
-//     privilege cannot run it.
+//     sessions agent-version trigger, the Auth key-lineage and terminal-grant
+//     triggers, and SECURITY DEFINER functions with a fixed search_path owned
+//     by the migration role: the lock-only runtime process function and the
+//     Auth credential lookup, authority lock and token prune functions. It
+//     stays portable across self-managed PostgreSQL and managed providers.
+//     The complete database preparation command additionally requires a
+//     PostgreSQL superuser for its current role installer; managed-provider
+//     customer administrators without that privilege cannot run it.
 //
 // UPDATE-WITH:
 //   - postgresql_schema.go (version-one table/index/policy/trigger DDL)
 //   - postgresql_runtime_schema.go (runtime process and handoff tables, lock-only function)
+//   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
@@ -65,9 +67,10 @@
 //
 // The DDL in this package defines the columns and constraints of each table
 // but not which service may write it or read it. Owner (writer boundary) and
-// reader boundary for the session and runtime durable row families follow the
-// actual code paths; database/roles.json grants are the enforced upper bound
-// (a grant may exist only for row locks or Session-delete cascades):
+// reader boundary for the session, runtime and Auth durable row families
+// follow the actual code paths; database/roles.json grants are the enforced
+// upper bound (a grant may exist only for row locks or Session-delete
+// cascades):
 //
 //	row family                                             owner / writer boundary                                          readers
 //	sessions                                               api Session admission (row + pinned config);              Bridge LoadContext, Gateway provider lookup,
@@ -116,12 +119,19 @@
 //	                                                                                                                         cleanup scheduler
 //	queue_partition_counters                               Queue admission and bounded Queue maintenance                    Queue admission and maintenance
 //	platform_provider_keys                                 operator ops CLI (platform credential domain)                    Gateway platform key pool (read-only, cached)
+//	auth_federation_rules / auth_identities /              tetral-auth-policy over the administrative connection            Auth exchange rule and identity reads;
+//	auth_workspace_grants                                   (import, removal, grant revocation)                             grant lookup and authority lock
+//	                                                                                                                        functions for exchange, admission and
+//	                                                                                                                        key issuance
+//	auth_access_tokens                                     Auth exchange issuance and admission usage; pruning              Auth admission (lookup function) and
+//	                                                        through the prune function; tetral-auth-policy revocation       derived-key issuance
 //
-// UPDATE-WITH: the table DDL in postgresql_schema.go and
-// postgresql_runtime_schema.go; the writer/reader services under
-// services/bridge, services/job-runner, services/api, services/sandbox,
-// services/queue, services/cleanup, services/event-stream, services/git-proxy
-// and services/gateway; the shared writers in internal/runtimecontrol,
-// internal/sessionevent, internal/mcpmanifest and internal/session; and the
-// enforced grants in database/roles.json.
+// UPDATE-WITH: the table DDL in postgresql_schema.go,
+// postgresql_runtime_schema.go and postgresql_auth_schema.go; the writer/reader
+// services under services/bridge, services/job-runner, services/api,
+// services/sandbox, services/queue, services/cleanup, services/event-stream,
+// services/git-proxy, services/gateway and services/auth; the shared writers in
+// internal/runtimecontrol, internal/sessionevent, internal/mcpmanifest,
+// internal/session and internal/auth; and the enforced grants in
+// database/roles.json.
 package storage

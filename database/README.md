@@ -8,7 +8,11 @@ contracts.
   dimension; Session and Thread isolation remains explicit relational and
   lifecycle ownership inside a Workspace.
 - `roles.json` declares the exact table and sequence privileges, and the
-  allowlisted SECURITY DEFINER function grants, for each serving workload.
+  allowlisted SECURITY DEFINER function grants, for each serving workload. The
+  allowlist admits the runtime process lock for Bridge and Job Runner and, for
+  Auth only, `tetral_auth_lookup_key`, `tetral_auth_lookup_token`,
+  `tetral_auth_lookup_grants`, `tetral_auth_lock_authority` and
+  `tetral_auth_prune_tokens`.
   Operator-selected role names and credentials are inputs to the installer and
   never belong in this repository.
 - `ApplyRoleContract` owns role attributes, public-privilege revocation, schema
