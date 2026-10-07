@@ -32,6 +32,8 @@ export class McpHTTPProtocolFixture {
 	get pendingRequests(): number { return this.server.pendingRequests; }
 	get notificationStreamCount(): number { return this.#streams.size; }
 	resetCounts(): void { for (const key of Object.keys(this.counts) as (keyof ProtocolCounts)[]) this.counts[key] = 0; this.requests.length = 0; }
+	/** Ordered request trace: origin, method (a cursor page as `tools/list@cursor`), MCP session and authentication fixture label. */
+	trace(): string[] { return this.requests.map((request) => `${request.origin} ${request.method}${request.cursor === undefined ? "" : `@${request.cursor}`} ${request.session} ${request.credentialLabel}`); }
 	hold(method: string, cursor?: string): { entered: Promise<void>; release: () => void } {
 		const entered = barrier(), release = barrier();
 		const key = cursor === undefined ? method : `${method}\0${cursor}`;

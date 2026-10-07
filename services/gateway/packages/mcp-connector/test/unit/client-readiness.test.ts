@@ -1,8 +1,5 @@
-import { observeProtocol } from '../fixtures/protocol-observations.js';
-import { expect, test as bunTest } from 'bun:test';
-let caseName = '';
-const test = (name: string, body: () => void | Promise<void>, timeout?: number) => bunTest(name, async () => { caseName=name; await body(); }, timeout);
-function peerFor(adapter: 'github'|'slack') { const peer=new McpHTTPProtocolFixture(adapter); observeProtocol(peer,caseName); return peer; }
+import { expect, test } from 'bun:test';
+function peerFor(adapter: 'github'|'slack') { return new McpHTTPProtocolFixture(adapter); }
 import { createHash } from 'node:crypto';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { DiscoverySDKClient } from '../../src/discovery.js';
@@ -14,6 +11,8 @@ import { registeredServer } from '../fixtures/registered-server.js';
 
 const identity = {workspaceId:'w',sessionId:'s',mcpServerName:'work-github'};
 const call = {...identity, sessionThreadId:'t',toolName:'read_echo',input:{nonce:'readiness-control'}};
+// Expected endpoint trace entry; component() registers token-N as fixture label generation-N.
+const sent = (method:string, session:number, label='generation-0', adapter='github') => `direct-sdk ${method} ${adapter}-session-${session} ${label}`;
 function component(peer: McpHTTPProtocolFixture, options: Partial<McpSDKClientOptions> = {}, onRefresh?:()=>void) {
   let refreshes=0;
   let token='token-0';
@@ -30,15 +29,24 @@ function component(peer: McpHTTPProtocolFixture, options: Partial<McpSDKClientOp
 }
 
 for (const row of [
-  {name:'cold discovery init401 then list401', listing:true, init:[401,0,0],list:[401,0], calls:[],expected:[2,3,2,0],success:true},
-  {name:'cold call init401 then call401',init:[401,0,0],list:[],calls:[401,0],expected:[2,3,2,2],success:true},
-  {name:'cold call list401 then call401',init:[],list:[401,0],calls:[401],expected:[1,2,2,1]},
-  {name:'cold call init401 list401 call401',init:[401,0,0],list:[401,0],calls:[401],expected:[2,3,2,1]},
-  {name:'call401 rebuild init401',init:[0,401],list:[],calls:[401],expected:[1,2,1,1]},
-  {name:'call401 rebuild list401',init:[],list:[0,401],calls:[401],expected:[1,2,2,1]},
-  {name:'init401 retry init401',init:[401,401],list:[],calls:[],expected:[1,2,0,0]},
-  {name:'warm call401 retry success',warm:true,init:[],list:[],calls:[401,0],expected:[1,1,1,2],success:true},
-  {name:'warm discovery list401 retry success',warm:true,listing:true,init:[],list:[401,0],calls:[],expected:[1,1,2,0],success:true},
+  {name:'cold discovery init401 then list401', listing:true, init:[401,0,0],list:[401,0], calls:[],expected:[2,3,2,0],success:true,
+    trace:[sent('initialize',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('initialize',3,'generation-2'),sent('tools/list',3,'generation-2')]},
+  {name:'cold call init401 then call401',init:[401,0,0],list:[],calls:[401,0],expected:[2,3,2,2],success:true,
+    trace:[sent('initialize',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('tools/call',2,'generation-1'),sent('initialize',3,'generation-2'),sent('tools/list',3,'generation-2'),sent('tools/call',3,'generation-2')]},
+  {name:'cold call list401 then call401',init:[],list:[401,0],calls:[401],expected:[1,2,2,1],
+    trace:[sent('initialize',1),sent('tools/list',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('tools/call',2,'generation-1')]},
+  {name:'cold call init401 list401 call401',init:[401,0,0],list:[401,0],calls:[401],expected:[2,3,2,1],
+    trace:[sent('initialize',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('initialize',3,'generation-2'),sent('tools/list',3,'generation-2'),sent('tools/call',3,'generation-2')]},
+  {name:'call401 rebuild init401',init:[0,401],list:[],calls:[401],expected:[1,2,1,1],
+    trace:[sent('initialize',1),sent('tools/list',1),sent('tools/call',1),sent('initialize',2,'generation-1')]},
+  {name:'call401 rebuild list401',init:[],list:[0,401],calls:[401],expected:[1,2,2,1],
+    trace:[sent('initialize',1),sent('tools/list',1),sent('tools/call',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1')]},
+  {name:'init401 retry init401',init:[401,401],list:[],calls:[],expected:[1,2,0,0],
+    trace:[sent('initialize',1),sent('initialize',2,'generation-1')]},
+  {name:'warm call401 retry success',warm:true,init:[],list:[],calls:[401,0],expected:[1,1,1,2],success:true,
+    trace:[sent('tools/call',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('tools/call',2,'generation-1')]},
+  {name:'warm discovery list401 retry success',warm:true,listing:true,init:[],list:[401,0],calls:[],expected:[1,1,2,0],success:true,
+    trace:[sent('tools/list',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1')]},
 ]) test(`actual SDK refresh allowances: ${row.name}`, async()=>{
   const peer=peerFor('github');peer.notificationsEnabled=false;
   const f=component(peer);
@@ -52,6 +60,7 @@ for (const row of [
     expect(peer.requests.at(-1)?.credentialLabel).toBe('generation-'+f.refreshes());
     expect(peer.requests.every(request=>request.toolset==='default,actions'&&request.accept.includes('application/json')&&request.accept.includes('text/event-stream'))).toBe(true);
     expect(peer.requests.filter(request=>request.method!=='initialize').every(request=>request.protocolVersion==='2025-11-25'&&request.session!=='missing-session')).toBe(true);
+    expect(peer.trace()).toEqual(row.trace);
   } finally {await f.client.closeAll();await peer.close();}
 },10_000);
 
@@ -70,6 +79,7 @@ for(const adapter of ['github','slack'] as const)for(const warm of [false,true])
   else await expect(operation).resolves.toEqual({content:[{type:'text',text:JSON.stringify({ok:true,source:adapter+'-fixture',nonce:'readiness-control'})}],structuredContent:{ok:true,source:adapter+'-fixture',nonce:'readiness-control'},refreshTriggered:false});
   expect(peer.counts.effects).toBe(1);
   expect(f.refreshes()).toBe(0);expect(peer.counts.call).toBe(1);expect(peer.counts.initialize).toBe(warm?0:1);expect(peer.counts.list).toBe(warm?0:1);
+  expect(peer.trace()).toEqual([...(warm?[]:['initialize','tools/list']),'tools/call'].map(method=>sent(method,1,'generation-0',adapter)));
  }finally{await f.client.closeAll();await peer.close();}
 },10_000);
 
@@ -82,6 +92,7 @@ test('held readiness prevents cache/call; one cancelled waiter leaves peer initi
   await held.entered;expect(peer.counts.call).toBe(0);expect(f.client.connectionCount()).toBe(0);
   cancelled.abort(new Error('One waiter left'));await expect(a).rejects.toBeDefined();expect(peer.counts.initialize).toBe(1);
   held.release();await b;expect(peer.counts).toMatchObject({initialize:1,list:1,call:1});expect(f.client.connectionCount()).toBe(1);
+  expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/call',1)]);
  }finally{held.release();await f.client.closeAll();await peer.close();}
 },10_000);
 
@@ -94,6 +105,8 @@ test('pending readiness refresh costs are inherited by two calls; subsequent war
   const results=await Promise.allSettled([a,b]);expect(results.every(result=>result.status==='rejected'&&(result.reason as {code?:unknown}).code==='mcp_authentication_failed')).toBe(true);
   expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,2,2]);
   peer.faults.set('tools/call',[401,0]);await f.client.callTool(call);expect(f.refreshes()).toBe(2);
+  expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),sent('tools/call',2,'generation-1'),sent('tools/call',2,'generation-1'),
+   sent('tools/call',2,'generation-1'),sent('initialize',3,'generation-2'),sent('tools/list',3,'generation-2'),sent('tools/call',3,'generation-2')]);
  }finally{held.release();await f.client.closeAll();await peer.close();}
 },10_000);
 
@@ -106,6 +119,7 @@ test('late waiter joins after rotation and inherits pending replacement listing 
   const late=f.client.callTool(call);void late.catch(()=>undefined);await until(()=>f.client.pendingWaiterCount()===3);held.release();
   const results=await Promise.allSettled([a,b,late]);expect(results.every(result=>result.status==='rejected'&&(result.reason as {code?:unknown}).code==='mcp_authentication_failed')).toBe(true);
   expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,2,3]);
+  expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),...Array(3).fill(sent('tools/call',2,'generation-1'))]);
  }finally{held.release();await f.client.closeAll();await peer.close();}
 },10_000);
 
@@ -122,19 +136,21 @@ test('already retrying waiter cannot borrow an eligible pending opening refresh'
   released.resolve();await until(()=>f.client.pendingWaiterCount()===2);held.release();
   await expect(retrying).rejects.toMatchObject({code:'mcp_authentication_failed'});await independent;
   expect([refreshes,peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([2,2,2,2]);expect(peer.counts.effects).toBe(1);
+  // Tokens A, B and C are unregistered fixture bearers; sessions identify the rotated clients.
+  expect(peer.trace()).toEqual([sent('tools/call',1,'unrecognized'),sent('initialize',2,'unrecognized'),sent('tools/list',2,'unrecognized'),sent('initialize',3,'unrecognized'),sent('tools/list',3,'unrecognized'),sent('tools/call',3,'unrecognized')]);
  }finally{released.resolve();held.release();await independent?.catch(()=>undefined);await f.client.closeAll();await peer.close();}
 },10_000);
 
 for(const name of ['read-401','read-403'])for(const warm of [false,true])test(`missing SDK output ${name} ${warm?'warm':'cold'} has no authentication provenance`,async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;peer.result='missing';peer.tools=peer.tools.map(tool=>({...tool,name}));const f=component(peer);
- try{if(warm){await f.client.listTools(identity);peer.resetCounts();}await expect(f.client.callTool({...call,toolName:name})).rejects.toMatchObject({code:-32600});expect(peer.counts).toMatchObject({call:1,effects:1,list:warm?0:1,initialize:warm?0:1});expect(f.refreshes()).toBe(0);}finally{await f.client.closeAll();await peer.close();}
+ try{if(warm){await f.client.listTools(identity);peer.resetCounts();}await expect(f.client.callTool({...call,toolName:name})).rejects.toMatchObject({code:-32600});expect(peer.counts).toMatchObject({call:1,effects:1,list:warm?0:1,initialize:warm?0:1});expect(f.refreshes()).toBe(0);expect(peer.trace()).toEqual([...(warm?[]:['initialize','tools/list']),'tools/call'].map(method=>sent(method,1)));}finally{await f.client.closeAll();await peer.close();}
 },10_000);
 
 for(const successful of [false,true])test(`second page HTTP 401 ${successful?'successful replacement excludes old partial tools':'repeat rejection exhausts one listing allowance'}`,async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const old={...fixtureTools()[0]!,name:'old_partial'};const fresh={...fixtureTools()[0]!,name:'new_session'};
  peer.pages=[{tools:[old],nextCursor:'page-two'},{tools:[]}];peer.faults.set('tools/list',successful?[0,401,0]:[0,401,0,401]);
  const f=component(peer,{},successful?()=>{peer.pages=[{tools:[fresh]}];}:undefined);
- try{if(successful){const listed=await f.client.listTools(identity);expect(listed.map(tool=>tool.name)).toEqual(['new_session']);expect(listed.some(tool=>tool.name==='old_partial')).toBe(false);expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,3,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined]);await expect(f.client.callTool({...call,toolName:'new_session',input:{nonce:'restart-control'}})).resolves.toMatchObject({structuredContent:{ok:true,source:'github-fixture',nonce:'restart-control'}});expect(peer.counts.call).toBe(1);expect(peer.counts.effects).toBe(1);}else{await expect(f.client.listTools(identity)).rejects.toMatchObject({code:'mcp_authentication_failed'});expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,4,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined,'page-two']);expect(f.client.connectionCount()).toBe(0);}const sessions=peer.requests.filter(request=>request.method==='initialize').map(request=>request.session);expect(sessions).toHaveLength(2);expect(sessions[0]).not.toBe(sessions[1]);}finally{await f.client.closeAll();await peer.close();}
+ try{if(successful){const listed=await f.client.listTools(identity);expect(listed.map(tool=>tool.name)).toEqual(['new_session']);expect(listed.some(tool=>tool.name==='old_partial')).toBe(false);expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,3,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined]);await expect(f.client.callTool({...call,toolName:'new_session',input:{nonce:'restart-control'}})).resolves.toMatchObject({structuredContent:{ok:true,source:'github-fixture',nonce:'restart-control'}});expect(peer.counts.call).toBe(1);expect(peer.counts.effects).toBe(1);}else{await expect(f.client.listTools(identity)).rejects.toMatchObject({code:'mcp_authentication_failed'});expect([f.refreshes(),peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,2,4,0]);expect(peer.requests.filter(request=>request.method==='tools/list').map(request=>request.cursor)).toEqual([undefined,'page-two',undefined,'page-two']);expect(f.client.connectionCount()).toBe(0);}const sessions=peer.requests.filter(request=>request.method==='initialize').map(request=>request.session);expect(sessions).toHaveLength(2);expect(sessions[0]).not.toBe(sessions[1]);expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/list@page-two',1),sent('initialize',2,'generation-1'),sent('tools/list',2,'generation-1'),successful?sent('tools/call',2,'generation-1'):sent('tools/list@page-two',2,'generation-1')]);}finally{await f.client.closeAll();await peer.close();}
 },10000);
 
 for (const mode of ['initialize','tools/list','refresh-ready','refresh-pending','refresh-alias','other-scope'] as const) test(`actual SDK pending credential retirement ${mode}`, async()=>{
@@ -213,7 +229,8 @@ for (const mode of ['initialize','tools/list','refresh-ready','refresh-pending',
   expect(transports.every(transport=>transport.closeCalls===1&&transport.closed)).toBe(true);
   expect(client.connectionCount()).toBe(0);expect(client.pendingWaiterCount()).toBe(0);
   await until(()=>oldPeer.pendingRequests===0&&replacementPeer.pendingRequests===0);
-  console.info(JSON.stringify({kind:'mcp-pending-retirement-observation',case:caseName,refreshes,sdks,transports,old:{...oldPeer.counts},replacement:{...replacementPeer.counts},cached:client.connectionCount(),pending:client.pendingWaiterCount(),peerRequestsBeforeCleanup:[oldPeer.pendingRequests,replacementPeer.pendingRequests]}));
+  expect(oldPeer.trace()).toEqual(['initialize',...(mode==='initialize'?[]:['tools/list']),...(mode==='other-scope'?['tools/call']:[])].map(method=>sent(method,1,'old')));
+  expect(replacementPeer.trace()).toEqual(['initialize','tools/list','tools/call','tools/call'].map(method=>sent(method,1,'replacement')));
  }finally{
   oldHeld.release();replacementHeld?.release();refreshRelease.resolve();
   await original;await replacement?.catch(()=>undefined);await client.closeAll();await oldPeer.close();await replacementPeer.close();
@@ -223,19 +240,26 @@ for (const mode of ['initialize','tools/list','refresh-ready','refresh-pending',
 test('all cancelled readiness owners join and close; later independent request can recover',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const held=peer.hold('tools/list');const f=component(peer);const one=new AbortController(),two=new AbortController();
  const a=f.client.callTool(call,{signal:one.signal}),b=f.client.callTool(call,{signal:two.signal});void a.catch(()=>undefined);void b.catch(()=>undefined);
- try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);one.abort(new Error('one'));two.abort(new Error('two'));await Promise.allSettled([a,b]);await until(()=>f.client.pendingWaiterCount()===0);expect(f.client.connectionCount()).toBe(0);expect(peer.counts.call).toBe(0);held.release();await f.client.callTool(call);expect(peer.counts.initialize).toBe(2);expect(peer.counts.call).toBe(1);}finally{held.release();await f.client.closeAll();await peer.close();}
+ try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);one.abort(new Error('one'));two.abort(new Error('two'));await Promise.allSettled([a,b]);await until(()=>f.client.pendingWaiterCount()===0);expect(f.client.connectionCount()).toBe(0);expect(peer.counts.call).toBe(0);held.release();await f.client.callTool(call);expect(peer.counts.initialize).toBe(2);expect(peer.counts.call).toBe(1);expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('initialize',2),sent('tools/list',2),sent('tools/call',2)]);}finally{held.release();await f.client.closeAll();await peer.close();}
 },10_000);
 
 test('held second page publishes no ready client and first-page SDK output metadata survives aggregation',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;peer.pages=[{tools:fixtureTools(),nextCursor:'page-two'},{tools:[{...fixtureTools()[0]!,name:'read_extra'}]}];peer.result='wrong-type';const held=peer.hold('tools/list','page-two');const f=component(peer);
  const operation=f.client.callTool(call);void operation.catch(()=>undefined);
- try{await held.entered;expect(peer.counts.call).toBe(0);expect(f.client.connectionCount()).toBe(0);held.release();const failure=await operation.catch(error=>error);expect(failure).toMatchObject({code:'mcp_invalid_input'});expect(peer.counts).toMatchObject({initialize:1,list:2,call:1,effects:1});expect(f.refreshes()).toBe(0);expect(f.client.connectionCount()).toBe(1);}finally{held.release();await f.client.closeAll();await peer.close();}
+ try{await held.entered;expect(peer.counts.call).toBe(0);expect(f.client.connectionCount()).toBe(0);held.release();const failure=await operation.catch(error=>error);expect(failure).toMatchObject({code:'mcp_invalid_input'});expect(peer.counts).toMatchObject({initialize:1,list:2,call:1,effects:1});expect(f.refreshes()).toBe(0);expect(f.client.connectionCount()).toBe(1);expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/list@page-two',1),sent('tools/call',1)]);}finally{held.release();await f.client.closeAll();await peer.close();}
 },10000);
 
 for(const sameKey of [true,false])test(`concurrent actual SDK opening ${sameKey?'coalesces one key':'separates Session keys'} and retains distinct arguments`,async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const held=peer.hold('tools/list');const f=component(peer);
  const a=f.client.callTool({...call,input:{nonce:'first'}}),b=f.client.callTool({...call,sessionId:sameKey?call.sessionId:'second-session',input:{nonce:'second'}});
- try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);expect(peer.counts.initialize).toBe(sameKey?1:2);expect(peer.counts.call).toBe(0);held.release();const results=await Promise.all([a,b]);expect(results.map(result=>result.structuredContent)).toEqual([{ok:true,source:'github-fixture',nonce:'first'},{ok:true,source:'github-fixture',nonce:'second'}]);expect(peer.counts.list).toBe(sameKey?1:2);await f.client.callTool({...call,input:{nonce:'reused-client-call'}});expect(peer.counts.initialize).toBe(sameKey?1:2);expect(peer.counts.call).toBe(3);}finally{held.release();await f.client.closeAll();await peer.close();}
+ try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);expect(peer.counts.initialize).toBe(sameKey?1:2);expect(peer.counts.call).toBe(0);held.release();const results=await Promise.all([a,b]);expect(results.map(result=>result.structuredContent)).toEqual([{ok:true,source:'github-fixture',nonce:'first'},{ok:true,source:'github-fixture',nonce:'second'}]);expect(peer.counts.list).toBe(sameKey?1:2);await f.client.callTool({...call,input:{nonce:'reused-client-call'}});expect(peer.counts.initialize).toBe(sameKey?1:2);expect(peer.counts.call).toBe(3);
+  if(sameKey)expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),...Array(3).fill(sent('tools/call',1))]);
+  else{
+   // Separate keys open concurrently, so only each MCP session's own sequence is ordered.
+   expect(peer.requests.every(request=>request.origin==='direct-sdk'&&request.credentialLabel==='generation-0')).toBe(true);
+   expect(['github-session-1','github-session-2'].map(session=>peer.requests.filter(request=>request.session===session).map(request=>request.method).join(',')).sort()).toEqual(['initialize,tools/list,tools/call','initialize,tools/list,tools/call,tools/call']);
+  }
+ }finally{held.release();await f.client.closeAll();await peer.close();}
 },10000);
 
 for(const failure of ['initialize','second-page','repeated-cursor','timeout']as const)test(`actual HTTP readiness ${failure} failure closes and permits a later independent recovery`,async()=>{
@@ -246,12 +270,14 @@ for(const failure of ['initialize','second-page','repeated-cursor','timeout']as 
  const held=failure==='timeout'?peer.hold('tools/list'):undefined;
  const f=component(peer,{discoveryTimeoutMs:1000,createTransport:input=>{const transport=new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input));const close=transport.close.bind(transport);transport.close=async()=>{closures++;await close();};return transport;}});
  const operation=f.client.callTool(call);void operation.catch(()=>undefined);
- try{await held?.entered;if(failure==='timeout')await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});else if(failure==='repeated-cursor')await expect(operation).rejects.toMatchObject({reason:'repeated_cursor'});else await expect(operation).rejects.toMatchObject({code:500});expect(peer.counts.call).toBe(0);expect(f.refreshes()).toBe(0);expect(f.client.connectionCount()).toBe(0);expect(closures).toBe(1);held?.release();peer.pages=undefined;await f.client.callTool(call);expect(peer.counts.call).toBe(1);expect(f.client.connectionCount()).toBe(1);}finally{held?.release();await f.client.closeAll();await peer.close();}
+ try{await held?.entered;if(failure==='timeout')await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});else if(failure==='repeated-cursor')await expect(operation).rejects.toMatchObject({reason:'repeated_cursor'});else await expect(operation).rejects.toMatchObject({code:500});expect(peer.counts.call).toBe(0);expect(f.refreshes()).toBe(0);expect(f.client.connectionCount()).toBe(0);expect(closures).toBe(1);held?.release();peer.pages=undefined;await f.client.callTool(call);expect(peer.counts.call).toBe(1);expect(f.client.connectionCount()).toBe(1);
+  const failedListing={initialize:[],'second-page':[sent('tools/list',1),sent('tools/list@page-two',1)],'repeated-cursor':[sent('tools/list',1),sent('tools/list@same',1)],timeout:[sent('tools/list',1)]}[failure];
+  expect(peer.trace()).toEqual([sent('initialize',1),...failedListing,sent('initialize',2),sent('tools/list',2),sent('tools/call',2)]);}finally{held?.release();await f.client.closeAll();await peer.close();}
 },10000);
 
 test('real HTTP 500 body mentioning 401 is not authentication provenance',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;peer.faultBody='upstream diagnostic mentions 401';peer.faults.set('tools/call',[500]);const f=component(peer);
- try{await expect(f.client.callTool(call)).rejects.toMatchObject({code:500});expect(f.refreshes()).toBe(0);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:0});}finally{await f.client.closeAll();await peer.close();}
+ try{await expect(f.client.callTool(call)).rejects.toMatchObject({code:500});expect(f.refreshes()).toBe(0);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:0});expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/call',1)]);}finally{await f.client.closeAll();await peer.close();}
 },10000);
 
 
@@ -259,14 +285,14 @@ test('shared actual SDK initializer records both execution participants with def
  const peer=peerFor('github');peer.notificationsEnabled=false;const held=peer.hold('tools/list');const lines:string[]=[];const f=component(peer,{logger:createJsonLogger({write:line=>lines.push(line)})});
  const observation=(id:string)=>()=>({claimId:'claim-'+id,toolUseEventId:'tool-'+id,elapsedMs:42,remainingMs:1000});
  const a=f.client.callTool(call,{executionObservation:observation('a')}),b=f.client.callTool(call,{executionObservation:observation('b')});
- try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);held.release();await Promise.all([a,b]);const records=lines.map(line=>JSON.parse(line));expect(records.filter(record=>record.phase==='readiness').map(record=>record['mcp.tool_use_event_id']).sort()).toEqual(['tool-a','tool-b']);for(const record of records.filter(record=>record.phase==='readiness'))expect(record).toMatchObject({'timeout.elapsed_ms':42,'timeout.remaining_ms':1000,attempt:1});expect(f.client.pendingWaiterCount()).toBe(0);}finally{held.release();await f.client.closeAll();await peer.close();}
+ try{await held.entered;await until(()=>f.client.pendingWaiterCount()===2);held.release();await Promise.all([a,b]);const records=lines.map(line=>JSON.parse(line));expect(records.filter(record=>record.phase==='readiness').map(record=>record['mcp.tool_use_event_id']).sort()).toEqual(['tool-a','tool-b']);for(const record of records.filter(record=>record.phase==='readiness'))expect(record).toMatchObject({'timeout.elapsed_ms':42,'timeout.remaining_ms':1000,attempt:1});expect(f.client.pendingWaiterCount()).toBe(0);expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/call',1),sent('tools/call',1)]);}finally{held.release();await f.client.closeAll();await peer.close();}
 },10000);
 
 test('held real credential refresh exhausts caller budget without replacement SDK dispatch',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;let refreshes=0;const entered=barrier();const material={ok:true as const,mode:'bearer' as const,token:'refresh-control',tokenHash:'refresh-control',vaultId:'v',credentialId:'c'};
  const f=component(peer,{credentialResolver:{async resolve(){return material;},async refresh(input){refreshes++;entered.resolve();await new Promise<void>((_resolve,reject)=>{if(input.signal?.aborted)reject(input.signal.reason);else input.signal?.addEventListener('abort',()=>reject(input.signal!.reason),{once:true});});return material;}}});
  await f.client.listTools(identity);peer.resetCounts();peer.faults.set('tools/call',[401]);const operation=f.client.callTool(call,{timeoutMs:1000});void operation.catch(()=>undefined);
- try{await entered.promise;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});expect([refreshes,peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,0,0,1]);expect(peer.counts.effects).toBe(0);}finally{await f.client.closeAll();await peer.close();}
+ try{await entered.promise;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});expect([refreshes,peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,0,0,1]);expect(peer.counts.effects).toBe(0);expect(peer.trace()).toEqual([sent('tools/call',1,'unrecognized')]);}finally{await f.client.closeAll();await peer.close();}
 },10000);
 
 
@@ -285,6 +311,7 @@ for(const phase of ['initialize','tools/list'] as const)test(`unequal caller dea
   await expect(survivor).resolves.toEqual({content:[{type:'text',text:JSON.stringify({ok:true,source:'github-fixture',nonce:'surviving-owner'})}],structuredContent:{ok:true,source:'github-fixture',nonce:'surviving-owner'},refreshTriggered:false});
   expect(f.refreshes()).toBe(0);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:1});
   expect(f.client.pendingWaiterCount()).toBe(0);expect(f.client.connectionCount()).toBe(1);
+  expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1),sent('tools/call',1)]);
  }finally{held.release();await survivor?.catch(()=>undefined);await f.client.closeAll();await peer.close();}
 },10000);
 
@@ -319,6 +346,6 @@ for(const departure of ['cancelled','expired'] as const)test(`stale token close 
   await retired.promise;
   expect(transportStarts).toBe(1);expect(peer.counts).toMatchObject({initialize:1,list:1,call:0,effects:0});
   expect(f.client.connectionCount()).toBe(0);expect(f.refreshes()).toBe(0);
-  console.info(JSON.stringify({kind:'mcp-stale-token-retirement-observation',case:caseName,remainingOwners:f.client.pendingWaiterCount(),transportStarts,externalInitialize:peer.counts.initialize,externalCalls:peer.counts.call}));
+  expect(peer.trace()).toEqual([sent('initialize',1),sent('tools/list',1)]);
  }finally{release.resolve();await replacement?.catch(()=>undefined);await f.client.closeAll();await peer.close();}
 },10000);

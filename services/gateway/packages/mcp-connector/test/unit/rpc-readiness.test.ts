@@ -1,8 +1,5 @@
-import { observeProtocol } from '../fixtures/protocol-observations.js';
-import { expect, test as bunTest } from 'bun:test';
-let caseName = '';
-const test = (name: string, body: () => void | Promise<void>, timeout?: number) => bunTest(name, async () => { caseName=name; await body(); }, timeout);
-function peerFor(adapter: 'github'|'slack') { const peer=new McpHTTPProtocolFixture(adapter); observeProtocol(peer,caseName); return peer; }
+import { expect, test } from 'bun:test';
+function peerFor(adapter: 'github'|'slack') { return new McpHTTPProtocolFixture(adapter); }
 import { createHmac } from 'node:crypto';
 import { Server, ServerCredentials, Metadata, credentials, status } from '@grpc/grpc-js';
 import { AgentRuntimeBridgeServiceService } from '@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js';
@@ -21,6 +18,8 @@ import { DiscoverySDKClient } from '../../src/discovery.js';
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { registeredServer } from '../fixtures/registered-server.js';
 const key='test-runtime-binding-hmac-key-of-32bytes';
+// The connector client and Bridge verification re-list share one direct SDK client and unregistered fixture bearer.
+const sent=(method:string)=>`direct-sdk ${method} github-session-1 unrecognized`;
 interface ClockCharges {
  now: () => number;
  claim: () => void;
@@ -76,13 +75,13 @@ function request(toolUseEventId:string):RunMcpToolRequest{
 }
 
 test('execution-created readiness reports outside initializer and Bridge verification re-lists published SDK client',async()=>{
- const f=await composition();try{await expect(f.run('sevt_rpc_cold')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(f.notifications()).toBe(1);expect(f.verifierLists()).toBe(1);expect(f.peer.counts).toMatchObject({initialize:1,list:2,call:1});await f.run('sevt_rpc_warm');expect(f.peer.counts).toMatchObject({initialize:1,list:2,call:2});expect(f.commits.map(commit=>commit.toolUseEventId)).toEqual(['sevt_rpc_cold','sevt_rpc_warm']);const records=f.lines.map(line=>JSON.parse(line));for(const phase of ['server_resolution','credential_resolution','connect','readiness','manifest_preparation','tool_call','claim','execution','first_commit'])expect(records.some(record=>record.phase===phase&&record['workspace.id']==='wksp_rpc'&&record['session.id']==='sesn_rpc'&&typeof record['duration.ms']==='number')).toBe(true);const callRecord=records.find(record=>record.phase==='tool_call');expect(callRecord).toMatchObject({'mcp.tool_use_event_id':'sevt_rpc_cold',attempt:1});expect(callRecord['timeout.elapsed_ms']).toBeGreaterThanOrEqual(0);expect(callRecord['timeout.remaining_ms']).toBeGreaterThan(0);const claim=records.find(record=>record.phase==='claim');expect(callRecord['request.id']).toBe(claim['request.id']);expect(records.find(record=>record.phase==='first_commit')).toMatchObject({'request.id':claim['request.id'],'mcp.tool_use_event_id':'sevt_rpc_cold',outcome:'ack_received',attempt:1});}finally{await f.close();}
+ const f=await composition();try{await expect(f.run('sevt_rpc_cold')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(f.notifications()).toBe(1);expect(f.verifierLists()).toBe(1);expect(f.peer.counts).toMatchObject({initialize:1,list:2,call:1});await f.run('sevt_rpc_warm');expect(f.peer.counts).toMatchObject({initialize:1,list:2,call:2});expect(f.commits.map(commit=>commit.toolUseEventId)).toEqual(['sevt_rpc_cold','sevt_rpc_warm']);const records=f.lines.map(line=>JSON.parse(line));for(const phase of ['server_resolution','credential_resolution','connect','readiness','manifest_preparation','tool_call','claim','execution','first_commit'])expect(records.some(record=>record.phase===phase&&record['workspace.id']==='wksp_rpc'&&record['session.id']==='sesn_rpc'&&typeof record['duration.ms']==='number')).toBe(true);const callRecord=records.find(record=>record.phase==='tool_call');expect(callRecord).toMatchObject({'mcp.tool_use_event_id':'sevt_rpc_cold',attempt:1});expect(callRecord['timeout.elapsed_ms']).toBeGreaterThanOrEqual(0);expect(callRecord['timeout.remaining_ms']).toBeGreaterThan(0);const claim=records.find(record=>record.phase==='claim');expect(callRecord['request.id']).toBe(claim['request.id']);expect(records.find(record=>record.phase==='first_commit')).toMatchObject({'request.id':claim['request.id'],'mcp.tool_use_event_id':'sevt_rpc_cold',outcome:'ack_received',attempt:1});expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list'),sent('tools/call'),sent('tools/call')]);}finally{await f.close();}
 },10000);
 
 test('actual caller gRPC deadline cancels held HTTP and commits mcp_timeout on original Tool Use, then replay has no call',async()=>{
  const f=await composition();await f.client.listTools({workspaceId:'wksp_rpc',sessionId:'sesn_rpc',mcpServerName:'work-github'});const held=f.peer.hold('tools/call');
  const operation=f.run('sevt_rpc_deadline',1000);void operation.catch(()=>undefined);
- try{await held.entered;await expect(operation).rejects.toMatchObject({code:4});await until(()=>f.commits.length===1&&f.peer.counts.cancelledCalls===1);const result=JSON.parse(f.commits[0]!.resultJson);expect(result.response).toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,error_kind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);expect(f.peer.counts.effects).toBe(1);await expect(f.run('sevt_rpc_deadline')).resolves.toMatchObject({errorKind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);}finally{held.release();await f.close();}
+ try{await held.entered;await expect(operation).rejects.toMatchObject({code:4});await until(()=>f.commits.length===1&&f.peer.counts.cancelledCalls===1);const result=JSON.parse(f.commits[0]!.resultJson);expect(result.response).toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,error_kind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);expect(f.peer.counts.effects).toBe(1);await expect(f.run('sevt_rpc_deadline')).resolves.toMatchObject({errorKind:McpErrorKind.MCP_ERROR_KIND_TIMEOUT});expect(f.peer.counts.call).toBe(1);expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/call')]);}finally{held.release();await f.close();}
 },10000);
 
 for(const phase of ['before-dispatch','after-dispatch'] as const)for(const finite of [true,false])test(`actual gRPC early caller cancellation ${phase} ${finite?'finite':'unbounded'}`,async()=>{
@@ -105,19 +104,21 @@ for(const phase of ['before-dispatch','after-dispatch'] as const)for(const finit
   expect(f.peer.counts.call).toBe(phase==='before-dispatch'?0:1);expect(f.peer.counts.effects).toBe(phase==='before-dispatch'?0:1);
   held.release();await expect(f.run(event)).resolves.toMatchObject({errorKind:expectedKind});
   expect(f.commits).toHaveLength(1);expect(f.peer.counts.call).toBe(phase==='before-dispatch'?0:1);
-  console.info(JSON.stringify({kind:'mcp-caller-abandonment-observation',case:caseName,phase,finite,grpcCode:status.CANCELLED,remainingMs:execution['timeout.remaining_ms'],errorKind:expectedKind,originalClaim:true,commits:f.commits.length,counts:{...f.peer.counts}}));
+  const dispatched=phase==='after-dispatch'?1:0;
+  expect(f.peer.counts).toEqual({initialize:1,list:1,call:dispatched,effects:dispatched,cancelledCalls:dispatched,notifications:0});
+  expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),...(dispatched===1?[sent('tools/call')]:[])]);
  }finally{held.release();await f.close();}
 },10000);
 
 
 test('actual SDK dependency diagnostics stay out of owner logs and throwing sink preserves receipt',async()=>{
- const f=await composition();try{const sentinel='SENTINEL_RAW_HTTP_BODY';f.peer.faultBody=sentinel;f.peer.faults.set('tools/call',[500]);await expect(f.run('sevt_safe_failure')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,errorKind:McpErrorKind.MCP_ERROR_KIND_INTERNAL});expect(f.commits).toHaveLength(1);expect(f.lines.join('')).not.toContain(sentinel);expect(f.lines.map(line=>JSON.parse(line)).find(record=>record.phase==='tool_call')).toMatchObject({outcome:'failed'});expect(f.peer.counts.effects).toBe(0);}finally{await f.close();}
- const broken=await composition(true);try{await expect(broken.run('sevt_sink_failure')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(broken.commits).toHaveLength(1);expect(broken.peer.counts.effects).toBe(1);expect(broken.logger.stats().sinkFailures).toBeGreaterThan(0);}finally{await broken.close();}
+ const f=await composition();try{const sentinel='SENTINEL_RAW_HTTP_BODY';f.peer.faultBody=sentinel;f.peer.faults.set('tools/call',[500]);await expect(f.run('sevt_safe_failure')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,errorKind:McpErrorKind.MCP_ERROR_KIND_INTERNAL});expect(f.commits).toHaveLength(1);expect(f.lines.join('')).not.toContain(sentinel);expect(f.lines.map(line=>JSON.parse(line)).find(record=>record.phase==='tool_call')).toMatchObject({outcome:'failed'});expect(f.peer.counts.effects).toBe(0);expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list'),sent('tools/call')]);}finally{await f.close();}
+ const broken=await composition(true);try{await expect(broken.run('sevt_sink_failure')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(broken.commits).toHaveLength(1);expect(broken.peer.counts.effects).toBe(1);expect(broken.logger.stats().sinkFailures).toBeGreaterThan(0);expect(broken.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list'),sent('tools/call')]);}finally{await broken.close();}
 },10000);
 
 
 test('lost first Commit ACK converges original receipt without another external execution',async()=>{
- const f=await composition(false,true);try{await expect(f.run('sevt_receipt_recovery')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(f.peer.counts).toMatchObject({call:1,effects:1});expect(f.commits).toHaveLength(2);expect(f.commits[1]).toEqual(f.commits[0]);const records=f.lines.map(line=>JSON.parse(line));expect(records.find(record=>record.phase==='first_commit')).toMatchObject({outcome:'failed',attempt:1});expect(records.find(record=>record.phase==='receipt_recovery')).toMatchObject({outcome:'converged',attempt:1,'request.id':f.commits[0]!.claimId,'mcp.tool_use_event_id':'sevt_receipt_recovery'});expect(records.filter(record=>record.phase==='tool_call')).toHaveLength(1);expect(f.lines.join('')).not.toContain('fixture-ack-sentinel');}finally{await f.close();}
+ const f=await composition(false,true);try{await expect(f.run('sevt_receipt_recovery')).resolves.toMatchObject({status:RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED});expect(f.peer.counts).toMatchObject({call:1,effects:1});expect(f.commits).toHaveLength(2);expect(f.commits[1]).toEqual(f.commits[0]);const records=f.lines.map(line=>JSON.parse(line));expect(records.find(record=>record.phase==='first_commit')).toMatchObject({outcome:'failed',attempt:1});expect(records.find(record=>record.phase==='receipt_recovery')).toMatchObject({outcome:'converged',attempt:1,'request.id':f.commits[0]!.claimId,'mcp.tool_use_event_id':'sevt_receipt_recovery'});expect(records.filter(record=>record.phase==='tool_call')).toHaveLength(1);expect(f.lines.join('')).not.toContain('fixture-ack-sentinel');expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list'),sent('tools/call')]);}finally{await f.close();}
 },10000);
 
 
@@ -139,7 +140,7 @@ for(const row of [
   const claim=f.lines.map(line=>JSON.parse(line)).find(record=>record.phase==='claim');
   expect(claim).toMatchObject({'timeout.elapsed_ms':row.claimMs,'timeout.remaining_ms':row.remainingMs});
   expect(f.commits[0]!.claimId).toBe(claim['request.id']);
-  console.info(JSON.stringify({kind:'mcp-service-budget-observation',case:caseName,claimElapsedMs:row.claimMs,clientTimeoutMs:f.clientTimeouts[0],sdkTimeoutMs:f.sdkTimeouts[0],commits:f.commits.length}));
+  expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list'),sent('tools/call')]);
  }finally{await f.close();}
 },10000);
 
@@ -166,6 +167,6 @@ for(const row of [
   expect(records.find(record=>record.phase==='manifest_preparation')).toMatchObject({'timeout.elapsed_ms':row.totalMs,'timeout.remaining_ms':0});
   expect(records.filter(record=>record.phase==='tool_call')).toHaveLength(1);
   expect(records.find(record=>record.phase==='tool_call')).toMatchObject({outcome:'mcp_timeout','timeout.elapsed_ms':row.totalMs,'timeout.remaining_ms':0});
-  console.info(JSON.stringify({kind:'mcp-service-budget-observation',case:caseName,claimElapsedMs:row.claimMs,preparationElapsedMs:preparationMs,totalElapsedMs:elapsed,clientTimeoutMs:f.clientTimeouts[0],externalCalls:f.peer.counts.call,commits:f.commits.length}));
+  expect(f.peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/list')]);
  }finally{await f.close();}
 },10000);

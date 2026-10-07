@@ -1,8 +1,5 @@
-import { observeProtocol } from '../fixtures/protocol-observations.js';
-import { expect, test as bunTest } from 'bun:test';
-let caseName = '';
-const test = (name: string, body: () => void | Promise<void>, timeout?: number) => bunTest(name, async () => { caseName=name; await body(); }, timeout);
-function peerFor(adapter: 'github'|'slack') { const peer=new McpHTTPProtocolFixture(adapter); observeProtocol(peer,caseName); return peer; }
+import { expect, test } from 'bun:test';
+function peerFor(adapter: 'github'|'slack') { return new McpHTTPProtocolFixture(adapter); }
 import { McpExecutionBudget, MCP_EXECUTION_TIMEOUT_MS, MCP_FIRST_COMMIT_RESERVE_MS } from '../../src/execution-budget.js';
 import { DiscoverySDKClient } from '../../src/discovery.js';
 import { McpSDKClient, streamableHTTPTransportOptions } from '../../src/client.js';
@@ -13,6 +10,8 @@ import { registeredServer } from '../fixtures/registered-server.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 const identity={workspaceId:'w',sessionId:'s',mcpServerName:'work-github',sessionThreadId:'t',toolName:'read_echo',input:{nonce:'budget-control'}};
+// Every request here carries the unregistered fixture bearer through the direct SDK client.
+const sent=(method:string,session=1)=>`direct-sdk ${method} github-session-${session} unrecognized`;
 
 test('one monotonic allowance clips a remaining phase and never follows wall-clock changes',()=>{
  let clock=0;const budget=new McpExecutionBudget(undefined,()=>clock);clock=166000;expect(budget.timeoutMs(120000)).toBe(4000);clock=170000;expect(()=>budget.timeoutMs()).toThrow('budget exhausted');
@@ -27,20 +26,21 @@ for(const row of [{name:'four seconds remain',total:170000,listedAt:166000,callT
   override async callTool(params:Parameters<DiscoverySDKClient['callTool']>[0],schema?:Parameters<DiscoverySDKClient['callTool']>[1],options?:RequestOptions){requestedTimeout=options?.timeout;return super.callTool(params,schema,options);}
  }
  const client=new McpSDKClient({monotonicNow:()=>clock,serverResolver:{async resolve(){return registeredServer('github','work-github');}},credentialResolver:{async resolve(){clock+=2000;return {ok:true,mode:'bearer',token:'fixture',tokenHash:'fixture',vaultId:'v',credentialId:'c'};},async refresh(){throw new Error('Unexpected refresh');}},onToolsListChanged:async()=>undefined,createClient:()=>new ObservedSDKClient({name:'budget-sdk',version:'1'}, {}),createTransport:input=>new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input))});
- try{const operation=client.callTool(identity,{timeoutMs:row.total});if(row.callTimeout===undefined){await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});expect(peer.counts.call).toBe(0);}else{await operation;expect(requestedTimeout).toBe(row.callTimeout);expect(peer.counts.call).toBe(1);}}finally{await client.closeAll();await peer.close();}
+ try{const operation=client.callTool(identity,{timeoutMs:row.total});if(row.callTimeout===undefined){await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});expect(peer.counts.call).toBe(0);}else{await operation;expect(requestedTimeout).toBe(row.callTimeout);expect(peer.counts.call).toBe(1);}
+  expect(peer.trace()).toEqual([sent('initialize'),sent('tools/list'),...(row.callTimeout===undefined?[]:[sent('tools/call')])]);}finally{await client.closeAll();await peer.close();}
 },10_000);
 
 test('authentication refresh crossing the original deadline cannot rebuild or dispatch a second call',async()=>{
  let clock=0,refreshes=0;const peer=peerFor('github');peer.notificationsEnabled=false;peer.faults.set('tools/call',[401]);
  const client=new McpSDKClient({monotonicNow:()=>clock,serverResolver:{async resolve(){return registeredServer('github','work-github');}},credentialResolver:{async resolve(){return {ok:true,mode:'bearer',token:'A',tokenHash:'A',vaultId:'v',credentialId:'c'};},async refresh(){refreshes++;clock=170001;return {ok:true,mode:'bearer',token:'B',tokenHash:'B',vaultId:'v',credentialId:'c'};}},onToolsListChanged:async()=>undefined,createTransport:input=>new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input))});
- try{await expect(client.callTool(identity)).rejects.toMatchObject({code:'mcp_timeout'});expect([refreshes,peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,1,1,1]);}finally{await client.closeAll();await peer.close();}
+ try{await expect(client.callTool(identity)).rejects.toMatchObject({code:'mcp_timeout'});expect([refreshes,peer.counts.initialize,peer.counts.list,peer.counts.call]).toEqual([1,1,1,1]);expect(peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/call')]);}finally{await client.closeAll();await peer.close();}
 },10_000);
 
 test('real HTTP held tool response is cancelled when the execution budget expires',async()=>{
  const peer=peerFor('github');peer.notificationsEnabled=false;const held=peer.hold('tools/call');
  const client=new McpSDKClient({executionTimeoutMs:1000,serverResolver:{async resolve(){return registeredServer('github','work-github');}},credentialResolver:{async resolve(){return {ok:true,mode:'bearer',token:'fixture',tokenHash:'fixture',vaultId:'v',credentialId:'c'};},async refresh(){throw new Error('Unexpected refresh');}},onToolsListChanged:async()=>undefined,createTransport:input=>new StreamableHTTPClientTransport(peer.url,streamableHTTPTransportOptions(input))});
  const operation=client.callTool(identity);void operation.catch(()=>undefined);
- try{await held.entered;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});await until(()=>peer.counts.cancelledCalls===1);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:1});expect(client.connectionCount()).toBe(0);}finally{held.release();await client.closeAll();await peer.close();}
+ try{await held.entered;await expect(operation).rejects.toMatchObject({code:'mcp_timeout'});await until(()=>peer.counts.cancelledCalls===1);expect(peer.counts).toMatchObject({initialize:1,list:1,call:1,effects:1});expect(client.connectionCount()).toBe(0);expect(peer.trace()).toEqual([sent('initialize'),sent('tools/list'),sent('tools/call')]);}finally{held.release();await client.closeAll();await peer.close();}
 },10_000);
 
 function timeoutClient(peer: McpHTTPProtocolFixture, options: Partial<McpSDKClientOptions> = {}): McpSDKClient {
@@ -65,10 +65,10 @@ test('native SDK call timeout retires sole HTTP execution before the total deadl
   const rejectionElapsedMs=performance.now()-started;expect(rejectionElapsedMs).toBeLessThan(1000);
   await until(()=>peer.counts.cancelledCalls===1);
   expect(client.connectionCount()).toBe(0);expect(peer.counts).toMatchObject({initialize:0,list:0,call:1,effects:1,cancelledCalls:1});
-  console.info(JSON.stringify({kind:'mcp-native-timeout-observation',case:caseName,rejectionElapsedMs,totalBudgetMs:1000,callCeilingMs:50,counts:{...peer.counts},connections:client.connectionCount(),beforeRelease:true}));
   held.release();
   await expect(client.callTool({...identity,input:{nonce:'after-native-timeout'}})).resolves.toMatchObject({structuredContent:{nonce:'after-native-timeout'}});
   expect(peer.counts).toMatchObject({initialize:1,list:1,call:2,effects:2});expect(client.connectionCount()).toBe(1);
+  expect(peer.trace()).toEqual([sent('tools/call'),sent('initialize',2),sent('tools/list',2),sent('tools/call',2)]);
  }finally{held?.release();await client.closeAll();await peer.close();}
 },10_000);
 
@@ -90,6 +90,7 @@ test('native SDK call timeout preserves an unrelated execution owning the same t
   expect(survivorSettled).toBe(false);expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({call:2,effects:2,cancelledCalls:0});
   held.release();await expect(survivor).resolves.toMatchObject({structuredContent:{nonce:'survivor'}});
   expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:0,call:2,effects:2,cancelledCalls:0});
+  expect(peer.trace()).toEqual([sent('tools/call'),sent('tools/call')]);
  }finally{held?.release();await survivor?.catch(()=>undefined);await client.closeAll();await peer.close();}
 },10_000);
 
@@ -110,5 +111,6 @@ test('native SDK warm discovery timeout preserves ready transport and concurrent
   expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:1,call:1,effects:1,cancelledCalls:0});
   heldList.release();heldCall.release();await expect(survivor).resolves.toMatchObject({structuredContent:{nonce:'discovery-survivor'}});
   expect(client.connectionCount()).toBe(1);expect(peer.counts).toMatchObject({initialize:0,list:1,call:1,effects:1,cancelledCalls:0});
+  expect(peer.trace()).toEqual([sent('tools/call'),sent('tools/list')]);
  }finally{heldList?.release();heldCall?.release();await survivor?.catch(()=>undefined);await client.closeAll();await peer.close();}
 },10_000);

@@ -1,8 +1,5 @@
-import { observeProtocol } from '../fixtures/protocol-observations.js';
-import { expect, test as bunTest } from 'bun:test';
-let caseName = '';
-const test = (name: string, body: () => void | Promise<void>, timeout?: number) => bunTest(name, async () => { caseName=name; await body(); }, timeout);
-function peerFor(adapter: 'github'|'slack') { const peer=new McpHTTPProtocolFixture(adapter); observeProtocol(peer,caseName); return peer; }
+import { expect, test } from 'bun:test';
+function peerFor(adapter: 'github'|'slack') { return new McpHTTPProtocolFixture(adapter); }
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpSDKClient, streamableHTTPTransportOptions } from '../../src/client.js';
 import { MCP_ADAPTERS, adapterByEndpoint, validateAdapter } from '../../src/adapters/registry.js';
@@ -29,6 +26,7 @@ for (const adapter of MCP_ADAPTERS) test(`${adapter.id} configured identity rout
     expect(peer.requests.every(request=>request.accept.includes('application/json')&&request.accept.includes('text/event-stream')&&request.contentType.includes('application/json'))).toBe(true);
     expect(peer.requests.filter(request=>request.method!=='initialize').every(request=>request.protocolVersion==='2025-11-25'&&request.session===peer.requests[0]!.session)).toBe(true);
     expect(peer.requests.map(request => request.toolset)).toEqual(peer.requests.map(() => adapter.id === 'github' ? 'default,actions' : undefined));
+    expect(peer.trace()).toEqual(['initialize', 'tools/list', 'tools/call', 'tools/call'].map(method => `direct-sdk ${method} ${adapter.id}-session-1 selected-vault`));
   } finally {await client.closeAll(); await peer.close();}
 }, 10_000);
 
