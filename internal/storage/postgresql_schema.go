@@ -1876,7 +1876,6 @@ END $$`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
-	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`
 	createPostgreSQLRuntimeToolResultsKindIndex             = `CREATE INDEX IF NOT EXISTS idx_session_runtime_tool_results_kind ON session_runtime_tool_results(workspace_id, session_id, tool_kind, updated_at)`
 	createPostgreSQLSessionResourcePrefixGCDueIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resource_prefix_gc_due ON session_resource_prefix_gc(workspace_id, next_attempt_at, created_at) WHERE status IN ('pending', 'retryable_failed')`
@@ -2077,7 +2076,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_platform_provider_keys", createPostgreSQLPlatformProviderKeysTable},
 		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
-
+	}...)
+	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
+	steps = append(steps, []postgresqlSchemaStep{
 		// Current-state trigger that fills the immutable Agent version reference
 		// for Session rows created through the public API.
 		{"create_sessions_agent_version_id_function", createPostgreSQLSessionsAgentVersionIDFunction},
@@ -2118,7 +2119,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},
 		{"index_session_mcp_manifests_generation", createPostgreSQLSessionMCPManifestsGenerationIndex},
-		{"index_session_runtime_status_cleanup_due", createPostgreSQLRuntimeStatusCleanupDueIndex},
+		{"index_session_runtime_status_cleanup_global_due", createPostgreSQLRuntimeStatusCleanupGlobalDueIndex},
 		{"index_session_bridge_operations_runtime_write", createPostgreSQLBridgeOperationsRuntimeWriteIndex},
 		{"index_session_runtime_tool_results_kind", createPostgreSQLRuntimeToolResultsKindIndex},
 		{"index_session_output_captures_session", createPostgreSQLSessionOutputCapturesIndex},
@@ -2225,6 +2226,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	}
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
 	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
+	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
 
 	// Narrow git-ticket lookup policy on session_git_tickets: the git
 	// proxy validates a capability ticket before it knows the workspace.

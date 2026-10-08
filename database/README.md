@@ -13,14 +13,14 @@ contracts.
   can update or delete their rows even where a grant would allow it.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
-  allowlist admits the runtime process lock for Bridge and Job Runner, the
+  allowlist admits the runtime process lock for Bridge and Job Runner; the
   runtime process liveness lock and the binding-discovery functions
   `tetral_job_runner_binding_upper()` and
   `tetral_job_runner_binding_page(text, text, text, text, integer)` for Job
-  Runner only and, for Auth only,
-  `tetral_auth_lookup_key`, `tetral_auth_lookup_token`,
-  `tetral_auth_lookup_grants`, `tetral_auth_lock_authority` and
-  `tetral_auth_prune_tokens`.
+  Runner only; for Auth only, `tetral_auth_lookup_key`,
+  `tetral_auth_lookup_token`, `tetral_auth_lookup_grants`,
+  `tetral_auth_lock_authority` and `tetral_auth_prune_tokens`; and, for Cleanup
+  only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`.
   Operator-selected role names and credentials are inputs to the installer and
   never belong in this repository.
 - `ApplyRoleContract` owns role attributes, public-privilege revocation, schema
@@ -66,6 +66,19 @@ security-definer bodies use a fixed search path and qualified tables; each holds
 `FOR SHARE` through the calling transaction without granting mutation. Public
 execution is revoked at creation and installation. Other serving roles cannot
 execute them or use them to acquire Workspace authority.
+
+Cleanup scheduling has one non-tenant table, `cleanup_schedule_cursor`: a
+singleton row, inserted by initialization, holding the elected scheduler's
+owner generation and its position in the current discovery cycle. Cleanup can
+only SELECT and UPDATE it; no serving role can insert or delete it, and no other
+role can read it. Cleanup's only cross-Workspace read is the migration-owned
+security-definer `public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)`,
+which has a fixed search path, qualified objects and revoked public execution.
+It sets `tetral.cleanup_discovery`, and the SELECT-only `cleanup_discovery`
+policy on `session_runtime_status` admits a row only when that flag is set and
+`current_user` is the table owner, so a serving role that sets the flag itself
+still sees only its own Workspace. The function returns Workspace, Session and
+due time, never Session content.
 
 `session_runtime_handoffs` and `session_runtime_handoff_threads` are internal
 Workspace-RLS receipts retained through Session lifetime. They preserve exact
@@ -181,6 +194,7 @@ These owner tests pin the serving paths repaired after role restriction:
 | job_runner | Pod-loss repair discovery across Workspaces | `EXECUTE` on the two binding-discovery functions only, with no `workspaces` grant and no direct cross-Workspace `SELECT`; the migration-owned functions set `tetral.runner_discovery`, and the `runner_discovery` SELECT policies on `session_runtime_bindings`, `session_runtime_status`, `sessions` and `session_runtime_inbox` also require the actual table owner, so a caller that sets the flag itself still sees only its Workspace; `services/job-runner/runtime_binding_discovery_test.go` uses the installed role for paging, argument rejection, flag spoofing, other workloads, search-path shadowing and ownership |
 | job_runner | Lost Runtime closes an open model request | `request_usage_details SELECT/INSERT` (explicit `ON CONFLICT` key target and audit append); `services/job-runner/runtime_pod_loss_role_test.go` uses the installed role for the fenced closeout, verifies one matching zero-token terminal audit, unchanged replay, and whole repair rollback when either privilege is individually revoked |
 | job_runner | Session deletion retires output-capture custody after Sandbox release | `sandbox_output_capture_operations SELECT/UPDATE/DELETE` (row lock, cleanup scheduling, terminal retirement), `sandbox_output_capture_blobs SELECT/DELETE` (scoped deletion), with no capture `INSERT`; `services/job-runner/runtime_output_capture_role_test.go` uses the installed role, preserves pending Queue work and foreign custody, and checks rollback when required grants are revoked |
+| cleanup | Global due-Session scheduling | `tetral_cleanup_due_sessions` EXECUTE, `cleanup_schedule_cursor SELECT/UPDATE`, `session_runtime_status SELECT/UPDATE` and Queue admission, with no `workspaces` read; `services/cleanup/scheduler_test.go` runs the installed role through discovery, claims and fenced cursor writes, and `discovery_boundary_test.go` checks its denied direct reads and cursor `INSERT`/`DELETE` and every other role's denied execution |
 
 The installer test independently inspects all live public tables, sequences and declared function capabilities,
 including undeclared ones, and verifies that reapplication repairs missing grants

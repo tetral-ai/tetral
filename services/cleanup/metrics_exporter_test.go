@@ -29,7 +29,7 @@ func TestOpenMetricsHTTPExporterPushesSchedulerSeriesWithoutScopeLabels(t *testi
 	defer server.Close()
 
 	metrics := NewSchedulerMetrics()
-	metrics.ObserveClaimDue(2, 25*time.Millisecond)
+	metrics.ObserveClaimDue(2, 25*time.Millisecond, nil)
 	samples, err := metrics.Collector()(context.Background())
 	if err != nil {
 		t.Fatalf("collect metrics: %v", err)

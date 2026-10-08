@@ -4,18 +4,21 @@
 
 `cleanup` (Go package `tetralcleanup`, binary `cmd/tetral-cleanup`)
 is the TTL scheduler for idle sessions. It runs as a Kubernetes CronJob:
-each tick enumerates every workspace, finds sessions that have sat idle
-past their cleanup deadline, and enqueues one `cleanup_session` queue job
-per due session. It **produces** cleanup work and never **executes** it —
+each tick runs one bounded scheduling phase that discovers sessions, across
+all workspaces, that have sat idle past their cleanup deadline, and enqueues
+one `cleanup_session` queue job per due session. It **produces** cleanup work
+and never **executes** it —
 releasing hot Runtime Pod state belongs to Job Runner (`services/job-runner`,
 `runtime_session_cleanup.go`). TTL cleanup does not stop, archive, or delete a
 Sandbox. Provider-native auto-stop, auto-archive, and auto-delete continue on
 their own lifecycle; a later Sandbox tool inspects and normalizes the provider
 resource before execution. Session deletion owns the durable Sandbox release
-request. Every process is a fresh
-CronJob invocation holding no state between ticks, and every read and
-write is scoped by `workspace_id` (a signed principal binding, with
-`workspace_id` in every primary key, isolates tenants).
+request. Every process is a fresh CronJob invocation; the only state carried
+between ticks is the durable scheduling cursor row described below.
+Discovery is the one cross-workspace read and goes through a Cleanup-only
+database function; every claim and enqueue is a transaction scoped by
+`workspace_id` (with `workspace_id` in every primary key and workspace RLS
+isolating tenants).
 
 The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
@@ -26,8 +29,8 @@ shutdown joins requests/work before closing the database and trust observer.
 
 ### Cleanup marker columns on `session_runtime_status`
 
-The service owns no tables; the schema lives in `internal/storage`
-(`postgresql_schema.go`). Cleanup state is four columns on
+The schema lives in `internal/storage` (`postgresql_schema.go` and
+`postgresql_cleanup_schema.go`). Per-session cleanup state is four columns on
 `session_runtime_status` plus the two binding columns; ownership of each
 transition is split between Bridge or Job Runner idle writes (arm), Job Runner
 (finalize/reschedule) and this scheduler (claim/enqueue).
@@ -53,19 +56,67 @@ then converges through the stale-job path and cannot target the Runtime. Sandbox
 auto-stop/auto-archive/auto-delete timing and the 30-day retention floor in
 `services/sandbox/config.go` are independent of this TTL.
 
-### Due-scan predicate (per workspace, per tick)
+### Scheduling cursor and election
 
-`dueCleanupSessionsTx` reads candidates without row locks, ordered by
-`cleanup_after ASC, session_id ASC`, bounded to a batch (default 100). The
-claim then takes each candidate's Session runtime arbitration lock and stamps
-the marker through a guarded UPDATE that repeats the predicate:
+The service owns one global maintenance row, `cleanup_schedule_cursor`. It
+holds no tenant data, so it has no workspace RLS; the Cleanup role can only
+SELECT and UPDATE it, and no other workload can read it. Fresh installation
+inserts its only row as `(true, 0, NULL, NULL, NULL)`; a missing row is an
+invariant error (`ErrScheduleCursorMissing`) that the scheduler never repairs.
+
+| Column | Meaning |
+|--------|---------|
+| `owner_generation` | incremented by each elected scheduler before it reads or changes the cycle; never reset and never wraps (overflow is an error) |
+| `cycle_cutoff` | the database clock when the current cycle started; only rows due at or before it belong to the cycle |
+| `after_cleanup_at` / `after_session_id` | the last checkpointed candidate key; both `NULL` before the first checkpoint of a cycle |
+
+A CHECK allows exactly three progress shapes: no cycle (all three `NULL`), a
+new cycle (cutoff only), or a positioned cycle (cutoff plus a complete,
+nonempty key).
+
+Only one process schedules at a time. The phase takes the session advisory
+lock `pg_try_advisory_lock(pg_catalog.hashtextextended('tetral.cleanup.scheduler', 0))`
+on a dedicated connection (`dbconnect.Client.TryWithSessionLock`); if another
+session holds it, the phase ends successfully without work. On that same
+connection it increments `owner_generation` and reads the cycle state in one
+statement, and that generation fences everything the phase writes:
+
+- every cycle start, checkpoint and end-of-cycle reset is an UPDATE with
+  `owner_generation = $owned`; zero affected rows means a newer owner took
+  over, and the phase stops with `ErrSchedulingOwnershipLost`;
+- before each candidate claim the phase rereads the generation on the
+  election connection; a different value stops it, and a failed read (the
+  election connection is gone) stops it too.
+
+The advisory lock excludes overlapping owners; the generation fences a
+replacement owner whose predecessor lost its connection without noticing.
+The predecessor may finish one already-started claim, which is idempotent, but
+it cannot checkpoint, reset or move back the new owner's cursor. Before
+returning, the phase unlocks explicitly; if unlock fails, the connection is
+closed instead of returning to the pool, because pgx connections keep session
+locks across pool reuse. A crashed process releases the lock with its
+connection.
+
+### Due predicate and discovery order
+
+A cycle starts by saving the database clock as `cycle_cutoff`. Each page is
+one short read-only transaction calling
+`public.tetral_cleanup_due_sessions(cycle_cutoff, after_cleanup_at, after_session_id, limit)`,
+which returns only `workspace_id`, `session_id` and `cleanup_after` of rows
+matching
 
 ```
 status = 'idle'
-AND cleanup_after <= now()
 AND cleanup_job_id IS NULL
 AND binding_id IS NOT NULL
+AND cleanup_after <= cycle_cutoff
+AND (cleanup_after, session_id) > (after_cleanup_at, after_session_id)
 ```
+
+in `(cleanup_after, session_id)` order across all workspaces. Session IDs are
+globally unique, so equal due times still have a total order. The function
+rejects a cutoff later than the database clock, a partly `NULL` or empty key
+and a limit outside 1..100 with SQLSTATE `22023`.
 
 Each predicate term is load-bearing. Job Runner finalize nulls **both**
 `binding_id` and `cleanup_after`: either alone unmatches the row, and
@@ -74,26 +125,67 @@ never re-enqueues a no-op job on every tick. The `binding_id IS NOT NULL`
 guard additionally keeps the scheduler from claiming a session whose
 binding is already gone.
 
-The per-tick scan is covered by a partial index in `internal/storage`
-(`postgresql_schema.go`, `idx_session_runtime_status_cleanup_due` on
-`session_runtime_status(workspace_id, cleanup_after, cleanup_job_id)
-WHERE status = 'idle' AND binding_id IS NOT NULL`). It mirrors this
-predicate term for term; any change to the predicate must move the index
-in lockstep or the scan loses coverage.
+Discovery is served by the global partial index
+`idx_session_runtime_status_cleanup_global_due` on
+`session_runtime_status(cleanup_after, session_id) WHERE status = 'idle' AND
+cleanup_job_id IS NULL AND binding_id IS NOT NULL` (`internal/storage`,
+`postgresql_cleanup_schema.go`). Its predicate repeats the due predicate term
+for term; any change to the predicate must move the index in lockstep or
+discovery loses its ordered index range. There is no workspace-table scan.
 
-### Tick flow
+The function is `SECURITY DEFINER`, owned by the migration role like its
+table, with `search_path = pg_catalog` and schema-qualified objects; PUBLIC
+execution is revoked and only Cleanup may execute it. It sets the
+transaction-local flag `tetral.cleanup_discovery`, and the SELECT-only
+`cleanup_discovery` policy on `session_runtime_status` requires that flag
+**and** `current_user` equal to the table owner, so Cleanup setting the flag
+itself gains no cross-workspace read.
+
+### Scheduling phase
+
+| Bound | Value |
+|-------|-------|
+| Phase budget | 45 s child of the process context |
+| Candidate attempts per phase | 1000 |
+| Page size | `min(TETRAL_CLEANUP_CLAIM_LIMIT, 100)` |
+| Cursor, election and page queries | 1 s each |
+| One candidate claim | 2 s |
 
 | Step | Actor | Effect |
 |------|-------|--------|
 | 1 | Bridge or Job Runner idle write | stamps `cleanup_after` when a reusable run finishes |
-| 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
-| 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
-| 4 | scheduler `queue.EnqueueBatchTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
-| 5 | Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
+| 2 | scheduler election | takes the advisory lock, increments `owner_generation`, resumes the persisted cycle or starts one at the database clock |
+| 3 | scheduler discovery | reads one page after the persisted key and closes the snapshot before any claim |
+| 4 | scheduler claim (`claim`, `markCleanupEnqueuedTx`) | in one workspace transaction: takes the Session's runtime arbitration lock, reads the database clock, mints a fresh `cleanup_job_id` and, through a guarded UPDATE that repeats the due predicate against `cycle_cutoff`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`, then writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted id, available at that database time |
+| 5 | scheduler checkpoint | in a separate short statement, records the candidate's discovery key, whether the claim succeeded, was stale or failed |
+| 6 | Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
 
-An error in one workspace aborts the rest of that tick; the next tick
-retries. Batch bound is per workspace, so a tick's total work scales with
-tenant count.
+The guarded UPDATE affecting no row means the candidate became stale; no job
+is written. The cycle cutoff only bounds eligibility: the marker and Queue
+timestamps come from the clock read after the arbitration lock, so new work is
+never backdated.
+
+A failed claim is counted, its key is still checkpointed, and the phase
+continues; the failures are returned together when the phase stops. A failure
+to checkpoint, discover or check the generation stops the phase without
+processing later keys. The phase also stops after 1000 attempts or when its
+own 45 s budget ends, leaving the cursor at the last checkpoint, so the next
+tick resumes behind it and a persistently failing prefix is crossed across
+ticks instead of being retried from the start. Reaching either limit alone is
+success; an ownership loss, cursor failure or failed claim stays an error even
+when the budget ends at the same time.
+
+Database failures are errors, so a phase with any failed claim makes the Cron
+process exit non-zero. With the CronJob's `restartPolicy: OnFailure` and
+`concurrencyPolicy: Forbid`, a persistently failing Session therefore makes the
+Jobs whose cycles reach it exit non-zero and restart with Kubernetes backoff,
+while the cursor still advances past that Session on every attempt. A crash between a claim and its
+checkpoint repeats that candidate, and the guarded UPDATE makes the repeat a
+no-op. A short page ends the cycle: the cursor is reset and no new cycle
+starts in the same tick. Rows that become due after the cutoff, or change
+behind the cursor, are picked up by the next cycle, so a failing Session is
+retried once per completed cycle rather than hot-looped. Work per tick is
+bounded by these limits regardless of tenant count.
 
 ### The tree fence (role-blind busy check)
 
@@ -135,33 +227,35 @@ idle fence (`cleanupHasNewerUnprocessedInputTx`).
 
 ## Seams
 
-### Workspace fan-out (`workspace_fanout.go`)
+### Scheduling phase (`scheduler.go`)
 
-`ClaimDueAcrossWorkspaces` is the orchestration boundary, wired to two
-consumer-side interfaces:
-
-- `WorkspaceLister.ListIDs(ctx) ([]workspace.ID, error)` — tenant discovery.
-- `CleanupClaimer.ClaimDue(ctx, ClaimDueRequest) ([]ClaimedCleanupJob, error)` — the per-workspace claim.
-
-Invariants a replacement must preserve: every discovered workspace is
-visited once per tick; each `ClaimDue` runs in its own transaction; an
-empty `workspace_id` is a `ValidationError`; a per-workspace error aborts
-the remaining fan-out (fail-closed, retry next tick). Conformance:
-`TestClaimDueAcrossWorkspacesVisitsEveryDiscoveredWorkspace`.
-
-### Due-scan and enqueue (`scheduler.go`)
-
-`Scheduler.ClaimDue` is the claim seam. Contract: it reads
-`session_runtime_status` for one workspace, and writes exactly two things — the
-cleanup marker columns and one `queue_jobs` row per claimed session via
-`queue.EnqueueBatchTx`. Invariants a replacement must preserve: the exact due
-predicate above; the marker stamp is re-guarded against the same predicate
-before enqueue (`markCleanupEnqueuedTx` returns `false` → skip, no job);
-the queue job is deduped by the minted `cleanup_job_id`; the batch is
-bounded, and each Session is claimed under its runtime arbitration lock. It
-never calls Runtime Pod, Bridge, Sandbox Service, or the sandbox provider, and
-never touches durable history (`session_threads`, `session_events`, `session_messages`).
-Conformance: `TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs`,
+`Scheduler.RunSchedulingPhase` is the claim seam. Contract: it derives its own
+45 s budget from the caller's context, releases its election before returning,
+reads `session_runtime_status` only through the discovery function and inside
+its claim transactions, and writes exactly three things — the cleanup marker
+columns, one `queue_jobs` row per claimed session via `queue.EnqueueTx`, and
+the fenced `cleanup_schedule_cursor` row. Invariants a replacement must
+preserve: the exact due predicate above; one claim transaction per Session,
+taken under its runtime arbitration lock and re-guarded against the same
+predicate before enqueue (`markCleanupEnqueuedTx` returns `false` → no job);
+the queue job is deduped by the minted `cleanup_job_id`; marker and job commit
+together; every cursor write carries the owned generation; every attempted key
+is checkpointed. It never calls Runtime Pod, Bridge, Sandbox Service, or the
+sandbox provider, and never touches durable history (`session_threads`,
+`session_events`, `session_messages`).
+Conformance: `TestSchedulingPhaseClaimsDueSessionsAcrossWorkspaces`,
+`TestSchedulingClaimStampsDatabaseTimeAfterSessionArbitration`,
+`TestSchedulingOwnershipLossFencesTheOldOwner`,
+`TestSchedulingReplacedOwnerMakesNoFurtherClaim`,
+`TestSchedulingReplacedOwnerCannotStartOrResetTheCycle`,
+`TestSchedulingPhaseDeadlineHidesNoOtherError`,
+`TestSchedulingCrossesAPersistentFailingPrefix`,
+`TestSchedulingStopBetweenClaimAndCheckpointRepeatsWithoutDuplicates`,
+`TestSchedulingClaimLimitAboveOneHundredYieldsPagesOfOneHundred`,
+`TestSchedulingGenerationOverflowIsAnError`,
+`TestSchedulingMissingCursorIsAnInvariantError`,
+`TestCleanupDiscoveryFunctionBoundary`,
+`TestCleanupDiscoveryUsesGlobalDueIndex`,
 `TestCleanupWorkloadStaysWithinSchedulerBoundary`.
 
 ### Execution boundary (Job Runner — `job-runner/runtime_session_cleanup.go`)
@@ -187,7 +281,8 @@ Conformance (`integration/runtime_session_cleanup_test.go`):
 
 ### Metrics export (`metrics.go`, `metrics_exporter.go`)
 
-`SchedulerMetrics` accumulates three OpenMetrics counters —
+`SchedulerMetrics` accumulates three OpenMetrics counters, each updated once
+per scheduling phase —
 `tetral_cleanup_claim_due_runs_total`, `tetral_cleanup_jobs_claimed_total`,
 `tetral_cleanup_claim_due_duration_ms_total` — exposed through
 `SchedulerMetrics.Collector()`. `MetricsExporter` /
@@ -202,11 +297,15 @@ export is off by default and the shipped `k8s/networkpolicy.yaml` (postgres
 ### Configuration (`config.go`)
 
 `ConfigFromEnv` reads three env vars: `TETRAL_CLEANUP_CLAIM_LIMIT`
-(positive integer, default 100), `TETRAL_CLEANUP_METRICS_EXPORT_URL`
+(positive integer, default 100; the size of each global discovery page, which
+the scheduler caps at 100 internally, not a per-workspace batch),
+`TETRAL_CLEANUP_METRICS_EXPORT_URL`
 (HTTP(S), no credentials, else startup error), and
 `TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT` (positive duration, default 2s).
-The tick schedule lives in `k8s/cronjob.yaml`; batch size is config; the
-TTL delay is `runtimecontrol.IdleCleanupDelay`. Invalid positive-integer / URL /
+The tick schedule lives in `k8s/cronjob.yaml` (every minute,
+`concurrencyPolicy: Forbid`); the page size is config; the phase limits are
+the internal constants above; the TTL delay is
+`runtimecontrol.IdleCleanupDelay`. Invalid positive-integer / URL /
 duration settings are startup errors (`workload.NewConfigError`).
 Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 
@@ -214,16 +313,17 @@ Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 
 | Suite | Proves |
 |-------|--------|
-| `scheduler_test.go` | the due predicate selects only due, bound, idle rows; markers stamped and one deduped job enqueued; the workload stays within its read/write boundary; metrics counters stay safe |
-| `workspace_fanout_test.go` | every discovered workspace is visited once per tick |
+| `scheduler_test.go` | with the installed Cleanup role: global discovery order across workspaces; markers stamped and one deduped job enqueued with database time read after arbitration; generation fencing of a replaced owner's checkpoint, cycle start, end-of-cycle reset and next claim; only the phase's own deadline counts as success; a 1000-candidate failing prefix crossed across ticks with pages of one and equal due times; a stop between claim and checkpoint repeated without duplicates; pages capped at 100; generation overflow and a missing cursor row as errors; the workload stays within its read/write boundary; metrics counters stay safe |
+| `discovery_boundary_test.go` | the discovery function's real-role pages and continuation boundaries, argument validation, denied direct and spoofed reads, other workloads' denied execution, search-path shadowing, cursor privileges and CHECK, owner-checked policy and catalog posture; the generic plan of both discovery statements reads the global due index under its Limit |
 | `metrics_exporter_test.go` | exported series carry no scope labels; config validation rejects a bad exporter endpoint |
 | `integration/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |
 
-If a PR changes the due predicate, the workspace fan-out, the marker
-writes, the enqueue shape, or the metrics/config surface in this folder,
-it updates the matching section here. A due-predicate change must also
-move the `idx_session_runtime_status_cleanup_due` partial index in
-`internal/storage` in lockstep so the scan stays covered. If it changes the tree fence,
+If a PR changes the due predicate, the scheduling phase or its cursor, the
+marker writes, the enqueue shape, or the metrics/config surface in this
+folder, it updates the matching section here. A due-predicate change must
+also move the discovery function and the
+`idx_session_runtime_status_cleanup_global_due` partial index in
+`internal/storage` in lockstep so discovery stays an ordered index range. If it changes the tree fence,
 reschedule, or finalize order, it updates the execution-boundary seam and
 its conformance list.
 
@@ -238,13 +338,13 @@ diagnostic close after listeners and business resources.
 
 The existing optional exporter also carries the additive
 `tetral_operation_duration_seconds` histogram with `service="cleanup"`.
-`claim_due` records the existing successful per-workspace claim boundary;
-`claim_due_across_workspaces` records the whole job's enumeration and claims,
-including error, cancellation and deadline failure. Workspace IDs never
-become labels. The three existing counters preserve their population and
-units. The full job is observed once before the final export; a later export
-failure is separate from claim failure, and a CronJob registry does not persist
-across invocations. Deployment must collect each invocation's export rather
+`claim_due` records each scheduling phase, including error, cancellation and
+deadline failure; a phase that finished with failed claims is an `error`, even
+when a claim failed on its own deadline. Workspace IDs never become labels. The three counters keep
+their units and count scheduling phases, committed claims and phase duration.
+The phase is observed once before the final export; a later export failure is
+separate from claim failure, and a CronJob registry does not persist across
+invocations. Deployment must collect each invocation's export rather
 than treating its reset counts as a resident counter.
 
 Fixed seconds buckets and replica percentile queries follow the

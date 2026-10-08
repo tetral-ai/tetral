@@ -195,7 +195,7 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 	if queueStatus != queue.StatusDeadLettered || attempts != 2 || errorKind != "cleanup_failed" || errorMessage != "runtime rejected operation" {
 		t.Fatalf("exhausted cleanup Queue state = %s/%d/%s/%s; want dead_lettered/2/cleanup_failed/runtime rejected operation", queueStatus, attempts, errorKind, errorMessage)
 	}
-	cleanupAfter := assertCleanupMarkersRearmed(t, admin, sessionID, true)
+	assertCleanupMarkersRearmed(t, admin, sessionID, true)
 	var bindings int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, sessionID,
@@ -211,20 +211,7 @@ func TestPostgreSQLCleanupExhaustionReleasesMarkerAndAllowsFreshSweep(t *testing
 		t.Fatalf("replay exhausted cleanup = %#v/%v; want settled duplicate", replayed, err)
 	}
 
-	scheduler := tetralcleanup.NewScheduler(dbconnect.NewClientForTesting(runtimeDB))
-	scheduler.Clock = func() time.Time { return cleanupAfter.Add(time.Second) }
-	nextID := 0
-	scheduler.IDStrategy = func(prefix string) string {
-		nextID++
-		return prefix + "next_" + time.Duration(nextID).String()
-	}
-	claimed, err := scheduler.ClaimDue(context.Background(), tetralcleanup.ClaimDueRequest{WorkspaceID: workspace.DefaultID, Limit: 1})
-	if err != nil {
-		t.Fatalf("claim cleanup successor: %v", err)
-	}
-	if len(claimed) != 1 || claimed[0].CleanupJobID == cleanupID || claimed[0].QueueJobID == queueJobID {
-		t.Fatalf("cleanup successor = %#v; want one fresh identity", claimed)
-	}
+	assertCleanupSuccessorClaimed(t, runtimeDB, admin, sessionID, cleanupID, queueJobID)
 }
 
 func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t *testing.T) {
@@ -272,7 +259,7 @@ func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t
 	if queueStatus != queue.StatusDeadLettered || attempts != 2 || errorKind != "invalid_runtime_response" {
 		t.Fatalf("exhausted invalid cleanup state = %s/%d/%s; want dead_lettered/2/invalid_runtime_response", queueStatus, attempts, errorKind)
 	}
-	cleanupAfter := assertCleanupMarkersRearmed(t, admin, sessionID, true)
+	assertCleanupMarkersRearmed(t, admin, sessionID, true)
 	if sender.calls.Load() != 2 {
 		t.Fatalf("invalid cleanup Runtime calls = %d; want 2 bounded attempts", sender.calls.Load())
 	}
@@ -285,16 +272,7 @@ func TestPostgreSQLCleanupInvalidResponseRetriesThenReleasesMarkerAtExhaustion(t
 		t.Fatalf("invalid cleanup host effect = %s/%v; want two calls and one idempotent effect", raw, err)
 	}
 
-	scheduler := tetralcleanup.NewScheduler(dbconnect.NewClientForTesting(runtimeDB))
-	scheduler.Clock = func() time.Time { return cleanupAfter.Add(time.Second) }
-	scheduler.IDStrategy = func(prefix string) string { return prefix + "next" }
-	claimed, err := scheduler.ClaimDue(context.Background(), tetralcleanup.ClaimDueRequest{WorkspaceID: workspace.DefaultID, Limit: 1})
-	if err != nil {
-		t.Fatalf("claim cleanup successor after invalid response exhaustion: %v", err)
-	}
-	if len(claimed) != 1 || claimed[0].CleanupJobID == cleanupID || claimed[0].QueueJobID == queueJobID {
-		t.Fatalf("invalid response cleanup successor = %#v; want one fresh identity", claimed)
-	}
+	assertCleanupSuccessorClaimed(t, runtimeDB, admin, sessionID, cleanupID, queueJobID)
 }
 
 func TestPostgreSQLCleanupExhaustionRollsBackQueueAndMarkerTogether(t *testing.T) {
@@ -643,6 +621,34 @@ func assertCleanupMarkersRearmed(t *testing.T, admin *sql.DB, sessionID string, 
 		t.Fatalf("cleanup markers were not released: %v/%v/%v", cleanupJobID, cleanupEnqueuedAt, cleanupClaimedAt)
 	}
 	return cleanupAfter.Time
+}
+
+// assertCleanupSuccessorClaimed lets the rearmed deadline pass and requires the
+// production scheduling phase to claim the Session again with a fresh cleanup
+// and Queue identity.
+func assertCleanupSuccessorClaimed(t *testing.T, runtimeDB, admin *sql.DB, sessionID, cleanupID, queueJobID string) {
+	t.Helper()
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_status SET cleanup_after = clock_timestamp() - interval '1 second' WHERE workspace_id='default' AND session_id=$1`, sessionID,
+	); err != nil {
+		t.Fatalf("make cleanup successor due: %v", err)
+	}
+	result, err := tetralcleanup.NewScheduler(dbconnect.NewClientForTesting(runtimeDB), 1).RunSchedulingPhase(context.Background())
+	if err != nil || result.Claimed != 1 {
+		t.Fatalf("claim cleanup successor = %+v/%v; want one claim", result, err)
+	}
+	var successorID, successorQueueJobID string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT s.cleanup_job_id, q.id
+		   FROM session_runtime_status s
+		   JOIN queue_jobs q ON q.workspace_id = s.workspace_id AND q.dedupe_key = 'cleanup_session:default:' || s.session_id || ':' || s.cleanup_job_id
+		  WHERE s.workspace_id='default' AND s.session_id=$1`, sessionID,
+	).Scan(&successorID, &successorQueueJobID); err != nil {
+		t.Fatalf("read cleanup successor: %v", err)
+	}
+	if successorID == cleanupID || successorQueueJobID == queueJobID {
+		t.Fatalf("cleanup successor = %s/%s; want a fresh identity", successorID, successorQueueJobID)
+	}
 }
 
 func assertCleanupMarkersClaimed(t *testing.T, admin *sql.DB, sessionID, cleanupID string) {

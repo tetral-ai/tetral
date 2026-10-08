@@ -123,12 +123,13 @@
     },
     "cleanup": {
       "tables": {
-        "workspaces": ["SELECT"],
         "session_runtime_status": ["SELECT", "UPDATE"],
+        "cleanup_schedule_cursor": ["SELECT", "UPDATE"],
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
-      }
+      },
+      "functions": ["tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)"]
     },
     "provider_gateway": {
       "tables": {

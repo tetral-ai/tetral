@@ -64,7 +64,8 @@
     "runtime_processes",
     "runtime_process_liveness",
     "auth_federation_rules",
-    "auth_identities"
+    "auth_identities",
+    "cleanup_schedule_cursor"
   ],
   "special_policies": [
     {
@@ -107,6 +108,13 @@
       "name": "transient_attachment_gc_select",
       "command": "SELECT",
       "using": "(current_setting('tetral.transient_attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_runtime_status",
+      "name": "cleanup_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_status'::regclass)::oid))))",
       "check": ""
     },
     {

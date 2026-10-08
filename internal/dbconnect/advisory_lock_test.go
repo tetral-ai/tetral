@@ -97,6 +97,46 @@ func TestTryWithAdvisoryLockUnlockIgnoresRequestCancellationAfterSuccessfulCallb
 	}
 }
 
+func TestTryWithSessionLockClosesConnectionWhenUnlockFails(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		unlockErr error
+		closes    int
+		opens     int
+	}{
+		{name: "unlocked connection returns to the pool", closes: 0, opens: 1},
+		{name: "failed unlock closes the physical connection", unlockErr: errors.New("unlock failed"), closes: 1, opens: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newAdvisoryLockFakeState()
+			state.tryLockResult = true
+			state.sessionUnlockErr = test.unlockErr
+			db := openAdvisoryLockFakeDB(t, state)
+			db.SetMaxIdleConns(1)
+			client := NewClientForTesting(db)
+			called := false
+
+			locked, err := client.TryWithSessionLock(context.Background(), "cleanup.schedule_election", "tetral.cleanup.scheduler", func(*SessionLockConn) error {
+				called = true
+				return nil
+			})
+			if !locked || !called || !errors.Is(err, test.unlockErr) || (test.unlockErr == nil) != (err == nil) {
+				t.Fatalf("locked/called/err = %t/%t/%v; want true/true/%v", locked, called, err, test.unlockErr)
+			}
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.sessionUnlockCalls != 1 || state.closes != test.closes || state.opens != test.opens {
+				t.Fatalf("unlock/closes/opens = %d/%d/%d; want 1/%d/%d", state.sessionUnlockCalls, state.closes, state.opens, test.closes, test.opens)
+			}
+		})
+	}
+}
+
 const advisoryLockFakeDriverName = "tetral_advisory_lock_fake"
 
 var advisoryLockFakeDriverOnce sync.Once
@@ -109,6 +149,10 @@ type advisoryLockFakeState struct {
 	tryLockResult            bool
 	unlockSawCanceledContext bool
 	unlockErr                error
+	sessionUnlockCalls       int
+	sessionUnlockErr         error
+	opens                    int
+	closes                   int
 }
 
 func newAdvisoryLockFakeState() *advisoryLockFakeState {
@@ -165,6 +209,9 @@ func (advisoryLockFakeDriver) Open(name string) (driver.Conn, error) {
 	if state == nil {
 		return nil, errors.New("missing fake state")
 	}
+	state.mu.Lock()
+	state.opens++
+	state.mu.Unlock()
 	return advisoryLockFakeConn{state: state}, nil
 }
 
@@ -177,6 +224,9 @@ func (c advisoryLockFakeConn) Prepare(string) (driver.Stmt, error) {
 }
 
 func (c advisoryLockFakeConn) Close() error {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.state.closes++
 	return nil
 }
 
@@ -206,9 +256,16 @@ func (c advisoryLockFakeConn) ExecContext(ctx context.Context, query string, _ [
 	}
 }
 
-func (c advisoryLockFakeConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+func (c advisoryLockFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.state.mu.Lock()
 	defer c.state.mu.Unlock()
+	if query == "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0))" {
+		c.state.sessionUnlockCalls++
+		if c.state.sessionUnlockErr != nil {
+			return nil, c.state.sessionUnlockErr
+		}
+		return &advisoryLockFakeRows{values: []driver.Value{true}}, nil
+	}
 	c.state.tryLockCalls++
 	return &advisoryLockFakeRows{values: []driver.Value{c.state.tryLockResult}}, nil
 }

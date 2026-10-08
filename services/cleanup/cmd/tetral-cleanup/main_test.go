@@ -14,11 +14,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
-	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
-func TestCleanupSchemaBehindStopsBeforeWorkspaceScan(t *testing.T) {
+func TestCleanupSchemaBehindStopsBeforeScheduling(t *testing.T) {
 	runtimeDB := storagetest.NewPostgreSQLDB(t)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	previousOpen, previousVerify := openDatabase, verifySchema
@@ -60,7 +59,7 @@ func TestCleanupCommandSuccessLogUsesSharedOperationFields(t *testing.T) {
 	var buffer bytes.Buffer
 	logger := workload.NewLogger(&buffer, tetralcleanup.ServiceName, "test", "unit")
 
-	logCleanupClaimDue(logger, workspace.ID("default"), 2, 10, 25*time.Millisecond)
+	logCleanupClaimDue(logger, tetralcleanup.SchedulingResult{Elected: true, Attempted: 3, Claimed: 2}, nil, 10, 25*time.Millisecond)
 
 	var fields map[string]any
 	if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
@@ -74,9 +73,11 @@ func TestCleanupCommandSuccessLogUsesSharedOperationFields(t *testing.T) {
 		"operation":              "cleanup.claim_due",
 		"event.kind":             "cleanup.claim_due.completed",
 		"component":              tetralcleanup.ServiceName,
-		"workspace.id":           "default",
+		"outcome":                "completed",
 		"duration.ms":            float64(25),
+		"candidate.count":        float64(3),
 		"cleanup.jobs.claimed":   float64(2),
+		"failed.count":           float64(0),
 		"cleanup.claim.limit":    float64(10),
 	}
 	for key, value := range want {
@@ -84,7 +85,7 @@ func TestCleanupCommandSuccessLogUsesSharedOperationFields(t *testing.T) {
 			t.Fatalf("field %s = %#v; want %#v in %#v", key, fields[key], value, fields)
 		}
 	}
-	for _, forbidden := range []string{"session.id", "thread.id", "job.id", "cleanup.id", "error.message", "secret"} {
+	for _, forbidden := range []string{"workspace.id", "session.id", "thread.id", "job.id", "cleanup.id", "error.message", "secret"} {
 		if _, ok := fields[forbidden]; ok {
 			t.Fatalf("success log included forbidden field %s: %#v", forbidden, fields)
 		}
@@ -93,7 +94,7 @@ func TestCleanupCommandSuccessLogUsesSharedOperationFields(t *testing.T) {
 
 func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 	metrics := tetralcleanup.NewSchedulerMetrics()
-	metrics.ObserveClaimDue(3, 40*time.Millisecond)
+	metrics.ObserveClaimDue(3, 40*time.Millisecond, nil)
 	exporter := &recordingMetricsExporter{}
 
 	exportCleanupMetrics(context.Background(), nil, exporter, metrics, time.Second)
@@ -119,7 +120,7 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 
 func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 	metrics := tetralcleanup.NewSchedulerMetrics()
-	metrics.ObserveClaimDue(1, time.Millisecond)
+	metrics.ObserveClaimDue(1, time.Millisecond, nil)
 	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("hostile exporter detail")}
 	var buffer bytes.Buffer
 	logger := workload.NewLogger(&buffer, tetralcleanup.ServiceName, "test", "unit")

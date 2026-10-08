@@ -949,6 +949,7 @@ func cloneSchemaGrantStatements(roleName string) []string {
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lookup_grants(text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lookup_grants(text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lock_authority(text,text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lock_authority(text,text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_prune_tokens(integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_prune_tokens(integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
 	}
 }
 

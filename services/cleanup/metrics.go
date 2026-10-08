@@ -2,6 +2,7 @@ package tetralcleanup
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -17,14 +18,16 @@ type SchedulerMetrics struct {
 }
 
 func NewSchedulerMetrics() *SchedulerMetrics {
-	return &SchedulerMetrics{Operations: workload.NewOperationMetrics("cleanup", "claim_due", "claim_due_across_workspaces")}
+	return &SchedulerMetrics{Operations: workload.NewOperationMetrics("cleanup", "claim_due")}
 }
 
-func (m *SchedulerMetrics) ObserveClaimDue(claimedJobs int, duration time.Duration) {
+// ObserveClaimDue records one scheduling phase: its outcome and duration in the
+// operation histogram, and its committed claims and duration in the counters.
+func (m *SchedulerMetrics) ObserveClaimDue(claimedJobs int, duration time.Duration, err error) {
 	if m == nil {
 		return
 	}
-	m.Operations.Observe("claim_due", "success", duration)
+	m.Operations.Observe("claim_due", schedulingOutcome(err), duration)
 	if claimedJobs < 0 {
 		claimedJobs = 0
 	}
@@ -69,5 +72,24 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 		}
 		observations, _ := m.Operations.Collector()(context.Background())
 		return append(samples, observations...), nil
+	}
+}
+
+// schedulingOutcome classifies the phase itself. A phase that finished with
+// failed candidate claims is an error, even when a claim failed on its own
+// deadline.
+func schedulingOutcome(err error) string {
+	var claimFailures *claimFailuresError
+	switch {
+	case err == nil:
+		return "success"
+	case errors.As(err, &claimFailures):
+		return "error"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		return "error"
 	}
 }

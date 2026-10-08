@@ -2422,6 +2422,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"auth_federation_rules",
 		"auth_identities",
 		"auth_workspace_grants",
+		"cleanup_schedule_cursor",
 		"credentials",
 		"environment_artifacts",
 		"environments",

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -343,6 +344,70 @@ func (c *Client) TryWithAdvisoryLock(ctx context.Context, operation string, cate
 	}
 	unlocked = true
 	return true, nil
+}
+
+// SessionLockConn is the dedicated connection that holds a session advisory
+// lock for the duration of TryWithSessionLock's callback.
+type SessionLockConn struct {
+	conn      *sql.Conn
+	client    *Client
+	operation string
+}
+
+// QueryRow runs one statement on the lock-holding connection.
+func (c *SessionLockConn) QueryRow(ctx context.Context, query string, args ...any) *Row {
+	return &Row{row: c.conn.QueryRowContext(ctx, query, args...), client: c.client, op: c.operation}
+}
+
+// sessionLockReleaseTimeout bounds the explicit unlock, which still runs after
+// the caller's context has ended.
+const sessionLockReleaseTimeout = time.Second
+
+// TryWithSessionLock tries pg_try_advisory_lock(pg_catalog.hashtextextended(name,0))
+// on one dedicated pooled connection and, when it is acquired, runs fn with that
+// connection. It returns false without running fn when another session holds the
+// lock. database/sql reuses pgx connections without resetting session state, so
+// the lock is released explicitly; when unlock fails or does not confirm the
+// lock, the physical connection is closed instead of returning to the pool.
+func (c *Client) TryWithSessionLock(ctx context.Context, operation string, name string, fn func(*SessionLockConn) error) (bool, error) {
+	if err := c.validateOperation(operation); err != nil {
+		return false, err
+	}
+	conn, err := c.db.Conn(ctx)
+	if err != nil {
+		return false, c.classifyRuntimeError(operation, err)
+	}
+	var locked bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0))", name).Scan(&locked); err != nil {
+		// A failed try-lock has an unknown outcome; never pool that session.
+		discardConn(conn)
+		return false, c.classifyRuntimeError(operation, err)
+	}
+	if !locked {
+		_ = conn.Close()
+		return false, nil
+	}
+	fnErr := fn(&SessionLockConn{conn: conn, client: c, operation: operation})
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionLockReleaseTimeout)
+	defer cancel()
+	var unlocked bool
+	unlockErr := conn.QueryRowContext(releaseCtx, "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0))", name).Scan(&unlocked)
+	if unlockErr != nil || !unlocked {
+		discardConn(conn)
+		if unlockErr == nil {
+			unlockErr = errors.New("dbconnect: session advisory lock was not held at release")
+		}
+		return true, errors.Join(fnErr, c.classifyRuntimeError(operation, unlockErr))
+	}
+	_ = conn.Close()
+	return true, fnErr
+}
+
+// discardConn closes the physical connection: returning driver.ErrBadConn from
+// Raw makes database/sql drop the connection rather than return it to the pool.
+func discardConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
 }
 
 func (c *Client) WithWorkspaceTx(ctx context.Context, workspaceID string, operation string, fn func(*Tx) error) error {

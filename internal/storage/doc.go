@@ -50,8 +50,10 @@
 //     usage-generation and terminal-grant triggers, and SECURITY DEFINER
 //     functions with a fixed search_path owned by the migration role: the
 //     lock-only runtime process functions, the Job Runner binding-discovery
-//     upper and page functions, and the Auth credential lookup, authority
-//     lock and token prune functions. It stays portable across
+//     upper and page functions, the Auth credential lookup, authority lock
+//     and token prune functions, and the Cleanup due-Session discovery
+//     function. The baseline also inserts the Cleanup scheduling cursor's
+//     singleton row. It stays portable across
 //     self-managed PostgreSQL and managed providers.
 //     The complete database preparation command additionally requires a
 //     PostgreSQL superuser for its current role installer; managed-provider
@@ -62,6 +64,7 @@
 //   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
+//   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
@@ -94,8 +97,10 @@
 //	session_pending_tool_uses                              Bridge (declaration insert, settlement, interrupt); Job Runner   Bridge LoadContext cold-resume,
 //	                                                        settlement through internal/runtimecontrol; api approval         Runtime pending ToolJob, api approval
 //	                                                        decision (pending -> resolving)                                  lookup
-//	session_runtime_status                                 Bridge, Job Runner (delivery, pod-loss repair, Session           cleanup scheduler, Job Runner, repair
-//	                                                        cleanup), the cleanup scheduler, and session-create seeding
+//	session_runtime_status                                 Bridge, Job Runner (delivery, pod-loss repair, Session           cleanup scheduler (discovery function
+//	                                                        cleanup), the cleanup scheduler, and session-create seeding      and claims), Job Runner, repair
+//	cleanup_schedule_cursor                                cleanup scheduler (generation acquisition, fenced cycle          cleanup scheduler
+//	                                                        start, checkpoint and reset); initialization inserts the row
 //	session_runtime_bindings                               Job Runner (placement, delivery, pod-loss repair, Session        Job Runner delivery/reconcile/repair,
 //	                                                        cleanup); Bridge and Job Runner termination closeout and         Bridge receipt fences, Sandbox Service
 //	                                                        Bridge handoff release through internal/runtimecontrol           notification custody and prefix GC
@@ -137,7 +142,8 @@
 //	                                                        through the prune function; tetral-auth-policy revocation       derived-key issuance
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
-// postgresql_runtime_schema.go and postgresql_auth_schema.go; the writer/reader
+// postgresql_runtime_schema.go, postgresql_auth_schema.go and
+// postgresql_cleanup_schema.go; the writer/reader
 // services under services/bridge, services/job-runner, services/api,
 // services/sandbox, services/queue, services/cleanup, services/event-stream,
 // services/git-proxy, services/gateway and services/auth; the shared writers in
