@@ -58,7 +58,7 @@
 //
 // UPDATE-WITH:
 //   - postgresql_schema.go (version-one table/index/policy/trigger DDL)
-//   - postgresql_runtime_schema.go (runtime process and handoff tables, lock-only function)
+//   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
@@ -95,6 +95,8 @@
 //	runtime_process_pods / runtime_processes               Bridge process registration, report and promotion                Bridge receipt fences; Job Runner
 //	                                                                                                                         placement and delivery fences (reads
 //	                                                                                                                         and the lock-only function)
+//	runtime_process_liveness                               Bridge registration (NULL row) and every successful report       Job Runner final loss classification
+//	                                                                                                                         (liveness lock-only function)
 //	session_runtime_handoffs / _threads                    Bridge handoff release                                           Bridge replay; Bridge and Job Runner
 //	                                                                                                                         recovery source checks
 //	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge lifecycle and exact pod-loss custody

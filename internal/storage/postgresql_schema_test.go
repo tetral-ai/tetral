@@ -2427,7 +2427,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"queue_jobs",
 		"queue_partition_counters",
 		"request_usage_details",
-		"runtime_process_pods", "runtime_processes",
+		"runtime_process_liveness", "runtime_process_pods", "runtime_processes",
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",

@@ -99,20 +99,54 @@ is logged as `bridge.execution_result_listener.stopped`. Normal shutdown is quie
 
 `RegisterRuntimeProcess` authenticates the Pod and registers one stable boot ID
 as a non-current starting candidate. Bridge allocates its registration order and
-opaque receipt with the database clock; caller timestamps are not trusted.
-Exact registration retry returns the same order and receipt. Only the matching
-receipt-bearing accepting report promotes a candidate. Promotion compares the
-last promoted order, retires the previous process atomically, and schedules old
-binding reconciliation after commit. An unseen or abandoned candidate cannot
-write, receive placement, or displace the current process.
+opaque receipt with the database clock; caller timestamps are not trusted. The
+same transaction creates the process's liveness row with no report yet.
+Exact registration retry returns the same order and receipt; a retry whose
+liveness row is missing fails as an internal invariant error instead of
+creating one. Only the matching receipt-bearing accepting report promotes a
+candidate. Promotion compares the last promoted order, retires the previous
+process atomically, and schedules old binding reconciliation after commit. An
+unseen or abandoned candidate cannot write, receive placement, or displace the
+current process.
+
+`ReportRuntimeProcess` keeps lifecycle and liveness apart. Every report first
+reads the process row without locking it in one READ COMMITTED transaction: a
+missing or retired process is stale and a different receipt is denied. An
+unchanged report of the current process (same phase) then updates only its
+`runtime_process_liveness` row, conditioned on the process still being current,
+unretired, in that phase and with that receipt, and commits. It never takes the
+Pod or process locks, so it neither waits for Session mutations holding the
+process `FOR SHARE` nor delays promotion. Its acknowledgment reflects the
+process row as that UPDATE statement saw it: a promotion or drain committing
+meanwhile can supersede the reply, which is only an observation acknowledgment
+and grants no mutation authority, placement or custody. Everything else
+(promotion, phase change, abandonment, a draining process asking to accept,
+or an unchanged report whose UPDATE matched no row) rolls back and runs in a
+new transaction that locks the Pod row, then the old current and candidate
+process rows in registration order, applies the existing promotion rules and
+records the report on the candidate's liveness row; all of it commits together.
+A missing liveness row fails that transaction as an invariant error. Neither
+path locks a Session.
 
 Every Runtime scope carries `runtime_process_id` alongside binding ID,
 generation and target Pod UID. New mutations hold Session arbitration, the exact
 binding row, then the matching current process shared lock until commit or
-rollback. Promotion takes the Pod lock and process update locks without taking a
-Session lock. Ordinary receipt replay may bypass process-current after retirement
-only while its authenticated workspace, Session, Thread and exact binding remain
-unchanged. It returns the stored identity/result without touching timestamps,
+rollback; they never read liveness. One receipt-scope verification takes those
+locks once per transaction and returns a transaction-local proof of the locked
+binding and process facts. Receipt replay may use the proof even after the
+process retired; every new mutation first checks on that same proof that the
+process is current, unretired and not starting, without repeating binding or
+process SQL. The proof is passed down the RPC's own transaction closure only.
+The Sandbox-serving entrypoints (`CommitTaskNotificationResult`, background
+command acceptance and cancellation, FinishIdle output-capture adoption,
+`AcceptSandboxExecution` and `RunMemory`) still lock the binding and process a
+second time before new work; `CommitRuntimeTermination`, whose terminal
+receipt replays without a binding, locks them once through the standalone
+current-process check. The lock order is Session, binding, process `FOR SHARE`
+for mutations; Pod, process rows `FOR UPDATE`, liveness for lifecycle reports;
+liveness alone for unchanged reports. Ordinary receipt replay may bypass
+process-current after retirement only while its authenticated workspace,
+Session, Thread and exact binding remain unchanged. It returns the stored identity/result without touching timestamps,
 claims or projections. Background operation and memory projection waiters bind
 the exact scope proof to the sensitive receipt SELECT itself, so a binding cut
 between an earlier validation and a later poll cannot disclose stored results.
@@ -616,7 +650,11 @@ never deletes durable history.
 ## Testing guide
 
 `TestPostgreSQLRuntimeProcessLiveness` and the registration/report response-loss
-cases exercise real process arbitration. `TestPostgreSQLRuntimeExecutorReceiptRetirement`
+cases exercise real process arbitration. Held-mutation, overlapping-report and
+missing-liveness cases in `runtime_process_test.go` pin the separate liveness
+path, and `TestPostgreSQLRuntimeScopeTransactionsLockBindingAndProcessOnce`
+counts one binding and process lock per verified transaction.
+`TestPostgreSQLRuntimeExecutorReceiptRetirement`
 uses authenticated TCP Bridge instances, a same-Pod promotion and complete tenant
 table snapshots to prove stored executor replay has no durable effects, then
 checks ordinary denial after unbind. Integration replica placement, Runtime
@@ -651,7 +689,7 @@ packages receive explicit data or the caller's existing transaction; they do
 not read process environment, open a database pool, own a Queue consumer or
 call a service business package. The process registry behind
 `RegisterRuntimeProcess` and `ReportRuntimeProcess` is the exception: it
-receives the Bridge client and owns one short Pod/process transaction, because
-promotion must never run inside a Session transaction. Bridge remains the Runtime RPC owner and
+receives the Bridge client and owns its own short registry transactions,
+because promotion must never run inside a Session transaction. Bridge remains the Runtime RPC owner and
 Job Runner remains the reconciliation owner. Mixed owner tests live in
 `integration/` and call each owner's actual production entry points.

@@ -2,6 +2,7 @@ package jobrunner
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -33,9 +34,13 @@ func (e runtimePodConfirmationRequired) Error() string {
 }
 
 // One decision table governs ordinary delivery, cleanup and proactive census.
-// It consumes durable process facts under the owning transaction's shared lock;
-// confirming external observations are produced before Session arbitration.
-func classifyRuntimeProcess(ready bool, visibility kubernetes.BindingVisibilityState, process runtimecontrol.Process, found bool, replacement bool, now time.Time, freshness time.Duration, observation *runtimePodObservation) runtimeProcessDecision {
+// It consumes durable process facts under the owning transaction's shared lock
+// and, for a current process, the report time read under the liveness row's
+// shared lock; confirming external observations are produced before Session
+// arbitration. A retired process is classified from committed replacement
+// facts alone. A current process without a recorded report is an invariant
+// failure that is never evidence of loss.
+func classifyRuntimeProcess(ready bool, visibility kubernetes.BindingVisibilityState, process runtimecontrol.Process, found bool, replacement bool, reportedAt sql.NullTime, now time.Time, freshness time.Duration, observation *runtimePodObservation) runtimeProcessDecision {
 	if !ready || !found {
 		return runtimeProcessUnavailable
 	}
@@ -43,6 +48,9 @@ func classifyRuntimeProcess(ready bool, visibility kubernetes.BindingVisibilityS
 		if replacement {
 			return runtimeProcessLoss
 		}
+		return runtimeProcessUnavailable
+	}
+	if !reportedAt.Valid {
 		return runtimeProcessUnavailable
 	}
 	if process.Phase == runtimecontrol.ProcessStarting {
@@ -57,7 +65,7 @@ func classifyRuntimeProcess(ready bool, visibility kubernetes.BindingVisibilityS
 	if observation != nil && observation.Reusable {
 		return runtimeProcessUnavailable
 	}
-	fresh := process.ReportedAt.Valid && now.Before(process.ReportedAt.Time.Add(freshness))
+	fresh := now.Before(reportedAt.Time.Add(freshness))
 	if observation == nil {
 		return runtimeProcessConfirm
 	}
@@ -103,11 +111,13 @@ func (r KubernetesRuntimeTargetResolver) runtimeProcessDecisionTx(ctx context.Co
 	if !exists {
 		return runtimeProcessUnavailable, nil
 	}
-	process, err := runtimecontrol.LockProcessTx(ctx, tx, runtimecontrol.ProcessIdentity{Namespace: binding.Namespace, PodUID: binding.PodUID, ID: binding.RuntimeProcessID})
+	identity := runtimecontrol.ProcessIdentity{Namespace: binding.Namespace, PodUID: binding.PodUID, ID: binding.RuntimeProcessID}
+	process, err := runtimecontrol.LockProcessTx(ctx, tx, identity)
 	if err != nil {
 		return "", err
 	}
 	var replacement bool
+	var reportedAt sql.NullTime
 	if !process.Current || process.RetiredAt.Valid {
 		// A committed promotion permanently supersedes this process. Subsequent
 		// draining or candidate registration cannot undo that fact; accepting is
@@ -115,7 +125,16 @@ func (r KubernetesRuntimeTargetResolver) runtimeProcessDecisionTx(ctx context.Co
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_process_pods WHERE namespace=$1 AND pod_uid=$2 AND last_promoted_order>$3)`, binding.Namespace, binding.PodUID, process.RegistrationOrder).Scan(&replacement); err != nil {
 			return "", err
 		}
+	} else {
+		// Session -> binding -> process SHARE -> liveness SHARE. A report already
+		// holding the liveness row commits or rolls back before this returns;
+		// a later report waits until this decision commits.
+		reportedAt, err = runtimecontrol.LockProcessLivenessTx(ctx, tx, identity)
+		if err != nil {
+			return "", err
+		}
 	}
+	// Database time is read after any liveness lock wait, in its own statement.
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return "", err
@@ -132,7 +151,7 @@ func (r KubernetesRuntimeTargetResolver) runtimeProcessDecisionTx(ctx context.Co
 		observation = &fact
 	}
 	visibility := snapshot.VisibilityFor(kubernetes.BoundRuntimePod{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, PodIP: binding.PodIP})
-	decision := classifyRuntimeProcess(snapshot.Ready, visibility, process, true, replacement, now, policy.Freshness, observation)
+	decision := classifyRuntimeProcess(snapshot.Ready, visibility, process, true, replacement, reportedAt, now, policy.Freshness, observation)
 	if decision == runtimeProcessConfirm {
 		return decision, runtimePodConfirmationRequired{binding: binding}
 	}

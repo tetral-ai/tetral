@@ -549,7 +549,7 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/services/job-runner",
-      "name": "TestPostgreSQLRuntimeProcessVisibilityRechecksReport",
+      "name": "TestPostgreSQLRuntimeFinalLossClassificationOrdersWithLivenessReports",
       "dependencies": ["postgresql"]
     },
     {

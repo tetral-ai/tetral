@@ -19,15 +19,29 @@ const createPostgreSQLRuntimeProcessesTable = `CREATE TABLE runtime_processes (
  phase TEXT NOT NULL DEFAULT 'starting' CHECK (phase IN ('starting', 'accepting', 'draining')),
  is_current BOOLEAN NOT NULL DEFAULT FALSE,
  registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
- reported_at TIMESTAMPTZ,
  retired_at TIMESTAMPTZ,
  PRIMARY KEY (namespace, pod_uid, runtime_process_id),
  UNIQUE (namespace, pod_uid, registration_order),
  FOREIGN KEY (namespace, pod_uid) REFERENCES runtime_process_pods(namespace, pod_uid),
- CHECK (NOT is_current OR (phase IN ('accepting', 'draining') AND reported_at IS NOT NULL AND retired_at IS NULL))
+ CHECK (NOT is_current OR (phase IN ('accepting', 'draining') AND retired_at IS NULL))
 )`
 
 const createPostgreSQLRuntimeProcessesCurrentIndex = `CREATE UNIQUE INDEX idx_runtime_processes_current ON runtime_processes(namespace, pod_uid) WHERE is_current`
+
+// Liveness is separate from lifecycle so an unchanged report updates only this
+// row and never waits for the process row shared locks held by Session
+// mutations. Registration creates the row with a NULL report; every successful
+// report records database time. A retired process keeps its last report.
+const createPostgreSQLRuntimeProcessLivenessTable = `CREATE TABLE public.runtime_process_liveness (
+ namespace TEXT NOT NULL,
+ pod_uid TEXT NOT NULL,
+ runtime_process_id TEXT NOT NULL,
+ reported_at TIMESTAMPTZ,
+ PRIMARY KEY (namespace, pod_uid, runtime_process_id),
+ FOREIGN KEY (namespace, pod_uid, runtime_process_id)
+   REFERENCES public.runtime_processes(namespace, pod_uid, runtime_process_id)
+   ON DELETE CASCADE
+)`
 
 const createPostgreSQLSessionRuntimeHandoffsTable = `CREATE TABLE session_runtime_handoffs (
  workspace_id TEXT NOT NULL,
@@ -72,3 +86,15 @@ AS $$ SELECT process.* FROM public.runtime_processes process
       FOR SHARE OF process $$`
 
 const revokePostgreSQLRuntimeProcessLockPublic = `REVOKE ALL ON FUNCTION public.tetral_lock_runtime_process(text, text, text) FROM PUBLIC`
+
+// Job Runner's final loss classification holds the liveness row FOR SHARE, so a
+// concurrent report either finishes before the decision or waits for it. The
+// same lock-only definer pattern grants the Runner no liveness mutation.
+const createPostgreSQLRuntimeProcessLivenessLockFunction = `CREATE FUNCTION public.tetral_lock_runtime_process_liveness(text, text, text)
+RETURNS SETOF public.runtime_process_liveness
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
+AS $$ SELECT live.* FROM public.runtime_process_liveness live
+      WHERE live.namespace = $1 AND live.pod_uid = $2 AND live.runtime_process_id = $3
+      FOR SHARE OF live $$`
+
+const revokePostgreSQLRuntimeProcessLivenessLockPublic = `REVOKE ALL ON FUNCTION public.tetral_lock_runtime_process_liveness(text, text, text) FROM PUBLIC`

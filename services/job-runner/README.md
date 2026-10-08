@@ -61,9 +61,13 @@ credentials.
 The binding names the Pod UID and the registered `runtime_process_id` for
 one process boot. Session arbitration, the exact binding row and a shared
 process-row lock fence each mutation. Promotion holds the matching process row
-until earlier admitted mutations commit or roll back. The installer grants
-Runner SELECT on the global process tables and EXECUTE on the fixed lock-only
-function; Bridge owns registration and promotion writes.
+until earlier admitted mutations commit or roll back. Report time lives apart
+from lifecycle, in `runtime_process_liveness`, which Bridge writes at
+registration (no report yet) and on every successful report; an unchanged
+report updates only that row. The installer grants Runner SELECT on the global
+process tables and EXECUTE on the two fixed lock-only functions, one for the
+process row and one for its liveness row; Bridge owns registration, promotion
+and liveness writes.
 
 Delivery, placement, cleanup and proactive loss repair share one process-aware
 classifier. Every delivery store, in production and in tests, is built with a
@@ -88,6 +92,15 @@ A cached deletion timestamp, IP change or missing cache entry alone cannot
 prove loss. Confirming GET runs outside Session transactions with a two-second
 bound. The subsequent transaction rechecks exact binding/process and heartbeat;
 a newer report or release wins over an earlier census observation.
+For a current process the final decision takes Session, binding and process
+`FOR SHARE`, then the liveness row `FOR SHARE`, and reads database time in a
+separate statement after that lock. A report holding the liveness row
+therefore commits (fresh, no loss) or rolls back (the old time decides) before
+the decision, and a report arriving later waits until the decision commits. A
+current process whose liveness row is missing or has no report yet is
+unavailable: it is never reused and never proven lost. A retired process is
+classified from the committed promotion watermark alone; its last report,
+including one acknowledged while promotion committed, does not block repair.
 The durable promotion watermark proves retirement independently of the new
 process's current admission phase. Registering or abandoning a candidate does
 not advance that watermark and cannot displace the current owner.

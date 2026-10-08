@@ -114,6 +114,7 @@
         "tetral_schema_migrations": ["SELECT"],
         "runtime_process_pods": ["SELECT", "INSERT", "UPDATE"],
         "runtime_processes": ["SELECT", "INSERT", "UPDATE"],
+        "runtime_process_liveness": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_handoffs": ["SELECT", "INSERT"],
         "session_runtime_handoff_threads": ["SELECT", "INSERT"]
       },
@@ -202,7 +203,7 @@
     },
     "job_runner": {
       "sequences": ["session_runtime_binding_generation_seq"],
-      "functions": ["tetral_lock_runtime_process(text, text, text)"],
+      "functions": ["tetral_lock_runtime_process(text, text, text)", "tetral_lock_runtime_process_liveness(text, text, text)"],
       "tables": {
         "workspaces": ["SELECT"],
         "sessions": ["SELECT", "UPDATE"],
@@ -232,6 +233,7 @@
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
         "runtime_process_pods": ["SELECT"],
         "runtime_processes": ["SELECT"],
+        "runtime_process_liveness": ["SELECT"],
         "session_runtime_handoffs": ["SELECT"],
         "session_runtime_handoff_threads": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]

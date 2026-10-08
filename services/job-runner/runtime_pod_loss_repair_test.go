@@ -195,7 +195,10 @@ func TestPostgreSQLRuntimePodLossSweepRequiresFreshLossEvidence(t *testing.T) {
 			if tc.expired {
 				age = "11 seconds"
 			}
-			if _, err := admin.ExecContext(context.Background(), `UPDATE runtime_processes SET phase=$2, reported_at=clock_timestamp()-$3::interval WHERE runtime_process_id=$1`, candidate.binding.RuntimeProcessID, tc.phase, age); err != nil {
+			if _, err := admin.ExecContext(context.Background(), `UPDATE runtime_processes SET phase=$2 WHERE runtime_process_id=$1`, candidate.binding.RuntimeProcessID, tc.phase); err != nil {
+				t.Fatalf("seed process phase: %v", err)
+			}
+			if _, err := admin.ExecContext(context.Background(), `UPDATE runtime_process_liveness SET reported_at=clock_timestamp()-$2::interval WHERE runtime_process_id=$1`, candidate.binding.RuntimeProcessID, age); err != nil {
 				t.Fatalf("seed process heartbeat: %v", err)
 			}
 			bound := boundRuntimePod(candidate.binding)

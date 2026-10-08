@@ -147,7 +147,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		evidence.Kind = "transaction"
@@ -176,7 +177,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			duplicate = true
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if requestStart != nil {

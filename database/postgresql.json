@@ -59,6 +59,7 @@
     "workspaces",
     "runtime_process_pods",
     "runtime_processes",
+    "runtime_process_liveness",
     "auth_federation_rules",
     "auth_identities"
   ],

@@ -26,8 +26,16 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+)
+
+// Exact statement text of the single binding/process verification in
+// lockRuntimeBindingProcessTx.
+const (
+	servingProcessLockSQL = "FROM public.tetral_lock_runtime_process($1,$2,$3)"
+	servingBindingLockSQL = "FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4 FOR UPDATE"
 )
 
 func waitProcessSQLLock(ctx context.Context, t *testing.T, admin *sql.DB, pattern string) {
@@ -114,7 +122,9 @@ func TestPostgreSQLRuntimeProcessServingMutationRaces(t *testing.T) {
 				if promotionFirst {
 					fired, release = promotionTrace.armBarrier("", "UPDATE runtime_process_pods SET last_promoted_order", 1)
 				} else {
-					fired, release = writerTrace.armBarrier("", "FROM public.tetral_lock_runtime_process", 2)
+					// The receipt-scope proof's process lock is the only one the
+					// mutation takes; the writer parks while holding it.
+					fired, release = writerTrace.armBarrier("", servingProcessLockSQL, 1)
 				}
 				var once sync.Once
 				resume := func() { once.Do(func() { close(release) }) }
@@ -151,6 +161,9 @@ func TestPostgreSQLRuntimeProcessServingMutationRaces(t *testing.T) {
 				}
 				writeResult := <-written
 				writeErr := writeResult.err
+				if locks, bindings := writerTrace.countSQL(servingProcessLockSQL), writerTrace.countSQL(servingBindingLockSQL); locks != 1 || bindings != 1 {
+					t.Fatalf("%s took %d process and %d binding locks; want one each", operation, locks, bindings)
+				}
 				after := receiptTenantSnapshot(t, admin)
 				if promotionFirst {
 					if !writeResult.stale && status.Code(writeErr) != codes.FailedPrecondition {
@@ -449,4 +462,263 @@ func holdRegistrationDisconnect(t *testing.T, address string) (string, func()) {
 		}
 	})
 	return listener.Addr().String(), resume
+}
+
+// scopeLockTracer groups each connection's statements into transactions and
+// records, for every finished transaction that verified a Runtime scope, how
+// many binding and process locks it took, in completion order.
+type scopeLockTracer struct {
+	mu   sync.Mutex
+	open map[*pgx.Conn]*scopeLocks
+	done []scopeLocks
+}
+
+type scopeLocks struct{ process, binding int }
+
+func (tr *scopeLockTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	statement := strings.ToLower(strings.TrimSpace(data.SQL))
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.open == nil {
+		tr.open = make(map[*pgx.Conn]*scopeLocks)
+	}
+	switch {
+	case strings.HasPrefix(statement, "begin"):
+		tr.open[conn] = &scopeLocks{}
+	case statement == "commit" || statement == "rollback":
+		if locks := tr.open[conn]; locks != nil {
+			if locks.process+locks.binding > 0 {
+				tr.done = append(tr.done, *locks)
+			}
+			delete(tr.open, conn)
+		}
+	default:
+		if locks := tr.open[conn]; locks != nil {
+			if strings.Contains(data.SQL, servingProcessLockSQL) {
+				locks.process++
+			}
+			if strings.Contains(data.SQL, servingBindingLockSQL) {
+				locks.binding++
+			}
+		}
+	}
+	return ctx
+}
+
+func (*scopeLockTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (tr *scopeLockTracer) take() []scopeLocks {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	done := tr.done
+	tr.done = nil
+	return done
+}
+
+// Each non-Sandbox scope-verified transaction locks its binding and process
+// once: the receipt-scope proof's process SHARE lock also authorizes new
+// work. FinishIdle's final adoption transaction follows the unchanged
+// Sandbox-serving output-capture transaction, which still locks twice. After a
+// same-Pod promotion the unchanged binding still replays exact receipts under
+// one lock and rejects new work.
+func TestPostgreSQLRuntimeScopeTransactionsLockBindingAndProcessOnce(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_single_process_lock"
+		threadID  = "thr_single_process_lock"
+		bindingID = "bind_single_process_lock"
+		podUID    = "pod_single_process_lock"
+		request   = "mreq_single_process_lock"
+	)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	tracer := &scopeLockTracer{}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(storagetest.OpenRuntimeRoleDBWithTracer(t, runtime, tracer)))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	ctx := context.Background()
+	once := []scopeLocks{{process: 1, binding: 1}}
+	verified := func(name string, want []scopeLocks, call func() error) {
+		t.Helper()
+		tracer.take()
+		if err := call(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := tracer.take(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s took process/binding locks per transaction %+v; want %+v", name, got, want)
+		}
+	}
+	outcome := func(ok bool, response any) error {
+		if !ok {
+			return status.Errorf(codes.Internal, "unexpected outcome %v", response)
+		}
+		return nil
+	}
+	declare := func(name, writeID string, declaration *bridgev1.RuntimeToolDeclaration) string {
+		t.Helper()
+		var eventID string
+		verified(name, once, func() error {
+			response, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: writeID, ModelRequestId: request, ToolDeclaration: declaration})
+			if err != nil {
+				return err
+			}
+			eventID = response.GetCommitted().GetEventId()
+			return outcome(eventID != "", response)
+		})
+		return eventID
+	}
+
+	verified("request start", once, func() error {
+		response, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "single-lock-start", ModelRequestId: request, EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + request + `"}`, ContextThroughMessageSequence: sessionfixture.BridgeAPIInt64(0), RequestKind: "agent_provider_request"})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+	mcpToolUse := declare("MCP Tool declaration", "single-lock-mcp", bridgeMCPToolDeclarationForTest("call_single_lock_mcp", "create_issue", "github", `{"title":"Bug","body":"Details"}`, "allow"))
+	spawnToolUse := declare("spawn Tool declaration", "single-lock-spawn", sessionfixture.BridgeToolDeclarationWithRouteForTest("call_single_lock_spawn", "spawn_agent", `{"task_name":"single-lock","agent_type":"general","fork_turns":"none","prompt":"work"}`, "allow"))
+	claim := &bridgev1.ClaimMcpToolResultRequest{Scope: scope, ToolUseEventId: mcpToolUse, ClaimId: "claim_single_lock"}
+	verified("MCP claim", once, func() error {
+		response, err := store.ClaimMcpToolResult(ctx, claim)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetAcquired() != nil, response)
+	})
+	verified("MCP claim renewal", once, func() error {
+		response, err := store.ClaimMcpToolResult(ctx, claim)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetAcquired() != nil, response)
+	})
+	verified("MCP relinquish", once, func() error {
+		response, err := store.RelinquishMcpToolResult(ctx, &bridgev1.RelinquishMcpToolResultRequest{Scope: scope, ToolUseEventId: mcpToolUse, ClaimId: claim.GetClaimId()})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetRelinquished() != nil, response)
+	})
+	claim.ClaimId = "claim_single_lock_again"
+	verified("MCP claim after relinquish", once, func() error {
+		response, err := store.ClaimMcpToolResult(ctx, claim)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetAcquired() != nil, response)
+	})
+	commit := &bridgev1.CommitMcpToolResultRequest{Scope: scope, ToolUseEventId: mcpToolUse, ClaimId: claim.GetClaimId(), ResultJson: `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`}
+	verified("MCP commit preflight and commit", []scopeLocks{{1, 1}, {1, 1}}, func() error {
+		response, err := store.CommitMcpToolResult(ctx, commit)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+	create := &bridgev1.CreateSubagentThreadRequest{Scope: scope, SourceToolUseEventId: spawnToolUse, TaskName: "single-lock-worker", AgentType: "worker", InitialPrompt: "work"}
+	var childID string
+	verified("child creation", once, func() error {
+		response, err := store.CreateSubagentThread(ctx, create)
+		if err != nil {
+			return err
+		}
+		childID = response.GetCommitted().GetChildThreadId()
+		return outcome(childID != "", response)
+	})
+	mailToolUse := declare("send_message Tool declaration", "single-lock-mail", sessionfixture.BridgeToolDeclarationWithRouteForTest("call_single_lock_mail", "send_message", `{"task_name":"single-lock-worker","message":"hello"}`, "allow"))
+	verified("inter-agent mail", once, func() error {
+		response, err := store.DeliverInterAgentMail(ctx, &bridgev1.DeliverInterAgentMailRequest{Scope: scope, DeliveryId: runtimecontrol.AgentMailDeliveryID(mailToolUse, childID), TargetThreadId: childID, SourceToolUseEventId: mailToolUse, Content: "hello"})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+	resumeToolUse := declare("resume_agent Tool declaration", "single-lock-resume", sessionfixture.BridgeToolDeclarationWithRouteForTest("call_single_lock_resume", "resume_agent", `{"task_name":"single-lock-worker"}`, "allow"))
+	verified("child resume", once, func() error {
+		response, err := store.MarkChildThreadActive(ctx, &bridgev1.MarkChildThreadActiveRequest{Scope: scope, SourceToolUseEventId: resumeToolUse, TargetChildThreadId: childID})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+	verified("internal Tool repair", once, func() error {
+		response, err := store.CommitInternalToolRepair(ctx, &bridgev1.CommitInternalToolRepairRequest{
+			Scope: scope, ModelRequestId: request, ModelToolCallId: "call_single_lock_repair", ToolName: "unknown_tool",
+			RepairKey: internalToolRepairKey(request, "call_single_lock_repair", "unknown_tool"), CanonicalInputJson: `{"q":"x"}`,
+			Error: &bridgev1.RuntimeToolError{ErrorJson: `{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}`},
+		})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+	verified("approval reviewer trunk", once, func() error {
+		response, err := store.EnsureApprovalReviewerTrunk(ctx, &bridgev1.EnsureApprovalReviewerTrunkRequest{Scope: scope, EnsureOperationId: "ensure_single_lock_reviewer"})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted().GetReviewerThreadId() != "", response)
+	})
+	verified("approval reviewer sidecar", once, func() error {
+		response, err := store.EnsureApprovalReviewerSidecar(ctx, &bridgev1.EnsureApprovalReviewerSidecarRequest{Scope: scope, ReviewId: "review_single_lock"})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted().GetReviewerThreadId() != "", response)
+	})
+	verified("current-scope read", once, func() error {
+		response, err := store.ListChildThreads(ctx, &bridgev1.ListChildThreadsRequest{Scope: scope})
+		if err != nil {
+			return err
+		}
+		return outcome(len(response.GetCompleted().GetChildren()) > 0, response)
+	})
+
+	// FinishIdle in its own Session: the Sandbox-serving output-capture
+	// admission keeps its two locks; the final adoption transaction takes one.
+	const idleSessionID, idleThreadID, idleBindingID, idlePodUID, idleTurn = "sesn_single_lock_idle", "thr_single_lock_idle", "bind_single_lock_idle", "pod_single_lock_idle", "evt_single_lock_idle_turn"
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", idleSessionID, idleThreadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", idleSessionID, idleBindingID, 1, idlePodUID)
+	idleScope := sessionfixture.BridgeAPIScope(idleSessionID, idleThreadID, idleBindingID, 1, idlePodUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, idleScope, idleTurn)
+	verified("FinishIdle", []scopeLocks{{2, 2}, {1, 1}}, func() error {
+		response, err := finishIdleWithStagedCaptureForTest(t, admin, store, &bridgev1.FinishIdleRequest{Scope: idleScope, DurableTurnId: idleTurn, StopReasonJson: `{"type":"end_turn"}`})
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetCommitted() != nil, response)
+	})
+
+	identity := runtimecontrol.ProcessIdentity{Namespace: "tetral-agent-runtime", PodUID: podUID, ID: "process_single_lock_replacement"}
+	replacement, err := runtimecontrol.RegisterProcess(ctx, dbconnect.NewClientForTesting(admin), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtimecontrol.ReportProcess(ctx, dbconnect.NewClientForTesting(admin), identity, replacement.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
+		t.Fatal(err)
+	}
+	verified("retired child creation replay", once, func() error {
+		response, err := store.CreateSubagentThread(ctx, create)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetDuplicate().GetChildThreadId() == childID, response)
+	})
+	verified("retired MCP commit replay", once, func() error {
+		response, err := store.CommitMcpToolResult(ctx, commit)
+		if err != nil {
+			return err
+		}
+		return outcome(response.GetDuplicate() != nil, response)
+	})
+	verified("retired new event", once, func() error {
+		response, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "single-lock-after-promotion", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
+		if err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				return nil
+			}
+			return err
+		}
+		return outcome(response.GetStale() != nil, response)
+	})
 }

@@ -81,7 +81,7 @@ func TestRuntimeMutationProcessFenceCallerInventory(t *testing.T) {
 					receiver = ptr.X
 				}
 				name, ok := receiver.(*ast.Ident)
-				if !ok || name.Name != "PostgreSQLBridgeAPIStore" {
+				if !ok || (name.Name != "PostgreSQLBridgeAPIStore" && name.Name != "lockedRuntimeScope") {
 					continue
 				}
 			}
@@ -115,6 +115,11 @@ func TestRuntimeMutationProcessFenceCallerInventory(t *testing.T) {
 					}
 				}
 			}
+			// The pure check reads the process facts that the receipt-scope proof
+			// locked in the same transaction.
+			if fn.Name.Name == "requireCurrent" && fields["Current"] && fields["RetiredAt"] && fields["Phase"] && fields["ScopeSupersededError"] {
+				graph[fn.Name.Name] = append(graph[fn.Name.Name], "current_process_authority")
+			}
 		}
 	}
 	var names []string
@@ -128,14 +133,16 @@ func TestRuntimeMutationProcessFenceCallerInventory(t *testing.T) {
 	if failures := runtimeFenceInventoryErrors(append(append([]string{}, names...), "UnclassifiedRuntimeMutation"), graph); len(failures) != 1 || !strings.Contains(failures[0], "unclassified") {
 		t.Fatalf("new caller escaped guard:%v", failures)
 	}
-	// Remove the actual common current-process edge from its parsed body. The
+	// Remove each actual common current-process edge from its parsed body. The
 	// inventory must detect every mutation family that depended on that edge.
-	changed := make(map[string][]string, len(graph))
-	for name, calls := range graph {
-		changed[name] = append([]string{}, calls...)
-	}
-	changed["requireRuntimeProcessCurrentTx"] = nil
-	if failures := runtimeFenceInventoryErrors(names, changed); len(failures) < 3 {
-		t.Fatalf("removed production process fence escaped inventory:%v", failures)
+	for _, fence := range []string{"requireRuntimeProcessCurrentTx", "requireCurrent"} {
+		changed := make(map[string][]string, len(graph))
+		for name, calls := range graph {
+			changed[name] = append([]string{}, calls...)
+		}
+		changed[fence] = nil
+		if failures := runtimeFenceInventoryErrors(names, changed); len(failures) < 3 {
+			t.Fatalf("removed production process fence %s escaped inventory:%v", fence, failures)
+		}
 	}
 }

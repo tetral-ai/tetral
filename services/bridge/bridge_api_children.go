@@ -51,7 +51,8 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceSubagent, request.GetSourceToolUseEventId()); err != nil {
@@ -64,7 +65,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateSubagentThread(ctx context.Context, req
 			response = &bridgev1.CreateSubagentThreadResponse{Outcome: &bridgev1.CreateSubagentThreadResponse_Duplicate{Duplicate: &bridgev1.CreateSubagentThreadDuplicate{ChildThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
@@ -123,7 +124,8 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceReviewerTrunk, request.GetEnsureOperationId()); err != nil {
@@ -136,7 +138,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerTrunk(ctx context.Conte
 			response = &bridgev1.EnsureApprovalReviewerTrunkResponse{Outcome: &bridgev1.EnsureApprovalReviewerTrunkResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerTrunkDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
@@ -178,7 +180,8 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationBySourceTx(ctx, tx, request.GetScope(), bridgeOpCreateChildThread, childCreateSourceReviewerSidecar, request.GetReviewId()); err != nil {
@@ -191,7 +194,7 @@ func (s *PostgreSQLBridgeAPIStore) EnsureApprovalReviewerSidecar(ctx context.Con
 			response = &bridgev1.EnsureApprovalReviewerSidecarResponse{Outcome: &bridgev1.EnsureApprovalReviewerSidecarResponse_Duplicate{Duplicate: &bridgev1.EnsureApprovalReviewerSidecarDuplicate{ReviewerThreadId: result.ChildThreadID}}}
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
@@ -439,7 +442,8 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 		if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpDeliverInterAgentMail, request.GetDeliveryId()); err != nil {
@@ -451,7 +455,7 @@ func (s *PostgreSQLBridgeAPIStore) DeliverInterAgentMail(ctx context.Context, re
 			response = &bridgev1.DeliverInterAgentMailResponse{Outcome: &bridgev1.DeliverInterAgentMailResponse_Duplicate{Duplicate: &bridgev1.DeliverInterAgentMailDuplicate{}}}
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := runtimecontrol.RequireThreadMutationAllowedTx(ctx, tx, request.GetScope()); err != nil {
@@ -972,14 +976,14 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		childThreadID = request.GetTargetChildThreadId()
 		if err := validateDeclaredPublicSubagentTargetTx(ctx, tx, request.GetScope(), childThreadID); err != nil {
 			return err
 		}
-		var err error
 		command, err = parseChildLifecycleCommand(
 			request.GetScope(), childThreadID, now, "tool_use", request.GetSourceToolUseEventId(),
 			bridgeOpMarkChildThreadActive, "resume", nil,
@@ -1004,7 +1008,7 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			duplicate = true
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetSourceToolUseEventId(), "child_resume"); err != nil {

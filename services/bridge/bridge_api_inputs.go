@@ -58,10 +58,10 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
-		var err error
 		inputKind, err = commitInputKindTx(ctx, tx, request)
 		if err != nil {
 			evidence.Kind = "schema"
@@ -98,7 +98,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
 			return err
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if inputKind == "interrupt_control" {

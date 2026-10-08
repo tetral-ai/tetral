@@ -62,13 +62,16 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 					"GRANT UPDATE ON SEQUENCE session_runtime_binding_generation_seq TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
 					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) TO " + pgx.Identifier{declarations.Roles["auth"].Name}.Sanitize(),
 					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) TO " + pgx.Identifier{declarations.Roles["bridge"].Name}.Sanitize(),
+					"REVOKE EXECUTE ON FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) FROM " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
+					"GRANT UPDATE ON runtime_process_liveness TO " + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize(),
 				} {
 					if _, err := admin.Exec(statement); err != nil {
 						t.Fatal(err)
 					}
 				}
 				drift := workloadPrivilegeMismatches(t, admin, roleContract, declarations)
-				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE"} {
+				for _, want := range []string{"sandbox environments UPDATE", "auth queue_jobs SELECT", "auth session_runtime_binding_generation_seq UPDATE", "auth tetral_lock_runtime_process EXECUTE", "job_runner tetral_lock_runtime_process EXECUTE", "bridge tetral_lock_runtime_process_liveness EXECUTE", "job_runner tetral_lock_runtime_process_liveness EXECUTE", "job_runner runtime_process_liveness UPDATE"} {
 					if !contains(drift, want) {
 						t.Fatalf("catalog checker missed injected drift %s: %v", want, drift)
 					}
@@ -295,12 +298,14 @@ func workloadPrivilegeMismatches(t *testing.T, admin *sql.DB, contract database.
 		_ = rows.Close()
 	}
 	var allowed bool
-	for workload, role := range contract.Workloads {
-		if err := admin.QueryRow(`SELECT has_function_privilege($1,'public.tetral_lock_runtime_process(text,text,text)','EXECUTE')`, declarations.Roles[workload].Name).Scan(&allowed); err != nil {
-			t.Fatal(err)
-		}
-		if allowed != contains(role.Functions, "tetral_lock_runtime_process(text, text, text)") {
-			mismatches = append(mismatches, workload+" tetral_lock_runtime_process EXECUTE")
+	for _, function := range []string{"tetral_lock_runtime_process", "tetral_lock_runtime_process_liveness"} {
+		for workload, role := range contract.Workloads {
+			if err := admin.QueryRow(`SELECT has_function_privilege($1,'public.'||$2||'(text,text,text)','EXECUTE')`, declarations.Roles[workload].Name, function).Scan(&allowed); err != nil {
+				t.Fatal(err)
+			}
+			if allowed != contains(role.Functions, function+"(text, text, text)") {
+				mismatches = append(mismatches, workload+" "+function+" EXECUTE")
+			}
 		}
 	}
 	return mismatches
@@ -662,8 +667,14 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting); err != nil {
-		t.Fatal(err)
+	promoted, promotedNow, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting)
+	if err != nil || !promotedNow {
+		t.Fatalf("Bridge role promotion=%t: %v", promotedNow, err)
+	}
+	// The unchanged report updates only liveness under the Bridge role.
+	reported, promotedNow, err := runtimecontrol.ReportProcess(context.Background(), dbconnect.NewClientForTesting(bridge), identity, process.RegistrationReceipt, runtimecontrol.ProcessAccepting)
+	if err != nil || promotedNow || !reported.Current || reported.ReportedAt.Before(promoted.ReportedAt) {
+		t.Fatalf("Bridge role unchanged report=%+v promoted=%t: %v", reported, promotedNow, err)
 	}
 	runner := openManagedRoleSQL(t, databaseName, declarations.Roles["job_runner"])
 	defer func() {
@@ -671,16 +682,36 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 			t.Error(err)
 		}
 	}()
-	if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), "runtimecontrol.test_restricted_lock", nil, func(tx *dbconnect.Tx) error {
-		process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
-		if err == nil && process.Phase != runtimecontrol.ProcessAccepting {
-			t.Fatal("restricted lock returned wrong process")
+	// Runner reads lifecycle and liveness only through the two lock-only functions.
+	lockBoth := func(operation string, shadow bool) {
+		t.Helper()
+		if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), operation, nil, func(tx *dbconnect.Tx) error {
+			if shadow {
+				if _, err := tx.Exec(context.Background(), `SET LOCAL search_path=process_shadow,public,pg_catalog`); err != nil {
+					return err
+				}
+			}
+			process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
+			if err != nil {
+				return err
+			}
+			if process.Phase != runtimecontrol.ProcessAccepting {
+				t.Fatal("restricted lock returned wrong process")
+			}
+			liveness, err := runtimecontrol.LockProcessLivenessTx(context.Background(), tx, identity)
+			if err != nil {
+				return err
+			}
+			if !liveness.Valid || !liveness.Time.Equal(reported.ReportedAt) {
+				t.Fatalf("restricted liveness lock returned %v; want %v", liveness, reported.ReportedAt)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
 		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
 	}
-	for _, table := range []string{"runtime_processes", "runtime_process_pods"} {
+	lockBoth("runtimecontrol.test_restricted_lock", false)
+	for _, table := range []string{"runtime_processes", "runtime_process_pods", "runtime_process_liveness"} {
 		for _, statement := range []string{"INSERT INTO " + table + " DEFAULT VALUES", "UPDATE " + table + " SET namespace=namespace", "DELETE FROM " + table} {
 			assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], statement)
 		}
@@ -688,28 +719,25 @@ func assertProcessRegistryPrivileges(t *testing.T, databaseName string, admin *s
 	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream"} {
 		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
 	}
+	for _, workload := range []string{"api", "auth", "queue", "sandbox", "provider_gateway", "mcp_connector", "git_proxy", "cleanup", "event_stream", "bridge"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `SELECT 1 FROM public.tetral_lock_runtime_process_liveness('tetral-agent-runtime','role-boundary-pod','role-boundary-process')`)
+	}
 	assertWorkloadDenied(t, databaseName, declarations.Roles["job_runner"], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM public.runtime_processes'`)
+	for _, workload := range []string{"job_runner", "bridge"} {
+		assertWorkloadDenied(t, databaseName, declarations.Roles[workload], `CREATE OR REPLACE FUNCTION public.tetral_lock_runtime_process_liveness(text,text,text) RETURNS SETOF public.runtime_process_liveness LANGUAGE sql AS 'SELECT * FROM public.runtime_process_liveness'`)
+	}
 	// Only the installer-owned role identifier is concatenated, using pgx's
 	// PostgreSQL identifier quoting; all SQL below is fixed test DDL.
 	//nolint:gosec // G202: the identifier is quoted, not an executable SQL fragment.
 	if _, err := admin.Exec(`CREATE SCHEMA process_shadow;
- CREATE VIEW process_shadow.runtime_processes AS SELECT namespace,pod_uid,runtime_process_id,registration_order,registration_receipt,'draining'::text phase,is_current,registered_at,reported_at,retired_at FROM public.runtime_processes;
+ CREATE VIEW process_shadow.runtime_processes AS SELECT namespace,pod_uid,runtime_process_id,registration_order,registration_receipt,'draining'::text phase,is_current,registered_at,retired_at FROM public.runtime_processes;
  CREATE FUNCTION process_shadow.tetral_lock_runtime_process(text,text,text) RETURNS SETOF public.runtime_processes LANGUAGE sql AS 'SELECT * FROM process_shadow.runtime_processes';
+ CREATE VIEW process_shadow.runtime_process_liveness AS SELECT namespace,pod_uid,runtime_process_id,NULL::timestamptz reported_at FROM public.runtime_process_liveness;
+ CREATE FUNCTION process_shadow.tetral_lock_runtime_process_liveness(text,text,text) RETURNS SETOF public.runtime_process_liveness LANGUAGE sql AS 'SELECT * FROM process_shadow.runtime_process_liveness';
  GRANT USAGE ON SCHEMA process_shadow TO ` + pgx.Identifier{declarations.Roles["job_runner"].Name}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
-	if err := dbconnect.NewClientForTesting(runner).WithTx(context.Background(), "runtimecontrol.test_shadow_lock", nil, func(tx *dbconnect.Tx) error {
-		if _, err := tx.Exec(context.Background(), `SET LOCAL search_path=process_shadow,public,pg_catalog`); err != nil {
-			return err
-		}
-		process, err := runtimecontrol.RequireCurrentProcessTx(context.Background(), tx, identity)
-		if err == nil && process.Phase != runtimecontrol.ProcessAccepting {
-			t.Fatal("search_path shadow changed process lock authority")
-		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	lockBoth("runtimecontrol.test_shadow_lock", true)
 }
 
 func assertAuthLookupBoundary(t *testing.T, databaseName string, admin *sql.DB, declarations database.RoleDeclarations) {

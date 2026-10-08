@@ -9,8 +9,9 @@ contracts.
   lifecycle ownership inside a Workspace.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
-  allowlist admits the runtime process lock for Bridge and Job Runner and, for
-  Auth only, `tetral_auth_lookup_key`, `tetral_auth_lookup_token`,
+  allowlist admits the runtime process lock for Bridge and Job Runner, the
+  runtime process liveness lock for Job Runner only and, for Auth only,
+  `tetral_auth_lookup_key`, `tetral_auth_lookup_token`,
   `tetral_auth_lookup_grants`, `tetral_auth_lock_authority` and
   `tetral_auth_prune_tokens`.
   Operator-selected role names and credentials are inputs to the installer and
@@ -43,16 +44,21 @@ Initialization serializes on the schema advisory lock and commits DDL plus its
 stamp in one transaction. Failed DDL rolls back; an unacknowledged commit remains
 unknown until an independent connection observes the identity.
 
-Runtime process custody has two non-tenant tables: `runtime_process_pods` owns
-registration allocation and the last promoted order, and `runtime_processes`
-retains candidate/current/retired boot identities and database timestamps. Bridge
-alone can register, report and promote. Bridge and the separate `job_runner`
-role, which only reads these facts, can execute the fixed lock-only
-`public.tetral_lock_runtime_process(text,text,text)` function. Its migration-owned
-security-definer body uses a fixed search path and qualified table; it holds
-`FOR SHARE` through the calling transaction without granting process mutation.
-Public execution is revoked at creation and installation. Other serving roles
-cannot execute it or use it to acquire Workspace authority.
+Runtime process custody has three non-tenant global tables, with no Workspace
+column or RLS policy: `runtime_process_pods` owns registration allocation and
+the last promoted order, `runtime_processes` retains candidate/current/retired
+boot identities and lifecycle timestamps, and `runtime_process_liveness` holds
+one row per process with its last report time (NULL until the first report,
+kept after retirement). Bridge alone can register, report and promote, and is
+the only writer of liveness. Bridge and the separate `job_runner` role, which
+only reads these facts, can execute the fixed lock-only
+`public.tetral_lock_runtime_process(text,text,text)` function; only
+`job_runner` can execute `public.tetral_lock_runtime_process_liveness(text,text,text)`,
+which its final loss classification uses. Both migration-owned
+security-definer bodies use a fixed search path and qualified tables; each holds
+`FOR SHARE` through the calling transaction without granting mutation. Public
+execution is revoked at creation and installation. Other serving roles cannot
+execute them or use them to acquire Workspace authority.
 
 `session_runtime_handoffs` and `session_runtime_handoff_threads` are internal
 Workspace-RLS receipts retained through Session lifetime. They preserve exact
@@ -155,7 +161,7 @@ These owner tests pin the serving paths repaired after role restriction:
 | sandbox | Git repository preparation and recovery | `session_git_tickets SELECT/INSERT/UPDATE`; `internal/sandbox/github_preparation_postgresql_test.go` proves live ticket before clone and pending-ticket recovery |
 | sandbox | Media publication | `session_transient_attachments INSERT`; `services/sandbox/tool_media_test.go` checks staged Blob bytes and recovery |
 | sandbox | Background task/command settlement and child-close fence | `session_threads SELECT/UPDATE`, `session_events SELECT/UPDATE`, `session_bridge_operations SELECT`; `services/sandbox/background_command_store_test.go` uses the Sandbox role for all store cases; `background_settlement_role_test.go` checks committed control without a close receipt, atomic parking and replay |
-| bridge / job_runner | Process custody promotion and Session process fencing | Bridge alone writes registry/arbitration; Runner reads and executes the lock-only function; `services/bridge/runtime_process_test.go` and installer role tests check locks and denied mutation |
+| bridge / job_runner | Process custody promotion, liveness reports and Session process fencing | Bridge alone writes registry/arbitration and `runtime_process_liveness SELECT/INSERT/UPDATE`; Runner reads the registry and liveness tables and executes the two lock-only functions; `services/bridge/runtime_process_test.go`, `services/job-runner/runtime_visibility_test.go` and installer role tests check locks, search-path shadowing and denied mutation |
 | bridge | Placement and Session cleanup are Job Runner-owned | no binding-generation sequence, no `session_runtime_bindings INSERT`, no Session-cleanup `DELETE` and no lifecycle-operation `INSERT`; Bridge keeps binding `UPDATE/DELETE` for release and termination; `database/apply_roles_postgresql_test.go` requires SQLSTATE `42501` for each removed statement |
 | provider_gateway / mcp_connector | Separate Gateway workload credentials | Provider Gateway reads `session_provider_auth` and `platform_provider_keys` and rotates `credentials`; MCP Connector reads Session vault references and reads/rotates its `credentials` with no provider binding or platform-key access; `database/apply_roles_postgresql_test.go` runs Bun and command readiness under both roles and requires SQLSTATE `42501` for MCP Connector's provider credential reads |
 | bridge | Durable Memory mutation | `memory_stores UPDATE`; `services/bridge/bridge_api_tools_test.go` checks committed content and idempotent replay |

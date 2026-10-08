@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -299,11 +300,11 @@ func TestPostgreSQLRuntimeProcessRegistrationAndReportResponseLoss(t *testing.T)
 		t.Fatal("report response barrier was not reached")
 	}
 	var current bool
-	var reportedAt time.Time
-	if err := admin.QueryRowContext(ctx, `SELECT is_current,reported_at FROM runtime_processes WHERE pod_uid='pod-lost-ack' AND runtime_process_id='lost-ack-process'`).Scan(&current, &reportedAt); err != nil {
+	var reportedAt sql.NullTime
+	if err := admin.QueryRowContext(ctx, `SELECT process.is_current,live.reported_at FROM runtime_processes process JOIN runtime_process_liveness live USING(namespace,pod_uid,runtime_process_id) WHERE process.pod_uid='pod-lost-ack' AND process.runtime_process_id='lost-ack-process'`).Scan(&current, &reportedAt); err != nil {
 		t.Fatal(err)
 	}
-	if !current || reportedAt.IsZero() {
+	if !current || !reportedAt.Valid {
 		t.Fatal("report barrier preceded durable promotion")
 	}
 	cancel()
@@ -703,4 +704,336 @@ func reportDeadlinePromotionSnapshot(t *testing.T, admin *sql.DB, podUID string)
 		t.Fatal(err)
 	}
 	return state
+}
+
+// livenessTestPolicy keeps lifecycle reports that wait on barriers inside
+// their attempt budget; the fences under test, not the timeout, decide.
+func livenessTestPolicy(store *PostgreSQLBridgeAPIStore) *PostgreSQLBridgeAPIStore {
+	store.ProcessPolicy.ReportTimeout = 5 * time.Second
+	store.ProcessPolicy.ReportInterval = 6 * time.Second
+	return store
+}
+
+type livenessFixture struct {
+	t        *testing.T
+	ctx      context.Context
+	admin    *sql.DB
+	registry bridgev1.AgentRuntimeBridgeServiceClient
+	scope    *bridgev1.RuntimeScope
+	receipt  string
+}
+
+func newLivenessFixture(ctx context.Context, t *testing.T, runtime, admin *sql.DB, suffix string) *livenessFixture {
+	t.Helper()
+	sessionID, threadID, bindingID, podUID := "sesn_liveness_"+suffix, "thr_liveness_"+suffix, "bind_liveness_"+suffix, "pod_liveness_"+suffix
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	f := &livenessFixture{t: t, ctx: ctx, admin: admin, scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)}
+	f.registry = processRegistryRPCWithStore(t, livenessTestPolicy(NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))), podUID, nil)
+	if err := admin.QueryRow(`SELECT registration_receipt FROM runtime_processes WHERE runtime_process_id=$1`, f.scope.Binding.RuntimeProcessId).Scan(&f.receipt); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f *livenessFixture) report(processID, receipt string, phase bridgev1.RuntimeProcessPhase) error {
+	_, err := f.registry.ReportRuntimeProcess(f.ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: processID, RegistrationReceipt: receipt, Phase: phase})
+	return err
+}
+
+func (f *livenessFixture) register(processID string) *bridgev1.RegisterRuntimeProcessResponse {
+	f.t.Helper()
+	response, err := f.registry.RegisterRuntimeProcess(f.ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: processID})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return response
+}
+
+func (f *livenessFixture) reportedAt(processID string) sql.NullTime {
+	f.t.Helper()
+	var reported sql.NullTime
+	if err := f.admin.QueryRow(`SELECT reported_at FROM runtime_process_liveness WHERE pod_uid=$1 AND runtime_process_id=$2`, f.scope.Binding.TargetPodUid, processID).Scan(&reported); err != nil {
+		f.t.Fatal(err)
+	}
+	return reported
+}
+
+// lifecycle returns the process's lifecycle facts and the Pod's current process.
+func (f *livenessFixture) lifecycle(processID string) (phase string, current, retired bool, owner string) {
+	f.t.Helper()
+	if err := f.admin.QueryRow(`SELECT phase,is_current,retired_at IS NOT NULL,(SELECT string_agg(runtime_process_id,',') FROM runtime_processes WHERE pod_uid=$1 AND is_current) FROM runtime_processes WHERE pod_uid=$1 AND runtime_process_id=$2`, f.scope.Binding.TargetPodUid, processID).Scan(&phase, &current, &retired, &owner); err != nil {
+		f.t.Fatal(err)
+	}
+	return phase, current, retired, owner
+}
+
+// awaitBlocked fails unless the lifecycle report is still waiting.
+func awaitBlocked(t *testing.T, result <-chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("%s did not wait: %v", what, err)
+	default:
+	}
+}
+
+// An unchanged report updates only its liveness row, so it commits while a
+// Session mutation holds the process row FOR SHARE. A phase change or promotion
+// still waits for that mutation, which commits first; afterwards the retired
+// process cannot start new work.
+func TestPostgreSQLRuntimeUnchangedReportCommitsPastHeldMutationFence(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f := newLivenessFixture(ctx, t, runtime, admin, "held_fence")
+	trace := &bridgeExecutionQueryTracer{}
+	writer := processRegistryRPCWithStore(t, newAwaitNotificationTracedStore(t, runtime, trace), f.scope.Binding.TargetPodUid, nil)
+	write := func(id string) (*bridgev1.WriteEventResponse, error) {
+		return writer.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: f.scope, RuntimeWriteId: id, EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
+	}
+	// heldWrite parks one mutation right after its process SHARE lock.
+	heldWrite := func(id string) (func(), <-chan error) {
+		t.Helper()
+		fired, release := trace.armBarrier("", servingProcessLockSQL, 1)
+		done := make(chan error, 1)
+		go func() {
+			response, err := write(id)
+			if err == nil && response.GetCommitted() == nil {
+				err = status.Errorf(codes.Internal, "held mutation %s outcome %v", id, response)
+			}
+			done <- err
+		}()
+		select {
+		case <-fired:
+		case <-ctx.Done():
+			t.Fatal("mutation did not reach its process lock")
+		}
+		var once sync.Once
+		return func() { once.Do(func() { close(release) }) }, done
+	}
+	accepting := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING
+	draining := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_DRAINING
+	old := f.scope.Binding.RuntimeProcessId
+
+	release, written := heldWrite("held-accepting")
+	defer release()
+	before := f.reportedAt(old)
+	if err := f.report(old, f.receipt, accepting); err != nil {
+		t.Fatalf("unchanged accepting report behind a held mutation: %v", err)
+	}
+	if after := f.reportedAt(old); !after.Valid || !after.Time.After(before.Time) {
+		t.Fatalf("unchanged report did not commit its liveness: %v -> %v", before, after)
+	}
+	drained := make(chan error, 1)
+	go func() { drained <- f.report(old, f.receipt, draining) }()
+	waitProcessSQLLock(ctx, t, admin, "ORDER BY registration_order FOR UPDATE")
+	awaitBlocked(t, drained, "phase change behind a held mutation")
+	if phase, _, _, _ := f.lifecycle(old); phase != runtimecontrol.ProcessAccepting {
+		t.Fatalf("phase changed to %s before the held mutation committed", phase)
+	}
+	release()
+	if err := <-written; err != nil {
+		t.Fatalf("held mutation: %v", err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatalf("phase change after the mutation: %v", err)
+	}
+
+	next := f.register("held-fence-next")
+	release, written = heldWrite("held-draining")
+	defer release()
+	before = f.reportedAt(old)
+	if err := f.report(old, f.receipt, draining); err != nil {
+		t.Fatalf("unchanged draining report behind a held mutation: %v", err)
+	}
+	if after := f.reportedAt(old); !after.Valid || !after.Time.After(before.Time) {
+		t.Fatalf("unchanged draining report did not commit its liveness: %v -> %v", before, after)
+	}
+	promoted := make(chan error, 1)
+	go func() { promoted <- f.report(next.RuntimeProcessId, next.RegistrationReceipt, accepting) }()
+	waitProcessSQLLock(ctx, t, admin, "ORDER BY registration_order FOR UPDATE")
+	awaitBlocked(t, promoted, "promotion behind a held mutation")
+	if _, _, _, owner := f.lifecycle(old); owner != old {
+		t.Fatalf("current process %s before the held mutation committed", owner)
+	}
+	release()
+	if err := <-written; err != nil {
+		t.Fatalf("held draining mutation: %v", err)
+	}
+	if err := <-promoted; err != nil {
+		t.Fatalf("promotion after the mutation: %v", err)
+	}
+	if _, current, retired, owner := f.lifecycle(old); current || !retired || owner != next.RuntimeProcessId {
+		t.Fatalf("promotion did not retire the old process: current=%t retired=%t owner=%s", current, retired, owner)
+	}
+	if response, err := write("after-promotion"); err != nil || response.GetStale() == nil {
+		t.Fatalf("retired process started new work: %v/%v", response, err)
+	}
+}
+
+// A report whose liveness UPDATE snapshot predates a promotion or drain may be
+// acknowledged, but it changes no lifecycle fact: the new process stays the
+// sole current owner, the old one can neither mutate nor report again, and a
+// draining process never returns to accepting. The overlapping report holds no
+// process lock, so neither lifecycle change waits for it.
+func TestPostgreSQLRuntimeReportOverlappingLifecycleChangeGrantsNoAuthority(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f := newLivenessFixture(ctx, t, runtime, admin, "overlap")
+	accepting := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING
+	draining := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_DRAINING
+	old := f.scope.Binding.RuntimeProcessId
+	next := f.register("overlap-next")
+	// holdLiveness keeps a liveness row FOR SHARE, as a final loss
+	// classification does, so the report's UPDATE waits after its snapshot.
+	holdLiveness := func(processID string) *sql.Tx {
+		t.Helper()
+		hold, err := admin.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := hold.ExecContext(ctx, `SELECT 1 FROM runtime_process_liveness WHERE pod_uid=$1 AND runtime_process_id=$2 FOR SHARE`, f.scope.Binding.TargetPodUid, processID); err != nil {
+			t.Fatal(err)
+		}
+		return hold
+	}
+
+	hold := holdLiveness(old)
+	defer func() { _ = hold.Rollback() }()
+	before := f.reportedAt(old)
+	acknowledged := make(chan error, 1)
+	go func() { acknowledged <- f.report(old, f.receipt, accepting) }()
+	waitProcessSQLLock(ctx, t, admin, "UPDATE public.runtime_process_liveness AS live")
+	if err := f.report(next.RuntimeProcessId, next.RegistrationReceipt, accepting); err != nil {
+		t.Fatalf("promotion waited for or failed behind an overlapping report: %v", err)
+	}
+	awaitBlocked(t, acknowledged, "overlapping report")
+	if err := hold.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-acknowledged; err != nil {
+		t.Fatalf("overlapping report acknowledgment: %v", err)
+	}
+	if after := f.reportedAt(old); !after.Valid || !after.Time.After(before.Time) {
+		t.Fatalf("overlapping report did not record its acknowledgment: %v -> %v", before, after)
+	}
+	if _, current, retired, owner := f.lifecycle(old); current || !retired || owner != next.RuntimeProcessId {
+		t.Fatalf("acknowledged report changed lifecycle: current=%t retired=%t owner=%s", current, retired, owner)
+	}
+	if response, err := f.registry.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: f.scope, RuntimeWriteId: "overlap-after-promotion", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}); err != nil || response.GetStale() == nil {
+		t.Fatalf("acknowledged retired process started new work: %v/%v", response, err)
+	}
+	if err := f.report(old, f.receipt, accepting); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("report after promotion: %v", err)
+	}
+
+	// A drain records its own report on the same liveness row, so it commits
+	// its phase change in either order with the overlapping report.
+	hold = holdLiveness(next.RuntimeProcessId)
+	defer func() { _ = hold.Rollback() }()
+	acknowledged = make(chan error, 1)
+	go func() { acknowledged <- f.report(next.RuntimeProcessId, next.RegistrationReceipt, accepting) }()
+	waitProcessSQLLock(ctx, t, admin, "UPDATE public.runtime_process_liveness AS live")
+	drained := make(chan error, 1)
+	go func() { drained <- f.report(next.RuntimeProcessId, next.RegistrationReceipt, draining) }()
+	waitProcessSQLLock(ctx, t, admin, "UPDATE public.runtime_process_liveness SET reported_at")
+	awaitBlocked(t, acknowledged, "overlapping accepting report")
+	if err := hold.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-acknowledged; err != nil {
+		t.Fatalf("overlapping accepting report acknowledgment: %v", err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatalf("drain overlapping an accepting report: %v", err)
+	}
+	if phase, current, retired, _ := f.lifecycle(next.RuntimeProcessId); phase != runtimecontrol.ProcessDraining || !current || retired {
+		t.Fatalf("acknowledged report undid the drain: phase=%s current=%t retired=%t", phase, current, retired)
+	}
+	if err := f.report(next.RuntimeProcessId, next.RegistrationReceipt, accepting); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("draining process returned to accepting: %v", err)
+	}
+}
+
+// The lifecycle path commits its process change and its report time together.
+// A registered process without its liveness row is an invariant failure:
+// registration retry and every report fail without promoting, changing phase
+// or manufacturing the row.
+func TestPostgreSQLRuntimeProcessLifecycleAndLivenessCommitTogether(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const podUID = "pod-liveness-atomic"
+	f := &livenessFixture{t: t, ctx: ctx, admin: admin, scope: &bridgev1.RuntimeScope{Binding: &bridgev1.RuntimeBindingRef{TargetPodUid: podUID}}}
+	f.registry = processRegistryRPCWithStore(t, livenessTestPolicy(NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))), podUID, nil)
+	accepting := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_ACCEPTING
+	draining := bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_DRAINING
+	registered := f.register("liveness-atomic")
+	if reported := f.reportedAt(registered.RuntimeProcessId); reported.Valid {
+		t.Fatalf("registration recorded a report: %v", reported)
+	}
+	livenessRows := func() int {
+		t.Helper()
+		var rows int
+		if err := admin.QueryRow(`SELECT count(*) FROM runtime_process_liveness WHERE pod_uid=$1`, podUID).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	removeLiveness := func() {
+		t.Helper()
+		if _, err := admin.Exec(`DELETE FROM runtime_process_liveness WHERE pod_uid=$1 AND runtime_process_id=$2`, podUID, registered.RuntimeProcessId); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreLiveness := func() {
+		t.Helper()
+		if _, err := admin.Exec(`INSERT INTO runtime_process_liveness(namespace,pod_uid,runtime_process_id) VALUES('tetral-agent-runtime',$1,$2)`, podUID, registered.RuntimeProcessId); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireRefused := func(state string) {
+		t.Helper()
+		if after := reportDeadlinePromotionSnapshot(t, admin, podUID); after != state {
+			t.Fatalf("refused report changed lifecycle:\n%s\n%s", state, after)
+		}
+		if rows := livenessRows(); rows != 0 {
+			t.Fatalf("refused report manufactured %d liveness rows", rows)
+		}
+	}
+
+	removeLiveness()
+	state := reportDeadlinePromotionSnapshot(t, admin, podUID)
+	if _, err := f.registry.RegisterRuntimeProcess(ctx, &bridgev1.RegisterRuntimeProcessRequest{RuntimeProcessId: registered.RuntimeProcessId}); status.Code(err) != codes.Internal {
+		t.Fatalf("registration retry without liveness: %v", err)
+	}
+	if err := f.report(registered.RuntimeProcessId, registered.RegistrationReceipt, accepting); status.Code(err) != codes.Internal {
+		t.Fatalf("promotion without liveness: %v", err)
+	}
+	requireRefused(state)
+	restoreLiveness()
+	if err := f.report(registered.RuntimeProcessId, registered.RegistrationReceipt, accepting); err != nil {
+		t.Fatal(err)
+	}
+	if phase, current, _, _ := f.lifecycle(registered.RuntimeProcessId); phase != runtimecontrol.ProcessAccepting || !current || !f.reportedAt(registered.RuntimeProcessId).Valid {
+		t.Fatalf("promotion committed without its report: phase=%s current=%t", phase, current)
+	}
+
+	removeLiveness()
+	state = reportDeadlinePromotionSnapshot(t, admin, podUID)
+	for name, phase := range map[string]bridgev1.RuntimeProcessPhase{"unchanged report": accepting, "phase change": draining} {
+		if err := f.report(registered.RuntimeProcessId, registered.RegistrationReceipt, phase); status.Code(err) != codes.Internal {
+			t.Fatalf("%s without liveness: %v", name, err)
+		}
+	}
+	requireRefused(state)
+	restoreLiveness()
+	if err := f.report(registered.RuntimeProcessId, registered.RegistrationReceipt, draining); err != nil {
+		t.Fatal(err)
+	}
+	if phase, current, _, _ := f.lifecycle(registered.RuntimeProcessId); phase != runtimecontrol.ProcessDraining || !current || !f.reportedAt(registered.RuntimeProcessId).Valid {
+		t.Fatalf("phase change committed without its report: phase=%s current=%t", phase, current)
+	}
 }

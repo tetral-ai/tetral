@@ -65,7 +65,8 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			return err
 		}
 		evidence.Kind = "transaction"
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpSettleToolResult, toolUseEventID); err != nil {
@@ -77,7 +78,7 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 			outcome = "duplicate"
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())

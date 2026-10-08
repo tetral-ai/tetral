@@ -479,34 +479,75 @@ func validateRuntimeScope(scope *bridgev1.RuntimeScope) error {
 	return nil
 }
 
-// verifyRuntimeScopeTx fences every new mutation with the exact current process.
+// verifyRuntimeScopeTx fences every new mutation with the exact current
+// process: one receipt-scope proof, then the pure current check on it.
 func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
-	if err := verifyRuntimeReceiptScopeTx(ctx, tx, scope); err != nil {
+	proof, err := lockRuntimeReceiptScopeTx(ctx, tx, scope)
+	if err != nil {
 		return err
 	}
-	return requireRuntimeProcessCurrentTx(ctx, tx, scope)
+	return proof.requireCurrent(tx)
 }
 
-// verifyRuntimeReceiptScopeTx permits only an existing receipt to be replayed
+// lockedRuntimeScope proves, inside one transaction, that the caller's Pod UID,
+// the Session mutation lock and nonterminal state, the exact binding row and
+// the exact process row FOR SHARE were all verified. The locks it describes
+// last until that transaction ends, so the proof is passed explicitly down one
+// RPC's transaction closure and is never stored on the Service or a context,
+// nor reused after commit or rollback.
+type lockedRuntimeScope struct {
+	tx      *dbconnect.Tx
+	process runtimecontrol.Process
+}
+
+// lockRuntimeReceiptScopeTx permits only an existing receipt to be replayed
 // by a retired process. The unchanged binding and exact process remain locked;
-// callers must require current process authority before any new mutation.
-func verifyRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+// callers must call requireCurrent on the returned proof before any new
+// mutation.
+func lockRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (lockedRuntimeScope, error) {
 	if err := validateRuntimeScope(scope); err != nil {
-		return err
+		return lockedRuntimeScope{}, err
 	}
 	if err := verifyRuntimeCallerPodUID(ctx, scope); err != nil {
-		return err
+		return lockedRuntimeScope{}, err
 	}
 	if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return err
+		return lockedRuntimeScope{}, err
 	}
 	if err := verifyRuntimeSessionNonTerminalTx(ctx, tx, scope); err != nil {
-		return err
+		return lockedRuntimeScope{}, err
 	}
-	_, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	process, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
+	if err != nil {
+		return lockedRuntimeScope{}, err
+	}
+	return lockedRuntimeScope{tx: tx, process: process}, nil
+}
+
+// requireCurrent authorizes a new mutation from the process row this
+// transaction already holds FOR SHARE: promotion cannot retire the process
+// until the transaction ends, so no binding or process SQL is repeated.
+func (proof lockedRuntimeScope) requireCurrent(tx *dbconnect.Tx) error {
+	if proof.tx == nil || proof.tx != tx {
+		return status.Error(codes.Internal, "runtime scope proof belongs to another transaction")
+	}
+	if !proof.process.Current || proof.process.RetiredAt.Valid || proof.process.Phase == runtimecontrol.ProcessStarting {
+		return runtimecontrol.ScopeSupersededError(runtimecontrol.LifecycleError(codes.FailedPrecondition, "RUNTIME_PROCESS_STALE", "runtime process is stale"))
+	}
+	return nil
+}
+
+// verifyRuntimeReceiptScopeTx is used only by the Sandbox-serving entrypoints,
+// which follow it with requireRuntimeProcessCurrentTx; it is removed when the
+// Sandbox service split rewrites them.
+func verifyRuntimeReceiptScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	_, err := lockRuntimeReceiptScopeTx(ctx, tx, scope)
 	return err
 }
 
+// requireRuntimeProcessCurrentTx locks the binding and process again and
+// requires current process authority. It serves entrypoints that hold no
+// receipt-scope proof.
 func requireRuntimeProcessCurrentTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	process, err := lockRuntimeBindingProcessTx(ctx, tx, scope)
 	if err != nil {

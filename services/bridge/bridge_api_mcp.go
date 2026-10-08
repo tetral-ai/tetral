@@ -88,7 +88,8 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
@@ -101,16 +102,16 @@ func (s *PostgreSQLBridgeAPIStore) ClaimMcpToolResult(ctx context.Context, reque
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			response, err = claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
+			response, err = claimExistingMCPToolResultTx(ctx, tx, proof, request, tool, existing, now)
 			return err
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		if err := lockExecutableToolRouteTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "mcp_execute"); err != nil {
 			return err
 		}
-		response, err = claimMCPToolResultTx(ctx, tx, request, tool, now)
+		response, err = claimMCPToolResultTx(ctx, tx, proof, request, tool, now)
 		return err
 	}); err != nil {
 		if runtimecontrol.IsScopeSupersededError(err) {
@@ -141,7 +142,8 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		existingOperation, ok, err := readBridgeDeclarationOperationTx(
@@ -162,7 +164,7 @@ func (s *PostgreSQLBridgeAPIStore) RelinquishMcpToolResult(ctx context.Context, 
 			response = duplicateMCPRelinquishResponse()
 			return nil
 		}
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		tool, err := runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
@@ -255,7 +257,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		var replayed bool
@@ -263,7 +266,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err != nil || replayed {
 			return err
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		tool, err = runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
@@ -345,7 +348,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeReceiptScopeTx(ctx, tx, request.GetScope()); err != nil {
+		proof, err := lockRuntimeReceiptScopeTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
 		var replayed bool
@@ -361,7 +365,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 				response.GetDuplicate().GetAttachmentRef() != attachment.GetAttachmentRef()
 			return nil
 		}
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
 		tool, err = runtimecontrol.LoadDurableToolExecutionTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), "agent.mcp_tool_use", true)
@@ -519,13 +523,13 @@ func storedMCPAttachmentMetadata(resultJSON string) ([]storedMCPAttachment, bool
 	return attachments, true
 }
 
-func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, proof lockedRuntimeScope, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
 	existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 	if err != nil {
 		return nil, err
 	}
 	if ok {
-		return claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
+		return claimExistingMCPToolResultTx(ctx, tx, proof, request, tool, existing, now)
 	}
 	inserted, err := insertMCPToolResultClaimTx(ctx, tx, request, tool, now)
 	if err != nil {
@@ -541,10 +545,13 @@ func claimMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridge
 	if !ok {
 		return nil, status.Error(codes.Internal, "mcp tool claim race was not stored")
 	}
-	return claimExistingMCPToolResultTx(ctx, tx, request, tool, existing, now)
+	return claimExistingMCPToolResultTx(ctx, tx, proof, request, tool, existing, now)
 }
 
-func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
+// claimExistingMCPToolResultTx replays a completed claim under the receipt
+// proof alone; any new claim or renewal first requires current process
+// authority on that same proof.
+func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, proof lockedRuntimeScope, request *bridgev1.ClaimMcpToolResultRequest, tool runtimecontrol.DurableToolExecution, existing runtimeToolResult, now time.Time) (*bridgev1.ClaimMcpToolResultResponse, error) {
 	if !sameMCPToolResult(existing, tool) {
 		return nil, status.Error(codes.AlreadyExists, "mcp tool use id conflicts with existing result")
 	}
@@ -555,7 +562,7 @@ func claimExistingMCPToolResultTx(ctx context.Context, tx *dbconnect.Tx, request
 		}
 		return &bridgev1.ClaimMcpToolResultResponse{Outcome: &bridgev1.ClaimMcpToolResultResponse_AlreadyCompleted{AlreadyCompleted: &bridgev1.McpToolAlreadyCompleted{ResultJson: existing.ResultJSON}}}, nil
 	case mcpClaimStatusInFlight:
-		if err := requireRuntimeProcessCurrentTx(ctx, tx, request.GetScope()); err != nil {
+		if err := proof.requireCurrent(tx); err != nil {
 			return nil, err
 		}
 		if existing.MCPClaimID.Valid && existing.MCPClaimID.String == request.GetClaimId() {
