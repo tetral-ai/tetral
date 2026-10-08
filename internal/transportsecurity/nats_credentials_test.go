@@ -9,7 +9,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 )
 
-func TestNATSCredentialPurposeUsesIndependentMountAndTrustRetirement(t *testing.T) {
+func TestNATSCredentialTrustRetirement(t *testing.T) {
 	root := transporttest.Must(transporttest.NewAuthority("nats-native"))
 	leaf := transporttest.Must(root.ValidLeaf("client.nats.test", ""))
 	dir := t.TempDir()

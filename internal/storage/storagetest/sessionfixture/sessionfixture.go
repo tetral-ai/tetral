@@ -256,7 +256,8 @@ func BridgeInterAgentSentEventJSON(t *testing.T, deliveryID string, sourceThread
 }
 
 // RuntimePodLostBinding returns the Runtime binding that pod-loss fixtures use for
-// sessionID, with fixed Pod placement values.
+// sessionID: a fixed namespace, Pod name and Pod IP, with the Pod UID and Runtime
+// process ID derived from sessionID.
 func RuntimePodLostBinding(sessionID string, bindingID string, generation int64) runtimecontrol.Binding {
 	return runtimecontrol.Binding{
 		BindingID:         bindingID,
