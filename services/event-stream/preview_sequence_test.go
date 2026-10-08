@@ -105,10 +105,11 @@ func TestPreviewWriterDeliversOnlyContinuousPrefixes(t *testing.T) {
 			if starts != test.starts || text != test.text {
 				t.Fatalf("preview starts=%d text=%q want%d %q", starts, text, test.starts, test.text)
 			}
-			if got := h.options.previewMetrics.previewLatency.count.Load(); got != test.latencySamples || h.options.previewMetrics.previewLatency.buckets[5].Load() != got {
+			latency := h.options.previewMetrics.previewLatency.snapshot()
+			if got := latency.count; got != test.latencySamples || latency.buckets[5] != got {
 				t.Fatalf("actual successful preview latency samples=%d want%d", got, test.latencySamples)
 			}
-			if test.latencySamples > 0 && h.options.previewMetrics.previewLatency.nanos.Load() == 0 {
+			if test.latencySamples > 0 && latency.nanos == 0 {
 				t.Fatal("real writer recorded no monotonic elapsed duration")
 			}
 		})

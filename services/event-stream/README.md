@@ -487,8 +487,9 @@ fixed-bucket latency histograms `event_stream_formal_delivery_latency_seconds`
 and `event_stream_preview_delivery_latency_seconds` use monotonic elapsed time:
 formal selection/read through successful response flush (End includes its final
 publication group), and local hub ingress through successful preview flush.
-The constant `le` bucket label is the only latency label; these observations
-do not measure provider, broker or client end-to-end latency.
+Each scrape reads one histogram's count, sum and buckets from the same set of
+observations. The constant `le` bucket label is the only latency label; these
+observations do not measure provider, broker or client end-to-end latency.
 
 ## Process diagnostics
 

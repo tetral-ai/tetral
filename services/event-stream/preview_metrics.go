@@ -2,6 +2,7 @@ package eventstream
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,34 +17,52 @@ type nativePreviewMetrics struct {
 
 // Local elapsed observations use time.Since's monotonic clock. Each latency is
 // one fixed-bucket histogram family through the shared exposition, with only
-// constant le labels and no identity labels.
+// constant le labels and no identity labels. One mutex covers the whole
+// histogram so a scrape copies count, sum and buckets from the same set of
+// observations.
 type deliveryLatency struct {
-	count, nanos atomic.Uint64
-	buckets      [6]atomic.Uint64
+	mu           sync.Mutex
+	count, nanos uint64
+	buckets      [6]uint64
+}
+
+type deliveryLatencySnapshot struct {
+	count, nanos uint64
+	buckets      [6]uint64
 }
 
 func (l *deliveryLatency) observe(elapsed time.Duration) {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	l.count.Add(1)
-	l.nanos.Add(uint64(elapsed))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.count++
+	l.nanos += uint64(elapsed)
 	for i, upper := range [...]time.Duration{time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, time.Second, 10 * time.Second, time.Duration(1<<63 - 1)} {
 		if elapsed <= upper {
-			l.buckets[i].Add(1)
+			l.buckets[i]++
 		}
 	}
 }
+
+func (l *deliveryLatency) snapshot() deliveryLatencySnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return deliveryLatencySnapshot{count: l.count, nanos: l.nanos, buckets: l.buckets}
+}
+
 func (l *deliveryLatency) samples(prefix, help string) []workload.Metric {
 	family := prefix + "_seconds"
 	help += " latency in local elapsed seconds."
+	snapshot := l.snapshot()
 	var result []workload.Metric
 	for i, upper := range [...]string{"0.001", "0.01", "0.1", "1", "10", "+Inf"} {
-		result = append(result, workload.Metric{Name: family + "_bucket", Family: family, Help: help, Type: "histogram", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(l.buckets[i].Load())})
+		result = append(result, workload.Metric{Name: family + "_bucket", Family: family, Help: help, Type: "histogram", Labels: []workload.MetricLabel{{Name: "le", Value: upper}}, Value: float64(snapshot.buckets[i])})
 	}
 	return append(result,
-		workload.Metric{Name: family + "_count", Family: family, Help: help, Type: "histogram", Value: float64(l.count.Load())},
-		workload.Metric{Name: family + "_sum", Family: family, Help: help, Type: "histogram", Value: float64(l.nanos.Load()) / float64(time.Second)},
+		workload.Metric{Name: family + "_count", Family: family, Help: help, Type: "histogram", Value: float64(snapshot.count)},
+		workload.Metric{Name: family + "_sum", Family: family, Help: help, Type: "histogram", Value: float64(snapshot.nanos) / float64(time.Second)},
 	)
 }
 
