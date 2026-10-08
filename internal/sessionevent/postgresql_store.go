@@ -51,8 +51,12 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 // target Thread lane. Delivery may bind that custody to a Runtime Pod, but it
 // never reconstructs an input from the event or turns admission into execution.
 //
-// The append path never scans, locks, or JSON-decodes stored session_events
-// rows; the only session_events read is the bounded MAX(sequence) aggregate.
+// Besides the bounded MAX(sequence) aggregate, the append path reads stored
+// session_events only through childcontrol.ThreadOrAncestorClosingTx: it
+// share-locks and JSON-decodes every child-interrupt request event of the
+// target Thread and its ancestors to find pending ones and, for a committed
+// request, scans the Session's tool result events, decoding each payload, for
+// one that answers the request's source Tool Use.
 func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, workspaceID workspace.ID, sessionID string, events []preparedEvent, idempotency appendIdempotency, settings appendSettings) (*appendOutcome, error) {
 	if s == nil || s.client == nil {
 		return nil, &ValidationError{Message: "session event store is required"}

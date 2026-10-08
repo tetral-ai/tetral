@@ -55,8 +55,10 @@ auto-stop/auto-archive/auto-delete timing and the 30-day retention floor in
 
 ### Due-scan predicate (per workspace, per tick)
 
-`dueCleanupSessionsTx` selects under `FOR UPDATE SKIP LOCKED`, ordered by
-`cleanup_after ASC, session_id ASC`, bounded to a batch (default 100):
+`dueCleanupSessionsTx` reads candidates without row locks, ordered by
+`cleanup_after ASC, session_id ASC`, bounded to a batch (default 100). The
+claim then takes each candidate's Session runtime arbitration lock and stamps
+the marker through a guarded UPDATE that repeats the predicate:
 
 ```
 status = 'idle'
@@ -86,7 +88,7 @@ in lockstep or the scan loses coverage.
 | 1 | Bridge or Job Runner idle write | stamps `cleanup_after` when a reusable run finishes |
 | 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
 | 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
-| 4 | scheduler `queue.EnqueueTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
+| 4 | scheduler `queue.EnqueueBatchTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
 | 5 | Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
 
 An error in one workspace aborts the rest of that tick; the next tick
@@ -149,16 +151,16 @@ the remaining fan-out (fail-closed, retry next tick). Conformance:
 
 ### Due-scan and enqueue (`scheduler.go`)
 
-`Scheduler.ClaimDue` is the claim seam. Contract: it reads the workspace
-catalog and `session_runtime_status`, and writes exactly two things — the
+`Scheduler.ClaimDue` is the claim seam. Contract: it reads
+`session_runtime_status` for one workspace, and writes exactly two things — the
 cleanup marker columns and one `queue_jobs` row per claimed session via
-`queue.EnqueueTx`. Invariants a replacement must preserve: the exact due
+`queue.EnqueueBatchTx`. Invariants a replacement must preserve: the exact due
 predicate above; the marker stamp is re-guarded against the same predicate
 before enqueue (`markCleanupEnqueuedTx` returns `false` → skip, no job);
 the queue job is deduped by the minted `cleanup_job_id`; the batch is
-bounded and claimed under `FOR UPDATE SKIP LOCKED`. It never calls Runtime
-Pod, Bridge, Sandbox Service, or the sandbox provider, and never touches
-durable history (`session_threads`, `session_events`, `session_messages`).
+bounded, and each Session is claimed under its runtime arbitration lock. It
+never calls Runtime Pod, Bridge, Sandbox Service, or the sandbox provider, and
+never touches durable history (`session_threads`, `session_events`, `session_messages`).
 Conformance: `TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs`,
 `TestCleanupWorkloadStaysWithinSchedulerBoundary`.
 

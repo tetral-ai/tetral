@@ -269,9 +269,11 @@ Target resolution:
 | replay — same key, identical canonical request | `200` with the stored admitted events; no new rows or queue jobs. |
 | same key, different canonical request | `409 invalid_request_error`. |
 
-Only digests are stored in `session_event_idempotency_keys`: the key's SHA-256
-digest plus a separate `canonical_request_hash` over the decoded batch (order,
-per-event thread selector, tool-use references, types, payloads). The selector
+`session_event_idempotency_keys` stores the key's SHA-256 digest, never the
+raw key; a separate `canonical_request_hash` over the decoded batch (order,
+per-event thread selector, tool-use references, types, payloads); and the
+complete admitted response events — ID, Thread, sequence, type, payload and
+creation time — that a replay returns. The selector
 in that hash is the interrupt *intent* (`session`, `thread:<id>`,
 `tool_use:<id>`, or `primary`), never a resolved database identifier —
 idempotency lookup precedes main-thread resolution, so a bare interrupt replays identically
