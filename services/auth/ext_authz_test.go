@@ -88,7 +88,10 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	_, admin, privateKey := newTestAuthRouter(t)
 	workloadDB := storagetest.OpenWorkloadDB(t, admin, "auth")
 	runtime := workloadDB.DB
-	resolver := auth.NewAuthorityResolver(runtime, "ws_auth_test")
+	usage := auth.NewAPIKeyUsageRecorder(runtime, nil)
+	usage.Start(ctx)
+	t.Cleanup(usage.Close)
+	resolver := auth.NewAuthorityResolver(runtime, "ws_auth_test", usage)
 	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
 	if err != nil {
 		t.Fatal(err)
@@ -214,10 +217,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 				t.Fatal("principal verified wrong method/path binding")
 			}
 		}
-		var touched sql.NullTime
-		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, p.APIKeyID).Scan(&touched); err != nil || !touched.Valid {
-			t.Fatal("Check did not commit key usage")
-		}
+		awaitAPIKeyUsage(ctx, t, admin, p.APIKeyID)
 	})
 	t.Run("ForeignKeyKeepsActualWorkspace", func(t *testing.T) {
 		if _, err := workspace.NewSeeder(admin).Seed(ctx, "ws_foreign_ext", "foreign"); err != nil {
@@ -391,13 +391,6 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 				}
 			}
 			check(t, externalTestRequest("GET", "/v1/sessions", key.APIKey, nil), 401)
-			var used sql.NullTime
-			if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&used); err != nil {
-				t.Fatal(err)
-			}
-			if used.Valid != admissionFirst {
-				t.Fatal("denied Check mutated usage or admitted Check lost touch")
-			}
 		})
 	}
 	t.Run("CancelledDatabaseWait", func(t *testing.T) {
@@ -441,9 +434,10 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err := held.Rollback(); err != nil {
 			t.Fatal(err)
 		}
+		flushAPIKeyUsage(ctx, t, admin, runtime, resolver)
 		var used sql.NullTime
 		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&used); err != nil || used.Valid {
-			t.Fatal("cancelled Check committed usage")
+			t.Fatal("cancelled Check submitted usage")
 		}
 	})
 	t.Run("DefaultInfoAdmissionAndSinkSafety", func(t *testing.T) {
@@ -485,7 +479,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if err := closedDB.Close(); err != nil {
 			t.Fatal(err)
 		}
-		failedAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closedDB, "ws_auth_test")}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
+		failedAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(closedDB, "ws_auth_test", usage)}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -520,12 +514,15 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "error") != 1 || authOperationSample(t, failedMetrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") != 0 {
 			t.Fatal("typed 500 was counted as successful gRPC admission")
 		}
+		flushAPIKeyUsage(ctx, t, admin, runtime, resolver)
 		var used sql.NullTime
 		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&used); err != nil || used.Valid {
-			t.Fatal("unavailable Check committed credential usage")
+			t.Fatal("unavailable Check submitted credential usage")
 		}
 	})
-	t.Run("NativeTLSGenerationAndPeerAdmission", func(t *testing.T) { externalTestNativeTLS(ctx, t, admin, workloadDB, runtime, adapter, signer) })
+	t.Run("NativeTLSGenerationAndPeerAdmission", func(t *testing.T) {
+		externalTestNativeTLS(ctx, t, admin, workloadDB, runtime, usage, adapter, signer)
+	})
 	stop()
 	if err := <-joined; err != nil {
 		t.Fatal(err)
@@ -564,6 +561,44 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 
 }
 
+// awaitAPIKeyUsage waits for the production usage worker, which samples a
+// committed admission on a later one-second tick, to write keyID.
+func awaitAPIKeyUsage(ctx context.Context, t *testing.T, admin *sql.DB, keyID string) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var used bool
+		if err := admin.QueryRowContext(ctx, `SELECT last_used_at IS NOT NULL FROM api_keys WHERE id=$1`, keyID).Scan(&used); err != nil {
+			t.Fatal(err)
+		}
+		if used {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("production usage worker did not write the admitted key")
+		case <-ticker.C:
+		}
+	}
+}
+
+// flushAPIKeyUsage admits a fresh control key through resolver and waits for
+// its sample. A sample submitted earlier for another fresh key through the same
+// recorder is due no later than the control's, so it has been attempted by
+// then; a negative usage assertion after this call is not vacuous.
+func flushAPIKeyUsage(ctx context.Context, t *testing.T, admin, runtime *sql.DB, resolver *auth.AuthorityResolver) {
+	t.Helper()
+	control, err := authtest.SeedIndependentKey(ctx, runtime, "ws_auth_test", "usage flush control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.AuthenticateKey(ctx, control.APIKey); err != nil {
+		t.Fatal(err)
+	}
+	awaitAPIKeyUsage(ctx, t, admin, control.ID)
+}
+
 func externalAwaitBlock(ctx context.Context, t *testing.T, admin *sql.DB, holder int) int {
 	t.Helper()
 	ticker := time.NewTicker(5 * time.Millisecond)
@@ -594,7 +629,7 @@ func externalTestBearer(ctx context.Context, t *testing.T, admin, runtime *sql.D
 	if _, err := auth.NewPolicyStore(admin).Apply(ctx, document); err != nil {
 		t.Fatal(err)
 	}
-	resolver := auth.NewAuthorityResolver(runtime, "ws_auth_test")
+	resolver := auth.NewAuthorityResolver(runtime, "ws_auth_test", nil)
 	loaded, err := resolver.LoadFederationRule(ctx, rule.ID, rule.OrganizationID)
 	if err != nil {
 		t.Fatal(err)

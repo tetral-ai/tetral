@@ -143,7 +143,7 @@ func TestPostgreSQLPublicMemoryTypedActors(t *testing.T) {
 	env := newAuthTestEnv(t)
 	service := memory.NewService(memory.NewPostgreSQLStore(dbconnect.NewClientForTesting(env.runtime)))
 	router, signer := signedMemoryRouter(t, service)
-	key, err := auth.NewAuthorityResolver(env.runtime, "").AuthenticateKey(context.Background(), env.envKey)
+	key, err := auth.NewAuthorityResolver(env.runtime, "", nil).AuthenticateKey(context.Background(), env.envKey)
 	if err != nil {
 		t.Fatal(err)
 	}

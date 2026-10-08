@@ -65,7 +65,7 @@ func directEdgeCheckStatus(response *authv3.CheckResponse) (int, string) {
 // the Go edge remains a routing fixture, separately from the real Envoy proof.
 func startSDKAuthorization(t *testing.T, database *sql.DB, signer *auth.InternalPrincipalSigner, ttl time.Duration) string {
 	t.Helper()
-	adapter, err := tetralauth.NewExternalAuthorization(tetralauth.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(database, workspace.DefaultID)}, Signer: signer, PrincipalTTL: ttl})
+	adapter, err := tetralauth.NewExternalAuthorization(tetralauth.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(database, workspace.DefaultID, nil)}, Signer: signer, PrincipalTTL: ttl})
 	if err != nil {
 		t.Fatal(err)
 	}

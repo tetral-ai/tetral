@@ -62,7 +62,7 @@ func TestRefreshBootstrapInsertsBootstrapRowOnFreshSchema(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(context.Background(), store, workspace.DefaultID, envKey); err != nil {
 		t.Fatalf("RefreshBootstrap: %v", err)
@@ -81,7 +81,7 @@ func TestRefreshBootstrapRotatesBootstrapKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	ctx := context.Background()
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)
@@ -111,7 +111,7 @@ func TestRefreshBootstrapPreservesStandardKeys(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	ctx := context.Background()
 
 	// Seed bootstrap, then create a standard key, then rotate
@@ -143,7 +143,7 @@ func TestRefreshBootstrapNoOpOnUnchangedDigest(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 	if err := auth.RefreshBootstrap(ctx, store, workspace.DefaultID, envKey); err != nil {
@@ -199,7 +199,7 @@ func TestRefreshBootstrapReactivatesRevokedBootstrapRow(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 
@@ -260,7 +260,7 @@ func TestRefreshBootstrapDoesNotReactivateRevokedStandardKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	authDB := storagetest.OpenWorkloadDB(t, db, "auth").DB
 	store := auth.NewAPIKeyStore(authDB)
-	resolver := auth.NewAuthorityResolver(authDB, "")
+	resolver := auth.NewAuthorityResolver(authDB, "", nil)
 	ctx := context.Background()
 	envKey := strings.Repeat("a", 64)
 

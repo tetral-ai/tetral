@@ -102,7 +102,7 @@ func newAuthenticatedRouter(t *testing.T, sessionHandler *httpapi.SessionHandler
 	t.Helper()
 	authDB := newTestDBFromStorage(t)
 	allOptions := []httpapi.RouterOption{
-		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(authDB, "").AuthenticateKey)),
+		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(authDB, "", nil).AuthenticateKey)),
 	}
 	allOptions = append(allOptions, options...)
 	return httpapi.NewRouter(sessionHandler, "", allOptions...)

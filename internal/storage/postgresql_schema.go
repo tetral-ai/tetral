@@ -1676,6 +1676,11 @@ END $$`
 	// (workspace_id) WHERE key_kind = 'bootstrap' enforces the
 	// "exactly one bootstrap key per workspace" invariant without
 	// blocking multiple standard keys.
+	//
+	// `last_used_at` is Auth's asynchronous, approximate usage sample. A
+	// trigger in postgresql_auth_schema.go advances `usage_generation` on
+	// every digest or revocation change, so a delayed sample of earlier
+	// credential material cannot update a later instance of the key.
 	createPostgreSQLApiKeysTable = `CREATE TABLE IF NOT EXISTS api_keys (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
 		id TEXT NOT NULL,
@@ -1707,6 +1712,7 @@ END $$`
 		created_at TIMESTAMPTZ NOT NULL,
 		last_used_at TIMESTAMPTZ,
 		revoked_at TIMESTAMPTZ,
+		usage_generation BIGINT NOT NULL DEFAULT 1 CHECK (usage_generation > 0),
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id)
 	)`

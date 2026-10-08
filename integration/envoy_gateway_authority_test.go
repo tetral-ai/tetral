@@ -42,7 +42,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					t.Fatal("actual exchange did not fetch exactly the registered real HTTPS JWKS")
 				}
 				issuerBefore := issuer.counts()
-				principal := transporttest.Must(auth.NewAuthorityResolver(f.db, workspace.DefaultID).AuthenticateBearer(edge.ctx, issued.AccessToken))
+				principal := transporttest.Must(auth.NewAuthorityResolver(f.db, workspace.DefaultID, nil).AuthenticateBearer(edge.ctx, issued.AccessToken))
 				restricted := transporttest.Must(auth.GenerateAPIKey())
 				// Provision an old, immutable narrower issuance ceiling using the same
 				// accepted PR6 fixture boundary. Current product role remains full access;
@@ -292,12 +292,24 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 		}
 		ticker.Stop()
 		release()
-		var lastUsed sql.NullTime
-		if f.db.QueryRowContext(edge.ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&lastUsed) != nil || lastUsed.Valid || edge.apiRequests.Load() != before {
-			t.Fatal("failed held Check changed usage or forwarded to business backend")
+		if edge.apiRequests.Load() != before {
+			t.Fatal("failed held Check forwarded to business backend")
 		}
 		if held.Rollback() != nil {
 			t.Fatal("held authority transaction did not release")
+		}
+		// Usage is sampled asynchronously after a committed admission. A fresh
+		// control key admitted now is written no earlier than any sample the
+		// failed Check could have submitted, so the held key's empty usage is
+		// then meaningful.
+		control := edge.authorityCreateKey(t, "held Check usage control")
+		if status, _ := edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", control.APIKey, "", nil); status != 200 {
+			t.Fatal("usage control key was not admitted")
+		}
+		edgeAwaitAPIKeyUsage(edge.ctx, t, f.db, control.ID)
+		var lastUsed sql.NullTime
+		if f.db.QueryRowContext(edge.ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, key.ID).Scan(&lastUsed) != nil || lastUsed.Valid {
+			t.Fatal("failed held Check submitted usage")
 		}
 		status, _ := edge.authorityRequest(edge.ctx, t, "GET", "/v1/sessions/"+f.session+"?beta=true", key.APIKey, "", nil)
 		if status != 200 {
@@ -305,6 +317,29 @@ func (edge *translatedPublicEdge) assertHeldAuthority(t *testing.T, f *publicPro
 		}
 	}
 }
+
+// edgeAwaitAPIKeyUsage waits for the Check adapter's usage worker, which
+// samples a committed admission on a later one-second tick, to write keyID.
+func edgeAwaitAPIKeyUsage(ctx context.Context, t *testing.T, db *sql.DB, keyID string) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var used bool
+		if db.QueryRowContext(ctx, `SELECT last_used_at IS NOT NULL FROM api_keys WHERE id=$1`, keyID).Scan(&used) != nil {
+			t.Fatal("API-key usage unavailable")
+		}
+		if used {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("Check usage worker did not write the admitted key")
+		case <-ticker.C:
+		}
+	}
+}
+
 func edgeAwaitAuthorityBlock(ctx context.Context, t *testing.T, db *sql.DB, holder int) int {
 	t.Helper()
 	ticker := time.NewTicker(5 * time.Millisecond)

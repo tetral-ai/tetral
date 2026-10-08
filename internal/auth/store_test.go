@@ -32,7 +32,7 @@ func seedDefaultBootstrap(t *testing.T, store *auth.APIKeyStore) string {
 func bootstrapPrincipal(t *testing.T, db *sql.DB, store *auth.APIKeyStore) auth.Principal {
 	t.Helper()
 	envKey := seedDefaultBootstrap(t, store)
-	principal, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), envKey)
+	principal, err := auth.NewAuthorityResolver(db, "", nil).AuthenticateKey(context.Background(), envKey)
 	if err != nil {
 		t.Fatalf("authenticate bootstrap key: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestListActiveForWorkspaceRejectsCrossWorkspaceCursor(t *testing.T) {
 func TestRevokeForWorkspaceMarksRowAndBlocksReauth(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
-	resolver := auth.NewAuthorityResolver(db, "")
+	resolver := auth.NewAuthorityResolver(db, "", nil)
 	ctx := context.Background()
 	created, err := authtest.SeedIndependentKey(ctx, db, workspace.DefaultID, "revoke")
 	if err != nil {
@@ -326,7 +326,7 @@ func TestAuthenticateKeyReturnsBootstrapWorkspace(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	envKey := seedDefaultBootstrap(t, store)
-	result, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), envKey)
+	result, err := auth.NewAuthorityResolver(db, "", nil).AuthenticateKey(context.Background(), envKey)
 	if err != nil {
 		t.Fatalf("AuthenticateKey: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestAuthenticateKeyPropagatesAPIKeyIDInPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SeedIndependentKey: %v", err)
 	}
-	principal, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), created.APIKey)
+	principal, err := auth.NewAuthorityResolver(db, "", nil).AuthenticateKey(context.Background(), created.APIKey)
 	if err != nil {
 		t.Fatalf("AuthenticateKey: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestAuthenticateKeyRejectsUnknownKey(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
 	store := auth.NewAPIKeyStore(db)
 	_ = seedDefaultBootstrap(t, store)
-	_, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), "tetral_sk_unknown_"+strings.Repeat("x", 32))
+	_, err := auth.NewAuthorityResolver(db, "", nil).AuthenticateKey(context.Background(), "tetral_sk_unknown_"+strings.Repeat("x", 32))
 	if err == nil {
 		t.Fatal("expected AuthenticationError for unknown key")
 	}
@@ -378,7 +378,7 @@ func TestAuthenticateKeyRejectsUnknownKey(t *testing.T) {
 
 func TestAuthenticateKeyRejectsEmpty(t *testing.T) {
 	db := storagetest.NewPostgreSQLAdminDB(t)
-	_, err := auth.NewAuthorityResolver(db, "").AuthenticateKey(context.Background(), "")
+	_, err := auth.NewAuthorityResolver(db, "", nil).AuthenticateKey(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error for empty key")
 	}

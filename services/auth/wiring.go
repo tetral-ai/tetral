@@ -37,12 +37,17 @@ type Application struct {
 	Verifier              *auth.AssertionVerifier
 	Pruner                *auth.TokenPruner
 	PruningMetrics        workload.MetricsCollector
+	UsageRecorder         *auth.APIKeyUsageRecorder
+	UsageMetrics          workload.MetricsCollector
 }
 
+// Close is idempotent. The usage recorder stops first, discarding unwritten
+// samples, so neither shutdown nor pool close waits for best-effort usage.
 func (a *Application) Close() error {
 	if a == nil {
 		return nil
 	}
+	a.UsageRecorder.Close()
 	if a.Pruner != nil {
 		a.Pruner.Close()
 	}
@@ -82,10 +87,13 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 		_ = database.OpenResult.Client.Close()
 		return nil, err
 	}
-
+	// HTTP and Check share one resolver and therefore this one recorder. Its
+	// worker starts only after startup validation, before any listener opens.
+	usage := auth.NewAPIKeyUsageRecorder(database.OpenResult.RawDatabaseForExcludedStores, opts.logger)
 	routerConfig, err := buildRouterConfig(ctx, RouterBuildConfig{
 		RawDatabase:       database.OpenResult.RawDatabaseForExcludedStores,
 		AssertionVerifier: verifier,
+		APIKeyUsage:       usage,
 		Config:            cfg,
 		Logger:            opts.logger,
 		RequestMetrics:    opts.requestMetrics,
@@ -102,16 +110,21 @@ func BuildApplication(ctx context.Context, cfg Config, open StartupOpenFunc, opt
 		return nil, err
 	}
 	handler := NewRouter(routerConfig)
+	usage.Start(ctx)
 	pruner := auth.StartTokenPruner(ctx, routerConfig.Resolver, opts.logger)
-	return &Application{ExternalAuthorization: adapter, Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector()}, nil
+	return &Application{ExternalAuthorization: adapter, Handler: handler, Client: database.OpenResult.Client, Verifier: verifier, Pruner: pruner, PruningMetrics: pruner.Collector(), UsageRecorder: usage, UsageMetrics: usage.Collector()}, nil
 }
 
 type RouterBuildConfig struct {
 	AssertionVerifier *auth.AssertionVerifier
 	RawDatabase       *sql.DB
-	Config            Config
-	Logger            *slog.Logger
-	RequestMetrics    httpapi.RequestMetricsRecorder
+	// APIKeyUsage receives committed API-key admissions through the router's
+	// resolver. Its owner starts and closes it; BuildRouter never starts a
+	// worker, and nil records no usage.
+	APIKeyUsage    *auth.APIKeyUsageRecorder
+	Config         Config
+	Logger         *slog.Logger
+	RequestMetrics httpapi.RequestMetricsRecorder
 }
 
 type ApplicationOption func(*applicationOptions)
@@ -159,7 +172,7 @@ func buildRouterConfig(ctx context.Context, cfg RouterBuildConfig) (RouterConfig
 	}
 	return RouterConfig{
 		Store:             store,
-		Resolver:          auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID),
+		Resolver:          auth.NewAuthorityResolver(cfg.RawDatabase, cfg.Config.BootstrapWorkspaceID, cfg.APIKeyUsage),
 		AssertionVerifier: cfg.AssertionVerifier,
 		ExchangeLimits:    cfg.Config.ExchangeLimits,
 		Signer:            signer,

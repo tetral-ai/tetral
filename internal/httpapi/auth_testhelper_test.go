@@ -48,7 +48,7 @@ func newAuthTestEnv(t *testing.T) *authTestEnv {
 // route families that still belong here.
 func (e *authTestEnv) router(opts ...httpapi.RouterOption) http.Handler {
 	options := []httpapi.RouterOption{
-		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(e.runtime, "").AuthenticateKey)),
+		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(e.runtime, "", nil).AuthenticateKey)),
 	}
 	options = append(options, opts...)
 	return httpapi.NewRouter(nil, "", options...)

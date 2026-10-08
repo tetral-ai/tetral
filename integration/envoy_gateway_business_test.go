@@ -97,7 +97,11 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		checkDiagnostics.Level = slog.LevelDebug
 		checkLog := workload.NewProcessLogger(&edge.checkRecords, "auth", "test", "edge", checkDiagnostics)
 		t.Cleanup(checkLog.CloseWithBudget)
-		adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: time.Minute, Logger: checkLog.Logger}))
+		// The Check adapter samples API-key usage like the Auth application.
+		usage := auth.NewAPIKeyUsageRecorder(authDB, checkLog.Logger)
+		usage.Start(ctx)
+		t.Cleanup(usage.Close)
+		adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID, usage)}, Signer: signer, PrincipalTTL: time.Minute, Logger: checkLog.Logger}))
 		edge.startCheck(ctx, t, fixture, profile, adapter)
 		edge.startHTTP(ctx, t, fixture, profile, "auth", "127.0.0.2:8080", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == "POST" && r.URL.Path == "/v1/oauth/token" {

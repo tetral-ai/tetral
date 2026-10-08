@@ -205,7 +205,7 @@ type externalAuditRecorder struct {
 
 func (r externalAuditRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEvent) {
 	// A failed diagnostic sink cannot change the domain decision or roll back
-	// committed usage. Business panics remain the Check owner's separate 500.
+	// committed admission. Business panics remain the Check owner's separate 500.
 	defer func() { _ = recover() }()
 	attrs := []any{"component", "auth", "operation", "auth." + event.Stage, "auth.stage", event.Stage, "auth.result", event.Result, "request.id", r.requestID}
 	if event.IdentityKind != "" {

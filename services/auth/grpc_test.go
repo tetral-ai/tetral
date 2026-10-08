@@ -62,16 +62,18 @@ func TestAuthGRPCConfig(t *testing.T) {
 	}
 }
 
-// Called by the owning PostgreSQL root: held Check and its usage transaction
-// are real, while the existing certificate fixture changes mounted generations.
-func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, workloadDB *storagetest.WorkloadDB, runtime *sql.DB, adapter *ExternalAuthorization, signer *auth.InternalPrincipalSigner) {
+// Called by the owning PostgreSQL root: held Check and its admission
+// transaction are real, while the existing certificate fixture changes mounted
+// generations. usage is the root's running recorder.
+func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, workloadDB *storagetest.WorkloadDB, runtime *sql.DB, usage *auth.APIKeyUsageRecorder, adapter *ExternalAuthorization, signer *auth.InternalPrincipalSigner) {
 	// This listener owns an actual independent Auth-role pool, so shutdown can
 	// prove its admitted users join before the pool/credential owners close.
 	nativeDB := workloadDB.OpenWorkload(t, "auth", nil)
-	nativeAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(nativeDB, "ws_auth_test")}, Signer: signer, PrincipalTTL: adapter.cfg.PrincipalTTL, Logger: adapter.cfg.Logger})
+	nativeAdapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(nativeDB, "ws_auth_test", usage)}, Signer: signer, PrincipalTTL: adapter.cfg.PrincipalTTL, Logger: adapter.cfg.Logger})
 	if err != nil {
 		t.Fatal(err)
 	}
+	control := auth.NewAuthorityResolver(runtime, "ws_auth_test", usage)
 	rootA := transporttest.Must(transporttest.NewAuthority("auth-check-a"))
 	rootB := transporttest.Must(transporttest.NewAuthority("auth-check-b"))
 	dns := "auth.tetral-system.svc.cluster.local"
@@ -156,6 +158,7 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 	assertAllow(clientA)
 	wrongRole := transporttest.Must(rootA.ValidLeaf("controller", "spiffe://tetral.local/ns/envoy-gateway-system/sa/envoy-gateway"))
 	expired := transporttest.Must(rootA.Issue("public-edge", edgeURI, time.Now().Add(-time.Hour), time.Now().Add(-time.Second)))
+	var negativeKeys []string
 	for name, creds := range map[string]credentials.TransportCredentials{
 		"wrong role": credentials.NewTLS(clientConfig(rootA.PEM, wrongRole, dns)), "wrong DNS": credentials.NewTLS(clientConfig(rootA.PEM, edgeA, "other.tetral-system.svc.cluster.local")),
 		"wrong CA": credentials.NewTLS(clientConfig(rootB.PEM, edgeB, dns)), "missing leaf": credentials.NewTLS(clientConfig(rootA.PEM, transporttest.Leaf{}, dns)), "expired leaf": credentials.NewTLS(clientConfig(rootA.PEM, expired, dns)), "plaintext": insecure.NewCredentials(),
@@ -165,6 +168,7 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 			if err != nil {
 				t.Fatal(err)
 			}
+			negativeKeys = append(negativeKeys, negativeKey.ID)
 			negativeRequest := externalTestRequest("GET", "/v1/sessions", negativeKey.APIKey, nil)
 			_, client := dial(creds)
 			callCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
@@ -173,11 +177,14 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 			if err == nil || externalTestPrincipal(response) != "" {
 				t.Fatal("invalid native transport admitted Check")
 			}
-			var touched sql.NullTime
-			if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, negativeKey.ID).Scan(&touched); err != nil || touched.Valid {
-				t.Fatal("invalid native transport reached credential admission/usage")
-			}
 		})
+	}
+	flushAPIKeyUsage(ctx, t, admin, runtime, control)
+	for _, id := range negativeKeys {
+		var touched sql.NullTime
+		if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, id).Scan(&touched); err != nil || touched.Valid {
+			t.Fatal("invalid native transport reached credential admission/usage")
+		}
 	}
 	assertAllow(clientA)
 	held, err := admin.BeginTx(ctx, nil)
@@ -266,6 +273,7 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 	if err == nil || externalTestPrincipal(response) != "" {
 		t.Fatal("reused retired-root channel admitted a new principal")
 	}
+	flushAPIKeyUsage(ctx, t, admin, runtime, control)
 	var touched sql.NullTime
 	if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, retiredKey.ID).Scan(&touched); err != nil || touched.Valid {
 		t.Fatal("retired channel reached credential admission/usage")
@@ -358,12 +366,8 @@ func externalTestNativeTLS(ctx context.Context, t *testing.T, admin *sql.DB, wor
 	case <-ctx.Done():
 		t.Fatal("Check listener did not join after admitted work")
 	}
-	var drainedTouch sql.NullTime
 	if authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", "shutdown_grpc_drain", "success") != 1 || authOperationSample(t, metrics, "tetral_operation_duration_seconds_count", externalAuthorizationCheckMethod, "success") == 0 {
 		t.Fatal("real native Check and held-owner drain durations were not exposed")
-	}
-	if err := admin.QueryRowContext(ctx, `SELECT last_used_at FROM api_keys WHERE id=$1`, drainKey.ID).Scan(&drainedTouch); err != nil || !drainedTouch.Valid {
-		t.Fatal("drained Check lost committed usage")
 	}
 	if err := server.Close(); err != nil {
 		t.Fatal(err)

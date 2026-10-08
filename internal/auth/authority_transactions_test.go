@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -419,4 +421,96 @@ func TestAuthorityResolverIssuanceBeforePolicyCommitHoldsRoots(t *testing.T) {
 	// invalidates it, rather than allowing the earlier issuance to escape roots.
 	_, err = resolver.AuthenticateBearer(ctx, issued.AccessToken)
 	requireCredentialRejection(t, err)
+}
+
+func TestAuthorityResolverAdmissionSharesCredentialLockAndSamplesAfterCommit(t *testing.T) {
+	t.Run("ConcurrentAdmissionThenWaitingRevoke", func(t *testing.T) {
+		admin, _, store, _ := authorityFixture(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		key, err := seedIndependentKeyForTest(ctx, store.db, workspace.DefaultID, "shared admission")
+		if err != nil {
+			t.Fatal(err)
+		}
+		usage, _ := testUsageRecorder(store.db, nil)
+		share := newSQLPause("SELECT id FROM api_keys WHERE", true, false)
+		commit := newSQLPause("commit", false, false)
+		trace := newSQLTrace(t, share, commit)
+		held := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, trace), workspace.DefaultID, usage)
+		first := make(chan error, 1)
+		go func() { _, err := held.AuthenticateKey(ctx, key.APIKey); first <- err }()
+		holder := share.wait(ctx, t)
+		// The first admission holds its credential share lock. A second admission
+		// of the same key shares it rather than queueing behind the first.
+		second, stop := context.WithTimeout(ctx, 2*time.Second)
+		defer stop()
+		if _, err := NewAuthorityResolver(store.db, workspace.DefaultID, nil).AuthenticateKey(second, key.APIKey); err != nil {
+			t.Fatalf("concurrent admission of one key waited on the held admission: %T", err)
+		}
+		revoked := make(chan error, 1)
+		go func() {
+			_, err := admin.ExecContext(ctx, `UPDATE api_keys SET revoked_at=clock_timestamp() WHERE id=$1`, key.ID)
+			revoked <- err
+		}()
+		awaitAuthorityBlock(ctx, t, admin, int(holder.pid))
+		share.resume()
+		commit.wait(ctx, t)
+		select {
+		case err := <-revoked:
+			t.Fatalf("revoke passed an uncommitted admission: %v", err)
+		default:
+		}
+		if len(usageEntries(usage)) != 0 {
+			t.Fatal("usage was submitted before the admission committed")
+		}
+		commit.resume()
+		if err := <-first; err != nil {
+			t.Fatalf("admission holding the share lock failed: %T", err)
+		}
+		if err := <-revoked; err != nil {
+			t.Fatal(err)
+		}
+		entries := usageEntries(usage)
+		if entry, ok := entries[usageIdentity(workspace.DefaultID, key.ID, key.APIKey, 1)]; len(entries) != 1 || !ok || !entry.pending || entry.observedAt.IsZero() {
+			t.Fatal("committed admission did not submit one generation-bound observation")
+		}
+		for _, statement := range trace.all() {
+			if verb := strings.ToUpper(strings.Fields(statement)[0]); verb == "UPDATE" || verb == "INSERT" || verb == "DELETE" {
+				t.Fatalf("admission transaction wrote: %s", verb)
+			}
+		}
+		_, err = held.AuthenticateKey(ctx, key.APIKey)
+		requireCredentialRejection(t, err)
+		if len(usageEntries(usage)) != 1 {
+			t.Fatal("rejected admission submitted usage")
+		}
+	})
+	t.Run("UncommittedAdmissionSubmitsNothing", func(t *testing.T) {
+		admin, _, store, _ := authorityFixture(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		key, err := seedIndependentKeyForTest(ctx, store.db, workspace.DefaultID, "uncommitted admission")
+		if err != nil {
+			t.Fatal(err)
+		}
+		usage, _ := testUsageRecorder(store.db, nil)
+		commit := newSQLPause("commit", false, true)
+		resolver := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, store.db, newSQLTrace(t, commit)), workspace.DefaultID, usage)
+		admission, abandon := context.WithCancel(ctx)
+		result := make(chan error, 1)
+		go func() { _, err := resolver.AuthenticateKey(admission, key.APIKey); result <- err }()
+		commit.wait(ctx, t)
+		abandon()
+		if err := <-result; err == nil {
+			t.Fatal("admission succeeded without its commit")
+		}
+		if _, err := admin.ExecContext(ctx, `UPDATE api_keys SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, key.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, err = resolver.AuthenticateKey(ctx, key.APIKey)
+		requireCredentialRejection(t, err)
+		if len(usageEntries(usage)) != 0 {
+			t.Fatal("failed commit or post-lock rejection submitted usage")
+		}
+	})
 }

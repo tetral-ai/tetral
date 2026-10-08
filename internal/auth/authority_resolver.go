@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -50,10 +51,13 @@ func (a *RequestAuthenticator) AuthenticateRequest(ctx context.Context, r Creden
 type AuthorityResolver struct {
 	db               *sql.DB
 	defaultWorkspace workspace.ID
+	usage            *APIKeyUsageRecorder
 }
 
-func NewAuthorityResolver(db *sql.DB, defaultWorkspace workspace.ID) *AuthorityResolver {
-	return &AuthorityResolver{db: db, defaultWorkspace: defaultWorkspace}
+// NewAuthorityResolver borrows Auth's pool. usage receives one observation per
+// committed API-key admission; a nil recorder records no usage.
+func NewAuthorityResolver(db *sql.DB, defaultWorkspace workspace.ID, usage *APIKeyUsageRecorder) *AuthorityResolver {
+	return &AuthorityResolver{db: db, defaultWorkspace: defaultWorkspace, usage: usage}
 }
 
 type credentialSnapshot struct {
@@ -146,6 +150,7 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	if raw == "" || len(raw) > 4096 {
 		return Principal{}, authRejected()
 	}
+	digest := DigestAPIKey(raw)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Principal{}, err
@@ -153,9 +158,9 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	defer func() { _ = tx.Rollback() }()
 	var c credentialSnapshot
 	if bearer {
-		c, err = readTokenSnapshot(tx.QueryRowContext(ctx, `SELECT `+tokenAuthorityColumns+` FROM public.tetral_auth_lookup_token($1)`, DigestAPIKey(raw)))
+		c, err = readTokenSnapshot(tx.QueryRowContext(ctx, `SELECT `+tokenAuthorityColumns+` FROM public.tetral_auth_lookup_token($1)`, digest))
 	} else {
-		c, err = readKeySnapshot(tx.QueryRowContext(ctx, `SELECT `+keyAuthorityColumns+` FROM public.tetral_auth_lookup_key($1)`, DigestAPIKey(raw)))
+		c, err = readKeySnapshot(tx.QueryRowContext(ctx, `SELECT `+keyAuthorityColumns+` FROM public.tetral_auth_lookup_key($1)`, digest))
 	}
 	if err != nil {
 		return Principal{}, err
@@ -173,8 +178,11 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	if err = setAuthWorkspace(ctx, tx, c.workspaceID); err != nil {
 		return Principal{}, err
 	}
-	// Recheck the credential after root locks, under its workspace. An individual
-	// revoke either precedes admission or waits for this credential usage commit.
+	// Recheck the credential after root locks, under its workspace. The share
+	// lock admits concurrent requests of one credential together, while an
+	// individual revoke or rotation either commits first and is observed after
+	// the wait, or waits for this admission to end; token pruning skips the
+	// locked row until a later pass. Admission writes nothing.
 	table := "api_keys"
 	digestColumn := "key_digest"
 	if bearer {
@@ -182,7 +190,7 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 		digestColumn = "token_digest"
 	}
 	var lockedID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE id=$1 AND workspace_id=$2 AND `+digestColumn+`=$3 FOR UPDATE`, c.id, string(c.workspaceID), DigestAPIKey(raw)).Scan(&lockedID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE id=$1 AND workspace_id=$2 AND `+digestColumn+`=$3 FOR SHARE`, c.id, string(c.workspaceID), digest).Scan(&lockedID)
 	if err == sql.ErrNoRows {
 		return Principal{}, authRejected()
 	}
@@ -190,9 +198,17 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 		return Principal{}, err
 	}
 	// A locking SELECT can evaluate its target list before waiting for the row
-	// lock. Read database time in a separate statement after acquiring it.
+	// lock. Read database time in a separate statement after acquiring it. For
+	// an API key, that one clock reading is also the usage observation, bound
+	// to the credential generation it admitted.
 	var valid bool
-	err = tx.QueryRowContext(ctx, `SELECT revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) AND `+digestColumn+`=$3 FROM `+table+` WHERE id=$1 AND workspace_id=$2`, c.id, string(c.workspaceID), DigestAPIKey(raw)).Scan(&valid)
+	var usage apiKeyUsageObservation
+	if bearer {
+		err = tx.QueryRowContext(ctx, `SELECT revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) AND token_digest=$3 FROM auth_access_tokens WHERE id=$1 AND workspace_id=$2`, c.id, string(c.workspaceID), digest).Scan(&valid)
+	} else {
+		usage.identity = apiKeyUsageIdentity{workspaceID: c.workspaceID, keyID: c.id, digest: [sha256.Size]byte(digest)}
+		err = tx.QueryRowContext(ctx, `SELECT k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>admission.observed_at) AND k.key_digest=$3,k.usage_generation,admission.observed_at FROM api_keys k CROSS JOIN (SELECT clock_timestamp() AS observed_at) admission WHERE k.id=$1 AND k.workspace_id=$2`, c.id, string(c.workspaceID), digest).Scan(&valid, &usage.identity.generation, &usage.observedAt)
+	}
 	if err == sql.ErrNoRows || err == nil && !valid {
 		return Principal{}, authRejected()
 	}
@@ -217,11 +233,13 @@ func (s *AuthorityResolver) authenticate(ctx context.Context, raw string, bearer
 	if err = p.Validate(); err != nil {
 		return Principal{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE `+table+` SET last_used_at=clock_timestamp() WHERE id=$1 AND workspace_id=$2`, c.id, string(c.workspaceID)); err != nil {
-		return Principal{}, err
-	}
 	if err = tx.Commit(); err != nil {
 		return Principal{}, err
+	}
+	// Only a committed API-key admission is sampled. Submission never waits,
+	// and a dropped sample cannot change this admission.
+	if !bearer {
+		s.usage.submit(usage)
 	}
 	return p, nil
 }

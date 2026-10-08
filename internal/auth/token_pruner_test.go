@@ -28,7 +28,7 @@ func prunerFixture(t *testing.T) (*sql.DB, *storagetest.WorkloadDB, *AuthorityRe
 		t.Fatal(err)
 	}
 	w := storagetest.OpenWorkloadDB(t, admin, "auth")
-	return admin, w, NewAuthorityResolver(w.DB, workspace.DefaultID)
+	return admin, w, NewAuthorityResolver(w.DB, workspace.DefaultID, nil)
 }
 
 func seedPruneToken(t *testing.T, db *sql.DB, label string, expiry time.Time, revoked bool) string {
@@ -76,30 +76,36 @@ func pruneIDs(t *testing.T, db *sql.DB) []string {
 	return ids
 }
 
+// controlPruneClock replaces only the deployed pruner's one clock expression in
+// this private clone. Retention boundaries cannot be observed reliably with
+// wall time; owner, security, search path and ACL stay as installed.
+func controlPruneClock(t *testing.T, admin *sql.DB, at time.Time) {
+	t.Helper()
+	var definition, metadata string
+	if err := admin.QueryRow(`SELECT pg_get_functiondef(oid),ROW(proowner,prosecdef,proconfig,proacl)::text FROM pg_proc WHERE oid='public.tetral_auth_prune_tokens(integer)'::regprocedure`).Scan(&definition, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	const clock = "pg_catalog.clock_timestamp()"
+	if strings.Count(definition, clock) != 1 {
+		t.Fatal("canonical pruner does not have exactly one replaceable clock expression")
+	}
+	controlled := strings.Replace(definition, clock, "TIMESTAMPTZ '"+at.UTC().Format("2006-01-02 15:04:05.999999Z07:00")+"'", 1)
+	if _, err := admin.Exec(controlled); err != nil {
+		t.Fatal(err)
+	}
+	var installed, afterMetadata string
+	if err := admin.QueryRow(`SELECT pg_get_functiondef(oid),ROW(proowner,prosecdef,proconfig,proacl)::text FROM pg_proc WHERE oid='public.tetral_auth_prune_tokens(integer)'::regprocedure`).Scan(&installed, &afterMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if installed != controlled || metadata != afterMetadata {
+		t.Fatal("controlled clock changed function body or owner/security/search-path/ACL beyond the single substitution")
+	}
+}
+
 func TestAuthTokenPrunerRetentionAndBatch(t *testing.T) {
 	t.Run("ControlledDatabaseClockStrictRetention", func(t *testing.T) {
 		admin, w, resolver := prunerFixture(t)
-		// This private clone preserves the deployed function body except its one
-		// clock expression. Equality cannot be observed reliably with wall time.
-		var definition, metadata string
-		if err := admin.QueryRow(`SELECT pg_get_functiondef(oid),ROW(proowner,prosecdef,proconfig,proacl)::text FROM pg_proc WHERE oid='public.tetral_auth_prune_tokens(integer)'::regprocedure`).Scan(&definition, &metadata); err != nil {
-			t.Fatal(err)
-		}
-		const clock = "pg_catalog.clock_timestamp()"
-		if strings.Count(definition, clock) != 1 {
-			t.Fatal("canonical pruner does not have exactly one replaceable clock expression")
-		}
-		controlled := strings.Replace(definition, clock, `TIMESTAMPTZ '2026-10-04 00:00:00+00'`, 1)
-		if _, err := admin.Exec(controlled); err != nil {
-			t.Fatal(err)
-		}
-		var installed, afterMetadata string
-		if err := admin.QueryRow(`SELECT pg_get_functiondef(oid),ROW(proowner,prosecdef,proconfig,proacl)::text FROM pg_proc WHERE oid='public.tetral_auth_prune_tokens(integer)'::regprocedure`).Scan(&installed, &afterMetadata); err != nil {
-			t.Fatal(err)
-		}
-		if installed != controlled || metadata != afterMetadata {
-			t.Fatal("controlled clock changed function body or owner/security/search-path/ACL beyond the single substitution")
-		}
+		controlPruneClock(t, admin, time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC))
 		cutoff := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
 		seedPruneToken(t, admin, "at_before", cutoff.Add(-time.Microsecond), false)
 		seedPruneToken(t, admin, "at_equal", cutoff, false)
@@ -220,7 +226,7 @@ func TestAuthTokenPrunerConcurrentReplicas(t *testing.T) {
 	}
 	// The first deletion remains uncommitted and row-locked. The second
 	// Auth connection must skip it rather than await the first transaction's commit.
-	second := NewAuthorityResolver(w.OpenWorkload(t, "auth", nil), workspace.DefaultID)
+	second := NewAuthorityResolver(w.OpenWorkload(t, "auth", nil), workspace.DefaultID, nil)
 	b, err := second.PruneTokens(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -258,7 +264,7 @@ func TestAuthTokenPrunerRoleIsolation(t *testing.T) {
 			continue
 		}
 		t.Run(role, func(t *testing.T) {
-			_, err := NewAuthorityResolver(w.OpenWorkload(t, role, nil), workspace.DefaultID).PruneTokens(context.Background(), 1000)
+			_, err := NewAuthorityResolver(w.OpenWorkload(t, role, nil), workspace.DefaultID, nil).PruneTokens(context.Background(), 1000)
 			var pgErr *pgconn.PgError
 			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
 				t.Fatalf("non-Auth role prune: want insufficient_privilege, got %T", err)
@@ -372,7 +378,7 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 		// lock, so expiry update and physical purge can precede admission.
 		barrier := &pruneQueryBarrier{match: "SELECT id FROM auth_access_tokens WHERE", entered: make(chan struct{}), release: make(chan struct{})}
 		traced := storagetest.OpenRuntimeRoleDBWithTracer(t, w.DB, barrier)
-		resolver := NewAuthorityResolver(traced, workspace.DefaultID)
+		resolver := NewAuthorityResolver(traced, workspace.DefaultID, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		result := make(chan error, 1)
 		done := make(chan struct{})
@@ -392,7 +398,7 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 		if _, err := admin.ExecContext(ctx, `UPDATE auth_access_tokens SET expires_at=$1 WHERE id='at_admission'`, now.Add(-48*time.Hour)); err != nil {
 			t.Fatal(err)
 		}
-		pruned, err := NewAuthorityResolver(w.DB, workspace.DefaultID).PruneTokens(ctx, 1000)
+		pruned, err := NewAuthorityResolver(w.DB, workspace.DefaultID, nil).PruneTokens(ctx, 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -413,13 +419,17 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 			t.Fatal("stale admission recreated token")
 		}
 	})
-	t.Run("AdmittedLiveCredentialAndExpiredPruningProceed", func(t *testing.T) {
+	t.Run("AdmissionShareLockDefersPruningOfItsCredential", func(t *testing.T) {
 		admin, w, _ := prunerFixture(t)
 		now := dbClock(t, admin)
 		raw := seedPruneToken(t, admin, "at_live_admission", now.Add(time.Hour), false)
 		seedPruneToken(t, admin, "at_other_expired", now.Add(-48*time.Hour), false)
-		barrier := &pruneQueryBarrier{match: "UPDATE auth_access_tokens SET last_used_at", end: true, entered: make(chan struct{}), release: make(chan struct{})}
-		resolver := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, w.DB, barrier), workspace.DefaultID)
+		// Admission's real clock still accepts the live token, while this pruner
+		// clock already makes it eligible. Only the admission's held credential
+		// share lock keeps pruning from deleting it mid-admission.
+		controlPruneClock(t, admin, now.Add(48*time.Hour))
+		barrier := &pruneQueryBarrier{match: "SELECT id FROM auth_access_tokens WHERE", end: true, entered: make(chan struct{}), release: make(chan struct{})}
+		resolver := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, w.DB, barrier), workspace.DefaultID, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		result := make(chan error, 1)
 		done := make(chan struct{})
@@ -436,12 +446,16 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 			waitPruneSignal(joinCtx, t, done)
 		}()
 		waitPruneSignal(ctx, t, barrier.entered)
-		pruned, err := NewAuthorityResolver(w.DB, workspace.DefaultID).PruneTokens(ctx, 1000)
+		pruner := NewAuthorityResolver(w.DB, workspace.DefaultID, nil)
+		pruned, err := pruner.PruneTokens(ctx, 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pruned.DeletedCount != 1 {
-			t.Fatal("live admission blocked expired pruning")
+		if pruned.DeletedCount != 1 || pruned.ExpiredBacklog != 1 {
+			t.Fatalf("pruning during admission=%+v", pruned)
+		}
+		if ids := pruneIDs(t, admin); !slices.Equal(ids, []string{"at_live_admission"}) {
+			t.Fatalf("pruning during admission retained=%v", ids)
 		}
 		barrier.resume()
 		select {
@@ -452,18 +466,18 @@ func TestAuthTokenPrunerAdmissionAndShutdown(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("live admission did not join")
 		}
-		var touched bool
-		if err := admin.QueryRow(`SELECT last_used_at IS NOT NULL FROM auth_access_tokens WHERE id='at_live_admission'`).Scan(&touched); err != nil {
+		after, err := pruner.PruneTokens(ctx, 1000)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if !touched {
-			t.Fatal("live admission did not commit usage")
+		if after.DeletedCount != 1 || len(pruneIDs(t, admin)) != 0 {
+			t.Fatalf("pruning after admission=%+v", after)
 		}
 	})
 	t.Run("DatabaseDeadlineAndJoinedCancellation", func(t *testing.T) {
 		admin, w, _ := prunerFixture(t)
 		tracer := &pruneBackendTracer{started: make(chan uint32, 4)}
-		resolver := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, w.DB, tracer), workspace.DefaultID)
+		resolver := NewAuthorityResolver(storagetest.OpenRuntimeRoleDBWithTracer(t, w.DB, tracer), workspace.DefaultID, nil)
 		seedPruneToken(t, admin, "at_blocked", dbClock(t, admin).Add(-48*time.Hour), false)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

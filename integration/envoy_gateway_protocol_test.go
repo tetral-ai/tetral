@@ -41,7 +41,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				private := transporttest.Must(auth.GenerateEd25519PrivateKeyBase64())
 				signer := transporttest.Must(auth.NewInternalPrincipalSignerFromBase64(private))
 				handler := transporttest.Must(authservice.BuildRouter(ctx, authservice.RouterBuildConfig{RawDatabase: authDB, Config: authservice.Config{BootstrapAPIKey: key, BootstrapWorkspaceID: workspace.DefaultID, InternalPrincipalPrivateKeyB64: private, InternalPrincipalTTL: time.Minute}}))
-				adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: time.Minute}))
+				adapter := transporttest.Must(authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID, nil)}, Signer: signer, PrincipalTTL: time.Minute}))
 				ports, releasePorts := reserveEnvoyGatewayFixturePorts(t)
 				fixture := translateProductionEnvoyGateway(t, profile, ports)
 				fixture.ReleasePorts = releasePorts

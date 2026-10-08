@@ -21,7 +21,7 @@ func authorityFixture(t *testing.T) (*sql.DB, *AuthorityResolver, *APIKeyStore, 
 		t.Fatal(err)
 	}
 	runtime := storagetest.OpenWorkloadDB(t, db, "auth").DB
-	return db, NewAuthorityResolver(runtime, workspace.DefaultID), NewAPIKeyStore(runtime), VerifiedAssertion{ruleID: d.FederationRules[0].ID, ruleRevision: 1, issuer: d.FederationRules[0].Issuer, subject: d.Identities[0].Subject, expiresAt: time.Now().Add(30 * time.Minute)}
+	return db, NewAuthorityResolver(runtime, workspace.DefaultID, nil), NewAPIKeyStore(runtime), VerifiedAssertion{ruleID: d.FederationRules[0].ID, ruleRevision: 1, issuer: d.FederationRules[0].Issuer, subject: d.Identities[0].Subject, expiresAt: time.Now().Add(30 * time.Minute)}
 }
 
 // seedIndependentKeyForTest inserts the standard independent key row that

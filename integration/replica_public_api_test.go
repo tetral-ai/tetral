@@ -92,7 +92,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			authRouters[index].ServeHTTP(w, r)
 		}))
 		t.Cleanup(authServers[i].Close)
-		adapter, err := authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID)}, Signer: signer, PrincipalTTL: 2 * time.Second})
+		adapter, err := authservice.NewExternalAuthorization(authservice.ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: auth.NewAuthorityResolver(authDB, workspace.DefaultID, nil)}, Signer: signer, PrincipalTTL: 2 * time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}

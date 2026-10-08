@@ -183,9 +183,9 @@ func TestOIDCReplicaAuthority(t *testing.T) {
 			t.Fatal("replica fixture lacks two independently observed actual Auth processes")
 		}
 		for _, process := range processes {
-			oidcAssertActualPrunerExport(ctx, t, process)
+			oidcAssertActualMaintenanceExport(ctx, t, process)
 		}
-		t.Log("oidc_replica_assertion=pruner_export replicas=2 families=6 samples=8 public_metrics=404; export observation only")
+		t.Log("oidc_replica_assertion=maintenance_export replicas=2 families=9 samples=14 public_metrics=404; export observation only")
 		assertion := issuer.assertion(t, identity.Subject)
 		frozen := oidcReplicaExchange(ctx, t, processes[0], issuer.rule, assertion)
 		initial := issuer.counts()
@@ -278,18 +278,30 @@ func TestOIDCReplicaAuthority(t *testing.T) {
 }
 
 // Export wiring is observable immediately; zero initial counters do not prove a
-// maintenance pass. The separate pruner owner supplies expiry/loop evidence.
-func oidcAssertActualPrunerExport(ctx context.Context, t *testing.T, process *oidcAuthProcess) {
+// maintenance pass or a usage write. The pruner and usage owners supply loop
+// evidence; this checks that the actual process exports their fixed series.
+func oidcAssertActualMaintenanceExport(ctx context.Context, t *testing.T, process *oidcAuthProcess) {
 	t.Helper()
-	required := map[string]bool{
-		"tetral_auth_token_prune_passes_total":                   false,
-		"tetral_auth_token_prune_deleted_total":                  false,
-		"tetral_auth_token_prune_expired_backlog":                false,
-		"tetral_auth_token_prune_oldest_expiry_age_seconds":      false,
-		"tetral_auth_token_prune_last_success_timestamp_seconds": false,
-		"tetral_auth_token_prune_healthy":                        false,
+	families := map[string][]string{
+		"tetral_auth_token_prune_passes_total":                   {`status="success"`, `status="failed"`, `status="cancelled"`},
+		"tetral_auth_token_prune_deleted_total":                  nil,
+		"tetral_auth_token_prune_expired_backlog":                nil,
+		"tetral_auth_token_prune_oldest_expiry_age_seconds":      nil,
+		"tetral_auth_token_prune_last_success_timestamp_seconds": nil,
+		"tetral_auth_token_prune_healthy":                        nil,
+		"tetral_auth_api_key_usage_submissions_dropped_total":    {`reason="capacity"`, `reason="contended"`, `reason="closed"`},
+		"tetral_auth_api_key_usage_samples_dropped_total":        {`reason="deadline"`, `reason="database"`},
+		"tetral_auth_api_key_usage_rows_updated_total":           nil,
 	}
-	statuses := map[string]bool{"success": false, "failed": false, "cancelled": false}
+	expected := map[string]bool{}
+	for family, labels := range families {
+		if len(labels) == 0 {
+			expected[family] = false
+		}
+		for _, label := range labels {
+			expected[family+"{"+label+"}"] = false
+		}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, process.MetricsURL+"/metrics", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +318,6 @@ func oidcAssertActualPrunerExport(ctx context.Context, t *testing.T, process *oi
 	if err != nil {
 		t.Fatal("actual metrics body unreadable")
 	}
-	samples := 0
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, "#") {
 			continue
@@ -315,39 +326,19 @@ func oidcAssertActualPrunerExport(ctx context.Context, t *testing.T, process *oi
 		if len(fields) != 2 {
 			continue
 		}
-		family := strings.SplitN(fields[0], "{", 2)[0]
-		if _, exists := required[family]; !exists {
+		if _, exists := families[strings.SplitN(fields[0], "{", 2)[0]]; !exists {
 			continue
 		}
-		required[family] = true
-		samples++
-		if family == "tetral_auth_token_prune_passes_total" {
-			matched := false
-			for status := range statuses {
-				if fields[0] == family+"{status=\""+status+"\"}" {
-					statuses[status] = true
-					matched = true
-				}
-			}
-			if !matched {
-				t.Fatal("pruner metric exposed an unbounded or unexpected status label")
-			}
-		} else if fields[0] != family {
-			t.Fatal("aggregate pruner gauge/counter exposed unexpected labels")
+		seen, fixed := expected[fields[0]]
+		if !fixed || seen {
+			t.Fatal("Auth maintenance metric exposed an unbounded, unexpected or repeated series")
 		}
+		expected[fields[0]] = true
 	}
-	for _, seen := range required {
+	for _, seen := range expected {
 		if !seen {
-			t.Fatal("actual Auth metrics listener omitted required pruning family")
+			t.Fatal("actual Auth metrics listener omitted a fixed pruning or usage series")
 		}
-	}
-	for _, seen := range statuses {
-		if !seen {
-			t.Fatal("actual Auth metrics listener omitted fixed pruning status")
-		}
-	}
-	if samples != 8 {
-		t.Fatal("actual Auth pruning export has unexpected sample cardinality")
 	}
 	public, err := http.NewRequestWithContext(ctx, http.MethodGet, process.URL+"/metrics", nil)
 	if err != nil {

@@ -38,8 +38,13 @@ type APIKeyMetadata struct {
 	KeyPrefix   string `json:"key_prefix"`
 	KeyKind     string `json:"key_kind"`
 	CreatedAt   string `json:"created_at"`
-	LastUsedAt  string `json:"last_used_at,omitempty"`
-	RevokedAt   string `json:"revoked_at,omitempty"`
+	// LastUsedAt is the approximate database time of a sampled successful
+	// admission, normally written about a second later and at most once per
+	// five minutes of admission time. Under overload, failure or shutdown it
+	// may be missing or older than the latest use. It is neither security
+	// evidence nor a last-request guarantee.
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
 }
 
 // CreateAPIKeyResult is the one-time response shape for
@@ -52,9 +57,9 @@ type CreateAPIKeyResult struct {
 
 // APIKeyStore owns workspace-scoped key metadata listing and revocation,
 // bootstrap refresh and CreateForPrincipal issuance. Credential admission
-// belongs to AuthorityResolver: its fixed digest lookup, current root locks,
-// credential recheck and usage transaction. A caller-supplied lookup flag alone
-// does not confer global table access.
+// belongs to AuthorityResolver: its fixed digest lookup, current root locks and
+// share-locked credential recheck; APIKeyUsageRecorder samples usage afterwards.
+// A caller-supplied lookup flag alone does not confer global table access.
 type APIKeyStore struct {
 	db *sql.DB
 }
@@ -195,7 +200,9 @@ func (s *APIKeyStore) RevokeForWorkspace(ctx context.Context, workspaceID worksp
 // place; if the digest already matches an active row, the operation
 // is a no-op; if the digest matches a revoked bootstrap row,
 // revoked_at is cleared on that same row so the configured
-// ENGINE_API_KEY is authoritative after restart. Standard
+// ENGINE_API_KEY is authoritative after restart. Replacement and
+// reactivation clear last_used_at, and the schema trigger advances the
+// row's usage generation so earlier usage samples cannot land. Standard
 // (key_kind='standard') rows are untouched, so refreshing the
 // bootstrap key never invalidates or reactivates workspace-managed
 // keys.

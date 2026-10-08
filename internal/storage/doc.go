@@ -46,11 +46,12 @@
 //   - The single version-one baseline is the fresh-install identity.
 //     MigrateSchema never upgrades a predecessor schema.
 //   - The DDL is ordinary table/index DDL with row-level security, plus the
-//     sessions agent-version trigger, the Auth key-lineage and terminal-grant
-//     triggers, and SECURITY DEFINER functions with a fixed search_path owned
-//     by the migration role: the lock-only runtime process function and the
-//     Auth credential lookup, authority lock and token prune functions. It
-//     stays portable across self-managed PostgreSQL and managed providers.
+//     sessions agent-version trigger, the Auth key-lineage, key
+//     usage-generation and terminal-grant triggers, and SECURITY DEFINER
+//     functions with a fixed search_path owned by the migration role: the
+//     lock-only runtime process function and the Auth credential lookup,
+//     authority lock and token prune functions. It stays portable across
+//     self-managed PostgreSQL and managed providers.
 //     The complete database preparation command additionally requires a
 //     PostgreSQL superuser for its current role installer; managed-provider
 //     customer administrators without that privilege cannot run it.
@@ -123,7 +124,7 @@
 //	auth_workspace_grants                                   (import, removal, grant revocation)                             grant lookup and authority lock
 //	                                                                                                                        functions for exchange, admission and
 //	                                                                                                                        key issuance
-//	auth_access_tokens                                     Auth exchange issuance and admission usage; pruning              Auth admission (lookup function) and
+//	auth_access_tokens                                     Auth exchange issuance; pruning                                  Auth admission (lookup function) and
 //	                                                        through the prune function; tetral-auth-policy revocation       derived-key issuance
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,

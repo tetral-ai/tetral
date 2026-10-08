@@ -62,6 +62,11 @@ revoked_at? }`. The SDK has no API-key management resource; use raw HTTP for thi
 surface. Create returns raw key material exactly once. List returns no raw key,
 digest or authority lineage. Prefixes are non-authenticating identification
 metadata. Revoked keys are retained for audit and excluded from lists.
+`last_used_at` is approximate: the database time of a sampled successful
+admission, normally written about a second later and at most once per five
+minutes of admission time. Under overload, database failure or shutdown it can
+be missing or older than the latest use. It is neither security evidence nor a
+last-request guarantee. Access tokens record no usage.
 
 ### Credential selection and admission
 
@@ -105,17 +110,51 @@ Admission uses one bounded transaction:
    resolving credential/workspace/provenance before workspace scope is known.
 2. Identity-derived credentials lock rule, identity and grant in that order and
    require their current enabled state and exact recorded revisions.
-3. Auth installs the validated workspace and locks the selected credential row.
-   A separate statement then rechecks the same digest, revocation and expiry
-   against fresh PostgreSQL time **after** the lock wait.
-4. Auth reads the workspace, validates the complete typed principal, updates
-   usage, and commits. A concurrent individual revoke either precedes this
-   decision or waits for the admitted usage transaction.
+3. Auth installs the validated workspace and takes a share lock on the selected
+   credential row. A separate statement then rechecks the same digest,
+   revocation and expiry against fresh PostgreSQL time **after** the lock wait;
+   for an API key it also reads the usage generation and that database time.
+4. Auth reads the workspace, validates the complete typed principal and
+   commits. Admission writes nothing. Concurrent admissions of one credential
+   share its lock; a concurrent individual revoke or rotation either precedes
+   this decision or waits for the admission to commit, and token pruning skips
+   the share-locked row and deletes it on a later pass.
 
 **Atomic admission invariant.** Current root authority, selected credential
-material, expiry, revocation and usage are checked under one transaction. A
-caller-set lookup flag cannot grant global access. No Bearer business request
-contacts the identity provider.
+material, expiry and revocation are checked under one transaction. A caller-set
+lookup flag cannot grant global access. No Bearer business request contacts the
+identity provider.
+
+### API-key usage sampling
+
+Only a committed API-key admission submits a usage observation: workspace, key
+ID, digest, usage generation and the admission's database time. A rollback,
+rejected principal or failed commit submits nothing, and access tokens are not
+sampled. Submission never waits: it tries the recorder's map once, and a
+contended map, a closed recorder, or a new credential instance beyond the 4,096
+tracked ones drops the observation. Repeated observations of one instance keep
+the newest time. Raw credentials never enter the recorder; digests are never
+logged or used as labels.
+
+One worker per Auth process writes on a one-second tick through the Auth pool,
+one transaction at a time. Each tick forgets idle instances whose suppression
+ended, takes at most 128 due instances, oldest eligibility first, and suppresses
+each locally for five minutes whether or not its write succeeds. A tick's SQL
+has a one-second total deadline and each transaction 100 ms, including pool
+acquisition; work not started by the tick deadline is dropped. A write sets
+`last_used_at` only for the observed workspace, ID, digest and generation of an
+unrevoked key, and only when the observation is at least five minutes after the
+stored value. Replicas therefore store at most one sample per five minutes of
+admission time and never move it backward, though delayed samples can land
+closer together in wall time. A sample admitted before expiry can still be
+written after it. `usage_generation` advances whenever a key's digest or
+revocation state changes, so a delayed sample cannot update the key after a
+rotation away and back or after revoke and reactivation. API responses do not
+expose it.
+
+Usage writes contend with admission only on the same key: that key's admission
+waits for the worker's transaction, which its 100 ms deadline bounds. The
+worker also holds one pooled connection while it writes.
 
 ### Token exchange and authority selection
 
@@ -195,8 +234,10 @@ credential. SQL guards prevent editing a key's provenance, workspace or ceiling.
 Bootstrap refresh takes its workspace advisory lock and upserts one
 `key_kind = 'bootstrap'` row. Matching active configuration is a no-op; matching
 revoked configuration reactivates it; changed material replaces digest/prefix in
-place and resets usage. Standard keys are untouched. The locked digest recheck
-prevents old bootstrap material from authenticating across an in-place rotation.
+place and resets usage. Replacement and reactivation advance the usage
+generation; a no-op refresh does not. Standard keys are untouched. The locked
+digest recheck prevents old bootstrap material from authenticating across an
+in-place rotation.
 
 ### Administrative policy changes
 
@@ -242,12 +283,22 @@ Auth's separate metrics listener exports fixed status counters
 available after a failed pass; initial values do not claim a completed pass.
 There are no token, identity or workspace metric labels. Healthy ticks are
 quiet; degradation/recovery diagnostics are bounded and contain safe tuples.
+The usage worker exports
+`tetral_auth_api_key_usage_submissions_dropped_total{reason="capacity"|"contended"|"closed"}`,
+`tetral_auth_api_key_usage_samples_dropped_total{reason="deadline"|"database"}`
+and `tetral_auth_api_key_usage_rows_updated_total`, with no key, workspace or
+credential labels. A tick with failed writes logs one warning with a fixed
+message and the aggregate failed count; shutdown cancellation logs nothing.
 All listeners bind and native credential material validates before readiness.
 A listener failure cancels its siblings and clears readiness. The separate gRPC
 health service reports `envoy.service.auth.v3.Authorization`; the process probes
 remain on HTTP/metrics. Listener shutdown joins requests within the ten-second
-drain budget, cancelling forced gRPC work, then Application closes and joins pruning and
-issuer work before closing PostgreSQL and the trust observer.
+drain budget, cancelling forced gRPC work, then Application closes the usage
+recorder (submissions close, its worker is cancelled and joined, and unwritten
+samples are discarded without a final flush) and joins pruning and issuer work
+before closing PostgreSQL and the trust observer. Process cancellation also
+stops the usage worker, so admissions that complete during drain record no
+usage.
 
 The same metrics listener exports fixed-bucket
 `tetral_operation_duration_seconds{service="auth",operation="/envoy.service.auth.v3.Authorization/Check",outcome=...}`
@@ -321,6 +372,10 @@ edge returns `503` without a principal.
   metadata, issuance/expiry and a mandatory discriminated credential/identity/
   authority union. API-key actors retain their actual durable key ID; direct
   human/service Bearers carry stable Engine identity IDs and no API-key ID.
+- **Usage recorder:** `Application` owns the one `APIKeyUsageRecorder` and
+  injects it into the resolver that HTTP and Check share, starting its worker
+  after startup validation and before listeners open. `BuildRouter` starts no
+  worker; without an injected recorder it records no usage.
 - **Persistence:** pre-workspace access is restricted to fixed owner-controlled
   lookup/lock/prune functions. Serving roots are read-only; workspace writes
   require trusted scope. Raw keys, access tokens and assertions are never stored
@@ -338,7 +393,7 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
 - `services/auth/exchange_postgresql_test.go`: actual HTTP exchange, Engine
   selectors, human/service bindings, ported Check credential precedence and error classes.
 - `services/auth/ext_authz_test.go`: actual gRPC Check, real Auth-role private
-  PostgreSQL, signature/typed actor/touch/path binding, foreign and revoked keys,
+  PostgreSQL, signature/typed actor/sampled usage/path binding, foreign and revoked keys,
   frozen Bearer selection/duplicates, malformed metadata, actual lock-graph
   revoke/admission orders and interrupted database waits.
 - `services/auth/grpc_test.go`: listener configuration and, within the owning
@@ -346,17 +401,29 @@ administrative `TETRAL_TEST_DATABASE_URL` and create isolated clones/roles.
   held Check across leaf renewal and trust overlap, retired-channel rejection,
   and readiness withdrawal with an admitted Check completing before listener,
   credential observer and pool shutdown join.
+- `services/auth/application_test.go`: the production Application closes usage
+  submissions and joins the in-flight usage worker before closing the pool, with
+  no final flush; repeated Close succeeds.
 - `services/auth/operation_coverage_test.go`: actual Auth route registrations.
 - `internal/auth/authority_resolver_test.go` and `authority_transactions_test.go`:
   durable lineage/ceilings, parent pruning, exact revisions, actual Auth-role
-  row-lock barriers, both revocation orders and post-lock expiry/digest checks.
+  row-lock barriers, concurrent admissions sharing the credential lock, both
+  revocation orders, post-lock expiry/digest checks, no admission writes and
+  usage submitted only after commit.
+- `internal/auth/api_key_usage_test.go`: actual Auth-role worker/admission
+  contention (paused worker, other-key and same-key updates, cancellation,
+  exhausted pool, request versus application cancellation), two recorders
+  sampling by database time at the five-minute boundary, generation fencing
+  across rotation and reactivation, and map, batch, deadline and suppression
+  bounds.
 - `internal/auth/policy_test.go`, database role tests and the policy command tests:
   atomic/no-op/tombstone imports, narrow role isolation and protected operator
   entry with serving-role rejection.
 - Verifier/bounds tests: controlled HTTPS trust, claims, malicious metadata,
   rotation, retirement, cancellation, cache pressure and revision isolation.
 - Pruner tests: strict retention, bounded batches, replica progress, role
-  isolation, failure recovery, metrics and joined cancellation.
+  isolation, admission's credential share lock deferring pruning of that
+  credential, failure recovery, metrics and joined cancellation.
 - Actual OIDC integration roots: unchanged SDK/real HTTPS Keycloak exchange and
   reactive 401 recovery, real Keycloak/Auth rotation, two actual Auth processes
   sharing PostgreSQL with frozen Bearers and zero issuer calls, and exact test

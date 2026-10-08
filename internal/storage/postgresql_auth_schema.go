@@ -62,7 +62,6 @@ const createPostgreSQLAuthAccessTokens = `CREATE TABLE IF NOT EXISTS auth_access
  role_version BIGINT NOT NULL CHECK(role_version>0),
  expires_at TIMESTAMPTZ NOT NULL,
  revoked_at TIMESTAMPTZ,
- last_used_at TIMESTAMPTZ,
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  UNIQUE(workspace_id,id),
  FOREIGN KEY(workspace_id,grant_id) REFERENCES auth_workspace_grants(workspace_id,id),
@@ -161,6 +160,23 @@ AS $$ BEGIN
  RETURN NEW;
 END $$`
 
+// A key's usage generation advances whenever its digest or revocation state
+// changes and is otherwise retained, so an UPDATE cannot set it. Asynchronous
+// usage samples carry the generation they were admitted under; an earlier
+// sample cannot update the same key ID after rotation away and back, or after
+// revoke and reactivation. The increment raises bigint out of range rather
+// than wrapping.
+const createPostgreSQLAuthKeyUsageGeneration = `CREATE FUNCTION public.tetral_auth_key_usage_generation()
+RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog
+AS $$ BEGIN
+ IF NEW.key_digest IS DISTINCT FROM OLD.key_digest OR NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+  NEW.usage_generation := OLD.usage_generation + 1;
+ ELSE
+  NEW.usage_generation := OLD.usage_generation;
+ END IF;
+ RETURN NEW;
+END $$`
+
 func postgresqlAuthTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_auth_federation_rules", createPostgreSQLAuthFederationRules},
@@ -177,6 +193,9 @@ func postgresqlAuthFunctionSteps() []postgresqlSchemaStep {
 		{"create_auth_key_lineage", createPostgreSQLAuthKeyLineage},
 		{"revoke_auth_key_lineage_public", `REVOKE ALL ON FUNCTION public.tetral_auth_key_lineage() FROM PUBLIC`},
 		{"trigger_auth_key_lineage", `CREATE TRIGGER api_keys_authority_immutable BEFORE UPDATE ON api_keys FOR EACH ROW EXECUTE FUNCTION public.tetral_auth_key_lineage()`},
+		{"create_auth_key_usage_generation", createPostgreSQLAuthKeyUsageGeneration},
+		{"revoke_auth_key_usage_generation_public", `REVOKE ALL ON FUNCTION public.tetral_auth_key_usage_generation() FROM PUBLIC`},
+		{"trigger_auth_key_usage_generation", `CREATE TRIGGER api_keys_usage_generation BEFORE UPDATE ON api_keys FOR EACH ROW EXECUTE FUNCTION public.tetral_auth_key_usage_generation()`},
 		{"create_auth_lookup_key", createPostgreSQLAuthLookupKey},
 		{"create_auth_lookup_token", createPostgreSQLAuthLookupToken},
 		{"create_auth_lookup_grants", createPostgreSQLAuthLookupGrants},
