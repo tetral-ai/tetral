@@ -1470,13 +1470,18 @@ func minimalStoreSession(id string, agentID string, agentVersion int, environmen
 
 func createStoreSessionWithPrimaryThread(t *testing.T, store *session.PostgreSQLSessionStore, sessionID string, threadID string, agentID string, environmentID string, now time.Time) {
 	t.Helper()
-	if err := store.WithWorkspaceTx(context.Background(), workspace.DefaultID, func(tx session.Transaction) error {
+	createWorkspaceStoreSessionWithPrimaryThread(t, store, workspace.DefaultID, sessionID, threadID, agentID, environmentID, now)
+}
+
+func createWorkspaceStoreSessionWithPrimaryThread(t *testing.T, store *session.PostgreSQLSessionStore, ws workspace.ID, sessionID string, threadID string, agentID string, environmentID string, now time.Time) {
+	t.Helper()
+	if err := store.WithWorkspaceTx(context.Background(), ws, func(tx session.Transaction) error {
 		if err := tx.CreateSession(context.Background(), minimalStoreSession(sessionID, agentID, 1, environmentID, now)); err != nil {
 			return err
 		}
 		return tx.CreatePrimaryThread(context.Background(), &session.Thread{
 			ID:           threadID,
-			WorkspaceID:  workspace.DefaultID,
+			WorkspaceID:  ws,
 			SessionID:    sessionID,
 			Role:         session.ThreadRoleMain,
 			Visibility:   session.ThreadVisibilityPublic,

@@ -637,6 +637,15 @@ func TestLoggingMiddlewareRunsWithoutError(t *testing.T) {
 	}
 }
 
+func (fakeSessionService) LookupSession(_ context.Context, _ workspace.ID, id string) (string, error) {
+	return id, nil
+}
+func (fakeSessionService) LookupThread(_ context.Context, _ workspace.ID, _ string, id string) (string, error) {
+	return id, nil
+}
+func (fakeSessionService) LookupResource(_ context.Context, _ workspace.ID, _ string, id string) (string, error) {
+	return id, nil
+}
 func (fakeSessionService) LookupSessionDeletion(_ context.Context, _ workspace.ID, id string) (string, error) {
 	return id, nil
 }

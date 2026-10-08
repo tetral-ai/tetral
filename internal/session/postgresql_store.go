@@ -2832,6 +2832,99 @@ func mapPostgreSQLSessionError(err error) error {
 	return err
 }
 
+// LookupSession, LookupThread and LookupResource each run one SELECT of the
+// canonical ID in a read-only workspace transaction. They state the workspace
+// predicate explicitly in addition to row-level security.
+func (s *PostgreSQLSessionStore) LookupSession(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT id
+			   FROM sessions
+			  WHERE workspace_id = $1
+			    AND id = $2
+			    AND lifecycle_state <> 'deleted'`,
+			string(ws), sessionID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+// LookupThread does not filter archived_at: an archived public Thread remains
+// the target of a repeated archive.
+func (s *PostgreSQLSessionStore) LookupThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_thread", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT t.id
+			   FROM session_threads t
+			   JOIN sessions s
+			     ON s.workspace_id = t.workspace_id AND s.id = t.session_id
+			  WHERE t.workspace_id = $1
+			    AND t.session_id = $2
+			    AND t.id = $3
+			    AND s.lifecycle_state <> 'deleted'
+			    AND t.visibility = 'public'
+			    AND t.role <> 'approval_reviewer'`,
+			string(ws), sessionID, threadID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session thread not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
+// LookupResource applies GetResource's visibility relation without assembling
+// the resource. Unlike LookupResourceDeletion it rejects a pending delete and a
+// tombstoned file.
+func (s *PostgreSQLSessionStore) LookupResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	var resolved string
+	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_resource", func(tx *dbconnect.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT sr.resource_id
+			   FROM session_resources sr
+			   LEFT JOIN session_file_resources sfr
+			     ON sfr.workspace_id = sr.workspace_id AND sfr.session_id = sr.session_id AND sfr.resource_id = sr.resource_id
+			  WHERE sr.workspace_id = $1
+			    AND sr.session_id = $2
+			    AND sr.resource_id = $3
+			    AND sr.detached_at IS NULL
+			    AND sr.delete_requested_at IS NULL
+			    AND EXISTS (
+			      SELECT 1
+			        FROM sessions s
+			       WHERE s.workspace_id = sr.workspace_id
+			         AND s.id = sr.session_id
+			         AND s.lifecycle_state <> 'deleted'
+			    )
+			    AND (
+			      sr.type <> 'file'
+			      OR EXISTS (
+			        SELECT 1
+			          FROM files f
+			         WHERE f.workspace_id = sr.workspace_id
+			           AND f.file_id = sfr.file_id
+			           AND f.scope_type = 'session'
+			           AND f.scope_id = sr.session_id
+			           AND f.deleted_at IS NULL
+			      )
+			    )`,
+			string(ws), sessionID, resourceID,
+		).Scan(&resolved)
+		if dbconnect.IsNoRows(err) {
+			return &NotFoundError{Message: "session resource not found"}
+		}
+		return err
+	})
+	return resolved, err
+}
+
 func (s *PostgreSQLSessionStore) LookupSessionDeletion(ctx context.Context, ws workspace.ID, sessionID string) (string, error) {
 	var resolved string
 	err := s.client.WithWorkspaceReadOnlyTx(ctx, string(ws), "session.lookup_deletion", func(tx *dbconnect.Tx) error {

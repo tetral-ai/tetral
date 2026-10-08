@@ -23,6 +23,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/memory"
+	"github.com/tetral-ai/tetral/internal/session"
+	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	publicstream "github.com/tetral-ai/tetral/services/event-stream"
@@ -437,8 +439,8 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 				if response.Code != want {
 					t.Fatalf("status=%d body=%s; want %d", response.Code, response.Body.String(), want)
 				}
-				if facts.getCalls != 0 || len(service.calls) != 0 {
-					t.Fatalf("validation/denial reached lookup or effects: reads=%d effects=%d", facts.getCalls, len(service.calls))
+				if facts.lookupCalls != 0 || len(service.calls) != 0 {
+					t.Fatalf("validation/denial reached lookup or effects: lookups=%d effects=%d", facts.lookupCalls, len(service.calls))
 				}
 			})
 		}
@@ -449,5 +451,232 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 	response := signedPublicCall(t, misconfigured, signer, full, http.MethodPost, "/v1/sessions/sesn_fixture/events?beta=true", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`)
 	if response.Code != http.StatusInternalServerError || len(service.calls) != 0 {
 		t.Fatalf("missing owner status=%d effects=%d", response.Code, len(service.calls))
+	}
+}
+
+// sessionGateOwner logs every Session owner call in order, so the registered
+// gate's lookup is distinguishable from the handler's later business call.
+type sessionGateOwner struct {
+	fakeSessionService
+	calls     []string
+	lookupErr error
+}
+
+func (s *sessionGateOwner) record(name string, ws workspace.ID, ids ...string) {
+	s.calls = append(s.calls, name+" "+string(ws)+" "+strings.Join(ids, "/"))
+}
+
+func (s *sessionGateOwner) lookup(name string, ws workspace.ID, ids ...string) (string, error) {
+	s.record(name, ws, ids...)
+	if s.lookupErr != nil {
+		return "", s.lookupErr
+	}
+	return ids[len(ids)-1], nil
+}
+
+func (s *sessionGateOwner) LookupSession(_ context.Context, ws workspace.ID, sessionID string) (string, error) {
+	return s.lookup("LookupSession", ws, sessionID)
+}
+
+func (s *sessionGateOwner) LookupThread(_ context.Context, ws workspace.ID, sessionID, threadID string) (string, error) {
+	return s.lookup("LookupThread", ws, sessionID, threadID)
+}
+
+func (s *sessionGateOwner) LookupResource(_ context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	return s.lookup("LookupResource", ws, sessionID, resourceID)
+}
+
+func (s *sessionGateOwner) LookupSessionDeletion(_ context.Context, ws workspace.ID, sessionID string) (string, error) {
+	return s.lookup("LookupSessionDeletion", ws, sessionID)
+}
+
+func (s *sessionGateOwner) LookupResourceDeletion(_ context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	return s.lookup("LookupResourceDeletion", ws, sessionID, resourceID)
+}
+
+func (s *sessionGateOwner) Create(ctx context.Context, ws workspace.ID, request session.CreateRequest) (*session.Response, error) {
+	s.record("Create", ws)
+	return s.fakeSessionService.Create(ctx, ws, request)
+}
+
+func (s *sessionGateOwner) Get(ctx context.Context, ws workspace.ID, sessionID string) (*session.Response, error) {
+	s.record("Get", ws, sessionID)
+	return s.fakeSessionService.Get(ctx, ws, sessionID)
+}
+
+func (s *sessionGateOwner) List(ctx context.Context, ws workspace.ID, options session.ListOptions) (*session.ListResult, error) {
+	s.record("List", ws)
+	return s.fakeSessionService.List(ctx, ws, options)
+}
+
+func (s *sessionGateOwner) ListThreads(ctx context.Context, ws workspace.ID, sessionID string, options session.ThreadListOptions) (*session.ThreadListResult, error) {
+	s.record("ListThreads", ws, sessionID)
+	return s.fakeSessionService.ListThreads(ctx, ws, sessionID, options)
+}
+
+func (s *sessionGateOwner) GetThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (*session.ThreadResponse, error) {
+	s.record("GetThread", ws, sessionID, threadID)
+	return s.fakeSessionService.GetThread(ctx, ws, sessionID, threadID)
+}
+
+func (s *sessionGateOwner) ArchiveThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (*session.ThreadResponse, error) {
+	s.record("ArchiveThread", ws, sessionID, threadID)
+	return s.fakeSessionService.ArchiveThread(ctx, ws, sessionID, threadID)
+}
+
+func (s *sessionGateOwner) Update(ctx context.Context, ws workspace.ID, sessionID string, request session.UpdateRequest) (*session.Response, error) {
+	s.record("Update", ws, sessionID)
+	return s.fakeSessionService.Update(ctx, ws, sessionID, request)
+}
+
+func (s *sessionGateOwner) Archive(ctx context.Context, ws workspace.ID, sessionID string) (*session.Response, error) {
+	s.record("Archive", ws, sessionID)
+	return s.fakeSessionService.Archive(ctx, ws, sessionID)
+}
+
+func (s *sessionGateOwner) Delete(ctx context.Context, ws workspace.ID, sessionID string) (*session.DeleteResponse, error) {
+	s.record("Delete", ws, sessionID)
+	return s.fakeSessionService.Delete(ctx, ws, sessionID)
+}
+
+func (s *sessionGateOwner) AddResource(ctx context.Context, ws workspace.ID, sessionID string, request session.ResourceRequest) (*session.ResourceResponse, error) {
+	s.record("AddResource", ws, sessionID)
+	return s.fakeSessionService.AddResource(ctx, ws, sessionID, request)
+}
+
+func (s *sessionGateOwner) ListResources(ctx context.Context, ws workspace.ID, sessionID string, options session.ResourceListOptions) (*session.ResourceListResult, error) {
+	s.record("ListResources", ws, sessionID)
+	return s.fakeSessionService.ListResources(ctx, ws, sessionID, options)
+}
+
+func (s *sessionGateOwner) GetResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (*session.ResourceResponse, error) {
+	s.record("GetResource", ws, sessionID, resourceID)
+	return s.fakeSessionService.GetResource(ctx, ws, sessionID, resourceID)
+}
+
+func (s *sessionGateOwner) UpdateResource(ctx context.Context, ws workspace.ID, sessionID, resourceID, token string) (*session.ResourceResponse, error) {
+	s.record("UpdateResource", ws, sessionID, resourceID)
+	return s.fakeSessionService.UpdateResource(ctx, ws, sessionID, resourceID, token)
+}
+
+func (s *sessionGateOwner) DeleteResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (*session.ResourceDeleteResponse, error) {
+	s.record("DeleteResource", ws, sessionID, resourceID)
+	return s.fakeSessionService.DeleteResource(ctx, ws, sessionID, resourceID)
+}
+
+// sessionGateEvents is the event admission and event-list owner on the same log.
+type sessionGateEvents struct{ owner *sessionGateOwner }
+
+func (e sessionGateEvents) AppendClientEvents(_ context.Context, ws workspace.ID, sessionID string, _ string, _ sessionevent.AppendRequest) (*sessionevent.AppendResult, error) {
+	e.owner.record("AppendClientEvents", ws, sessionID)
+	return &sessionevent.AppendResult{}, nil
+}
+
+func (e sessionGateEvents) ListSessionEvents(_ context.Context, ws workspace.ID, sessionID string, _ eventstream.ListOptions) (eventstream.ListResult, error) {
+	e.owner.record("ListSessionEvents", ws, sessionID)
+	return eventstream.ListResult{}, nil
+}
+
+func (e sessionGateEvents) ListThreadEvents(_ context.Context, ws workspace.ID, sessionID, threadID string, _ eventstream.ListOptions) (eventstream.ListResult, error) {
+	e.owner.record("ListThreadEvents", ws, sessionID, threadID)
+	return eventstream.ListResult{}, nil
+}
+
+// Every registered Session-family route, through the production router and
+// gate: an existing-target mutation resolves its target with exactly one
+// identity-only lookup before its business call, never with the full public
+// Get/GetThread/GetResource; reads and creation use no lookup. A failed lookup
+// keeps its owner's error class and never reaches the business call.
+func TestPublicAuthorizationSessionRoutesResolveIdentityOnly(t *testing.T) {
+	owner := &sessionGateOwner{}
+	authenticator := httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_gate"), nil
+	}))
+	events := sessionGateEvents{owner: owner}
+	router := httpapi.NewRouter(httpapi.NewSessionHandler(owner), "", authenticator,
+		httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(events)),
+		httpapi.WithSessionEventListHandler(eventstream.NewListHandler(events)))
+	stubEvents := httpapi.NewRouter(httpapi.NewSessionHandler(owner), "", authenticator)
+	const (
+		sessionPath  = "/v1/sessions/sesn_gate"
+		threadPath   = sessionPath + "/threads/thread_gate"
+		resourcePath = sessionPath + "/resources/sesrsc_gate"
+	)
+	call := func(name string, ids ...string) string {
+		return name + " " + string(workspace.DefaultID) + " " + strings.Join(ids, "/")
+	}
+	sessionOnly := []string{"sesn_gate"}
+	threadIDs := []string{"sesn_gate", "thread_gate"}
+	resourceIDs := []string{"sesn_gate", "sesrsc_gate"}
+	routes := []struct {
+		name, method, path, body string
+		router                   http.Handler
+		lookup                   string // empty when the route performs no lookup
+		business                 string
+		status                   int
+	}{
+		{"create", http.MethodPost, "/v1/sessions", `{"agent":"agent_gate","environment_id":"env_gate","vault_ids":[]}`, router, "", call("Create"), http.StatusOK},
+		{"list", http.MethodGet, "/v1/sessions", "", router, "", call("List"), http.StatusOK},
+		{"retrieve", http.MethodGet, sessionPath, "", router, "", call("Get", sessionOnly...), http.StatusOK},
+		{"update", http.MethodPost, sessionPath, `{"title":"gate"}`, router, call("LookupSession", sessionOnly...), call("Update", sessionOnly...), http.StatusOK},
+		{"archive", http.MethodPost, sessionPath + "/archive", "", router, call("LookupSession", sessionOnly...), call("Archive", sessionOnly...), http.StatusOK},
+		{"delete", http.MethodDelete, sessionPath, "", router, call("LookupSessionDeletion", sessionOnly...), call("Delete", sessionOnly...), http.StatusOK},
+		{"append events", http.MethodPost, sessionPath + "/events", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`, router, call("LookupSession", sessionOnly...), call("AppendClientEvents", sessionOnly...), http.StatusOK},
+		{"append events stub", http.MethodPost, sessionPath + "/events", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`, stubEvents, "", "", http.StatusNotImplemented},
+		{"list events", http.MethodGet, sessionPath + "/events", "", router, "", call("ListSessionEvents", sessionOnly...), http.StatusOK},
+		{"list threads", http.MethodGet, sessionPath + "/threads", "", router, "", call("ListThreads", sessionOnly...), http.StatusOK},
+		{"retrieve thread", http.MethodGet, threadPath, "", router, "", call("GetThread", threadIDs...), http.StatusOK},
+		{"list thread events", http.MethodGet, threadPath + "/events", "", router, "", call("ListThreadEvents", threadIDs...), http.StatusOK},
+		{"archive thread", http.MethodPost, threadPath + "/archive", "", router, call("LookupThread", threadIDs...), call("ArchiveThread", threadIDs...), http.StatusOK},
+		{"add resource", http.MethodPost, sessionPath + "/resources", `{"type":"file","file_id":"file_gate","mount_path":"/workspace/gate.txt"}`, router, call("LookupSession", sessionOnly...), call("AddResource", sessionOnly...), http.StatusOK},
+		{"list resources", http.MethodGet, sessionPath + "/resources", "", router, "", call("ListResources", sessionOnly...), http.StatusOK},
+		{"retrieve resource", http.MethodGet, resourcePath, "", router, "", call("GetResource", resourceIDs...), http.StatusOK},
+		{"update resource", http.MethodPost, resourcePath, `{"authorization_token":"gate_token"}`, router, call("LookupResource", resourceIDs...), call("UpdateResource", resourceIDs...), http.StatusOK},
+		{"delete resource", http.MethodDelete, resourcePath, "", router, call("LookupResourceDeletion", resourceIDs...), call("DeleteResource", resourceIDs...), http.StatusOK},
+	}
+	serve := func(t *testing.T, route http.Handler, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if body != "" {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		setAuthHeader(request)
+		response := httptest.NewRecorder()
+		route.ServeHTTP(response, request)
+		return response
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			owner.calls, owner.lookupErr = nil, nil
+			response := serve(t, route.router, route.method, route.path, route.body)
+			if response.Code != route.status {
+				t.Fatalf("status=%d body=%s; want %d", response.Code, response.Body.String(), route.status)
+			}
+			var want []string
+			for _, step := range []string{route.lookup, route.business} {
+				if step != "" {
+					want = append(want, step)
+				}
+			}
+			if !reflect.DeepEqual(owner.calls, want) {
+				t.Fatalf("owner calls = %q; want %q", owner.calls, want)
+			}
+			if route.lookup == "" {
+				return
+			}
+			for _, failure := range []struct {
+				err    error
+				status int
+			}{
+				{&session.NotFoundError{Message: "session not found"}, http.StatusNotFound},
+				{errors.New("lookup store unavailable"), http.StatusInternalServerError},
+			} {
+				owner.calls, owner.lookupErr = nil, failure.err
+				response := serve(t, route.router, route.method, route.path, route.body)
+				if response.Code != failure.status || !reflect.DeepEqual(owner.calls, []string{route.lookup}) {
+					t.Fatalf("lookup error %T: status=%d calls=%q; want %d and only %q", failure.err, response.Code, owner.calls, failure.status, route.lookup)
+				}
+			}
+		})
 	}
 }

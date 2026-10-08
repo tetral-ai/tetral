@@ -8,6 +8,9 @@ import (
 )
 
 type Store interface {
+	LookupSession(context.Context, workspace.ID, string) (string, error)
+	LookupThread(context.Context, workspace.ID, string, string) (string, error)
+	LookupResource(context.Context, workspace.ID, string, string) (string, error)
 	LookupSessionDeletion(context.Context, workspace.ID, string) (string, error)
 	LookupResourceDeletion(context.Context, workspace.ID, string, string) (string, error)
 	WithWorkspaceTx(ctx context.Context, ws workspace.ID, fn func(Transaction) error) error

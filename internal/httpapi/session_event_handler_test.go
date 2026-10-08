@@ -13,7 +13,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
-	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -642,12 +641,12 @@ func newSessionEventHTTPRouter(service *recordingSessionEventHTTPService) http.H
 // production API wires its Session handler alongside event admission.
 type sessionEventHTTPFacts struct {
 	fakeSessionService
-	getCalls int
+	lookupCalls int
 }
 
-func (s *sessionEventHTTPFacts) Get(_ context.Context, _ workspace.ID, sessionID string) (*session.Response, error) {
-	s.getCalls++
-	return &session.Response{ID: sessionID}, nil
+func (s *sessionEventHTTPFacts) LookupSession(_ context.Context, _ workspace.ID, sessionID string) (string, error) {
+	s.lookupCalls++
+	return sessionID, nil
 }
 
 type recordingSessionEventHTTPService struct {

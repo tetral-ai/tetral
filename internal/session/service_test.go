@@ -4131,6 +4131,30 @@ func cloneProviderCredentialForAdmission(credential *ProviderCredentialForAdmiss
 	return &clone
 }
 
+func (s *recordingSessionStore) LookupSession(_ context.Context, ws workspace.ID, sessionID string) (string, error) {
+	value, ok := s.sessions[sessionID]
+	if !ok || value.WorkspaceID != ws || value.LifecycleState == LifecycleStateDeleted {
+		return "", &NotFoundError{Message: "session not found"}
+	}
+	return value.ID, nil
+}
+func (s *recordingSessionStore) LookupThread(ctx context.Context, ws workspace.ID, sessionID, threadID string) (string, error) {
+	thread, ok := s.threads[threadID]
+	if _, err := s.LookupSession(ctx, ws, sessionID); err != nil || !ok || thread.SessionID != sessionID || thread.Visibility != ThreadVisibilityPublic || thread.Role == ThreadRoleApprovalReviewer {
+		return "", &NotFoundError{Message: "session thread not found"}
+	}
+	return thread.ID, nil
+}
+func (s *recordingSessionStore) LookupResource(ctx context.Context, ws workspace.ID, sessionID, resourceID string) (string, error) {
+	if _, err := s.LookupSession(ctx, ws, sessionID); err == nil {
+		for _, value := range s.sessions[sessionID].Resources {
+			if value.ID == resourceID && value.DetachedAt == nil && value.DeleteRequestedAt == nil {
+				return value.ID, nil
+			}
+		}
+	}
+	return "", &NotFoundError{Message: "session resource not found"}
+}
 func (s *recordingSessionStore) LookupSessionDeletion(_ context.Context, ws workspace.ID, sessionID string) (string, error) {
 	value, ok := s.sessions[sessionID]
 	if !ok || value.WorkspaceID != ws {

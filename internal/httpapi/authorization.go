@@ -91,9 +91,10 @@ func registerPublicRoute(r chi.Router, method, pattern string, handler http.Hand
 	// Unimplemented routes authorize the typed workspace here. Real handlers
 	// invoke the gate through requestWorkspace: GET requests authorize the
 	// workspace and read handlers then authorize their owner result before
-	// disclosure; mutations first resolve trusted owner facts. The GET
-	// event-list handlers from internal/eventstream do not invoke this gate; they
-	// call AuthorizePublicRequest after their tenant-safe list.
+	// disclosure; mutations first resolve the target's identity through its
+	// owner (resolvePublicResource). The GET event-list handlers from
+	// internal/eventstream do not invoke this gate; they call
+	// AuthorizePublicRequest after their tenant-safe list.
 	r.Method(method, pattern, DeclarePublicOperation(method, "/v1"+pattern, func(w http.ResponseWriter, req *http.Request) {
 		gate := func(ws workspace.ID) error {
 			if stub || req.Method == http.MethodGet {
@@ -150,33 +151,28 @@ func resolvePublicResource(r *http.Request, ws workspace.ID, sessions *SessionHa
 		if sessions == nil {
 			return auth.ResourceReference{}, errors.New("session resource owner is not configured")
 		}
+		// Session-family mutations resolve only the canonical identity; the
+		// handler's business transaction rechecks eligibility and builds any
+		// response. Deletion keeps its own lookups so repeated Session delete
+		// and an in-progress resource delete reach their mutator.
 		if threadID := chi.URLParam(r, "thread_id"); threadID != "" {
-			value, err := sessions.service.GetThread(ctx, ws, id, threadID)
-			if err != nil {
-				return auth.ResourceReference{}, err
-			}
-			return resourceReference(ws, "thread", value.ID, nil)
+			resolved, err := sessions.service.LookupThread(ctx, ws, id, threadID)
+			return resourceReference(ws, "thread", resolved, err)
 		}
 		if resourceID := chi.URLParam(r, "resource_id"); resourceID != "" {
 			if r.Method == http.MethodDelete {
 				resolved, err := sessions.service.LookupResourceDeletion(ctx, ws, id, resourceID)
 				return resourceReference(ws, "session_resource", resolved, err)
 			}
-			value, err := sessions.service.GetResource(ctx, ws, id, resourceID)
-			if err != nil {
-				return auth.ResourceReference{}, err
-			}
-			return resourceReference(ws, "session_resource", value.ID, nil)
+			resolved, err := sessions.service.LookupResource(ctx, ws, id, resourceID)
+			return resourceReference(ws, "session_resource", resolved, err)
 		}
 		if r.Method == http.MethodDelete {
 			resolved, err := sessions.service.LookupSessionDeletion(ctx, ws, id)
 			return resourceReference(ws, "session", resolved, err)
 		}
-		value, err := sessions.service.Get(ctx, ws, id)
-		if err != nil {
-			return auth.ResourceReference{}, err
-		}
-		return resourceReference(ws, "session", value.ID, nil)
+		resolved, err := sessions.service.LookupSession(ctx, ws, id)
+		return resourceReference(ws, "session", resolved, err)
 	}
 	if id := chi.URLParam(r, "agent_id"); id != "" && opts.agentHandler != nil {
 		value, err := opts.agentHandler.service.Get(ctx, ws, id)

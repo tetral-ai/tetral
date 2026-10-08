@@ -49,6 +49,13 @@ func newSessionIntegrationEnv(t *testing.T) *sessionIntegrationEnv {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
 	}
 	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
+	return newSessionIntegrationEnvOn(t, runtimeDB, adminDB)
+}
+
+// newSessionIntegrationEnvOn serves the Session routes from runtimeDB, which may
+// be a pool authenticated as a real workload role.
+func newSessionIntegrationEnvOn(t *testing.T, runtimeDB, adminDB *sql.DB) *sessionIntegrationEnv {
+	t.Helper()
 	seedSessionIntegrationReferences(t, adminDB, workspace.DefaultID)
 
 	testEnv := &sessionIntegrationEnv{
@@ -1014,4 +1021,102 @@ func TestPublicAuthorizationSessionDeletionPreservesLifecycle(t *testing.T) {
 	}
 	foreign := auth.IndependentKeyPrincipal(workspace.Workspace{ID: "workspace_other"}, "ak_other_fixture")
 	assertHTTPStatus(t, signedPublicCall(t, router, signer, foreign, http.MethodDelete, sessionPath, ""), http.StatusNotFound)
+}
+
+// Through the registered routes and the real Session owner on the API workload
+// role, identity-only lookups keep each mutation's lifecycle result: a public
+// Thread and an archived Session can be archived again, an archived Session
+// still reaches its business conflict, hidden or misparented Threads and a
+// pending resource deletion are absent for update but not for DELETE, another
+// workspace cannot resolve the Session, and a deleted Session is absent where
+// its business transaction would report a lifecycle conflict.
+func TestPublicAuthorizationSessionLookupsPreserveMutationLifecycle(t *testing.T) {
+	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
+		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
+	}
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	env := newSessionIntegrationEnvOn(t, storagetest.OpenWorkloadDB(t, admin, "api").DB, admin)
+	created := env.createSession(t, `{
+		"agent":{"type":"agent","id":"agent_http_session","version":2},
+		"environment_id":"env_http_session",
+		"vault_ids":[],
+		"resources":[{"type":"github_repository","url":"https://github.com/tetral-ai/tetral.git","authorization_token":"github_token_lookup","checkout":{"type":"branch","name":"main"}}]
+	}`)
+	sibling := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
+	githubResource := findSessionIntegrationResource(t, created.Resources, string(session.ResourceTypeGitHubRepository))
+	mainThreads := map[string]string{}
+	for _, sessionID := range []string{created.ID, sibling.ID} {
+		var mainThreadID string
+		if err := admin.QueryRowContext(t.Context(), `SELECT main_thread_id FROM sessions WHERE id = $1`, sessionID).Scan(&mainThreadID); err != nil {
+			t.Fatal(err)
+		}
+		mainThreads[sessionID] = mainThreadID
+	}
+	for _, thread := range []struct{ id, role, visibility string }{
+		{"thr_lookup_child", "subagent", "public"},
+		{"thr_lookup_internal", "subagent", "internal"},
+		{"thr_lookup_reviewer", "approval_reviewer", "public"},
+	} {
+		if _, err := admin.ExecContext(t.Context(),
+			`INSERT INTO session_threads (workspace_id, id, session_id, parent_thread_id, role, visibility, status, task_name, created_at, last_active_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, 'idle', $2, now(), now(), now())`,
+			string(workspace.DefaultID), thread.id, created.ID, mainThreads[created.ID], thread.role, thread.visibility); err != nil {
+			t.Fatalf("seed thread %s: %v", thread.id, err)
+		}
+	}
+	threadArchive := func(sessionID, threadID string) string {
+		return "/v1/sessions/" + sessionID + "/threads/" + threadID + "/archive?beta=true"
+	}
+	sessionPath := "/v1/sessions/" + created.ID + "?beta=true"
+	archivePath := "/v1/sessions/" + created.ID + "/archive?beta=true"
+	resourcePath := "/v1/sessions/" + created.ID + "/resources/" + githubResource.ID + "?beta=true"
+
+	assertHTTPStatus(t, env.request(http.MethodPost, threadArchive(created.ID, "thr_lookup_child"), ""), http.StatusOK)
+	assertHTTPStatus(t, env.request(http.MethodPost, threadArchive(created.ID, "thr_lookup_child"), ""), http.StatusOK)
+	for _, path := range []string{
+		threadArchive(created.ID, "thr_lookup_internal"),
+		threadArchive(created.ID, "thr_lookup_reviewer"),
+		threadArchive(sibling.ID, "thr_lookup_child"),
+		threadArchive(created.ID, "thr_lookup_missing"),
+	} {
+		assertHTTPStatus(t, env.request(http.MethodPost, path, ""), http.StatusNotFound)
+	}
+
+	if _, err := admin.ExecContext(t.Context(), `UPDATE session_resources SET delete_requested_at = now() WHERE resource_id = $1`, githubResource.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertHTTPStatus(t, env.request(http.MethodPost, resourcePath, `{"authorization_token":"github_token_lookup_rotated"}`), http.StatusNotFound)
+	pendingDelete := env.request(http.MethodDelete, resourcePath, "")
+	assertHTTPStatus(t, pendingDelete, http.StatusConflict)
+	assertErrorType(t, pendingDelete, "invalid_request_error")
+
+	assertHTTPStatus(t, env.request(http.MethodPost, archivePath, ""), http.StatusOK)
+	assertHTTPStatus(t, env.request(http.MethodPost, archivePath, ""), http.StatusOK)
+	archivedUpdate := env.request(http.MethodPost, sessionPath, `{"title":"after archive"}`)
+	assertHTTPStatus(t, archivedUpdate, http.StatusConflict)
+	assertErrorType(t, archivedUpdate, "invalid_request_error")
+
+	foreign := httpapi.NewRouter(httpapi.NewSessionHandler(env.service), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: "workspace_lookup_foreign"}, "ak_session_lookup_foreign"), nil //nolint:gosec // G101: synthetic test API key id
+	})))
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodPost, sessionPath, `{"title":"foreign"}`},
+		{http.MethodPost, archivePath, ""},
+	} {
+		recorder := httptest.NewRecorder()
+		httpRequest := httptest.NewRequest(request.method, request.path, strings.NewReader(request.body))
+		setAuthHeader(httpRequest)
+		foreign.ServeHTTP(recorder, httpRequest)
+		assertHTTPStatus(t, recorder, http.StatusNotFound)
+	}
+
+	assertHTTPStatus(t, env.request(http.MethodDelete, "/v1/sessions/"+sibling.ID+"?beta=true", ""), http.StatusOK)
+	for _, request := range []struct{ path, body string }{
+		{"/v1/sessions/" + sibling.ID + "?beta=true", `{"title":"after delete"}`},
+		{"/v1/sessions/" + sibling.ID + "/archive?beta=true", ""},
+		{"/v1/sessions/" + sibling.ID + "/resources?beta=true", `{"type":"file","file_id":"file_http_source_b","mount_path":"/workspace/after-delete.txt"}`},
+		{threadArchive(sibling.ID, mainThreads[sibling.ID]), ""},
+	} {
+		assertHTTPStatus(t, env.request(http.MethodPost, request.path, request.body), http.StatusNotFound)
+	}
 }

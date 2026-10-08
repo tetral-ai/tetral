@@ -22,6 +22,9 @@ import (
 const sessionBodyByteCap = 1 << 20
 
 type sessionService interface {
+	LookupSession(context.Context, workspace.ID, string) (string, error)
+	LookupThread(context.Context, workspace.ID, string, string) (string, error)
+	LookupResource(context.Context, workspace.ID, string, string) (string, error)
 	LookupSessionDeletion(context.Context, workspace.ID, string) (string, error)
 	LookupResourceDeletion(context.Context, workspace.ID, string, string) (string, error)
 	Create(rctx context.Context, ws workspace.ID, request session.CreateRequest) (*session.Response, error)

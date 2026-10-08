@@ -444,14 +444,24 @@ never added through `POST /resources`) are covered above.
   query resources. Allowed collection/create actions use the verified typed
   workspace. Individual reads authorize their canonical service result before
   disclosure; nested lists authorize a parent proven by the successful
-  tenant-scoped list. Mutations load trusted identities before effects, then
-  recheck eligibility in their own transactions.
+  tenant-scoped list. Mutations resolve the target's trusted identity before
+  effects, then recheck eligibility in their own transactions; the lookup
+  takes no lock.
+  Session-family mutations resolve identity only: one read-only SELECT of the
+  canonical ID, without assembling the public object, usage, agent version or
+  provider authentication. Update, archive, event admission and resource
+  attachment accept any Session that is not deleted, so an archived or
+  archiving Session reaches its own archive or conflict result. Thread archive
+  accepts a public, non-reviewer Thread of that Session, archived or not.
+  Resource update accepts an attached Resource of that Session whose deletion
+  has not been requested; a file Resource also needs its live Session-scoped
+  file. A target outside these rules, including another workspace's row, is
+  `404` before any effect.
   Session creation and resource attachment retain their service-owned checks
   of all referenced agents, environments, vaults, files and memory stores.
   Deletion lookups retain already-deleted Session rows and pending resource
   deletion facts so authorization preserves the existing idempotent Session
-  delete and in-progress resource conflict behavior. Mutations recheck
-  eligibility in their own transactions.
+  delete and in-progress resource conflict behavior.
   `workspace_full_access` is the only assignable role. Future resource policy
   filtering and pagination semantics are not implemented by this boundary.
 - **Invariant a replacement must preserve.** No public handler may read identity
