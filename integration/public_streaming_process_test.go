@@ -199,7 +199,15 @@ func newPublicStreamingProcesses(t *testing.T, scenario string, count int, overr
 		gateway["recordContext"] = false
 		gateway["sessionScenarioPlans"] = true
 	}
-	h := newPublicStreamingHarness(t, scenario, publicStreamingOptions{broker: &broker, gateway: gateway, eventsFactory: func(t *testing.T, pools *storagetest.WorkloadDB, _ eventstream.Reader, _ *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
+	writeEventTimeoutMs := 0
+	if scenario == "public-load" || scenario == "public-cycle" {
+		// These compositions prove backpressure and SIGTERM, not the Runtime
+		// write deadline. Each commits a 3 MiB agent.message (public-cycle in
+		// its final phase), a 6 MiB WriteEvent that under the race detector on
+		// a busy runner can take about the production 3 s per-attempt deadline.
+		writeEventTimeoutMs = 15_000
+	}
+	h := newPublicStreamingHarness(t, scenario, publicStreamingOptions{broker: &broker, gateway: gateway, writeEventTimeoutMs: writeEventTimeoutMs, eventsFactory: func(t *testing.T, pools *storagetest.WorkloadDB, _ eventstream.Reader, _ *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
 		group.database = pools.OpenWorkload(t, "event_stream", nil)
 		group.publicKey = publicKey
 		for range count {

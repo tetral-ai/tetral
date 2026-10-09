@@ -16,6 +16,7 @@ const input = z.strictObject({
  holdRefreshAfterDeclaration:z.boolean().optional(),observeQueuedTools:z.boolean().optional(),evictIdle:z.boolean().optional(),approvalMode:z.enum(["full_access","ask_for_approval","approve_for_me"]).optional(),
  evictIdleStopReason:z.enum(["requires_action","end_turn"]).optional(),observeContainerMemory:z.boolean().optional(),
  observeStages:z.boolean().optional(),controlCommands:z.boolean().optional(),observeColdLoad:z.boolean().optional(),observeContextEntries:z.boolean().optional(),maxConcurrentTools:z.number().int().positive().optional(),
+ writeEventTimeoutMs:z.number().int().positive().optional(),
 }).parse(JSON.parse(await readFile(process.argv[2]!,"utf8")) as unknown);
 const stop = new AbortController();
 const metadataFactory=async()=>{const metadata=new Metadata();metadata.set("authorization",`Bearer ${input.token}`);return metadata;};
@@ -29,6 +30,7 @@ await writeFile(`${input.directory}/fixture-token`,input.token);
 await writeFile(`${input.directory}/fixture-ca`,"fixture-readable-ca-material");
 const parsed=loadRuntimePodConfig({
  ...(input.maxConcurrentTools===undefined?{}:{TETRAL_RUNTIME_MAX_CONCURRENT_TOOLS:String(input.maxConcurrentTools)}),
+ ...(input.writeEventTimeoutMs===undefined?{}:{TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS:String(input.writeEventTimeoutMs)}),
  ...(input.observeStages?{TETRAL_LOG_LEVEL:"debug",TETRAL_LOG_BURST:"1000"}:{}),
  TETRAL_RUNTIME_POD_NAMESPACE:"tetral-agent-runtime",TETRAL_RUNTIME_POD_NAME:"content-runtime",TETRAL_RUNTIME_POD_UID:input.podUID,TETRAL_RUNTIME_POD_IP:"127.0.0.1",TETRAL_RUNTIME_POD_GRPC_PORT:"19090",TETRAL_RUNTIME_POD_HTTP_ADDR:"127.0.0.1:0",
  TETRAL_DEPLOYMENT_ENVIRONMENT:"test",TETRAL_SERVICE_VERSION:"test",TETRAL_RUNTIME_POD_GRPC_AUDIENCE:"tetral-internal-grpc",TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS:"tetral-system/job-runner",

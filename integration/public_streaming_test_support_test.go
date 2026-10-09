@@ -105,6 +105,9 @@ type publicStreamingOptions struct {
 	transform         func(eventwire.PreviewFrame, string, []byte) [][]byte
 	wrapWriter        func(http.Handler) http.Handler
 	config            func(*eventstream.StreamConfig)
+	// writeEventTimeoutMs replaces the Runtime child's production WriteEvent
+	// per-attempt deadline when positive.
+	writeEventTimeoutMs int
 }
 
 func newPublicStreamingHarness(t *testing.T, scenario string, options publicStreamingOptions) *publicStreamingHarness {
@@ -146,6 +149,9 @@ func newPublicStreamingHarness(t *testing.T, scenario string, options publicStre
 	runtime := map[string]any{}
 	if options.approval != "" {
 		runtime["approvalMode"] = options.approval
+	}
+	if options.writeEventTimeoutMs > 0 {
+		runtime["writeEventTimeoutMs"] = options.writeEventTimeoutMs
 	}
 	h.contentE2E = startContentE2EWithOptions(t, scenario, false, false, contentE2EOptions{Budget: 300 * time.Second, Gateway: gateway, Runtime: runtime, Provider: options.provider, ApprovalMode: options.approval, PublicEdge: func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
 		return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
