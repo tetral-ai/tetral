@@ -195,7 +195,7 @@ func TestContentTransportLimits(t *testing.T) {
 				t.Fatalf("maximum-valid content did not commit: %s; handler=%+v", output, observed.outcome(session))
 			}
 			var messageText, eventText string
-			if err := admin.QueryRow(`SELECT data_json::jsonb #>> '{parts,0,text}' FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND model_request_id='content-request'`, session).Scan(&messageText); err != nil {
+			if err := admin.QueryRow(`SELECT (`+sessionfixture.MessageContentSQL+`)::jsonb #>> '{parts,0,text}' FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND model_request_id='content-request'`, session).Scan(&messageText); err != nil {
 				t.Fatal(err)
 			}
 			if err := admin.QueryRow(`SELECT payload_json::jsonb #>> '{content,0,text}' FROM session_events WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, session, eventID).Scan(&eventText); err != nil {
@@ -211,7 +211,7 @@ func TestContentTransportLimits(t *testing.T) {
 				}
 			}
 			after := contentTransportDurableCounts(t, admin, session)
-			if after[0] != before[0]+1 || after[1] != before[1]+1 || after[2] != before[2]+1 {
+			if after[0] != before[0]+1 || after[1] != before[1]+1 || after[2] != before[2]+1 || after[3] != before[3]+1 {
 				t.Fatalf("text commit durable counts: %v -> %v", before, after)
 			}
 		})
@@ -281,10 +281,10 @@ func (s *contentTransportObservedStore) outcome(session string) contentTransport
 	return s.outcomes[session]
 }
 
-func contentTransportDurableCounts(t *testing.T, admin *sql.DB, session string) [3]int {
+func contentTransportDurableCounts(t *testing.T, admin *sql.DB, session string) [4]int {
 	t.Helper()
-	var result [3]int
-	for i, table := range []string{"session_events", "session_messages", "session_bridge_operations"} {
+	var result [4]int
+	for i, table := range []string{"session_events", "session_messages", "session_message_parts", "session_bridge_operations"} {
 		if err := admin.QueryRow("SELECT count(*) FROM "+table+" WHERE workspace_id='default' AND session_id=$1", session).Scan(&result[i]); err != nil {
 			t.Fatal(err)
 		}

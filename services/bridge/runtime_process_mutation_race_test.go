@@ -394,10 +394,10 @@ func assertServingMutationEffects(t *testing.T, admin *sql.DB, scope *bridgev1.R
 	var args []any
 	switch operation {
 	case "assistant event":
-		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id WHERE e.session_id=$1 AND e.runtime_write_id='write-race' AND e.type='agent.message' AND e.payload_json::jsonb #>> '{content,0,text}'='original' AND m.kind='assistant' AND m.data_json::jsonb @> '{"parts":[{"type":"text","text":"original"}]}')`
+		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id WHERE e.session_id=$1 AND e.runtime_write_id='write-race' AND e.type='agent.message' AND e.payload_json::jsonb #>> '{content,0,text}'='original' AND m.kind='assistant' AND (` + sessionfixture.MessageContentSQL + `)::jsonb @> '{"parts":[{"type":"text","text":"original"}]}')`
 		args = []any{scope.SessionId}
 	case "tool declaration":
-		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id WHERE e.session_id=$1 AND e.runtime_write_id='write-race' AND e.type='agent.tool_use' AND e.projection_json::jsonb->>'model_tool_call_id'='call-race' AND e.projection_json::jsonb->>'tool_name'='Read' AND m.data_json LIKE '%call-race%' AND m.data_json LIKE '%/workspace/once%')`
+		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id WHERE e.session_id=$1 AND e.runtime_write_id='write-race' AND e.type='agent.tool_use' AND e.projection_json::jsonb->>'model_tool_call_id'='call-race' AND e.projection_json::jsonb->>'tool_name'='Read' AND ` + sessionfixture.MessageContentSQL + ` LIKE '%call-race%' AND ` + sessionfixture.MessageContentSQL + ` LIKE '%/workspace/once%')`
 		args = []any{scope.SessionId}
 	case "input commit":
 		query = `SELECT EXISTS(SELECT 1 FROM session_runtime_inbox i JOIN session_messages m ON m.session_id=i.session_id AND m.source_event_id='event-race-input' WHERE i.session_id=$1 AND i.runtime_input_id='input-race' AND i.status='committed' AND i.committed_at IS NOT NULL AND m.kind='user' AND m.data_json::jsonb @> '{"parts":[{"type":"text","text":"input"}]}')`
@@ -406,7 +406,7 @@ func assertServingMutationEffects(t *testing.T, admin *sql.DB, scope *bridgev1.R
 		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id WHERE e.session_id=$1 AND e.runtime_write_id='end-race' AND e.type='span.model_request_end' AND e.payload_json::jsonb #>> '{provider_context_retention,disposition}'='completed' AND e.payload_json::jsonb #>> '{provider_context_retention,assistant_message_sequence}'=$2 AND e.payload_json::jsonb #> '{provider_context_retention,tool_use_event_ids}'=jsonb_build_array($3::text) AND m.sequence=$2::bigint AND m.model_request_id=$4)`
 		args = []any{scope.SessionId, fmt.Sprint(sequence), tool, modelRequest}
 	case "tool settlement":
-		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id JOIN session_runtime_tool_results r ON r.session_id=e.session_id AND r.tool_use_event_id=$2 WHERE e.session_id=$1 AND e.type='agent.tool_result' AND e.payload_json::jsonb->>'tool_use_id'=$2 AND m.data_json LIKE '%tool_result%' AND m.data_json LIKE '%original%' AND r.execution_state='consumed')`
+		query = `SELECT EXISTS(SELECT 1 FROM session_events e JOIN session_messages m ON m.session_id=e.session_id AND m.model_request_id=e.model_request_id JOIN session_runtime_tool_results r ON r.session_id=e.session_id AND r.tool_use_event_id=$2 WHERE e.session_id=$1 AND e.type='agent.tool_result' AND e.payload_json::jsonb->>'tool_use_id'=$2 AND ` + sessionfixture.MessageContentSQL + ` LIKE '%tool_result%' AND ` + sessionfixture.MessageContentSQL + ` LIKE '%original%' AND r.execution_state='consumed')`
 		args = []any{scope.SessionId, tool}
 	}
 	if err := admin.QueryRow(query, args...).Scan(&correct); err != nil || !correct {

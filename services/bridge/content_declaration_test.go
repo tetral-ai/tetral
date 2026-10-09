@@ -81,6 +81,7 @@ func (f contentDeclarationFixture) snapshot(t *testing.T) string {
 	err := f.admin.QueryRowContext(f.ctx, `SELECT jsonb_build_object(
 	  'events', COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY sequence) FROM session_events e WHERE workspace_id=$1 AND session_id=$2), '[]'::jsonb),
 	  'messages', COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY sequence) FROM session_messages m WHERE workspace_id=$1 AND session_id=$2), '[]'::jsonb),
+	  'parts', COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY message_id, part_index) FROM session_message_parts p WHERE workspace_id=$1 AND session_id=$2), '[]'::jsonb),
 	  'changes', COALESCE((SELECT jsonb_agg(to_jsonb(c) ORDER BY stream_position) FROM session_event_stream_changes c WHERE workspace_id=$1 AND session_id=$2), '[]'::jsonb),
 	  'operations', COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY operation,source_kind,idempotency_key) FROM session_bridge_operations o WHERE workspace_id=$1 AND session_id=$2), '[]'::jsonb)
 	)::text`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&snapshot)
@@ -296,7 +297,7 @@ func TestPostgreSQLContentWriteReplay(t *testing.T) {
 				}
 				if messages == 1 {
 					var raw string
-					if err := f.admin.QueryRowContext(f.ctx, `SELECT data_json FROM session_messages WHERE workspace_id=$1 AND session_id=$2`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&raw); err != nil {
+					if err := f.admin.QueryRowContext(f.ctx, `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id=$1 AND session_id=$2`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&raw); err != nil {
 						t.Fatal(err)
 					}
 					var actual, expected any

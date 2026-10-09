@@ -237,12 +237,12 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		"tool-call-pod-loss",
 		"Write",
 	)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = '{"parts":[{"type":"text","text":"committed text survives Pod loss"},{"type":"reasoning","text":"committed reasoning survives Pod loss","providerMetadata":{"anthropic":{"signature":"sig_pod_loss"}}},{"type":"tool_call","modelToolCallId":"tool-call-settled-before-pod-loss","toolName":"Read","canonicalInput":{"file_path":"src/b.ts"}},{"type":"tool_result","modelToolCallId":"tool-call-settled-before-pod-loss","result":{"type":"completed","output":{"text":"already durable"}}},{"type":"tool_call","modelToolCallId":"tool-call-pod-loss","toolName":"Write","canonicalInput":{"file_path":"src/a.ts"}}]}'
-		WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss'
-		  AND session_thread_id='thr_bridge_pod_loss' AND model_request_id='mrq_pod_loss'`); err != nil {
-		t.Fatalf("seed committed Pod-loss Assistant output: %v", err)
-	}
+	sessionfixture.ReplaceAssistantMessagePartsForTest(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "mrq_pod_loss",
+		`{"type":"text","text":"committed text survives Pod loss"}`,
+		`{"type":"reasoning","text":"committed reasoning survives Pod loss","providerMetadata":{"anthropic":{"signature":"sig_pod_loss"}}}`,
+		`{"type":"tool_call","modelToolCallId":"tool-call-settled-before-pod-loss","toolName":"Read","canonicalInput":{"file_path":"src/b.ts"}}`,
+		`{"type":"tool_result","modelToolCallId":"tool-call-settled-before-pod-loss","result":{"type":"completed","output":{"text":"already durable"}}}`,
+		`{"type":"tool_call","modelToolCallId":"tool-call-pod-loss","toolName":"Write","canonicalInput":{"file_path":"src/a.ts"}}`)
 	attachmentStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	attachmentStore.AttachmentBlobStore = blob.NewFakeBlobStore()
 	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
@@ -483,8 +483,8 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	var messageCount int
 	var messageData string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), COALESCE(max(data_json), '')
-		   FROM session_messages
+		`SELECT count(*), COALESCE(max(`+sessionfixture.MessageContentSQL+`), '')
+		   FROM session_messages m
 		  WHERE workspace_id = 'default'
 		    AND source_event_id = 'evt_pod_loss_tool'`).Scan(&messageCount, &messageData); err != nil {
 		t.Fatalf("read pod-loss terminal tool message: %v", err)
@@ -607,11 +607,8 @@ func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
 			)
 			// The cold content and durable approval route describe the same input.
 			// This fixture's generic Tool-message seed otherwise uses an empty object.
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-				SET data_json=jsonb_set(data_json::jsonb,'{parts,0,canonicalInput}','{"file_path":"src/a.ts"}'::jsonb)::text
-				WHERE workspace_id='default' AND session_id=$1 AND source_event_id=$2`, sessionID, toolUseEventID); err != nil {
-				t.Fatalf("seed matching approval content: %v", err)
-			}
+			sessionfixture.ReplaceAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, modelRequestID,
+				`{"type":"tool_call","modelToolCallId":"tool-call-pod-loss-approval-`+suffix+`","toolName":"Write","canonicalInput":{"file_path":"src/a.ts"}}`)
 			if _, err := admin.ExecContext(context.Background(),
 				`INSERT INTO session_pending_tool_uses (
 					workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,

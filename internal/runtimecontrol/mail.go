@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -472,24 +473,12 @@ func AdmitAgentMailDeliveryTx(
 			return admittedAgentMailDelivery{}, err
 		}
 		visibility, sessionVisible := threadScope.PublicProjection("agent.thread_message_received")
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_received', $6, $7, $8, $6, $9, $9, NULL)`,
-			targetScope.GetWorkspaceId(),
-			targetScope.GetSessionId(),
-			targetScope.GetSessionThreadId(),
-			receivedEventID,
-			receivedSequence,
-			eventPayloadJSON,
-			visibility,
-			sessionVisible,
-			now,
-		); err != nil {
-			return admittedAgentMailDelivery{}, err
-		}
-		if _, err := AppendSessionEventStreamChangeTx(ctx, tx, targetScope, receivedEventID, visibility, sessionVisible, now); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: targetScope.GetWorkspaceId(), SessionID: targetScope.GetSessionId(), SessionThreadID: targetScope.GetSessionThreadId(),
+			EventID: receivedEventID, Sequence: receivedSequence, Type: "agent.thread_message_received",
+			PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			CreatedAt: now,
+		}); err != nil {
 			return admittedAgentMailDelivery{}, err
 		}
 		receivedPayloadJSON = eventPayloadJSON
@@ -638,25 +627,12 @@ func AppendDeclaredCompletionMailForSourceTx(
 		return "", err
 	}
 	visibility, sessionVisible := threadScope.PublicProjection("agent.thread_message_sent")
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_sent', $6, $7, $8, $9, $6, $10, $10, $10)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventPayloadJSON,
-		visibility,
-		sessionVisible,
-		sourceID,
-		now,
-	); err != nil {
-		return "", err
-	}
-	if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
+		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: sourceID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return "", err
 	}
 	if err := BirthCompletionMailCustodyTx(

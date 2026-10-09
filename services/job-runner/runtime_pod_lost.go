@@ -1,6 +1,7 @@
 package jobrunner
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -107,7 +109,7 @@ func repairLostRuntimeBindingDetailedTx(ctx context.Context, tx *dbconnect.Tx, w
 		if _, interrupted := interruptedThreads[start.SessionThreadID]; interrupted {
 			continue
 		}
-		if err := retainRuntimePodLostToolPairsTx(ctx, tx, workspaceID, sessionID, start); err != nil {
+		if err := retainRuntimePodLostToolPairsTx(ctx, tx, workspaceID, sessionID, start, now); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -188,137 +190,165 @@ func filterRuntimePodLostToolUses(toolUses []runtimecontrol.OrphanToolUse, inter
 	return filtered
 }
 
-// retainRuntimePodLostToolPairsTx preserves the committed Assistant projection
-// and appends only Tool facts missing from it. Immutable Tool events authorize
-// additions; existing conversation parts are never settlement authority and
-// are never discarded during repair.
+// runtimePodLostRetainPageSize bounds one page of missing Tool facts that Pod-loss
+// repair projects and appends.
+const runtimePodLostRetainPageSize = 128
+
+// retainRuntimePodLostToolPairsTx appends to the request's Assistant message
+// only the Tool facts its immutable Tool events prove and its parts lack.
+// Candidates are scalar event identities in event order: a Tool Use yields its
+// call, an ordinary or MCP result yields a result keyed by the call ID of the
+// Tool Use it references, and a synthetic invalid-tool repair yields its call
+// then its result. Each candidate is anti-joined on the message's part
+// identity index, and only the selected missing facts are projected from
+// their events. Existing parts are never read, validated or rewritten; the
+// next context read validates them. Events authorize the additions; parts are
+// never settlement authority.
 func retainRuntimePodLostToolPairsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
 	sessionID string,
 	start runtimecontrol.OpenRequestStart,
+	now time.Time,
 ) error {
-	var existingDataJSON string
-	if err := tx.QueryRow(ctx,
-		`SELECT data_json FROM session_messages
-		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		    AND model_request_id=$4 AND kind='assistant'
-		  FOR UPDATE`,
-		workspaceID, sessionID, start.SessionThreadID, start.ModelRequestID,
-	).Scan(&existingDataJSON); dbconnect.IsNoRows(err) {
-		return nil
-	} else if err != nil {
+	scope := &bridgev1.RuntimeScope{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: start.SessionThreadID}
+	header, found, err := runtimecontrol.LockAssistantMessageHeaderTx(ctx, tx, scope, start.ModelRequestID)
+	if err != nil || !found {
 		return err
 	}
-	existingParts, err := runtimecontrol.DecodeStoredRuntimeContextParts(existingDataJSON)
-	if err != nil {
-		return err
-	}
-	retained := make([]map[string]any, 0, len(existingParts))
-	seenCalls := make(map[string]struct{})
-	seenResults := make(map[string]struct{})
-	for _, raw := range existingParts {
-		var part map[string]any
-		if err := json.Unmarshal(raw, &part); err != nil {
-			return status.Error(codes.FailedPrecondition, "durable context part is malformed")
-		}
-		retained = append(retained, part)
-		modelToolCallID, _ := part["modelToolCallId"].(string)
-		switch part["type"] {
-		case "tool_call":
-			seenCalls[modelToolCallID] = struct{}{}
-		case "tool_result":
-			seenResults[modelToolCallID] = struct{}{}
-		}
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT type, payload_json, projection_json
-		   FROM session_events
-		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-		    AND model_request_id=$4
-		    AND type IN ('agent.tool_use','agent.mcp_tool_use','agent.tool_result','agent.mcp_tool_result')
-		  ORDER BY sequence`,
-		workspaceID, sessionID, start.SessionThreadID, start.ModelRequestID,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var eventType, payloadJSON, projectionJSON string
-		if err := rows.Scan(&eventType, &payloadJSON, &projectionJSON); err != nil {
+	var afterSequence, afterOrdinal int64
+	for {
+		missing, err := runtimePodLostMissingToolPartsTx(ctx, tx, scope, start.ModelRequestID, header.MessageID, afterSequence, afterOrdinal)
+		if err != nil {
 			return err
 		}
-		switch eventType {
-		case "agent.tool_use", "agent.mcp_tool_use":
-			call, err := runtimeToolCallPartFromProjection(projectionJSON)
-			if err != nil {
-				return err
-			}
-			modelToolCallID, _ := call["modelToolCallId"].(string)
-			if _, exists := seenCalls[modelToolCallID]; !exists {
-				retained = append(retained, call)
-				seenCalls[modelToolCallID] = struct{}{}
-			}
-		case "agent.tool_result", "agent.mcp_tool_result":
-			var payload struct {
-				RepairKind string `json:"repair_kind"`
-			}
-			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-				return status.Error(codes.FailedPrecondition, "durable Tool Result event is malformed")
-			}
-			if payload.RepairKind == "invalid_tool" {
-				call, err := runtimeToolCallPartFromProjection(projectionJSON)
-				if err != nil {
-					return err
-				}
-				modelToolCallID, _ := call["modelToolCallId"].(string)
-				if _, exists := seenCalls[modelToolCallID]; !exists {
-					retained = append(retained, call)
-					seenCalls[modelToolCallID] = struct{}{}
-				}
-			}
-			result, err := runtimeToolResultPartFromProjection(projectionJSON)
-			if err != nil {
-				return err
-			}
-			modelToolCallID, _ := result["modelToolCallId"].(string)
-			if _, exists := seenResults[modelToolCallID]; !exists {
-				retained = append(retained, result)
-				seenResults[modelToolCallID] = struct{}{}
-			}
+		if len(missing) == 0 {
+			return nil
 		}
+		parts := make([]runtimecontrol.AssistantPart, 0, len(missing))
+		for _, candidate := range missing {
+			var part map[string]any
+			if candidate.partKind == "tool_call" {
+				part, err = runtimeToolCallPartFromProjection(candidate.projectionJSON)
+			} else {
+				part, err = runtimeToolResultPartFromProjection(candidate.projectionJSON)
+			}
+			if err != nil {
+				return err
+			}
+			if part["modelToolCallId"] != candidate.modelToolCallID {
+				return status.Error(codes.FailedPrecondition, "durable Tool projection identity is inconsistent")
+			}
+			parts = append(parts, runtimecontrol.AssistantPart{Value: part})
+		}
+		header, err = runtimecontrol.AppendAssistantMessagePartsTx(ctx, tx, runtimecontrol.AssistantPartsAppend{
+			Scope: scope, ModelRequestID: start.ModelRequestID, Header: &header, Parts: parts, Now: now,
+		})
+		if err != nil {
+			return err
+		}
+		if len(missing) < runtimePodLostRetainPageSize {
+			return nil
+		}
+		last := missing[len(missing)-1]
+		afterSequence, afterOrdinal = last.sequence, last.ordinal
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	encoded, err := runtimecontrol.RuntimeContextDataJSON(retained)
-	if err != nil {
-		return err
-	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_messages
-		    SET data_json = $5,
-		        updated_at = clock_timestamp()
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND kind = 'assistant'`,
-		workspaceID,
-		sessionID,
-		start.SessionThreadID,
-		start.ModelRequestID,
-		encoded,
+}
+
+type runtimePodLostMissingToolPart struct {
+	sequence        int64
+	ordinal         int64
+	partKind        string
+	modelToolCallID string
+	projectionJSON  string
+}
+
+// runtimePodLostMissingToolPartsTx selects the next page of missing Tool facts
+// after (afterSequence, afterOrdinal). The candidate and anti-join steps read
+// only scalar event and part identities; a projection is read only for a
+// selected missing candidate.
+func runtimePodLostMissingToolPartsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	messageID string,
+	afterSequence int64,
+	afterOrdinal int64,
+) ([]runtimePodLostMissingToolPart, error) {
+	rows, err := tx.Query(ctx,
+		`WITH candidate AS (
+			SELECT use_event.sequence, 0 AS ordinal, 'tool_call' AS part_kind,
+			       use_event.model_tool_call_id, use_event.event_id
+			  FROM session_events use_event
+			 WHERE use_event.workspace_id = $1 AND use_event.session_id = $2
+			   AND use_event.session_thread_id = $3 AND use_event.model_request_id = $4
+			   AND use_event.type IN ('agent.tool_use', 'agent.mcp_tool_use')
+			UNION ALL
+			SELECT repair.sequence, repair_candidate.ordinal, repair_candidate.part_kind,
+			       repair.model_tool_call_id, repair.event_id
+			  FROM session_events repair
+			 CROSS JOIN (VALUES (0, 'tool_call'), (1, 'tool_result')) repair_candidate(ordinal, part_kind)
+			 WHERE repair.workspace_id = $1 AND repair.session_id = $2
+			   AND repair.session_thread_id = $3 AND repair.model_request_id = $4
+			   AND repair.type = 'agent.tool_result'
+			   AND repair.model_tool_call_id IS NOT NULL
+			UNION ALL
+			SELECT result.sequence, 0, 'tool_result', use_event.model_tool_call_id, result.event_id
+			  FROM session_events result
+			  JOIN session_events use_event
+			    ON use_event.workspace_id = result.workspace_id
+			   AND use_event.session_id = result.session_id
+			   AND use_event.session_thread_id = result.session_thread_id
+			   AND use_event.event_id = result.tool_use_event_id
+			 WHERE result.workspace_id = $1 AND result.session_id = $2
+			   AND result.session_thread_id = $3 AND result.model_request_id = $4
+			   AND result.type IN ('agent.tool_result', 'agent.mcp_tool_result')
+			   AND result.tool_use_event_id IS NOT NULL
+		), missing AS (
+			SELECT candidate.sequence, candidate.ordinal, candidate.part_kind,
+			       candidate.model_tool_call_id, candidate.event_id
+			  FROM candidate
+			 WHERE (candidate.sequence, candidate.ordinal) > ($6, $7)
+			   AND NOT EXISTS (
+			     SELECT 1
+			       FROM session_message_parts part
+			      WHERE part.workspace_id = $1
+			        AND part.message_id = $5
+			        AND part.part_kind = candidate.part_kind
+			        AND part.model_tool_call_id = candidate.model_tool_call_id
+			   )
+			 ORDER BY candidate.sequence, candidate.ordinal
+			 LIMIT $8
+		)
+		SELECT missing.sequence, missing.ordinal, missing.part_kind, missing.model_tool_call_id, event.projection_json
+		  FROM missing
+		  JOIN session_events event
+		    ON event.workspace_id = $1
+		   AND event.session_id = $2
+		   AND event.session_thread_id = $3
+		   AND event.event_id = missing.event_id
+		 ORDER BY missing.sequence, missing.ordinal`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+		messageID, afterSequence, afterOrdinal, runtimePodLostRetainPageSize,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !runtimecontrol.RowsAffected(result) {
-		return nil
+	defer func() { _ = rows.Close() }()
+	missing := make([]runtimePodLostMissingToolPart, 0)
+	for rows.Next() {
+		var candidate runtimePodLostMissingToolPart
+		if err := rows.Scan(&candidate.sequence, &candidate.ordinal, &candidate.partKind, &candidate.modelToolCallID, &candidate.projectionJSON); err != nil {
+			return nil, err
+		}
+		missing = append(missing, candidate)
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return missing, nil
 }
 
 func runtimeToolCallPartFromProjection(projectionJSON string) (map[string]any, error) {
@@ -327,8 +357,12 @@ func runtimeToolCallPartFromProjection(projectionJSON string) (map[string]any, e
 		projection.ModelToolCallID == "" || projection.ToolName == "" || len(projection.ProviderInput) == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool projection is malformed")
 	}
+	// Numbers keep their admitted tokens; a float64 round trip would round
+	// large integers and re-spell signed zero and exponents.
+	decoder := json.NewDecoder(bytes.NewReader(projection.ProviderInput))
+	decoder.UseNumber()
 	var input any
-	if err := json.Unmarshal(projection.ProviderInput, &input); err != nil {
+	if err := decoder.Decode(&input); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "durable Tool input projection is malformed")
 	}
 	return map[string]any{
@@ -981,25 +1015,12 @@ func insertRuntimePodLostSettlementEventTx(
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7, $10, $10, $10)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventType,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		now,
-	); err != nil {
-		return "", err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return "", err
 	}
 	return eventID, nil

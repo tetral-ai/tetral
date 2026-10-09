@@ -56,6 +56,28 @@ call ID is `AlreadyExists`, a global event ID collision is a non-disclosing
 `AlreadyExists`, and a second result for one Tool Use is an internal invariant
 error that rolls the whole transaction back without retry.
 
+Assistant context of a model request is a parts-mode message: a small header
+in `session_messages` and immutable `session_message_parts` rows.
+`LockAssistantMessageHeaderTx` locks the header without reading content, and
+`AppendAssistantMessagePartsTx` is the one append primitive for Bridge
+declarations, ordinary and terminal Tool settlement and Job Runner Pod-loss
+repair. Its caller has already validated the new delta by its own rules and
+supplies each reasoning part's admitted charge; the primitive derives each
+row's kind and call identity from the same part, rejects a repeated Tool
+identity in the delta, checks cumulative reasoning against the caller's budget
+when one is given, allocates the next contiguous indexes, writes the header
+once (creating it with its final counters, or advancing the locked counters)
+and inserts every new part with one statement. It never reads, re-encodes or
+updates an existing part, and it never commits. `StoredMessageContentSQL` and
+`StoredMessagePartsJoinSQL` are the read side: a selected parts-mode message's
+rows are joined in index order only when they are exactly `0..next-1`, and
+`StoredMessageContentJSON` turns any other shape into the durable-context
+`FailedPrecondition`. Settlement and termination write feed events through
+`internal/sessioneventwrite`.
+
 Moved literal SQL and payload values are conserved from the accepted extraction
 base; owner tests and PostgreSQL compositions supply the behavioral evidence.
 Shared pure vector tests cover deterministic delivery identities.
+`message_parts_test.go` runs the append primitive under the real Bridge and
+Job Runner roles and proves parts are insert-only, workspace-isolated and bound
+to their message's scope and parts mode.

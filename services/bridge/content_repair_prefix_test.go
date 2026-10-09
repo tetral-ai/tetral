@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -102,7 +103,7 @@ func TestPostgreSQLInternalToolRepairReasoningPrefix(t *testing.T) {
 					t.Fatalf("repair commit %v/%v", first, err)
 				}
 				var data string
-				if err := f.admin.QueryRowContext(f.ctx, `SELECT data_json FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND model_request_id='request'`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&data); err != nil {
+				if err := f.admin.QueryRowContext(f.ctx, `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id=$1 AND session_id=$2 AND model_request_id='request'`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&data); err != nil {
 					t.Fatal(err)
 				}
 				const want = `{"parts":[{"type":"reasoning","text":"reason-before-tool","providerMetadata":{"anthropic":{"signature":"fixture-signature-tool"}}},{"type":"tool_call","modelToolCallId":"call","toolName":"unknown","canonicalInput":{"q":"x"}},{"type":"tool_result","modelToolCallId":"call","result":{"type":"error","error":{"type":"provider_tool_protocol_error","message":"invalid tool","retryable":false}}}]}`

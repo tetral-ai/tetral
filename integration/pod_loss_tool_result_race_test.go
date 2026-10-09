@@ -170,6 +170,9 @@ func TestPostgreSQLSeparatedOwnersPodLossToolResultRace(t *testing.T) {
 					t.Fatal("replacement settlement added a second result")
 				}
 			}
+			if parts := f.count(t, `SELECT count(*) FROM session_message_parts WHERE session_id=$1 AND part_kind='tool_result' AND model_tool_call_id='call_race_delivery'`, f.sessionID); parts != 1 {
+				t.Fatalf("after %s first: stored result parts = %d; want exactly one", first, parts)
+			}
 			t.Logf("winner=%s result=%s consumption=%s", first, resultID, consumptionReason)
 		})
 	}

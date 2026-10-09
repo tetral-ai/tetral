@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 // The response-only fault runs after the actual Bridge transaction. The
@@ -82,7 +84,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 					// abnormal-End policy deliberately excludes it from provider history.
 					if eventType == "agent.message" {
 						var preserved int
-						err := c.db.QueryRow(`SELECT count(*) FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND sequence=$3 AND data_json::jsonb='{"parts":[{"type":"reasoning","text":"reason-before-text","providerMetadata":{"anthropic":{"signature":"fixture-signature-text"}}},{"type":"text","text":"alpha"}]}'::jsonb`, c.session, original.GetModelRequestId(), receipt.GetCommitted().GetAssignedMessageSequence()).Scan(&preserved)
+						err := c.db.QueryRow(`SELECT count(*) FROM session_messages m WHERE session_id=$1 AND model_request_id=$2 AND sequence=$3 AND (`+sessionfixture.MessageContentSQL+`)::jsonb='{"parts":[{"type":"reasoning","text":"reason-before-text","providerMetadata":{"anthropic":{"signature":"fixture-signature-text"}}},{"type":"text","text":"alpha"}]}'::jsonb`, c.session, original.GetModelRequestId(), receipt.GetCommitted().GetAssignedMessageSequence()).Scan(&preserved)
 						if err != nil || preserved != 1 {
 							t.Fatalf("committed audit Assistant count=%d error=%v", preserved, err)
 						}

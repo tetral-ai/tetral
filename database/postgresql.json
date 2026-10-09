@@ -52,7 +52,10 @@
     "auth_workspace_grants",
     "auth_access_tokens"
   ],
-  "append_only_workspace_table": "session_file_attachment_consumptions",
+  "append_only_workspace_tables": [
+    "session_file_attachment_consumptions",
+    "session_message_parts"
+  ],
   "global_tables": [
     "platform_provider_keys",
     "tetral_schema_migrations",

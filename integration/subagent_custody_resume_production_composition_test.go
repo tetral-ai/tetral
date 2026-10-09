@@ -1498,17 +1498,17 @@ func TestSubagentRetainedAssistantAndTerminalToolResultColdResume(t *testing.T) 
 		"evt_close_after_terminal_tool")
 	var retainedAssistant, terminalResults int
 	if err := fixture.admin.QueryRowContext(context.Background(), `SELECT
-		count(*) FILTER (WHERE data_json::jsonb::text LIKE '%call_closed_resume_terminal_tool%'),
-		count(*) FILTER (WHERE data_json::jsonb::text LIKE '%\"type\": \"tool_result\"%' OR data_json::jsonb::text LIKE '%\"type\":\"tool_result\"%')
-		FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='assistant'`,
+		count(*) FILTER (WHERE (`+sessionfixture.MessageContentSQL+`)::jsonb::text LIKE '%call_closed_resume_terminal_tool%'),
+		count(*) FILTER (WHERE (`+sessionfixture.MessageContentSQL+`)::jsonb::text LIKE '%\"type\": \"tool_result\"%' OR (`+sessionfixture.MessageContentSQL+`)::jsonb::text LIKE '%\"type\":\"tool_result\"%')
+		FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND kind='assistant'`,
 		fixture.sessionID, fixture.childID).Scan(&retainedAssistant, &terminalResults); err != nil {
 		t.Fatalf("read retained Assistant terminal Tool pair: %v", err)
 	}
 	if retainedAssistant != 1 || terminalResults != 1 {
 		var messages string
 		var events string
-		_ = fixture.admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || kind || ':' || data_json, E'\n' ORDER BY sequence),'')
-			FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
+		_ = fixture.admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || kind || ':' || `+sessionfixture.MessageContentSQL+`, E'\n' ORDER BY sequence),'')
+			FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
 			fixture.sessionID, fixture.childID).Scan(&messages)
 		_ = fixture.admin.QueryRowContext(context.Background(), `SELECT coalesce(string_agg(sequence::text || ':' || type || ':' || payload_json, E'\n' ORDER BY sequence),'')
 			FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,

@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -1603,7 +1604,7 @@ func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *
 		rows, err := tx.Query(ctx, `WITH requested AS (
 			SELECT sequence, ordinality
 			FROM unnest($5::bigint[]) WITH ORDINALITY AS selected(sequence, ordinality)
-		) SELECT m.kind,m.sequence,m.data_json,
+		) SELECT m.kind,m.sequence,`+runtimecontrol.StoredMessageContentSQL+`,
 			CASE WHEN m.kind <> 'assistant' THEN true
 			     WHEN m.model_request_id IS NULL THEN false
 			     ELSE EXISTS (
@@ -1618,6 +1619,7 @@ func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *
 		JOIN session_messages m
 		  ON m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3
 		 AND m.sequence=requested.sequence
+		`+runtimecontrol.StoredMessagePartsJoinSQL+`
 		WHERE m.sequence < $4
 		ORDER BY requested.ordinality`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), boundarySequence, messageSequences)
@@ -1626,14 +1628,19 @@ func loadDeclaredSubagentPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			var kind, raw string
+			var kind string
+			var content sql.NullString
 			var sequence int64
 			var sealed bool
-			if err := rows.Scan(&kind, &sequence, &raw, &sealed); err != nil {
+			if err := rows.Scan(&kind, &sequence, &content, &sealed); err != nil {
 				return nil, err
 			}
 			if !sealed {
 				return nil, status.Error(codes.FailedPrecondition, "sub-agent parent Message reference is not sealed")
+			}
+			raw, err := runtimecontrol.StoredMessageContentJSON(content)
+			if err != nil {
+				return nil, err
 			}
 			parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
 			if err != nil {
@@ -1705,7 +1712,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	rows, err := tx.Query(ctx, `WITH latest_compaction AS (
 		SELECT MAX(sequence) AS boundary_sequence FROM session_messages
 		 WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND kind='compaction' AND sequence <= $4
-	) SELECT m.kind,m.sequence,m.data_json,m.model_request_id,
+	) SELECT m.kind,m.sequence,`+runtimecontrol.StoredMessageContentSQL+`,m.model_request_id,
 		CASE
 		  WHEN m.kind <> 'assistant' OR m.model_request_id IS NULL THEN 'sealed'
 		  WHEN NOT EXISTS (
@@ -1760,6 +1767,7 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 		  )
 		) AS complete_tool_repair
 	FROM session_messages m CROSS JOIN latest_compaction c
+	`+runtimecontrol.StoredMessagePartsJoinSQL+`
 	WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3 AND m.sequence <= $4
 	 AND (c.boundary_sequence IS NULL OR m.sequence >= c.boundary_sequence)
 	ORDER BY m.sequence`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), boundarySequence)
@@ -1770,12 +1778,17 @@ func loadDurablePrefixEntriesThroughTx(ctx context.Context, tx *dbconnect.Tx, sc
 	var entries []bridgeRuntimeContextEntry
 	var kinds []string
 	for rows.Next() {
-		var kind, raw, contextState string
+		var kind, contextState string
+		var content sql.NullString
 		var sequence int64
 		var modelRequestID sql.NullString
 		var requestRescheduled bool
 		var completeToolRepair bool
-		if err := rows.Scan(&kind, &sequence, &raw, &modelRequestID, &contextState, &requestRescheduled, &completeToolRepair); err != nil {
+		if err := rows.Scan(&kind, &sequence, &content, &modelRequestID, &contextState, &requestRescheduled, &completeToolRepair); err != nil {
+			return nil, nil, err
+		}
+		raw, err := runtimecontrol.StoredMessageContentJSON(content)
+		if err != nil {
 			return nil, nil, err
 		}
 		parts, err := runtimecontrol.DecodeStoredRuntimeContextParts(raw)
@@ -2013,24 +2026,12 @@ func insertChildThreadCreatedEventTx(
 	if err != nil {
 		return "", 0, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'session.thread_created', $6, $7, $8, $6, $9, $9, $9)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		payloadJSON,
-		eventVisibility,
-		sessionVisible,
-		now,
-	); err != nil {
-		return "", 0, err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, eventVisibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "session.thread_created",
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: eventVisibility, SessionVisible: sessionVisible,
+		CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return "", 0, err
 	}
 	return eventID, sequence, nil

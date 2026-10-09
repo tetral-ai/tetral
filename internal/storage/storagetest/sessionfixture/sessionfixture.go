@@ -324,35 +324,17 @@ func SeedBridgeAPIDurableToolMessage(
 		t.Fatalf("allocate durable tool message sequence: %v", err)
 	}
 	messageID := "msg_" + toolUseEventID
-	timestamp := "2026-01-01T00:00:00Z"
-	dataJSON, err := json.Marshal(map[string]any{
-		"parts": []map[string]any{{
-			"type":            "tool_call",
-			"modelToolCallId": toolCallID,
-			"toolName":        toolName,
-			"canonicalInput":  map[string]any{},
-		}},
+	callJSON, err := json.Marshal(map[string]any{
+		"type":            "tool_call",
+		"modelToolCallId": toolCallID,
+		"toolName":        toolName,
+		"canonicalInput":  map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("marshal durable tool message: %v", err)
 	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, model_request_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $9, $9)`,
-		workspaceID,
-		sessionID,
-		threadID,
-		messageID,
-		messageSequence,
-		string(dataJSON),
-		toolUseEventID,
-		modelRequestID,
-		timestamp,
-	); err != nil {
-		t.Fatalf("seed durable tool message: %v", err)
-	}
+	SeedAssistantMessagePartsForTest(t, db, workspaceID, sessionID, threadID, messageID, messageSequence,
+		toolUseEventID, modelRequestID, string(callJSON))
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_events
 		    SET model_request_id = $4,

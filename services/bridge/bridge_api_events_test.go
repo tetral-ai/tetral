@@ -148,7 +148,7 @@ func TestWriteEventReturnsOperationSpecificDurableFacts(t *testing.T) {
 		t.Fatalf("message result = %#v", message)
 	}
 	var stored string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id='mreq_facts'`, sessionID, threadID).Scan(&stored); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id='mreq_facts'`, sessionID, threadID).Scan(&stored); err != nil {
 		t.Fatalf("load stored context: %v", err)
 	}
 	var durable map[string]any
@@ -499,7 +499,7 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 		t.Fatalf("historical Tool Call reuse error = %v; want AlreadyExists", err)
 	}
 	var declarations int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_messages AS message CROSS JOIN LATERAL jsonb_array_elements(message.data_json::jsonb -> 'parts') AS part WHERE message.workspace_id='default' AND message.session_id=$1 AND message.session_thread_id=$2 AND part ->> 'type'='tool_call' AND part ->> 'modelToolCallId'=$3`, sessionID, threadID, modelToolCallID).Scan(&declarations); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_message_parts AS part WHERE part.workspace_id='default' AND part.session_id=$1 AND part.session_thread_id=$2 AND part.part_kind='tool_call' AND part.model_tool_call_id=$3`, sessionID, threadID, modelToolCallID).Scan(&declarations); err != nil {
 		t.Fatalf("count Tool Call declarations: %v", err)
 	}
 	if declarations != 1 {

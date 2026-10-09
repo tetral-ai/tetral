@@ -15,6 +15,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -354,23 +355,11 @@ func createApprovalReviewInputEventTx(
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'approval_review.input', $6, 'internal', false, $7, $8, $8, $8)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		payloadJSON,
-		runtimeInputID,
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "internal", false, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "approval_review.input", PayloadJSON: payloadJSON,
+		Visibility: "internal", SessionVisible: false, RuntimeWriteID: runtimeInputID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -752,27 +741,14 @@ func markRuntimeInboxCommittedTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 
 func markSessionEventsProcessed(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, now time.Time) error {
 	for _, eventID := range eventIDs {
-		var revision int64
-		var visibility string
-		var sessionVisible bool
-		err := tx.QueryRow(ctx,
-			`UPDATE session_events
-			    SET processed_at = $5,
-			        updated_at = $5,
-			        revision = revision + 1
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			    AND processed_at IS NULL
-			  RETURNING revision, visibility, session_visible`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			scope.GetSessionThreadId(),
-			eventID,
-			now,
-		).Scan(&revision, &visibility, &sessionVisible)
-		if dbconnect.IsNoRows(err) {
+		_, revised, err := sessioneventwrite.RecordProcessedRevisionTx(ctx, tx, sessioneventwrite.ProcessedRevision{
+			WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+			EventID: eventID, ProcessedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+		if !revised {
 			alreadyProcessed, exists, err := sessionEventProcessedState(ctx, tx, scope, eventID)
 			if err != nil {
 				return err
@@ -784,12 +760,6 @@ func markSessionEventsProcessed(ctx context.Context, tx *dbconnect.Tx, scope *br
 				continue
 			}
 			return status.Error(codes.FailedPrecondition, "runtime input event is not committable")
-		}
-		if err != nil {
-			return err
-		}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeForRevisionTx(ctx, tx, scope, eventID, revision, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 	}
 	return nil

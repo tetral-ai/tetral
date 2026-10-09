@@ -48,7 +48,7 @@ func testToolDeclarationReplay(t *testing.T, afterEnd bool) {
 		t.Fatal("Tool declarations split the request Assistant")
 	}
 	var stored string
-	if err := f.admin.QueryRowContext(f.ctx, `SELECT data_json FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND model_request_id='request' AND kind='assistant'`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&stored); err != nil {
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id=$1 AND session_id=$2 AND model_request_id='request' AND kind='assistant'`, f.scope.WorkspaceId, f.scope.SessionId).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	var actual, expected any
@@ -148,7 +148,7 @@ func testToolDeclarationReplay(t *testing.T, afterEnd bool) {
 		t.Fatalf("authorized other-Thread call scope = %v/%v", child, err)
 	}
 	var originalInput, childInput string
-	if err := f.admin.QueryRowContext(f.ctx, `SELECT (SELECT part->'canonicalInput'->>'path' FROM session_messages m CROSS JOIN LATERAL jsonb_array_elements(m.data_json::jsonb->'parts') part WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$3 AND m.model_request_id='request' AND part->>'type'='tool_call' AND part->>'modelToolCallId'='call-a'),(SELECT part->'canonicalInput'->>'path' FROM session_messages m CROSS JOIN LATERAL jsonb_array_elements(m.data_json::jsonb->'parts') part WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.session_thread_id=$4 AND part->>'type'='tool_call' AND part->>'modelToolCallId'='call-a')`, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId, childID).Scan(&originalInput, &childInput); err != nil {
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT (SELECT part.data_json::jsonb->'canonicalInput'->>'path' FROM session_message_parts part JOIN session_messages m ON m.workspace_id=part.workspace_id AND m.message_id=part.message_id WHERE part.workspace_id=$1 AND part.session_id=$2 AND part.session_thread_id=$3 AND m.model_request_id='request' AND part.part_kind='tool_call' AND part.model_tool_call_id='call-a'),(SELECT part.data_json::jsonb->'canonicalInput'->>'path' FROM session_message_parts part WHERE part.workspace_id=$1 AND part.session_id=$2 AND part.session_thread_id=$4 AND part.part_kind='tool_call' AND part.model_tool_call_id='call-a')`, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId, childID).Scan(&originalInput, &childInput); err != nil {
 		t.Fatal(err)
 	}
 	if originalInput != "alpha" || childInput != "independent" {

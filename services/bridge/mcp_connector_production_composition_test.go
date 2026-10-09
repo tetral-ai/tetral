@@ -395,6 +395,8 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 			UNION ALL
 			SELECT data_json AS surface FROM session_messages WHERE workspace_id='default' AND session_id=$1
 			UNION ALL
+			SELECT data_json AS surface FROM session_message_parts WHERE workspace_id='default' AND session_id=$1
+			UNION ALL
 			SELECT result_json AS surface FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1
 		) surfaces`, sessionID).Scan(&durablePublicSurfaces); err != nil {
 		t.Fatalf("read MCP OAuth durable public surfaces: %v", err)

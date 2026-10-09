@@ -35,12 +35,12 @@ func TestDurablePrefixIncludesAcknowledgedFailedAndRescheduledAssistantParts(t *
 		threadID  = "thr_prefix_sealed_only"
 	)
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, "msg_prefix_success", 1, nil, "mreq_prefix_success", `{"type":"text","text":"success"}`)
+	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, "msg_prefix_failed", 2, nil, "mreq_prefix_failed", `{"type":"text","text":"failed partial"}`)
+	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, "msg_prefix_rescheduled", 3, nil, "mreq_prefix_rescheduled", `{"type":"text","text":"rescheduled partial"}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
 	) VALUES
-		('default',$1,$2,'msg_prefix_success',1,'assistant','{"parts":[{"type":"text","text":"success"}]}','mreq_prefix_success',now(),now()),
-		('default',$1,$2,'msg_prefix_failed',2,'assistant','{"parts":[{"type":"text","text":"failed partial"}]}','mreq_prefix_failed',now(),now()),
-		('default',$1,$2,'msg_prefix_rescheduled',3,'assistant','{"parts":[{"type":"text","text":"rescheduled partial"}]}','mreq_prefix_rescheduled',now(),now()),
 		('default',$1,$2,'msg_prefix_user',4,'user','{"parts":[{"type":"text","text":"next input"}]}',NULL,now(),now())`, sessionID, threadID); err != nil {
 		t.Fatalf("seed prefix messages: %v", err)
 	}

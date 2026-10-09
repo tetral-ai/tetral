@@ -261,7 +261,7 @@ func testReplicaProviderContinuation(t *testing.T) {
  (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end'),
  (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true'),
  (SELECT count(*) FROM session_messages WHERE session_id=$1 AND kind='user'),
- COALESCE((SELECT string_agg(data_json,' ') FROM session_messages WHERE session_id=$1 AND kind='assistant'),'')`, sessionID).Scan(&starts, &ends, &errorEnds, &users, &assistants); err != nil {
+ COALESCE((SELECT string_agg(`+sessionfixture.MessageContentSQL+`,' ') FROM session_messages m WHERE session_id=$1 AND kind='assistant'),'')`, sessionID).Scan(&starts, &ends, &errorEnds, &users, &assistants); err != nil {
 		t.Fatal(err)
 	}
 	if starts != 2 || ends != 2 || errorEnds != 1 || users != 2 || !strings.Contains(assistants, "replica_core_2 partial") || strings.Contains(assistants, "replica_core_1 partial") {

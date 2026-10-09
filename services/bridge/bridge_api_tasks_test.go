@@ -575,7 +575,10 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_task_notify'
 		    AND type = 'runtime_notification'
-		    AND visibility = 'internal'`).Scan(&notificationEvents); err != nil {
+		    AND visibility = 'internal'
+		    AND insert_stream_position = 0
+		    AND latest_stream_position = 0
+		    AND NOT EXISTS (SELECT 1 FROM session_event_stream_changes change WHERE change.event_id = session_events.event_id)`).Scan(&notificationEvents); err != nil {
 		t.Fatalf("read runtime notification events: %v", err)
 	}
 	if taskStatus != "expired" || !terminalEventID.Valid || inboxStatus != "committed" || notificationMessages != 1 || notificationEvents != 1 {

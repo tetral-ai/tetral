@@ -19,6 +19,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -233,7 +234,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return err
 		}
 		projectionJSON := `{}`
-		var modelToolCallID sql.NullString
+		modelToolCallID := ""
 		if requestStart != nil {
 			projectionJSON, err = runtimecontrol.MarshalJSON(map[string]any{
 				"context_through_message_sequence": requestStart.ContextThroughMessageSequence,
@@ -250,29 +251,15 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			if err != nil {
 				return err
 			}
-			modelToolCallID = sql.NullString{String: toolProjection.ModelToolCallID, Valid: true}
+			modelToolCallID = toolProjection.ModelToolCallID
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, model_tool_call_id, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, $13, $14, $14, $14)`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			eventID,
-			sequence,
-			durableEventType,
-			eventPayloadJSON,
-			visibility,
-			sessionVisible,
-			key,
-			request.GetModelRequestId(),
-			projectionJSON,
-			modelToolCallID,
-			now,
-		); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: durableEventType,
+			PayloadJSON: eventPayloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: key, ModelRequestID: request.GetModelRequestId(), ModelToolCallID: modelToolCallID,
+			CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			// Event IDs are globally unique, while receipts are scoped. Only an
 			// exact operation replay can return a duplicate; an ID collision
 			// rolls back the whole declaration without revealing its owner. The
@@ -290,9 +277,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			if err := insertFileAttachmentConsumptionsTx(ctx, tx, request.GetScope(), eventID, consumedFileAttachments.Pairs); err != nil {
 				return err
 			}
-		}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 		facts, err = commitWriteEventContextTx(
 			ctx,

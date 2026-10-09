@@ -150,7 +150,7 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 		t.Fatalf("durable MCP failure = Tool Results %d Session errors %d; want 1/0", toolResults, sessionErrors)
 	}
 	var durableMessage string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequest).Scan(&durableMessage); err != nil {
 		t.Fatalf("read MCP Tool projection: %v", err)

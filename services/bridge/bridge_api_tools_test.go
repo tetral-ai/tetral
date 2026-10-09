@@ -813,7 +813,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	}
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json FROM session_messages
+		`SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		  WHERE workspace_id='default' AND session_id='sesn_bridge_repair'
 		    AND session_thread_id='thr_bridge_repair' AND model_request_id='mreq_repair'`,
 	).Scan(&dataJSON); err != nil {
@@ -924,8 +924,8 @@ func TestPostgreSQLBridgeAPIStoreKeepsOrdinaryAssistantAndRepairMembersInOneDraf
 	var rowCount int
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(data_json)
-		   FROM session_messages
+		`SELECT count(*), max(`+sessionfixture.MessageContentSQL+`)
+		   FROM session_messages m
 		  WHERE workspace_id='default' AND session_id='sesn_mixed_draft'
 		    AND session_thread_id='sthr_mixed_draft' AND model_request_id='mreq_mixed'`,
 	).Scan(&rowCount, &dataJSON); err != nil {

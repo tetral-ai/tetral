@@ -192,12 +192,12 @@ func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testin
 	 'internal',false,'rwrite_terminal_running',NULL,'{}',now(),now(),now())`, sessionID, threadID); err != nil {
 		t.Fatalf("seed terminal context facts: %v", err)
 	}
+	sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, "msg_terminal_old_open", 1,
+		"evt_terminal_old_open", "mreq_terminal_old_open", `{"type":"text","text":"superseded"}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_messages (
 		workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
 		source_event_id, model_request_id, created_at, updated_at
 	) VALUES
-	('default',$1,$2,'msg_terminal_old_open',1,'assistant','{"parts":[{"type":"text","text":"superseded"}]}',
-	 'evt_terminal_old_open','mreq_terminal_old_open',now(),now()),
 	('default',$1,$2,'msg_terminal_compaction',2,'compaction','{"parts":[{"type":"text","text":"summary"}]}',
 	 'evt_terminal_compacted',NULL,now(),now())`, sessionID, threadID); err != nil {
 		t.Fatalf("seed terminal context messages: %v", err)

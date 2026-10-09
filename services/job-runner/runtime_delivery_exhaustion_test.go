@@ -511,19 +511,21 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inbox
 	}
 	for _, eventID := range job.EventIDs {
 		var processedAt sql.NullString
-		var revision int64
-		if err := db.QueryRowContext(context.Background(), `SELECT processed_at, revision FROM session_events WHERE workspace_id=$1 AND event_id=$2`, job.WorkspaceID, eventID).Scan(&processedAt, &revision); err != nil {
+		var revision, insertPosition, latestPosition int64
+		if err := db.QueryRowContext(context.Background(), `SELECT processed_at, revision, insert_stream_position, latest_stream_position FROM session_events WHERE workspace_id=$1 AND event_id=$2`, job.WorkspaceID, eventID).Scan(&processedAt, &revision, &insertPosition, &latestPosition); err != nil {
 			t.Fatalf("read exhaustion input event %s: %v", eventID, err)
 		}
 		if !processedAt.Valid || revision != 2 {
 			t.Fatalf("exhaustion input event %s processed=%v revision=%d; want true/2", eventID, processedAt.Valid, revision)
 		}
 		var processingChanges int
-		if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_event_stream_changes WHERE workspace_id=$1 AND event_id=$2 AND revision=2`, job.WorkspaceID, eventID).Scan(&processingChanges); err != nil {
+		var processingPosition int64
+		if err := db.QueryRowContext(context.Background(), `SELECT count(*), COALESCE(max(stream_position), 0) FROM session_event_stream_changes WHERE workspace_id=$1 AND event_id=$2 AND revision=2`, job.WorkspaceID, eventID).Scan(&processingChanges, &processingPosition); err != nil {
 			t.Fatalf("count exhaustion input stream changes %s: %v", eventID, err)
 		}
-		if processingChanges != 1 {
-			t.Fatalf("exhaustion input stream changes %s = %d; want one revision-2 change", eventID, processingChanges)
+		if processingChanges != 1 || processingPosition != latestPosition || insertPosition >= latestPosition {
+			t.Fatalf("exhaustion input stream changes %s = %d at %d; event insert/latest %d/%d; want one revision-2 change at the latest position after the kept insert position",
+				eventID, processingChanges, processingPosition, insertPosition, latestPosition)
 		}
 	}
 	var runtimeStatusRows int

@@ -190,6 +190,23 @@ only then is the stale Runtime binding released. Sandbox lifecycle is
 independent of Runtime Pod loss. Provider text is never reconstructed
 — only ledgers are repaired.
 
+For each closed request whose Thread is not interrupt-owned, repair then
+appends to that request's Assistant message only the Tool facts its immutable
+Tool events prove and its parts lack. Candidates are scalar event identities
+in event order: a Tool Use yields its call, an ordinary or MCP result yields a
+result keyed by the call ID of the Tool Use it references, and a synthetic
+invalid-tool repair yields its call then its result. Each candidate is
+anti-joined on the message's part-identity index; at most 128 missing
+candidates are selected per page, with keyset continuation under the held
+fence, and only those are projected from their event projections (numbers
+decoded without a float64 round trip) and appended through the shared
+`runtimecontrol` primitive. Existing parts are never read, validated or
+rewritten, a repeated repair writes nothing, and a request without an
+Assistant message stays without one. The weaker projection checks remain:
+a completed result rebuilt from its `{text,truncated}` projection commits, and
+the next context read rejects it, as before. Repair adds no reasoning, so the
+admitted reasoning counters are unchanged.
+
 ### Cleanup order (hot Runtime state only)
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
@@ -455,3 +472,10 @@ New process/placement/lifecycle controls include `runtime_visibility_test.go`,
 `integration/replica_placement_test.go` PostgreSQL composition. Process freshness
 uses the shared `TETRAL_RUNTIME_PROCESS_FRESHNESS_MS` setting (10000), validated
 with the registration/report interval policy consumed by Runtime and Bridge.
+
+`message_parts_test.go` drives Pod-loss repair under the real Job Runner role
+with a statement tracer: it appends exactly the missing call and result facts
+in event order, keeps existing part rows and reasoning counters unchanged,
+preserves numeric input tokens, writes nothing on a repeated repair, creates no
+Assistant message for a request without one, and leaves the baseline
+`{text,truncated}` completion to fail the next context read.

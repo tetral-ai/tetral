@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -1366,24 +1367,17 @@ func (t *postgresqlTransaction) appendPublicProcessedSessionEvent(ctx context.Co
 	}
 	sessionVisible := controlPlaneEventSessionVisible(eventType, sessionThreadID)
 	eventTimestamp := timestamp
-	if _, err := t.tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, $7, $9, $9, $9)`,
-		string(t.workspaceID),
-		sessionID,
-		nullableEmptyString(sessionThreadID),
-		eventID,
-		sequence,
-		eventType,
-		string(payload),
-		sessionVisible,
-		eventTimestamp,
-	); err != nil {
+	rawTx, err := t.rawDBTx()
+	if err != nil {
 		return err
 	}
-	return t.appendSessionEventStreamChange(ctx, sessionID, sessionThreadID, eventID, sessionVisible, eventTimestamp)
+	_, err = sessioneventwrite.InsertInitialTx(ctx, rawTx, sessioneventwrite.InitialEvent{
+		WorkspaceID: string(t.workspaceID), SessionID: sessionID, SessionThreadID: sessionThreadID,
+		EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: string(payload), ProjectionJSON: string(payload), Visibility: "public", SessionVisible: sessionVisible,
+		CreatedAt: eventTimestamp, ProcessedAt: &eventTimestamp,
+	})
+	return err
 }
 
 func (t *postgresqlTransaction) nextSessionEventSequence(ctx context.Context, sessionID string, sessionThreadID string) (int64, error) {
@@ -1399,40 +1393,6 @@ func (t *postgresqlTransaction) nextSessionEventSequence(ctx context.Context, se
 		nullableEmptyString(sessionThreadID),
 	).Scan(&sequence)
 	return sequence, err
-}
-
-func (t *postgresqlTransaction) appendSessionEventStreamChange(ctx context.Context, sessionID string, sessionThreadID string, eventID string, sessionVisible bool, timestamp time.Time) error {
-	var streamPosition int64
-	if err := t.tx.QueryRowScanner(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, 1, 'public', $5, $6)
-		RETURNING stream_position`,
-		string(t.workspaceID),
-		sessionID,
-		eventID,
-		nullableEmptyString(sessionThreadID),
-		sessionVisible,
-		timestamp,
-	).Scan(&streamPosition); err != nil {
-		return err
-	}
-	_, err := t.tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		string(t.workspaceID),
-		sessionID,
-		eventID,
-		streamPosition,
-	)
-	return err
 }
 
 func controlPlaneEventSessionVisible(eventType string, sessionThreadID string) bool {

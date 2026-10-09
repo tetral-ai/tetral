@@ -1735,12 +1735,8 @@ func TestPostgreSQLInterruptedActorEffectsStayStaleWhileQueuedMailResumesAfterCl
 	seedBridgeAPIEvent(t, admin, "default", sessionID, siblingID, lateChild, 2, "agent.tool_use",
 		`{"type":"agent.tool_use","name":"spawn_agent","input":{"task_name":"late-child","prompt":"must be stale"},"evaluated_permission":"allow"}`)
 	sessionfixture.SeedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, siblingID, "mreq_interrupt_actor_late", lateMail, "call_interrupt_actor_late_mail", "send_message")
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json=jsonb_set(data_json::jsonb, '{parts}', (data_json::jsonb->'parts') ||
-			'[{"type":"tool_call","modelToolCallId":"call_interrupt_actor_late_child","toolName":"spawn_agent","canonicalInput":{}}]'::jsonb)::text
-		WHERE workspace_id='default' AND session_id=$1 AND source_event_id=$2`, sessionID, lateMail); err != nil {
-		t.Fatalf("add second durable actor Tool part: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, admin, "default", sessionID, siblingID, "mreq_interrupt_actor_late",
+		`{"type":"tool_call","modelToolCallId":"call_interrupt_actor_late_child","toolName":"spawn_agent","canonicalInput":{}}`)
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
 		SET model_request_id='mreq_interrupt_actor_late', projection_json=COALESCE(projection_json, '{}')::jsonb ||
 			'{"model_tool_call_id":"call_interrupt_actor_late_child","tool_name":"spawn_agent"}'::jsonb

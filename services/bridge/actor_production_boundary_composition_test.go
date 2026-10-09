@@ -397,14 +397,8 @@ func TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL(t *testing.T) {
 	if strings.Contains(prefixEntries, "call_actor_production_spawn") {
 		t.Fatalf("live spawn draft leaked into child prefix: %s", prefixEntries)
 	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = jsonb_set(data_json::jsonb, '{parts}',
-			(data_json::jsonb -> 'parts') || '[{"type":"text","text":"late parent growth"}]'::jsonb)::text,
-			updated_at=clock_timestamp()
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
-		sessionID, parentID, spawnRequestID); err != nil {
-		t.Fatalf("grow parent Assistant after child creation: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, admin, "default", sessionID, parentID, spawnRequestID,
+		`{"type":"text","text":"late parent growth"}`)
 	const repeatedSourceID = "evt_actor_production_spawn_repeated"
 	const repeatedRequestID = "mreq_actor_production_spawn_repeated"
 	seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, repeatedSourceID, 3, "agent.tool_use",

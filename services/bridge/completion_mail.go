@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -79,15 +80,12 @@ func appendSubagentMailEnvelopeTx(
 	if err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
-		visibility,session_visible,runtime_write_id,projection_json,created_at,updated_at,processed_at
-	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_sent',$6,'public',true,$7,$6,$8,$8,$8)`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
-		eventPayloadJSON, deliveryID, now); err != nil {
-		return runtimecontrol.StoredAgentMailEnvelope{}, err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "public", true, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
+		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: "public", SessionVisible: true,
+		RuntimeWriteID: deliveryID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
 	}
 	if err := runtimecontrol.BirthCompletionMailCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, deliveryID, now); err != nil {
@@ -150,15 +148,12 @@ func appendDeclaredSubagentInitialEnvelopeTx(
 	if err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
-		visibility,session_visible,runtime_write_id,projection_json,created_at,updated_at,processed_at
-	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_sent',$6,'public',true,$7,$6,$8,$8,$8)`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
-		eventPayloadJSON, deliveryID, now); err != nil {
-		return runtimecontrol.StoredAgentMailEnvelope{}, err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "public", true, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_sent",
+		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: "public", SessionVisible: true,
+		RuntimeWriteID: deliveryID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return runtimecontrol.StoredAgentMailEnvelope{}, err
 	}
 	if err := runtimecontrol.BirthCompletionMailCustodyTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetThreadID, deliveryID, now); err != nil {
@@ -209,15 +204,12 @@ func appendDeclaredSubagentReceivedEventTx(
 		return "", err
 	}
 	visibility, sessionVisible := threadScope.PublicProjection("agent.thread_message_received")
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (
-		workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,
-		visibility,session_visible,projection_json,created_at,updated_at,processed_at
-	) VALUES ($1,$2,$3,$4,$5,'agent.thread_message_received',$6,$7,$8,$6,$9,$9,NULL)`,
-		targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId(), eventID, sequence,
-		eventPayloadJSON, visibility, sessionVisible, now); err != nil {
-		return "", err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, targetScope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: targetScope.GetWorkspaceId(), SessionID: targetScope.GetSessionId(), SessionThreadID: targetScope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "agent.thread_message_received",
+		PayloadJSON: eventPayloadJSON, ProjectionJSON: eventPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		CreatedAt: now,
+	}); err != nil {
 		return "", err
 	}
 	return eventID, nil

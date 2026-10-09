@@ -21,7 +21,7 @@ import postgresqlContractJSON from "../../../../../database/postgresql.json";
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"a7e7f7a728837d2f363d08ec4ad3ea8ed09c460e2010c34e2d784aec26aec8e5";
+	"ab10153c0d2970b370196697a76024d4c38f2054bb1e9a1209396c95caa27cb1";
 
 const PostgreSQLSchemaRegistry = [
 	PostgreSQLSchemaVersionOneChecksum,
@@ -90,7 +90,7 @@ interface CatalogPolicyRow {
 interface PostgreSQLContract {
 	readonly version: number;
 	readonly workspace_tables: readonly string[];
-	readonly append_only_workspace_table: string;
+	readonly append_only_workspace_tables: readonly string[];
 	readonly global_tables: readonly string[];
 	readonly special_policies: readonly {
 		readonly table: string;
@@ -168,7 +168,7 @@ async function verifyPostgreSQLRLS(sql: SchemaSQL): Promise<void> {
 function catalogTablesMatch(rows: readonly CatalogTableRow[]): boolean {
 	const expectedWorkspace = new Set([
 		...postgresqlContract.workspace_tables,
-		postgresqlContract.append_only_workspace_table,
+		...postgresqlContract.append_only_workspace_tables,
 	]);
 	const expectedGlobal = new Set(postgresqlContract.global_tables);
 	const actualWorkspace = new Set<string>();
@@ -207,9 +207,10 @@ function expectedPolicies(): Map<string, { command: string; using: string; check
 	for (const table of postgresqlContract.workspace_tables) {
 		result.set(`${table}\0workspace_isolation`, { command: "ALL", using: workspace, check: workspace });
 	}
-	const appendOnly = postgresqlContract.append_only_workspace_table;
-	result.set(`${appendOnly}\0workspace_select`, { command: "SELECT", using: workspace, check: "" });
-	result.set(`${appendOnly}\0workspace_insert`, { command: "INSERT", using: "", check: workspace });
+	for (const appendOnly of postgresqlContract.append_only_workspace_tables) {
+		result.set(`${appendOnly}\0workspace_select`, { command: "SELECT", using: workspace, check: "" });
+		result.set(`${appendOnly}\0workspace_insert`, { command: "INSERT", using: "", check: workspace });
+	}
 	for (const policy of postgresqlContract.special_policies) {
 		result.set(`${policy.table}\0${policy.name}`, policy);
 	}

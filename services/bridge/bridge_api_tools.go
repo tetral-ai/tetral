@@ -24,6 +24,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/pathvalidation"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -756,30 +757,14 @@ func insertInternalToolRepairEventTx(
 	// The synthetic result owns the call ID and references no Tool Use: the
 	// call was never a public Tool Use. The Thread's call-ID index rejects a
 	// call ID that any earlier declaration or repair already used.
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-			model_tool_call_id, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		repairKey,
-		request.GetModelRequestId(),
-		projectionJSON,
-		request.GetModelToolCallId(),
-		now,
-	); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "agent.tool_result",
+		PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: repairKey, ModelRequestID: request.GetModelRequestId(), ModelToolCallID: request.GetModelToolCallId(),
+		CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return "", 0, runtimecontrol.ToolRelationInsertError(err)
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return "", 0, err
 	}
 	return eventID, sequence, nil
 }

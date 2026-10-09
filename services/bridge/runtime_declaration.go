@@ -18,6 +18,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -609,35 +610,12 @@ func commitWriteRequestEndContextTx(
 	if err != nil {
 		return requestEndDurableFacts{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-			created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.thread_context_compacted', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
-		request.GetScope().GetWorkspaceId(),
-		request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(),
-		compactionEventID,
-		compactionEventSequence,
-		compactionPayloadJSON,
-		visibility,
-		sessionVisible,
-		request.GetModelRequestId(),
-		request.GetModelRequestId(),
-		now,
-	); err != nil {
-		return requestEndDurableFacts{}, err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(
-		ctx,
-		tx,
-		request.GetScope(),
-		compactionEventID,
-		visibility,
-		sessionVisible,
-		now,
-	); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+		SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: compactionEventID, Sequence: compactionEventSequence, Type: "agent.thread_context_compacted",
+		PayloadJSON: compactionPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: request.GetModelRequestId(), ModelRequestID: request.GetModelRequestId(), CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return requestEndDurableFacts{}, err
 	}
 	checkpoint, err := insertCompactionContextEntryTx(
@@ -795,45 +773,9 @@ func appendPreparedRuntimeAssistantContextTx(
 		return durableContextWrite{}, status.Error(codes.InvalidArgument, "event cannot append assistant context")
 	}
 
-	var (
-		messageID       string
-		messageSequence int64
-		existingJSON    string
-	)
-	err := tx.QueryRow(ctx,
-		`SELECT message_id, sequence, data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&messageID, &messageSequence, &existingJSON)
-	insertMessage := false
-	if dbconnect.IsNoRows(err) {
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(MAX(sequence), 0) + 1
-			   FROM session_messages
-			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		).Scan(&messageSequence); err != nil {
-			return durableContextWrite{}, err
-		}
-		messageID = id.New("msg_")
-		existingJSON = `{"parts":[]}`
-		insertMessage = true
-	} else if err != nil {
+	header, found, err := runtimecontrol.LockAssistantMessageHeaderTx(ctx, tx, scope, modelRequestID)
+	if err != nil {
 		return durableContextWrite{}, err
-	}
-
-	stored, err := runtimecontrol.DecodeRuntimeDeclarationObject(existingJSON)
-	if err != nil || runtimecontrol.RequireRuntimeObjectFields(stored, []string{"parts"}, []string{"parts"}) != nil {
-		return durableContextWrite{}, status.Error(codes.FailedPrecondition, "durable assistant context is invalid")
-	}
-	existingParts, ok := stored["parts"].([]any)
-	if !ok {
-		return durableContextWrite{}, status.Error(codes.FailedPrecondition, "durable assistant context is invalid")
 	}
 
 	toolCount := 0
@@ -843,6 +785,7 @@ func appendPreparedRuntimeAssistantContextTx(
 	if err != nil {
 		return durableContextWrite{}, err
 	}
+	parts := make([]runtimecontrol.AssistantPart, 0, len(declaredParts))
 	for _, part := range declaredParts {
 		if part["type"] == "tool_call" {
 			toolCount++
@@ -851,7 +794,17 @@ func appendPreparedRuntimeAssistantContextTx(
 		if part["type"] == "text" {
 			textCount++
 		}
-		existingParts = append(existingParts, part)
+		if runtimecontrol.ValidateStoredRuntimeContextPart(part) != nil {
+			return durableContextWrite{}, status.Error(codes.InvalidArgument, "runtime context part is invalid")
+		}
+		appended := runtimecontrol.AssistantPart{Value: part}
+		if part["type"] == "reasoning" {
+			appended.ReasoningBytes, err = stableReasoningCharge(part)
+			if err != nil {
+				return durableContextWrite{}, err
+			}
+		}
+		parts = append(parts, appended)
 	}
 	switch eventType {
 	case "agent.tool_use", "agent.mcp_tool_use":
@@ -877,42 +830,23 @@ func appendPreparedRuntimeAssistantContextTx(
 			}
 		}
 	}
-	if err := validateStableReasoningBudget(existingParts); err != nil {
-		return durableContextWrite{}, err
+	// Every declaration charges its new reasoning against the request's
+	// stored counters; earlier parts are neither read nor re-serialized.
+	request := runtimecontrol.AssistantPartsAppend{
+		Scope: scope, ModelRequestID: modelRequestID, SourceEventID: eventID, Parts: parts, Now: now,
+		ReasoningBudget: &runtimecontrol.ReasoningBudget{
+			Parts: MaxStableReasoningPartsPerRequest,
+			Bytes: MaxStableReasoningBytesPerRequest,
+		},
 	}
-	stored["parts"] = existingParts
-	dataJSON, err := json.Marshal(stored)
+	if found {
+		request.Header = &header
+	}
+	written, err := runtimecontrol.AppendAssistantMessagePartsTx(ctx, tx, request)
 	if err != nil {
 		return durableContextWrite{}, err
 	}
-	if insertMessage {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_messages (
-				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-				data_json, source_event_id, model_request_id, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $8, $9, $9)`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-			messageID, messageSequence, string(dataJSON), eventID, modelRequestID, now,
-		); err != nil {
-			return durableContextWrite{}, err
-		}
-	} else {
-		result, err := tx.Exec(ctx,
-			`UPDATE session_messages
-			    SET data_json = $5, updated_at = $6
-			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-			    AND message_id = $4 AND model_request_id = $7`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-			messageID, string(dataJSON), now, modelRequestID,
-		)
-		if err != nil {
-			return durableContextWrite{}, err
-		}
-		if !runtimecontrol.RowsAffected(result) {
-			return durableContextWrite{}, status.Error(codes.FailedPrecondition, "assistant append lost its durable context")
-		}
-	}
-	return durableContextWrite{MessageID: messageID, MessageSequence: messageSequence, CreatedToolUseEventIDs: createdToolIDs}, nil
+	return durableContextWrite{MessageID: written.MessageID, MessageSequence: written.Sequence, CreatedToolUseEventIDs: createdToolIDs}, nil
 }
 
 func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {

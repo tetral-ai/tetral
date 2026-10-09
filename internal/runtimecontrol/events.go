@@ -117,47 +117,6 @@ func NextSessionEventSequenceTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	return sequence, err
 }
 
-func AppendSessionEventStreamChangeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, visibility string, sessionVisible bool, now time.Time) (int64, error) {
-	return AppendSessionEventStreamChangeForRevisionTx(ctx, tx, scope, eventID, 1, visibility, sessionVisible, now)
-}
-
-func AppendSessionEventStreamChangeForRevisionTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, revision int64, visibility string, sessionVisible bool, now time.Time) (int64, error) {
-	var streamPosition int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING stream_position`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		eventID,
-		scope.GetSessionThreadId(),
-		revision,
-		visibility,
-		sessionVisible,
-		now,
-	).Scan(&streamPosition); err != nil {
-		return 0, err
-	}
-	_, err := tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN $5 = 1 AND insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		eventID,
-		streamPosition,
-		revision,
-	)
-	return streamPosition, err
-}
-
 type ToolProjection struct {
 	EventType               string                              `json:"event_type"`
 	EvaluatedPermission     string                              `json:"evaluated_permission"`

@@ -387,11 +387,12 @@ func loadThreadContextJSONTx(
 		)
 			SELECT m.kind,
 			       m.sequence,
-			       m.data_json,
+			       `+runtimecontrol.StoredMessageContentSQL+`,
 			       m.source_event_id,
 			       m.model_request_id
 		  FROM session_messages m
 		  CROSS JOIN latest_compaction c
+		  `+runtimecontrol.StoredMessagePartsJoinSQL+`
 		 WHERE m.workspace_id = $1
 		   AND m.session_id = $2
 		   AND m.session_thread_id = $3
@@ -463,16 +464,20 @@ func loadThreadContextJSONTx(
 	for rows.Next() {
 		var kind string
 		var sequence int64
-		var raw string
+		var content sql.NullString
 		var sourceEventID sql.NullString
 		var modelRequestID sql.NullString
 		if err := rows.Scan(
 			&kind,
 			&sequence,
-			&raw,
+			&content,
 			&sourceEventID,
 			&modelRequestID,
 		); err != nil {
+			return "", err
+		}
+		raw, err := runtimecontrol.StoredMessageContentJSON(content)
+		if err != nil {
 			return "", err
 		}
 		if !json.Valid([]byte(raw)) {

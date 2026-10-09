@@ -272,7 +272,7 @@ func expectedCurrentBaseTableCount(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(contract.WorkspaceTables) + len(contract.GlobalTables) + 1
+	return len(contract.WorkspaceTables) + len(contract.AppendOnlyWorkspaceTables) + len(contract.GlobalTables)
 }
 
 func TestNewPostgreSQLDBLeavesPublicFoundationTablesUnchanged(t *testing.T) {

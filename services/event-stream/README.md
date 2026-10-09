@@ -82,7 +82,7 @@ Every writer named here lives outside this package (the append path in
 | Key | Read by (this reader) | Rule |
 | --- | --- | --- |
 | `session_event_stream_changes.stream_position` | change feed + `Current*StreamPosition` (via `MAX`) | append-only, strictly increasing per `(workspace_id, session_id)`; rows are never rewritten |
-| `session_events.insert_stream_position` | session list ordering + session cursor | set once to the first `stream_position` the event appears at, immutable thereafter |
+| `session_events.insert_stream_position` | session list ordering + session cursor | written with the event's one INSERT as its revision-1 change position, immutable thereafter |
 | `session_events.sequence` | thread list ordering + thread cursor | unique and stable per `(workspace_id, session_id, session_thread_id)`; never compared across threads |
 | `session_events.revision` | delivered as a same-`id` update on the stream | starts at 1, bumps when an existing public row's read state changes (e.g. `processed_at` stamped after Runtime commits an accepted input) |
 

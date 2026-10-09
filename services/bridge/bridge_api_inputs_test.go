@@ -109,6 +109,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit")
 	seedBridgeAPIRuntimeInput(t, admin, "default", "sesn_bridge_commit", "thr_bridge_commit", "rin_bridge_commit", "bind_bridge_commit", "pod_uid_commit", "evt_bridge_commit")
 	initialStreamPosition := sessionfixture.SeedBridgeAPIStreamChange(t, admin, "default", "sesn_bridge_commit", "thr_bridge_commit", "evt_bridge_commit", 1, "public", true)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET insert_stream_position=$1 WHERE event_id='evt_bridge_commit'`, initialStreamPosition); err != nil {
+		t.Fatalf("seed first-revision insert position: %v", err)
+	}
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-commit-inputs-test-key-32")
@@ -214,7 +217,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	var inboxStatus string
 	var processedAt sql.NullString
 	var eventRevision int64
-	var latestStreamPosition int64
+	var latestStreamPosition, insertStreamPosition int64
 	var messageCount int
 	var messageDataJSON string
 	var streamChangeCount int
@@ -225,7 +228,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		t.Fatalf("read inbox status: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT processed_at, revision, latest_stream_position FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit'`).Scan(&processedAt, &eventRevision, &latestStreamPosition); err != nil {
+		`SELECT processed_at, revision, latest_stream_position, insert_stream_position FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit'`).Scan(&processedAt, &eventRevision, &latestStreamPosition, &insertStreamPosition); err != nil {
 		t.Fatalf("read processed_at: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
@@ -247,9 +250,10 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		t.Fatalf("commit side effects status=%q processed=%v messages=%d; want committed/processed/1", inboxStatus, processedAt.Valid, messageCount)
 	}
 	assertBridgeUserContextProjection(t, messageDataJSON, "hello")
-	if eventRevision != 2 || streamChangeCount != 2 || maxStreamRevision != 2 || latestStreamPosition != maxStreamPosition || latestStreamPosition <= initialStreamPosition {
-		t.Fatalf("processed stream revision = eventRev %d changeCount %d maxRev %d latest %d initial %d maxPos %d; want same-event revision update only once",
-			eventRevision, streamChangeCount, maxStreamRevision, latestStreamPosition, initialStreamPosition, maxStreamPosition)
+	if eventRevision != 2 || streamChangeCount != 2 || maxStreamRevision != 2 || latestStreamPosition != maxStreamPosition || latestStreamPosition <= initialStreamPosition ||
+		insertStreamPosition != initialStreamPosition {
+		t.Fatalf("processed stream revision = eventRev %d changeCount %d maxRev %d latest %d initial %d maxPos %d insert %d; want same-event revision update only once with the insert position kept",
+			eventRevision, streamChangeCount, maxStreamRevision, latestStreamPosition, initialStreamPosition, maxStreamPosition, insertStreamPosition)
 	}
 
 }

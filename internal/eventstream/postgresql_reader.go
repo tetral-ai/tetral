@@ -21,12 +21,13 @@
 //	  sessions                      lifecycle_state readability guard (deletion rules under INVARIANTS)
 //
 // STATE MACHINE (durable ledger keys this reader pages on; every writer named
-// here lives OUTSIDE this package — the event append path in internal/sessionevent,
-// internal/session, and services/bridge):
+// here lives OUTSIDE this package — internal/sessioneventwrite, called by the
+// event append paths in internal/sessionevent, internal/session,
+// internal/runtimecontrol, services/bridge and services/job-runner):
 //
-//	key                                          | states                  | writer (external) | reader (this pkg)                            | transitions
-//	session_event_stream_changes.stream_position | absent -> N (IDENTITY)  | append path       | change feed + Current*StreamPosition (MAX)   | append-only, strictly increasing per (workspace,session); rows are never rewritten
-//	session_events.insert_stream_position        | 0 (unset) -> N          | append path       | ListSessionEvents ordering + session cursor  | set once to the first stream_position the event appears at, immutable thereafter
+//	key                                          | states                     | writer (external) | reader (this pkg)                            | transitions
+//	session_event_stream_changes.stream_position | absent -> N (IDENTITY)     | append path       | change feed + Current*StreamPosition (MAX)   | append-only, strictly increasing per (workspace,session) in commit order under the Session fence; rows are never rewritten
+//	session_events.insert_stream_position        | N at the event INSERT      | append path       | ListSessionEvents ordering + session cursor  | the revision-1 change position, written with the event and immutable thereafter
 //	session_events.sequence                      | assigned (thread-local) | append path       | ListThreadEvents ordering + thread cursor    | unique and stable per (workspace,session,thread); the thread-scoped paging key
 //
 // INVARIANTS:
@@ -74,9 +75,8 @@
 //   - internal/eventstream/list.go — list limit bounds and query options.
 //   - internal/storage/postgresql_schema.go — stream_position IDENTITY,
 //     insert_stream_position default, and thread sequence uniqueness.
-//   - internal/sessionevent/postgresql_store.go, internal/session/postgresql_store.go,
-//     services/bridge/bridge_api_events.go — the append paths that
-//     assign stream_position and freeze insert_stream_position.
+//   - internal/sessioneventwrite/sessioneventwrite.go — the one writer that
+//     reserves stream_position and writes insert_stream_position with the event.
 package eventstream
 
 import (

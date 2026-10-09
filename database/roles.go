@@ -41,8 +41,8 @@ func LoadRoleContract() (RoleContract, error) {
 	if err != nil {
 		return RoleContract{}, err
 	}
-	knownTables := map[string]bool{postgresql.AppendOnlyWorkspaceTable: true}
-	for _, table := range append(append([]string(nil), postgresql.WorkspaceTables...), postgresql.GlobalTables...) {
+	knownTables := map[string]bool{}
+	for _, table := range append(append(append([]string(nil), postgresql.WorkspaceTables...), postgresql.AppendOnlyWorkspaceTables...), postgresql.GlobalTables...) {
 		knownTables[table] = true
 	}
 	allowedPrivileges := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true}

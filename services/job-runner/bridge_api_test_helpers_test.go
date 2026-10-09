@@ -262,23 +262,8 @@ func seedBridgeAPINotifiableBackgroundTask(t *testing.T, db *sql.DB, workspaceID
 		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
 		t.Fatalf("seed background task source Tool Result: %v", err)
 	}
-	if _, err := db.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = jsonb_set(
-			data_json::jsonb,
-			'{parts}',
-			(data_json::jsonb -> 'parts') || jsonb_build_array(jsonb_build_object(
-				'type', 'tool_result',
-				'modelToolCallId', 'call_' || $4,
-				'result', jsonb_build_object(
-					'type', 'completed',
-					'output', jsonb_build_object('text', 'Background command accepted.')
-				)
-			))
-		)::text
-		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND source_event_id=$4`,
-		workspaceID, sessionID, threadID, sourceToolUseEventID); err != nil {
-		t.Fatalf("seed background task durable Tool Result context: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, db, workspaceID, sessionID, threadID, "mreq_"+sourceToolUseEventID,
+		`{"type":"tool_result","modelToolCallId":"call_`+sourceToolUseEventID+`","result":{"type":"completed","output":{"text":"Background command accepted."}}}`)
 }
 
 type recordingRuntimeTargetResolver struct {

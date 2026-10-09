@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 func TestPostgreSQLPublicStreamingIdentity(t *testing.T) {
@@ -273,7 +275,7 @@ func assertPublicPreviewShapes(t *testing.T, snapshot publicSDKSnapshot, allowed
 func (h *publicStreamingHarness) assertPrivateContent(t *testing.T) {
 	t.Helper()
 	var data string
-	if err := h.db.QueryRow(`SELECT data_json::text FROM session_messages WHERE session_id=$1 AND data_json::text LIKE '%private-reasoning-marker%' LIMIT 1`, h.session).Scan(&data); err != nil {
+	if err := h.db.QueryRow(`SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE session_id=$1 AND `+sessionfixture.MessageContentSQL+` LIKE '%private-reasoning-marker%' LIMIT 1`, h.session).Scan(&data); err != nil {
 		t.Fatal("reasoning body was not durably committed")
 	}
 	if !strings.Contains(data, "private-provider-signature-marker") {

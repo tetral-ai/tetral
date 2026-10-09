@@ -13,6 +13,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -132,20 +133,13 @@ func (s *PostgreSQLBridgeAPIStore) SettleToolResult(
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, tool_use_event_id, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $13, $13, $13)`,
-			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(),
-			eventID, sequence, resultEventType, payloadJSON, visibility, sessionVisible, tool.ModelRequestID, projectionJSON,
-			toolUseEventID, now,
-		); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: resultEventType,
+			PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			ModelRequestID: tool.ModelRequestID, ToolUseEventID: toolUseEventID, CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			return runtimecontrol.ToolRelationInsertError(err)
-		}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 		if err := applyToolResultBookkeepingTx(ctx, tx, request.GetScope(), eventID, resultEventType, toolUseEventID, projection, now); err != nil {
 			return err

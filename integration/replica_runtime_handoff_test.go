@@ -755,7 +755,7 @@ func assertHandoffExactToolContext(t *testing.T, admin *sql.DB, session, modelRe
 		expectedName = names[0]
 	}
 	var durableOutput, durableInput string
-	if err := admin.QueryRow(`SELECT (SELECT part->'result'->'output' FROM jsonb_array_elements(data_json::jsonb->'parts') part WHERE part->>'type'='tool_result' AND part->>'modelToolCallId'='tool-current')::text,(SELECT part->'canonicalInput' FROM jsonb_array_elements(data_json::jsonb->'parts') part WHERE part->>'type'='tool_call' AND part->>'modelToolCallId'='tool-current')::text FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, session, modelRequestID).Scan(&durableOutput, &durableInput); err != nil {
+	if err := admin.QueryRow(`SELECT (SELECT part->'result'->'output' FROM jsonb_array_elements((`+sessionfixture.MessageContentSQL+`)::jsonb->'parts') part WHERE part->>'type'='tool_result' AND part->>'modelToolCallId'='tool-current')::text,(SELECT part->'canonicalInput' FROM jsonb_array_elements((`+sessionfixture.MessageContentSQL+`)::jsonb->'parts') part WHERE part->>'type'='tool_call' AND part->>'modelToolCallId'='tool-current')::text FROM session_messages m WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, session, modelRequestID).Scan(&durableOutput, &durableInput); err != nil {
 		t.Fatal(err)
 	}
 	var contextEntries []struct {

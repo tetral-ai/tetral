@@ -16,12 +16,12 @@ function validTables() {
 			rls_enabled: true,
 			rls_forced: true,
 		})),
-		{
-			table_name: postgresqlContract.append_only_workspace_table,
+		...postgresqlContract.append_only_workspace_tables.map((table_name) => ({
+			table_name,
 			has_workspace_id: true,
 			rls_enabled: true,
 			rls_forced: true,
-		},
+		})),
 		...postgresqlContract.global_tables.map((table_name) => ({
 			table_name,
 			has_workspace_id: false,
@@ -41,11 +41,12 @@ function validPolicies() {
 		using_expression: workspaceExpression,
 		check_expression: workspaceExpression,
 	}));
-	const appendOnly = postgresqlContract.append_only_workspace_table;
-	policies.push(
-		{ table_name: appendOnly, policy_name: "workspace_select", permissive: true, public_only: true, command: "SELECT", using_expression: workspaceExpression, check_expression: "" },
-		{ table_name: appendOnly, policy_name: "workspace_insert", permissive: true, public_only: true, command: "INSERT", using_expression: "", check_expression: workspaceExpression },
-	);
+	for (const appendOnly of postgresqlContract.append_only_workspace_tables) {
+		policies.push(
+			{ table_name: appendOnly, policy_name: "workspace_select", permissive: true, public_only: true, command: "SELECT", using_expression: workspaceExpression, check_expression: "" },
+			{ table_name: appendOnly, policy_name: "workspace_insert", permissive: true, public_only: true, command: "INSERT", using_expression: "", check_expression: workspaceExpression },
+		);
+	}
 	for (const policy of postgresqlContract.special_policies) {
 		policies.push({
 			table_name: policy.table,
@@ -65,7 +66,7 @@ function readinessSQL(overrides: { role?: unknown; tables?: unknown; policies?: 
 	const responses = [
 		overrides.role ?? [{ is_superuser: false, bypasses_rls: false }],
 		[{ exists: true }],
-		[{ version: 1, checksum: "a7e7f7a728837d2f363d08ec4ad3ea8ed09c460e2010c34e2d784aec26aec8e5" }],
+		[{ version: 1, checksum: "ab10153c0d2970b370196697a76024d4c38f2054bb1e9a1209396c95caa27cb1" }],
 		overrides.tables ?? validTables(),
 		overrides.policies ?? validPolicies(),
 	];

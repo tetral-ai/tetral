@@ -31,6 +31,7 @@ import (
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
@@ -2660,24 +2661,12 @@ func insertRuntimeDeliveryExhaustionEventWithThreadScopeTx(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'session.error', $6, $7, $8, $6, $9, $9, $9)`,
-		job.WorkspaceID,
-		job.SessionID,
-		job.SessionThreadID,
-		eventID,
-		sequence,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: job.SessionThreadID,
+		EventID: eventID, Sequence: sequence, Type: "session.error",
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -3337,8 +3326,7 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 		return "", err
 	}
 	toolUse := runtimecontrol.OrphanToolUse{
-		SessionThreadID: wait.ThreadID,
-		EventID:         wait.ToolUseEventID,
+		SessionThreadID: wait.ThreadID, EventID: wait.ToolUseEventID,
 		EventType:       wait.EventType,
 		ModelRequestID:  wait.ModelRequestID,
 		ModelToolCallID: wait.ModelToolCallID,
@@ -3356,24 +3344,13 @@ func insertPendingToolTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, model_request_id, projection_json, tool_use_event_id,
-			created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventType, payloadJSON, visibility, sessionVisible, wait.ModelRequestID, projectionJSON,
-		wait.ToolUseEventID, now,
-	); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		ModelRequestID: wait.ModelRequestID, ToolUseEventID: wait.ToolUseEventID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return "", runtimecontrol.ToolRelationInsertError(err)
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return "", err
 	}
 	return eventID, nil
 }
@@ -3866,26 +3843,13 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 
 func markRuntimeInputEventsProcessedByIDTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, eventIDs []string, now time.Time) error {
 	for _, eventID := range eventIDs {
-		var revision int64
-		var visibility string
-		var sessionVisible bool
-		var threadID string
-		err := tx.QueryRow(ctx,
-			`UPDATE session_events
-			    SET processed_at = $4,
-			        updated_at = $4,
-			        revision = revision + 1
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND event_id = $3
-			    AND processed_at IS NULL
-			  RETURNING revision, visibility, session_visible, COALESCE(session_thread_id, '')`,
-			workspaceID,
-			sessionID,
-			eventID,
-			now,
-		).Scan(&revision, &visibility, &sessionVisible, &threadID)
-		if dbconnect.IsNoRows(err) {
+		revision, revised, err := sessioneventwrite.RecordProcessedRevisionTx(ctx, tx, sessioneventwrite.ProcessedRevision{
+			WorkspaceID: workspaceID, SessionID: sessionID, EventID: eventID, ProcessedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+		if !revised {
 			alreadyProcessed, exists, err := sessionEventProcessedStateByIDTx(ctx, tx, workspaceID, sessionID, eventID)
 			if err != nil {
 				return err
@@ -3898,15 +3862,8 @@ func markRuntimeInputEventsProcessedByIDTx(ctx context.Context, tx *dbconnect.Tx
 			}
 			return runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime input event is not settleable", Retryable: false}
 		}
-		if err != nil {
-			return err
-		}
-		if threadID == "" {
+		if revision.SessionThreadID == "" {
 			return runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime input event thread is unavailable", Retryable: false}
-		}
-		scope := &bridgev1.RuntimeScope{WorkspaceId: workspaceID, SessionId: sessionID, SessionThreadId: threadID}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeForRevisionTx(ctx, tx, scope, eventID, revision, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 	}
 	return nil

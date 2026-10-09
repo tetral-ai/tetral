@@ -241,7 +241,7 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 	want := map[string]bool{
 		"internal/runtimecontrol/events.go:UserMessageContextDraftJSON":                true,
 		"internal/mcpmanifest/manifest.go:CommandPayload":                              true,
-		"services/bridge/bridge_api_settlement.go:validateStableReasoningBudget":       true,
+		"services/bridge/bridge_api_settlement.go:stableReasoningCharge":               true,
 		"services/job-runner/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
 		"services/job-runner/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
 		"services/job-runner/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,

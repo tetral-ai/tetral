@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -159,24 +160,12 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 						return err
 					}
 					sessionVisible := publicEventSessionVisible(event.eventType, sessionThreadID, admission.mainThreadID)
-					if _, err := tx.Exec(ctx,
-						`INSERT INTO session_events (
-								workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-								visibility, session_visible, created_at, updated_at, processed_at
-							) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, $9, $9, NULL)`,
-						string(workspaceID),
-						sessionID,
-						nullableString(sessionThreadID),
-						eventID,
-						nextSequence,
-						event.eventType,
-						string(event.payload),
-						sessionVisible,
-						settings.now,
-					); err != nil {
-						return err
-					}
-					if _, err := appendSessionEventStreamChange(ctx, tx, workspaceID, sessionID, sessionThreadID, eventID, sessionVisible, settings.now); err != nil {
+					// An admitted input stays unprocessed until Runtime commits it.
+					if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+						WorkspaceID: string(workspaceID), SessionID: sessionID, SessionThreadID: sessionThreadID,
+						EventID: eventID, Sequence: nextSequence, Type: event.eventType, PayloadJSON: string(event.payload),
+						Visibility: "public", SessionVisible: sessionVisible, CreatedAt: settings.now,
+					}); err != nil {
 						return err
 					}
 					appended = append(appended, &Event{
@@ -546,42 +535,6 @@ func runtimeInputPartitionKey(workspaceID workspace.ID, sessionID string) string
 
 func runtimeInputDedupeKey(workspaceID workspace.ID, sessionID string, runtimeInputID string) string {
 	return RuntimeInputDedupeKey(workspaceID, sessionID, runtimeInputID)
-}
-
-func appendSessionEventStreamChange(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, sessionThreadID string, eventID string, sessionVisible bool, now time.Time) (int64, error) {
-	var streamPosition int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO session_event_stream_changes (
-			workspace_id, session_id, event_id, session_thread_id, revision, visibility, session_visible, changed_at
-		) VALUES ($1, $2, $3, $4, 1, 'public', $5, $6)
-		RETURNING stream_position`,
-		string(workspaceID),
-		sessionID,
-		eventID,
-		nullableString(sessionThreadID),
-		sessionVisible,
-		now,
-	).Scan(&streamPosition); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_events
-		    SET latest_stream_position = $4,
-		        insert_stream_position = CASE
-		            WHEN insert_stream_position = 0 THEN $4
-		            ELSE insert_stream_position
-		        END
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		string(workspaceID),
-		sessionID,
-		eventID,
-		streamPosition,
-	); err != nil {
-		return 0, err
-	}
-	return streamPosition, nil
 }
 
 func publicEventSessionVisible(eventType string, sessionThreadID string, mainThreadID string) bool {

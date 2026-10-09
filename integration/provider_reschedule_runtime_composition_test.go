@@ -421,7 +421,7 @@ func TestPostgreSQLProviderFailuresSettleOneTurnAndLaterInputContinues(t *testin
 					COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,type}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
 					COALESCE((SELECT string_agg(payload_json::jsonb #>> '{error,message}', ',' ORDER BY sequence) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),''),
 					COALESCE((SELECT string_agg(payload_json || ' ' || projection_json, ' ') FROM session_events WHERE workspace_id='default' AND session_id=$1),'') || ' ' ||
-					COALESCE((SELECT string_agg(data_json, ' ') FROM session_messages WHERE workspace_id='default' AND session_id=$1),'')`, sessionID).
+					COALESCE((SELECT string_agg(`+sessionfixture.MessageContentSQL+`, ' ') FROM session_messages m WHERE workspace_id='default' AND session_id=$1),'')`, sessionID).
 				Scan(&starts, &ends, &reschedules, &errorEnds, &users, &assistants, &publicErrors, &publicRetryStatuses, &publicErrorTypes, &publicErrorMessages, &durablePayloads); err != nil {
 				t.Fatalf("read %s durable provider failure facts: %v", testCase.scenario, err)
 			}
@@ -687,8 +687,8 @@ func waitForProviderFailureFacts(t *testing.T, admin *sql.DB, sessionID string, 
 		  FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),'[]'),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running'),
 		(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='user'),
-		COALESCE((SELECT jsonb_agg(jsonb_build_object('sequence',sequence,'kind',kind,'data',data_json::jsonb) ORDER BY sequence)::text
-		  FROM session_messages WHERE workspace_id='default' AND session_id=$1),'[]'),
+		COALESCE((SELECT jsonb_agg(jsonb_build_object('sequence',sequence,'kind',kind,'data',(`+sessionfixture.MessageContentSQL+`)::jsonb) ORDER BY sequence)::text
+		  FROM session_messages m WHERE workspace_id='default' AND session_id=$1),'[]'),
 		COALESCE((SELECT jsonb_agg(jsonb_build_object('type',type,'payload',payload_json::jsonb) ORDER BY sequence)::text
 		  FROM session_events WHERE workspace_id='default' AND session_id=$1),'[]')`, sessionID).
 		Scan(&starts, &ends, &reschedules, &statusValue, &providerAttempts, &endPayloads, &inboxFacts, &runningEvents, &userMessages, &messageFacts, &eventFacts)
@@ -1197,13 +1197,8 @@ func TestPostgreSQLProviderRescheduleColdRecoversCommittedToolWithoutReexecution
 	if err != nil || replayed.GetDuplicate().GetRescheduled() == nil {
 		t.Fatalf("replay provider reschedule after lost acknowledgement: response=%#v err=%v", replayed, err)
 	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_messages
-		SET data_json = jsonb_set(data_json::jsonb, '{parts}',
-			(data_json::jsonb -> 'parts') || '[{"type":"tool_call","modelToolCallId":"call_uncommitted_fragment","toolName":"Write","canonicalInput":{"path":"never.txt"}}]'::jsonb)::text
-		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
-		sessionID, threadID, modelRequestID); err != nil {
-		t.Fatalf("seed uncommitted sibling Tool fragment: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, modelRequestID,
+		`{"type":"tool_call","modelToolCallId":"call_uncommitted_fragment","toolName":"Write","canonicalInput":{"path":"never.txt"}}`)
 	if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
 		t.Fatalf("analyze provider reschedule history: %v", err)
 	}

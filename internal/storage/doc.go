@@ -80,10 +80,15 @@
 //	                                                        api (public archive admission)                            public Threads API
 //	session_events                                         api (public input admission); Bridge (runtime             api list reads, Event Stream SSE,
 //	                                                        agent/status/span events)                                        Bridge reconcile, Runtime repair
-//	session_event_stream_changes                           the same transaction that inserts/updates a public event         Event Stream cursor / SSE
-//	                                                        (api admission, Bridge event/projection writes)
+//	session_event_stream_changes                           internal/sessioneventwrite in the event writer's transaction:    Event Stream cursor / SSE
+//	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner)
+//	                                                        and the processed revision (Bridge commit, Job Runner delivery)
 //	session_event_idempotency_keys                         api event admission                                       api replay/conflict lookup
-//	session_messages                                       Runtime declarations persisted by Bridge                       Bridge LoadContext, Runtime cold repair
+//	session_messages                                       Runtime declarations persisted by Bridge; Assistant header      Bridge LoadContext and prefix readers,
+//	                                                        counters advanced by Bridge and Job Runner appends               Runtime cold repair
+//	session_message_parts                                  internal/runtimecontrol append primitive (Bridge declaration     Bridge LoadContext and prefix readers;
+//	                                                        and settlement, Job Runner terminal settlement and Pod-loss      Pod-loss repair reads only identities
+//	                                                        repair); insert-only
 //	session_pending_tool_uses                              Bridge (declaration insert, settlement, interrupt); Job Runner   Bridge LoadContext cold-resume,
 //	                                                        settlement through internal/runtimecontrol; api approval         Runtime pending ToolJob, api approval
 //	                                                        decision (pending -> resolving)                                  lookup
@@ -134,7 +139,7 @@
 // services under services/bridge, services/job-runner, services/api,
 // services/sandbox, services/queue, services/cleanup, services/event-stream,
 // services/git-proxy, services/gateway and services/auth; the shared writers in
-// internal/runtimecontrol, internal/sessionevent, internal/mcpmanifest,
-// internal/session and internal/auth; and the enforced grants in
+// internal/runtimecontrol, internal/sessioneventwrite, internal/sessionevent,
+// internal/mcpmanifest, internal/session and internal/auth; and the enforced grants in
 // database/roles.json.
 package storage

@@ -466,7 +466,7 @@ func readContentCrashFacts(t *testing.T, db *sql.DB, session, request string) co
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COALESCE((SELECT data_json::jsonb::text FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'),''),COALESCE((SELECT sequence FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'),0),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='agent.thinking')`, session, request).Scan(&result.Assistant, &result.AssistantSequence, &result.Ends, &result.Thinking); err != nil {
+	if err := db.QueryRow(`SELECT COALESCE((SELECT (`+sessionfixture.MessageContentSQL+`)::jsonb::text FROM session_messages m WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'),''),COALESCE((SELECT sequence FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'),0),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='agent.thinking')`, session, request).Scan(&result.Assistant, &result.AssistantSequence, &result.Ends, &result.Thinking); err != nil {
 		t.Fatal(err)
 	}
 	return result

@@ -106,7 +106,7 @@ func TestPostgreSQLToolSettlementReplayTransactions(t *testing.T) {
 				t.Fatal("replay or conflicting terminal outcome changed exact durable rows")
 			}
 			var stored string
-			if err := f.admin.QueryRowContext(f.ctx, `SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND kind='assistant'`, f.scope.SessionId).Scan(&stored); err != nil {
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id=$1 AND kind='assistant'`, f.scope.SessionId).Scan(&stored); err != nil {
 				t.Fatal(err)
 			}
 			var actual, literal any

@@ -407,10 +407,10 @@ func TestPostgreSQLToolRelationConstraintsRejectMalformedRows(t *testing.T) {
 	repairID := repaired.GetCommitted().GetRepairEventId()
 	var callParts, errorResults, references, repairCalls, unfinished int
 	if err := f.admin.QueryRowContext(f.ctx, `SELECT
-		(SELECT count(*) FROM session_messages m CROSS JOIN LATERAL jsonb_array_elements(m.data_json::jsonb->'parts') part
-		  WHERE m.workspace_id=$1 AND m.session_id=$2 AND part->>'type'='tool_call' AND part->>'modelToolCallId'='call'),
-		(SELECT count(*) FROM session_messages m CROSS JOIN LATERAL jsonb_array_elements(m.data_json::jsonb->'parts') part
-		  WHERE m.workspace_id=$1 AND m.session_id=$2 AND part->>'type'='tool_result' AND part->>'modelToolCallId'='call' AND part->'result'->>'type'='error'),
+		(SELECT count(*) FROM session_message_parts part
+		  WHERE part.workspace_id=$1 AND part.session_id=$2 AND part.part_kind='tool_call' AND part.model_tool_call_id='call'),
+		(SELECT count(*) FROM session_message_parts part
+		  WHERE part.workspace_id=$1 AND part.session_id=$2 AND part.part_kind='tool_result' AND part.model_tool_call_id='call' AND part.data_json::jsonb->'result'->>'type'='error'),
 		(SELECT count(*) FROM session_events WHERE event_id=$3 AND tool_use_event_id IS NOT NULL),
 		(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND model_tool_call_id='call'),
 		(SELECT count(*) FROM session_events tool WHERE tool.workspace_id=$1 AND tool.session_id=$2
@@ -603,8 +603,8 @@ func toolResultCustody(t *testing.T, f contentDeclarationFixture, toolUseEventID
 	var consumed, result sql.NullString
 	if err := f.admin.QueryRowContext(f.ctx, `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3),
-		(SELECT count(*) FROM session_messages m CROSS JOIN LATERAL jsonb_array_elements(m.data_json::jsonb->'parts') part
-		  WHERE m.workspace_id=$1 AND m.session_id=$2 AND part->>'type'='tool_result' AND part->>'modelToolCallId'=$4),
+		(SELECT count(*) FROM session_message_parts part
+		  WHERE part.workspace_id=$1 AND part.session_id=$2 AND part.part_kind='tool_result' AND part.model_tool_call_id=$4),
 		(SELECT execution_state FROM session_runtime_tool_results WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3),
 		(SELECT consumed_by_terminal_event_id FROM session_runtime_tool_results WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3),
 		(SELECT MAX(event_id) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3)`,
@@ -973,17 +973,16 @@ func TestPostgreSQLPodLostPrefixEligibilityFollowsToolRelation(t *testing.T) {
 	result := func(id string) string {
 		return `{"type":"tool_result","modelToolCallId":"` + id + `","result":{"type":"error","error":{"type":"runtime_pod_lost","message":"lost","retryable":false}}}`
 	}
-	for i, message := range []struct{ request, parts string }{
-		{"mreq_prefix_answered", call("call_prefix_answered") + "," + result("call_prefix_answered")},
-		{"mreq_prefix_unanswered", call("call_prefix_unanswered")},
-		{"mreq_prefix_repaired", call("call_prefix_repaired") + "," + result("call_prefix_repaired")},
+	for i, message := range []struct {
+		request string
+		parts   []string
+	}{
+		{"mreq_prefix_answered", []string{call("call_prefix_answered"), result("call_prefix_answered")}},
+		{"mreq_prefix_unanswered", []string{call("call_prefix_unanswered")}},
+		{"mreq_prefix_repaired", []string{call("call_prefix_repaired"), result("call_prefix_repaired")}},
 	} {
-		if _, err := f.admin.ExecContext(f.ctx, `INSERT INTO session_messages (
-			workspace_id,session_id,session_thread_id,message_id,sequence,kind,data_json,model_request_id,created_at,updated_at
-		) VALUES ($1,$2,$3,$4,$5,'assistant',$6,$7,now(),now())`, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId,
-			"msg_"+message.request, i+1, `{"parts":[`+message.parts+`]}`, message.request); err != nil {
-			t.Fatalf("seed prefix message: %v", err)
-		}
+		sessionfixture.SeedAssistantMessagePartsForTest(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId,
+			"msg_"+message.request, int64(i+1), nil, message.request, message.parts...)
 		seedBridgeAPIEvent(t, f.admin, f.scope.WorkspaceId, f.scope.SessionId, f.scope.SessionThreadId, "evt_end_"+message.request,
 			sessionfixture.NextBridgeAPIEventSequenceForTest(t, f.admin, f.scope.SessionId, f.scope.SessionThreadId),
 			"span.model_request_end", `{"is_error":true,"error_kind":"runtime_pod_lost"}`)

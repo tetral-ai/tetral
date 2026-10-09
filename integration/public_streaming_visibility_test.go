@@ -110,7 +110,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 			publicProjectionAssertListPrivacy(t, f, thread)
 		}
 		var private string
-		if err := f.db.QueryRow(`SELECT data_json FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, f.session, rp.id).Scan(&private); err != nil {
+		if err := f.db.QueryRow(`SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, f.session, rp.id).Scan(&private); err != nil {
 			t.Fatal(err)
 		}
 		var body struct {

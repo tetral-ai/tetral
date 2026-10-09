@@ -107,8 +107,8 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	}
 	var messageCount int
 	var dataJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*), max(data_json)
-		FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*), max(`+sessionfixture.MessageContentSQL+`)
+		FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`, sessionID, threadID,
 	).Scan(&messageCount, &dataJSON); err != nil {
 		t.Fatalf("read cleanup Tool context: %v", err)

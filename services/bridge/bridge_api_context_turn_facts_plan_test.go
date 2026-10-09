@@ -95,11 +95,13 @@ func TestClosedTurnFactPlansStayBoundedAcrossRetainedHistory(t *testing.T) {
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json,
 			source_event_id, model_request_id, created_at, updated_at
 		) VALUES
-		('default',$1,$2,$3,1,'compaction','{"parts":[{"type":"text","text":"summary"}]}',$4,NULL,now(),now()),
-		('default',$1,$2,'msg_closed_plan_assistant_'||$5,2,'assistant','{"parts":[{"type":"text","text":"retained tool pair"}]}',NULL,'mreq_closed_plan_'||$5,now(),now())`,
-			sessionID, threadID, fmt.Sprintf("msg_closed_plan_%d", historySize), fmt.Sprintf("evt_closed_plan_compacted_%d", historySize), fmt.Sprint(historySize)); err != nil {
+		('default',$1,$2,$3,1,'compaction','{"parts":[{"type":"text","text":"summary"}]}',$4,NULL,now(),now())`,
+			sessionID, threadID, fmt.Sprintf("msg_closed_plan_%d", historySize), fmt.Sprintf("evt_closed_plan_compacted_%d", historySize)); err != nil {
 			t.Fatalf("seed plan compaction Message %d: %v", historySize, err)
 		}
+		sessionfixture.SeedAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID,
+			fmt.Sprintf("msg_closed_plan_assistant_%d", historySize), 2, nil, fmt.Sprintf("mreq_closed_plan_%d", historySize),
+			`{"type":"text","text":"retained tool pair"}`)
 		if _, err := admin.ExecContext(context.Background(), `ANALYZE session_events`); err != nil {
 			t.Fatalf("analyze closed turn history %d: %v", historySize, err)
 		}

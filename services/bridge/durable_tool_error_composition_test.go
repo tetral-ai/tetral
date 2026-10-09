@@ -303,7 +303,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
 
 	var dataJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id='sesn_durable_error'
 		  AND session_thread_id='sthr_durable_error' AND model_request_id='mreq_durable_error'`).Scan(&dataJSON); err != nil {
 		t.Fatalf("read durable Tool error context: %v", err)
@@ -466,7 +466,7 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	}
 
 	var dataJSON, projectionJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
 		t.Fatalf("read durable truncated Tool context: %v", err)
@@ -578,7 +578,7 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	}
 
 	var dataJSON, projectionJSON string
-	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages
+	if err := admin.QueryRowContext(context.Background(), `SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
 		sessionID, threadID, modelRequestID).Scan(&dataJSON); err != nil {
 		t.Fatalf("read cancelled Tool context: %v", err)
@@ -650,9 +650,11 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 		t.Fatalf("write direct Tool authority: %#v/%v", toolUse, err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_messages
-		    SET data_json=jsonb_set(data_json::jsonb,'{parts,0,toolName}','"non_authoritative"'::jsonb)::text
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3`,
+		`UPDATE session_message_parts part
+		    SET data_json=jsonb_set(part.data_json::jsonb,'{toolName}','"non_authoritative"'::jsonb)::text
+		   FROM session_messages m
+		  WHERE m.workspace_id='default' AND m.session_id=$1 AND m.session_thread_id=$2 AND m.model_request_id=$3
+		    AND part.workspace_id=m.workspace_id AND part.message_id=m.message_id AND part.part_index=0`,
 		sessionID, threadID, modelRequestID,
 	); err != nil {
 		t.Fatalf("mutate non-authoritative Assistant projection: %v", err)
@@ -1087,7 +1089,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_reject_error'),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_reject_error'),
-		(SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id='sesn_reject_error'
+		(SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id='sesn_reject_error'
 		  AND model_request_id='mreq_reject_error')`).Scan(&beforeEvents, &beforeOperations, &beforeContext); err != nil {
 		t.Fatalf("read pre-rejection state: %v", err)
 	}
@@ -1109,7 +1111,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_reject_error'),
 		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_reject_error'),
-		(SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id='sesn_reject_error'
+		(SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m WHERE workspace_id='default' AND session_id='sesn_reject_error'
 		  AND model_request_id='mreq_reject_error')`).Scan(&afterEvents, &afterOperations, &afterContext); err != nil {
 		t.Fatalf("read post-rejection state: %v", err)
 	}

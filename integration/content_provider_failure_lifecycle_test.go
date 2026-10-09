@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
 // The fault is released only after the original completed Tool has a durable
@@ -216,7 +218,7 @@ func waitContentFailureProviderJoined(t *testing.T, c *contentE2E) map[string]js
 func assertContentFailurePrefix(t *testing.T, c *contentE2E, request string, spec contentToolLifecycleCase) {
 	t.Helper()
 	var raw string
-	if err := c.db.QueryRow(`SELECT data_json::jsonb::text FROM session_messages WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, c.session, request).Scan(&raw); err != nil {
+	if err := c.db.QueryRow(`SELECT (`+sessionfixture.MessageContentSQL+`)::jsonb::text FROM session_messages m WHERE session_id=$1 AND model_request_id=$2 AND kind='assistant'`, c.session, request).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	var message struct {

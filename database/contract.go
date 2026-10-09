@@ -20,11 +20,11 @@ func PostgreSQLContractDigest() string {
 }
 
 type PostgreSQL struct {
-	Version                  int      `json:"version"`
-	WorkspaceTables          []string `json:"workspace_tables"`
-	AppendOnlyWorkspaceTable string   `json:"append_only_workspace_table"`
-	GlobalTables             []string `json:"global_tables"`
-	SpecialPolicies          []Policy `json:"special_policies"`
+	Version                   int      `json:"version"`
+	WorkspaceTables           []string `json:"workspace_tables"`
+	AppendOnlyWorkspaceTables []string `json:"append_only_workspace_tables"`
+	GlobalTables              []string `json:"global_tables"`
+	SpecialPolicies           []Policy `json:"special_policies"`
 }
 
 type Policy struct {
@@ -40,20 +40,22 @@ func LoadPostgreSQL() (PostgreSQL, error) {
 	if err := json.Unmarshal(postgresqlJSON, &contract); err != nil {
 		return PostgreSQL{}, fmt.Errorf("decode PostgreSQL contract: %w", err)
 	}
-	if contract.Version != 1 || contract.AppendOnlyWorkspaceTable == "" || len(contract.WorkspaceTables) == 0 {
+	if contract.Version != 1 || len(contract.AppendOnlyWorkspaceTables) == 0 || len(contract.WorkspaceTables) == 0 {
 		return PostgreSQL{}, fmt.Errorf("invalid PostgreSQL contract")
 	}
-	if duplicate(contract.WorkspaceTables) || duplicate(contract.GlobalTables) {
+	if duplicate(contract.WorkspaceTables) || duplicate(contract.AppendOnlyWorkspaceTables) || duplicate(contract.GlobalTables) {
 		return PostgreSQL{}, fmt.Errorf("PostgreSQL contract contains duplicate tables")
 	}
 	tables := map[string]string{}
 	for _, table := range contract.WorkspaceTables {
 		tables[table] = "workspace"
 	}
-	if previous := tables[contract.AppendOnlyWorkspaceTable]; previous != "" {
-		return PostgreSQL{}, fmt.Errorf("PostgreSQL contract table %q has multiple ownership classes", contract.AppendOnlyWorkspaceTable)
+	for _, table := range contract.AppendOnlyWorkspaceTables {
+		if previous := tables[table]; previous != "" || table == "" {
+			return PostgreSQL{}, fmt.Errorf("PostgreSQL contract table %q has multiple ownership classes", table)
+		}
+		tables[table] = "append-only workspace"
 	}
-	tables[contract.AppendOnlyWorkspaceTable] = "append-only workspace"
 	for _, table := range contract.GlobalTables {
 		if previous := tables[table]; previous != "" {
 			return PostgreSQL{}, fmt.Errorf("PostgreSQL contract table %q has multiple ownership classes", table)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -206,26 +207,12 @@ func InsertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, sc
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'span.model_request_end', $6, $7, $8, $9, $10, $6, $11, $11, $11)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		start.SessionThreadID,
-		eventID,
-		sequence,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		request.GetRuntimeWriteId(),
-		start.ModelRequestID,
-		now,
-	); err != nil {
-		return false, err
-	}
-	if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: start.SessionThreadID,
+		EventID: eventID, Sequence: sequence, Type: "span.model_request_end",
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: request.GetRuntimeWriteId(), ModelRequestID: start.ModelRequestID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return false, err
 	}
 	_, err = tx.Exec(ctx,
@@ -387,31 +374,14 @@ func InsertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-			tool_use_event_id, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		toolUse.SessionThreadID,
-		eventID,
-		sequence,
-		resultEventType,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		terminal.WriteIDPrefix+toolUse.EventID,
-		toolUse.ModelRequestID,
-		projectionJSON,
-		toolUse.EventID,
-		now,
-	); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: toolUse.SessionThreadID,
+		EventID: eventID, Sequence: sequence, Type: resultEventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: terminal.WriteIDPrefix + toolUse.EventID, ModelRequestID: toolUse.ModelRequestID,
+		ToolUseEventID: toolUse.EventID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return false, ToolRelationInsertError(err)
-	}
-	if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return false, err
 	}
 	consumptionReason := terminal.ConsumptionReason
 	if consumptionReason == "" {
@@ -453,38 +423,22 @@ func SettleRuntimeTerminalToolPartTx(
 			"type": terminal.ErrorType, "message": terminal.Message, "retryable": terminal.Retryable,
 		}}
 	}
-	resultPartsJSON, err := json.Marshal([]map[string]any{{
-		"type": "tool_result", "modelToolCallId": toolUse.ModelToolCallID, "result": resultValue,
-	}})
+	resultPart := map[string]any{"type": "tool_result", "modelToolCallId": toolUse.ModelToolCallID, "result": resultValue}
+	if ValidateStoredRuntimeContextPart(resultPart) != nil {
+		return ToolProjection{}, status.Error(codes.FailedPrecondition, "terminal Tool result context is invalid")
+	}
+	header, found, err := LockAssistantMessageHeaderTx(ctx, tx, scope, toolUse.ModelRequestID)
 	if err != nil {
 		return ToolProjection{}, err
 	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_messages
-		    SET data_json = jsonb_set(
-		          data_json::jsonb,
-		          '{parts}',
-		          (data_json::jsonb -> 'parts') || $5::jsonb
-		        )::text,
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND kind = 'assistant'
-		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUse.ModelRequestID,
-		string(resultPartsJSON),
-		now,
-	)
-	if err != nil {
-		return ToolProjection{}, err
-	}
-	if !RowsAffected(result) {
+	if !found {
 		return ToolProjection{}, status.Error(codes.FailedPrecondition, "durable tool message lost its fence")
+	}
+	if _, err := AppendAssistantMessagePartsTx(ctx, tx, AssistantPartsAppend{
+		Scope: scope, ModelRequestID: toolUse.ModelRequestID, Header: &header,
+		Parts: []AssistantPart{{Value: resultPart}}, Now: now,
+	}); err != nil {
+		return ToolProjection{}, err
 	}
 	return RuntimeToolProjectionFromDurableTool(tool, resultValue), nil
 }

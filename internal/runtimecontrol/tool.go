@@ -153,31 +153,22 @@ func SettleRuntimeToolPartTx(
 	if err != nil {
 		return ToolProjection{}, err
 	}
-	resultPartsJSON, err := json.Marshal([]map[string]any{{
-		"type": "tool_result", "modelToolCallId": tool.ModelToolCallID, "result": resultValue,
-	}})
+	resultPart := map[string]any{"type": "tool_result", "modelToolCallId": tool.ModelToolCallID, "result": resultValue}
+	if ValidateStoredRuntimeContextPart(resultPart) != nil {
+		return ToolProjection{}, status.Error(codes.InvalidArgument, "runtime tool result context is invalid")
+	}
+	header, found, err := LockAssistantMessageHeaderTx(ctx, tx, scope, modelRequestID)
 	if err != nil {
 		return ToolProjection{}, err
 	}
-	updateResult, err := tx.Exec(ctx,
-		`UPDATE session_messages
-		    SET data_json = jsonb_set(
-		          data_json::jsonb,
-		          '{parts}',
-		          (data_json::jsonb -> 'parts') || $5::jsonb
-		        )::text,
-		        updated_at = $6
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND model_request_id = $4 AND kind = 'assistant'
-		    AND jsonb_typeof(data_json::jsonb -> 'parts') = 'array'`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
-		modelRequestID, string(resultPartsJSON), now,
-	)
-	if err != nil {
-		return ToolProjection{}, err
-	}
-	if !RowsAffected(updateResult) {
+	if !found {
 		return ToolProjection{}, status.Error(codes.FailedPrecondition, "Tool settlement lost its durable message")
+	}
+	if _, err := AppendAssistantMessagePartsTx(ctx, tx, AssistantPartsAppend{
+		Scope: scope, ModelRequestID: modelRequestID, Header: &header,
+		Parts: []AssistantPart{{Value: resultPart}}, Now: now,
+	}); err != nil {
+		return ToolProjection{}, err
 	}
 	return runtimeToolProjectionFromSettlement(tool, settlement)
 }

@@ -19,38 +19,50 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
 
 func validateStableReasoningBudget(parts []any) error {
 	count := 0
-	aggregateBytes := 0
+	var aggregateBytes int64
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
 		if !ok || part["type"] != "reasoning" {
 			continue
 		}
 		count++
-		text, _ := part["text"].(string)
-		metadataValue := part["providerMetadata"]
-		if metadataValue == nil {
-			metadataValue = map[string]any{}
-		}
-		// Keep durable-draft accounting byte-identical to the transported
-		// metadata contract; HTML escaping would create a second size policy.
-		// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
-		// (stableReasoningMetadataJSON).
-		metadata, err := runtimecontrol.MarshalDataJSON(metadataValue)
+		charge, err := stableReasoningCharge(part)
 		if err != nil {
-			return status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
+			return err
 		}
-		aggregateBytes += len(text) + len(runtimecontrol.RestoreJSONStringifySeparatorEscapes([]byte(metadata)))
+		aggregateBytes += charge
 	}
 	if count > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
 		return status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
 	}
 	return nil
+}
+
+// stableReasoningCharge is one admitted reasoning part's budget charge: its
+// UTF-8 text bytes plus its metadata JSON, an absent metadata object counting
+// as {}. The charge is fixed when the part is admitted and never recomputed.
+func stableReasoningCharge(part map[string]any) (int64, error) {
+	text, _ := part["text"].(string)
+	metadataValue := part["providerMetadata"]
+	if metadataValue == nil {
+		metadataValue = map[string]any{}
+	}
+	// Keep durable-draft accounting byte-identical to the transported
+	// metadata contract; HTML escaping would create a second size policy.
+	// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+	// (stableReasoningMetadataJSON).
+	metadata, err := runtimecontrol.MarshalDataJSON(metadataValue)
+	if err != nil {
+		return 0, status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
+	}
+	return int64(len(text) + len(runtimecontrol.RestoreJSONStringifySeparatorEscapes([]byte(metadata)))), nil
 }
 
 func requestEndInterruptCommitRequest(
@@ -326,27 +338,12 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id,
-				projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'span.model_request_end', $6, $7, $8, $9, $10, $6, $11, $11, $11)`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			eventID,
-			sequence,
-			payloadJSON,
-			visibility,
-			sessionVisible,
-			request.GetRuntimeWriteId(),
-			request.GetModelRequestId(),
-			now,
-		); err != nil {
-			return err
-		}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+			SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "span.model_request_end",
+			PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: request.GetRuntimeWriteId(), ModelRequestID: request.GetModelRequestId(), CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			return err
 		}
 		usageResult, err := tx.Exec(ctx,
@@ -860,28 +857,12 @@ func appendRequestRescheduledStatusTx(
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)`,
-		request.GetScope().GetWorkspaceId(),
-		request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventType,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		request.GetRuntimeWriteId(),
-		request.GetModelRequestId(),
-		string(projectionJSON),
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+		SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: string(projectionJSON), Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: request.GetRuntimeWriteId(), ModelRequestID: request.GetModelRequestId(), CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return err
 	}
 	if threadScope.Role == "main" {
@@ -1007,51 +988,24 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO session_events (
-					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-					visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-				) VALUES ($1, $2, $3, $4, $5, 'session.thread_status_idle', $6, $7, $8, $9, $6, $10, $10, $10)`,
-				request.GetScope().GetWorkspaceId(),
-				request.GetScope().GetSessionId(),
-				request.GetScope().GetSessionThreadId(),
-				eventID,
-				sequence,
-				childPayloadJSON,
-				visibility,
-				sessionVisible,
-				key,
-				now,
-			); err != nil {
-				return err
-			}
-			if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+			if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+				WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+				SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "session.thread_status_idle",
+				PayloadJSON: childPayloadJSON, ProjectionJSON: childPayloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+				RuntimeWriteID: key, CreatedAt: now, ProcessedAt: &now,
+			}); err != nil {
 				return err
 			}
 			if err := updateChildThreadStatusTx(ctx, tx, request.GetScope(), "idle", now); err != nil {
 				return err
 			}
 		} else {
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO session_events (
-					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-					visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-				) VALUES ($1, $2, $3, $4, $5, 'session.status_idle', $6, $7, $8, $9, $10, $11, $11, $11)`,
-				request.GetScope().GetWorkspaceId(),
-				request.GetScope().GetSessionId(),
-				request.GetScope().GetSessionThreadId(),
-				eventID,
-				sequence,
-				payloadJSON,
-				visibility,
-				sessionVisible,
-				key,
-				payloadJSON,
-				now,
-			); err != nil {
-				return err
-			}
-			if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+			if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+				WorkspaceID: request.GetScope().GetWorkspaceId(), SessionID: request.GetScope().GetSessionId(),
+				SessionThreadID: request.GetScope().GetSessionThreadId(), EventID: eventID, Sequence: sequence, Type: "session.status_idle",
+				PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+				RuntimeWriteID: key, CreatedAt: now, ProcessedAt: &now,
+			}); err != nil {
 				return err
 			}
 			cleanupAfter := now.Add(runtimecontrol.IdleCleanupDelay)
@@ -1453,25 +1407,12 @@ func insertChildThreadIdleStatusEventTx(
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'session.thread_status_idle', $6, $7, $8, $9, $6, $10, $10, $10)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		payloadJSON,
-		visibility,
-		sessionVisible,
-		runtimeWriteID,
-		now,
-	); err != nil {
-		return err
-	}
-	_, err = runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now)
+	_, err = sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: "session.thread_status_idle",
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: runtimeWriteID, CreatedAt: now, ProcessedAt: &now,
+	})
 	return err
 }
 

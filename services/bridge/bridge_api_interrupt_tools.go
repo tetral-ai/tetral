@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -99,21 +100,14 @@ func settleInterruptedThreadToolsTx(
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-				tool_use_event_id, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14)`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), resultEventID,
-			resultSequence, resultEventType, payloadJSON, visibility, sessionVisible,
-			runtimecontrol.StableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID), tool.modelRequestID, projectionJSON,
-			tool.eventID, now,
-		); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+			EventID: resultEventID, Sequence: resultSequence, Type: resultEventType,
+			PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: runtimecontrol.StableRuntimeID("interrupt_tool_result", interruptEventID, tool.eventID),
+			ModelRequestID: tool.modelRequestID, ToolUseEventID: tool.eventID, CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			return nil, runtimecontrol.ToolRelationInsertError(err)
-		}
-		if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, scope, resultEventID, visibility, sessionVisible, now); err != nil {
-			return nil, err
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE session_pending_tool_uses

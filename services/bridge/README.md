@@ -353,6 +353,18 @@ does not invent a caller retention selection. Immutable inherited context remain
 `threadContextPrefix.entries`. Messages carry no lifecycle flags or checkpoint,
 and loading alone starts no tool work.
 
+`LoadContext`, the declared sub-agent prefix and the reviewer-sidecar prefix
+keep their own message selection and differ only in how a selected message's
+content is read. An embedded message returns its stored document. The
+Assistant message of a model request returns its immutable part rows joined
+in index order, keyed by its workspace and message ID; the rows must be
+exactly `0..next_part_index-1`, otherwise the read fails with the existing
+durable-context `FailedPrecondition` and never substitutes an empty or
+embedded document. The assembled text goes to the same number-preserving
+decoder and part validator without any database cast. Child creation stores
+the entries it read in the immutable prefix envelope; later parent appends,
+settlements, compaction or Pod-loss repair never change that stored prefix.
+
 Request End retention references must belong to that request. Completed and
 compacted outcomes name every declared Tool; failed, interrupted and rescheduled
 outcomes may omit a Tool only after its durable result exists. Every unfinished
@@ -362,7 +374,7 @@ changes provider-context eligibility while retaining the original audit events.
 ### Event-writer and Tool-settlement boundaries
 
 - **Contract.** `WriteEvent` persists one non-result `session_events` row plus an
-  event-specific Assistant append into `session_messages` in one transaction. Usage,
+  event-specific append to the request's Assistant parts in one transaction. Usage,
   transport metadata, raw provider payloads, request ids, and raw attachment
   bytes never project. Opening or resolving an external wait updates
   `session_pending_tool_uses` in the same transaction: the trigger is the tool
@@ -407,6 +419,19 @@ changes provider-context eligibility while retaining the original audit events.
   nothing. The CHECK exists because other readers still cast Tool Use payloads
   and projections to JSONB; assistant text, reasoning and Tool Results carry
   no such requirement.
+- **Event feed.** Every feed-producing writer inserts its event through
+  `sessioneventwrite.InsertInitialTx` after taking its existing Session
+  mutation serialization: one reserved value of the change identity, one
+  complete event INSERT at revision 1 with both stream positions set to that
+  value, and one matching revision-1 change at the same position. The writer
+  issues no follow-up UPDATE of the row it just inserted. Because the value is
+  reserved after the Session serialization, a waiting writer on another Thread
+  commits at a later position and a reader cursor never skips it; a
+  rolled-back writer leaves a legal gap. `CommitInputs` marks committed inputs
+  processed through `sessioneventwrite.RecordProcessedRevisionTx`, which keeps
+  the insert position and records revision 2 at a newly reserved position; only
+  such a later revision moves `latest_stream_position`. The Sandbox task
+  notification remains the one event without a feed change.
 - **Lifecycle.** `WriteEvent` is idempotency-keyed by `runtime_write_id`; the attached
   reasoning set folds into the request hash. `agent.message` and `agent.thinking`
   additionally require the Gateway-supplied `preallocated_event_id` (`evt_`
@@ -435,6 +460,9 @@ changes provider-context eligibility while retaining the original audit events.
   every Bridge Tool event writer, the relation constraints, Tool Use
   storability, call-ID identity across compaction, text-only compaction and
   the Sandbox entrypoints' shared result checks under the real Bridge role.
+  `feed_position_test.go` pauses a writer holding the Session fence and proves
+  a concurrent production write on another Thread commits at a later position,
+  a rolled-back reservation leaves a gap, and other Sessions proceed.
 
 ### Settlement transaction
 
@@ -528,11 +556,27 @@ changes provider-context eligibility while retaining the original audit events.
   The settlement
   response does not return any of those facts; Runtime applies its immutable
   request after a committed or duplicate result.
+- **Storage.** The Assistant message of a model request is a small header plus
+  immutable `session_message_parts` rows. Every append, whether a declaration,
+  repair, request-end suffix or Tool settlement, goes through the shared
+  `runtimecontrol` append primitive under the caller's existing fences: it
+  locks the header without reading content, validates only the new delta,
+  inserts the new parts at the next contiguous indexes with one statement and
+  advances the header counters once. Each part is stored as the JSON its writer
+  admitted and is never read back, re-encoded or rewritten by a later append,
+  so escaped U+0000, large integers, signed zero and exponent spellings survive
+  settlement unchanged. A rolled-back append leaves its indexes for the next
+  commit; replay appends nothing; no second message or sequence is allocated.
 - **Budget.** `MaxStableReasoningPartsPerRequest` (16) and
-  `MaxStableReasoningBytesPerRequest` (2 MiB) are one budget enforced ACROSS
-  the locked durable Assistant message, not per append. Reasoning remains only
-  in its provider-visible context member; Bridge does not create a second audit
-  projection or synthetic Part identity.
+  `MaxStableReasoningBytesPerRequest` (2 MiB) are one budget charged against
+  the header's reasoning counters, not per append. Each reasoning part is
+  charged once when it is admitted: its UTF-8 text bytes plus its metadata in
+  the transported `JSON.stringify` form (no HTML escaping, separators
+  restored), absent metadata counting as `{}`. Declarations, repair prefixes
+  and request-end suffixes are checked cumulatively and rejected with
+  `InvalidArgument` past either cap; Tool results add nothing; the database
+  repeats both caps. Reasoning remains only in its provider-visible context
+  member; Bridge does not create a second audit projection.
 - **Invariants a replacement must preserve.** Each append and create is atomic,
   positional, and idempotent under its owning operation key. Tool settlement
   is independent of prior reasoning, text, and sibling Tool Uses. Replay must
@@ -556,9 +600,13 @@ changes provider-context eligibility while retaining the original audit events.
 - **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
   and `WriteRequestEnd` to prove ordered durable members, deterministic replay,
   Thread-scoped Tool Call identity, target-only Tool settlement, and exact/one-over
-  count and byte bounds with transactional rollback. Context-load and Pod-loss
-  tests distinguish ordinary failed/rescheduled preservation from incomplete
-  Pod-loss repair exclusion.
+  count and byte bounds with transactional rollback. `message_parts_test.go`
+  traces appends that read no stored content, commit-ordered indexes through
+  every context and prefix reader, rollback reuse and replay, cumulative
+  reasoning charges, contiguity failures, and raw U+0000 and numeric tokens
+  through settlement, both prefix readers and a frozen child prefix.
+  Context-load and Pod-loss tests distinguish ordinary failed/rescheduled
+  preservation from incomplete Pod-loss repair exclusion.
 
 ### Sandbox handoff and output adoption
 
@@ -662,7 +710,7 @@ changes provider-context eligibility while retaining the original audit events.
 
 The platform's widest writer surface, every row keyed by `workspace_id` and
 idempotent: runtime-side `session_events` and the `session_messages`
-projection; `session_pending_tool_uses`; `session_background_tasks`;
+projection with its Assistant `session_message_parts`; `session_pending_tool_uses`; `session_background_tasks`;
 `session_runtime_inbox` (Runtime commits and interrupt receipts); request usage detail rows
 and the `sessions.usage` projection; `session_output_captures`;
 `session_transient_attachments` and the file-attachment consumption records;

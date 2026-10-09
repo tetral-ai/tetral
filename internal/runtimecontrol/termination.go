@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -186,21 +187,14 @@ func settleRuntimeTerminationDurableFactsTx(
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, model_request_id, projection_json,
-				tool_use_event_id, created_at, updated_at, processed_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$14)`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
-			resultEventType, payloadJSON, visibility, sessionVisible,
-			StableRuntimeID("runtime_termination_tool_result", runtimeWriteID, toolUse.EventID),
-			toolUse.ModelRequestID, projectionJSON, toolUse.EventID, now,
-		); err != nil {
+		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+			WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+			EventID: eventID, Sequence: sequence, Type: resultEventType,
+			PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+			RuntimeWriteID: StableRuntimeID("runtime_termination_tool_result", runtimeWriteID, toolUse.EventID),
+			ModelRequestID: toolUse.ModelRequestID, ToolUseEventID: toolUse.EventID, CreatedAt: now, ProcessedAt: &now,
+		}); err != nil {
 			return ToolRelationInsertError(err)
-		}
-		if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-			return err
 		}
 		if err := ConsumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, "runtime_terminated", now); err != nil {
 			return err
@@ -676,16 +670,12 @@ func InsertRuntimeTerminationEventTx(
 	if err != nil {
 		return runtimeTerminationEventFact{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $11, $11)`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
-		eventType, payloadJSON, visibility, sessionVisible, runtimeWriteID, now); err != nil {
-		return runtimeTerminationEventFact{}, err
-	}
-	if _, err := AppendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
+		EventID: eventID, Sequence: sequence, Type: eventType,
+		PayloadJSON: payloadJSON, ProjectionJSON: payloadJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		RuntimeWriteID: runtimeWriteID, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
 		return runtimeTerminationEventFact{}, err
 	}
 	return runtimeTerminationEventFact{EventID: eventID, EventSequence: sequence}, nil

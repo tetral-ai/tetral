@@ -601,7 +601,7 @@ func assertContentLifecycleHistory(t *testing.T, db *sql.DB, sessionID string, s
 		t.Fatalf("public complete parts/identity %v/%v", texts, ids)
 	}
 	var messages string
-	if err := db.QueryRow(`SELECT jsonb_agg(data_json::jsonb ORDER BY sequence)::text FROM session_messages WHERE session_id=$1 AND kind='assistant'`, sessionID).Scan(&messages); err != nil {
+	if err := db.QueryRow(`SELECT jsonb_agg((`+sessionfixture.MessageContentSQL+`)::jsonb ORDER BY sequence)::text FROM session_messages m WHERE session_id=$1 AND kind='assistant'`, sessionID).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
 	var asts []struct {

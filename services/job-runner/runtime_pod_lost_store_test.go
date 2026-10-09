@@ -126,7 +126,7 @@ func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay
 	}
 	var messageJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json FROM session_messages
+		`SELECT `+sessionfixture.MessageContentSQL+` FROM session_messages m
 		  WHERE workspace_id = 'default' AND session_id = $1 AND message_id = $2`,
 		sessionID, "msg_"+toolUseEventID,
 	).Scan(&messageJSON); err != nil {
@@ -370,22 +370,8 @@ func TestRuntimePodLossPreservesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		t, admin, "default", sessionID, threadID, modelRequestID,
 		"evt_pod_loss_multiple_tool_pending", "tool-call-pod-loss-multiple-pending", "Write",
 	)
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_messages
-		    SET data_json = jsonb_set(
-				data_json::jsonb,
-				'{parts}',
-				(data_json::jsonb -> 'parts') || $4::jsonb
-			)::text
-		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
-		    AND model_request_id = $3 AND kind = 'assistant'`,
-		sessionID,
-		threadID,
-		modelRequestID,
-		`[{"type":"tool_call","modelToolCallId":"tool-call-pod-loss-multiple-resolving","toolName":"Write","canonicalInput":{}}]`,
-	); err != nil {
-		t.Fatalf("append second durable tool part: %v", err)
-	}
+	sessionfixture.AppendAssistantMessagePartsForTest(t, admin, "default", sessionID, threadID, modelRequestID,
+		`{"type":"tool_call","modelToolCallId":"tool-call-pod-loss-multiple-resolving","toolName":"Write","canonicalInput":{}}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events
 		    SET projection_json = jsonb_build_object(

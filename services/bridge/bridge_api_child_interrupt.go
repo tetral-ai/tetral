@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -418,15 +419,15 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, command
 	if err != nil {
 		return nil, err
 	}
-	processedAt := any(now)
+	processedAt := &now
 	if disposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
 		processedAt = nil
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,runtime_write_id,processed_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'internal',false,$4,$8,$9,$9)`,
-		command.scope.GetWorkspaceId(), command.scope.GetSessionId(), targetID, eventID, sequence, runtimecontrol.ChildInterruptRequestedEventType, payloadJSON, processedAt, now); err != nil {
-		return nil, err
-	}
-	if _, err := runtimecontrol.AppendSessionEventStreamChangeTx(ctx, tx, runtimecontrol.ScopeForThread(command.scope, targetID), eventID, "internal", false, now); err != nil {
+	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
+		WorkspaceID: command.scope.GetWorkspaceId(), SessionID: command.scope.GetSessionId(), SessionThreadID: targetID,
+		EventID: eventID, Sequence: sequence, Type: runtimecontrol.ChildInterruptRequestedEventType, PayloadJSON: payloadJSON,
+		Visibility: "internal", SessionVisible: false, RuntimeWriteID: eventID, CreatedAt: now, ProcessedAt: processedAt,
+	}); err != nil {
 		return nil, err
 	}
 	target := &bridgev1.ChildInterruptTarget{ChildThreadId: targetID, Disposition: disposition}

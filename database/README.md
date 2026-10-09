@@ -6,7 +6,11 @@ contracts.
 - `postgresql.json` enumerates the live Version 1 Workspace-RLS surface used by
   Go and TypeScript readiness checks. Workspace is the sole database tenant
   dimension; Session and Thread isolation remains explicit relational and
-  lifecycle ownership inside a Workspace.
+  lifecycle ownership inside a Workspace. Ordinary Workspace tables get one
+  read/write isolation policy. The append-only Workspace tables
+  (`session_file_attachment_consumptions` and `session_message_parts`) get only
+  a Workspace SELECT policy and a Workspace INSERT policy, so no serving role
+  can update or delete their rows even where a grant would allow it.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
   allowlist admits the runtime process lock for Bridge and Job Runner, the
@@ -166,6 +170,8 @@ These owner tests pin the serving paths repaired after role restriction:
 | provider_gateway / mcp_connector | Separate Gateway workload credentials | Provider Gateway reads `session_provider_auth` and `platform_provider_keys` and rotates `credentials`; MCP Connector reads Session vault references and reads/rotates its `credentials` with no provider binding or platform-key access; `database/apply_roles_postgresql_test.go` runs Bun and command readiness under both roles and requires SQLSTATE `42501` for MCP Connector's provider credential reads |
 | bridge | Durable Memory mutation | `memory_stores UPDATE`; `services/bridge/bridge_api_tools_test.go` checks committed content and idempotent replay |
 | bridge | Compaction Request End | `session_thread_context_prefixes UPDATE`; `services/bridge/runtime_compaction_role_test.go` checks main-thread checkpoint, child-prefix consumption, rollback and replay |
+| bridge / job_runner | Assistant part append | `session_message_parts SELECT/INSERT` only, with the existing `session_messages UPDATE` for the header counters; Bridge alone inserts messages. `internal/runtimecontrol/message_parts_test.go` appends through the shared primitive under both roles and requires SQLSTATE `42501` for part UPDATE/DELETE and a foreign-workspace INSERT, and `23503` for a part outside its message's Thread or under an embedded message |
+| api / bridge / job_runner | First event revision and processed revision | `session_event_stream_changes INSERT` with the derived `USAGE` on its identity sequence, used by `nextval` and an explicit `OVERRIDING SYSTEM VALUE` position; `internal/sessioneventwrite/sessioneventwrite_test.go` writes the first revision under all three roles and the processed revision under Bridge and Job Runner |
 | bridge | Runtime context skill index | `skill_versions SELECT`; `services/bridge/bridge_api_context_test.go` checks configured version metadata |
 | api | Session deletion through shared Sandbox release | `session_runtime_tool_results SELECT/INSERT/UPDATE`, `session_background_tasks SELECT/UPDATE`; `internal/session/postgresql_store_controlplane_test.go` checks atomic release and background cancellation custody |
 | api | Child tool-confirmation admission during close | `session_bridge_operations SELECT`; `internal/sessionevent/closing_role_test.go` checks missing-grant failure, intended conflict with no receipt, and admission/replay after the source Tool Result is terminal; the event-store suite uses the API role |

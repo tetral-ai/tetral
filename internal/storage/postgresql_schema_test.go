@@ -322,10 +322,10 @@ func TestSessionMessagesModelRequestAssociationIsAssistantOnlyAndScopedUnique(t 
 		_, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_messages (
 				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-				data_json, model_request_id, created_at, updated_at
+				content_storage, data_json, next_part_index, model_request_id, created_at, updated_at
 			) VALUES (
 				'workspace_message_model', 'sesn_message_model', 'thr_message_model', $1, $2, $3,
-				'{}', $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+				'parts', NULL, 1, $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 			)`,
 			messageID, sequence, kind, modelRequestID,
 		)
@@ -696,8 +696,13 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_messages": {
 			"workspace_id", "session_id", "session_thread_id", "message_id",
-			"sequence", "kind", "data_json", "source_event_id",
+			"sequence", "kind", "content_storage", "data_json", "next_part_index",
+			"reasoning_part_count", "reasoning_bytes", "source_event_id",
 			"repair_key", "model_request_id", "created_at", "updated_at",
+		},
+		"session_message_parts": {
+			"workspace_id", "session_id", "session_thread_id", "message_id",
+			"content_storage", "part_index", "part_kind", "model_tool_call_id", "data_json",
 		},
 		"session_pending_tool_uses": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
@@ -2444,6 +2449,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_github_repository_resources",
 		"session_mcp_manifests",
 		"session_memory_store_resources",
+		"session_message_parts",
 		"session_messages",
 		"session_output_captures",
 		"session_pending_tool_uses",

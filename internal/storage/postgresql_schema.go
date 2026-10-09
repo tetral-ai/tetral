@@ -315,8 +315,11 @@ const (
 	//
 	// insert_stream_position is the immutable session-global insert order: the
 	// stream_position of the event's revision-1 change in
-	// session_event_stream_changes, copied into this row once at insert (set
-	// once from 0, never updated) and used as the session-level list cursor.
+	// session_event_stream_changes. The writer reserves that identity value
+	// after taking its Session serialization and stores it in both stream
+	// positions with the event's one INSERT, then inserts the change at the
+	// same value; a later revision moves only latest_stream_position. It is the
+	// session-level list cursor. The no-feed Sandbox task notification keeps 0.
 	// Thread-level list paging uses the per-thread sequence column instead.
 	//
 	// model_tool_call_id and tool_use_event_id are the Tool relation. A Tool
@@ -332,8 +335,8 @@ const (
 	// most one result of either kind per Tool Use. Tool Use rows alone must stay
 	// JSONB-storable, because readers still cast their payload and projection.
 	//
-	// UPDATE-WITH: services/bridge and internal/session event
-	// append/delivery paths; internal/eventstream list/cursor reader;
+	// UPDATE-WITH: internal/sessioneventwrite and its event append/delivery
+	// callers; internal/eventstream list/cursor reader;
 	// internal/runtimecontrol, services/bridge and services/job-runner Tool
 	// relation writers and readers.
 	createPostgreSQLSessionEventsTable = `CREATE TABLE IF NOT EXISTS session_events (
@@ -419,7 +422,8 @@ const (
 	//   kind                   projects
 	//   user                   an accepted user-input context message
 	//   assistant              assistant output and tool state (agent.tool_use /
-	//                          agent.tool_result merge into the assistant row)
+	//                          agent.tool_result append parts to the model
+	//                          request's assistant message)
 	//   runtime_notification   an internal, model-visible runtime notice (e.g.
 	//                          background command completion); NOT a public
 	//                          user.message and NOT a second tool result
@@ -430,8 +434,20 @@ const (
 	// Usage, status, request/transport metadata, billing data, and raw
 	// attachment bytes never enter this table.
 	//
+	// content_storage says where a message's parts live. An embedded message
+	// (user, notification, compaction, and an assistant message without a
+	// model request) stores its whole {"parts":[...]} document in data_json.
+	// The assistant message of a model request is a parts-mode header: its
+	// parts are immutable session_message_parts rows, data_json is NULL, and
+	// the header holds only next_part_index (the part count and the next
+	// zero-based index) and the request's admitted reasoning count and bytes.
+	// An append locks the header, inserts the new parts at the next indexes
+	// and advances the counters once; no part is ever rewritten. The
+	// reasoning caps repeat the Bridge per-request budget.
+	//
 	// UPDATE-WITH: services/bridge projection, compaction, and
-	// fork writers and LoadContext.
+	// fork writers and LoadContext; internal/runtimecontrol part append;
+	// services/job-runner Pod-loss repair.
 	createPostgreSQLSessionMessagesTable = `CREATE TABLE IF NOT EXISTS session_messages (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -439,7 +455,11 @@ const (
 		message_id TEXT NOT NULL,
 		sequence BIGINT NOT NULL,
 		kind TEXT NOT NULL,
-		data_json TEXT NOT NULL,
+		content_storage TEXT NOT NULL DEFAULT 'embedded',
+		data_json TEXT,
+		next_part_index BIGINT NOT NULL DEFAULT 0,
+		reasoning_part_count INTEGER NOT NULL DEFAULT 0,
+		reasoning_bytes BIGINT NOT NULL DEFAULT 0,
 		source_event_id TEXT,
 		repair_key TEXT,
 		model_request_id TEXT,
@@ -447,11 +467,63 @@ const (
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, message_id),
 		UNIQUE (workspace_id, session_id, session_thread_id, sequence),
+		CONSTRAINT session_messages_content_storage_key UNIQUE (workspace_id, session_id, session_thread_id, message_id, content_storage),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_messages_sequence_shape CHECK (sequence > 0),
 		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'compaction')),
 		CONSTRAINT session_messages_model_request_id_shape CHECK (
 			model_request_id IS NULL OR (kind = 'assistant' AND model_request_id <> '')
+		),
+		CONSTRAINT session_messages_content_storage_shape CHECK (
+			(content_storage = 'parts'
+				AND kind = 'assistant'
+				AND model_request_id IS NOT NULL AND model_request_id <> ''
+				AND data_json IS NULL
+				AND next_part_index > 0
+				AND reasoning_part_count BETWEEN 0 AND 16
+				AND reasoning_bytes BETWEEN 0 AND 2097152
+				AND reasoning_part_count <= next_part_index)
+			OR (content_storage = 'embedded'
+				AND NOT (kind = 'assistant' AND model_request_id IS NOT NULL)
+				AND data_json IS NOT NULL
+				AND next_part_index = 0
+				AND reasoning_part_count = 0
+				AND reasoning_bytes = 0)
+		)
+	)`
+
+	// session_message_parts holds the immutable parts of a parts-mode
+	// assistant message, one row per part at its zero-based index. data_json
+	// is the part exactly as its writer admitted it; readers assemble a
+	// message's parts in index order and never re-serialize them. part_kind
+	// and model_tool_call_id are scalar copies the writer derives from the
+	// same validated part: the identity CHECK reads no JSON, and
+	// idx_session_message_parts_tool_identity makes one call and one result
+	// per model call per message independently queryable. Tool events, not
+	// parts, remain settlement authority. Serving roles may only SELECT and
+	// INSERT; the foreign key binds a part to its message's scope and to
+	// parts mode.
+	//
+	// UPDATE-WITH: internal/runtimecontrol part append; services/bridge
+	// LoadContext and prefix readers; services/job-runner Pod-loss repair.
+	createPostgreSQLSessionMessagePartsTable = `CREATE TABLE IF NOT EXISTS session_message_parts (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		content_storage TEXT NOT NULL DEFAULT 'parts' CHECK (content_storage = 'parts'),
+		part_index BIGINT NOT NULL CHECK (part_index >= 0),
+		part_kind TEXT NOT NULL CHECK (part_kind IN ('text', 'reasoning', 'tool_call', 'tool_result')),
+		model_tool_call_id TEXT,
+		data_json TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, message_id, part_index),
+		FOREIGN KEY (workspace_id, session_id, session_thread_id, message_id, content_storage)
+			REFERENCES session_messages(workspace_id, session_id, session_thread_id, message_id, content_storage)
+			ON DELETE CASCADE,
+		CONSTRAINT session_message_parts_identity_shape CHECK (
+			(part_kind IN ('tool_call', 'tool_result')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> '')
+			OR (part_kind IN ('text', 'reasoning') AND model_tool_call_id IS NULL)
 		)
 	)`
 
@@ -1789,6 +1861,7 @@ END $$`
 	createPostgreSQLSessionMessagesSourceEventUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_source_event_unique ON session_messages(workspace_id, session_id, session_thread_id, source_event_id) WHERE source_event_id IS NOT NULL`
 	createPostgreSQLSessionMessagesRepairKeyIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_repair_key_unique ON session_messages(workspace_id, session_id, session_thread_id, repair_key) WHERE repair_key IS NOT NULL`
 	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
+	createPostgreSQLSessionMessagePartsToolIdentityIndex    = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_message_parts_tool_identity ON session_message_parts(workspace_id, message_id, part_kind, model_tool_call_id) WHERE model_tool_call_id IS NOT NULL`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
 	createPostgreSQLSessionRuntimeInboxAttachmentIndex      = `CREATE INDEX IF NOT EXISTS session_runtime_inbox_attachment_authority_lookup ON session_runtime_inbox(workspace_id, session_id, session_thread_id, runtime_input_id) INCLUDE (input_kind, status)`
@@ -1945,6 +2018,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_event_stream_changes", createPostgreSQLSessionEventStreamChangesTable},
 		{"create_session_event_idempotency_keys", createPostgreSQLSessionEventIdempotencyKeysTable},
 		{"create_session_messages", createPostgreSQLSessionMessagesTable},
+		{"create_session_message_parts", createPostgreSQLSessionMessagePartsTable},
 		{"create_session_file_attachment_consumptions", createPostgreSQLSessionFileAttachmentConsumptionsTable},
 		{"create_session_thread_context_prefixes", createPostgreSQLSessionThreadContextPrefixesTable},
 		{"create_session_turn_retries", createPostgreSQLSessionTurnRetriesTable},
@@ -2017,6 +2091,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_source_event_unique", createPostgreSQLSessionMessagesSourceEventUniqueIndex},
 		{"index_session_messages_repair_key", createPostgreSQLSessionMessagesRepairKeyIndex},
 		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
+		{"index_session_message_parts_tool_identity", createPostgreSQLSessionMessagePartsToolIdentityIndex},
 		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
 		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
 		{"index_session_runtime_inbox_attachment_authority", createPostgreSQLSessionRuntimeInboxAttachmentIndex},
@@ -2098,21 +2173,24 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		)
 	}
 
-	// Attachment-consumption rows are append-only accounting: Runtime may
-	// read and insert rows in its workspace, but no serving path may update or
-	// delete them.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "rls_enable_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions ENABLE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "rls_force_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions FORCE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_select ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_insert ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_select ON session_file_attachment_consumptions
+	// Append-only workspace tables (attachment-consumption accounting and
+	// assistant message parts): serving roles may read and insert rows in
+	// their workspace, but no policy admits an update or delete.
+	for _, table := range postgresqlContract.AppendOnlyWorkspaceTables {
+		quoted := quoteIdentifier(table)
+		steps = append(steps,
+			postgresqlSchemaStep{name: "rls_enable_" + table, ddl: fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY", quoted)},
+			postgresqlSchemaStep{name: "rls_force_" + table, ddl: fmt.Sprintf("ALTER TABLE %s FORCE ROW LEVEL SECURITY", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_select_" + table + "_drop", ddl: fmt.Sprintf("DROP POLICY IF EXISTS workspace_select ON %s", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_insert_" + table + "_drop", ddl: fmt.Sprintf("DROP POLICY IF EXISTS workspace_insert ON %s", quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_select_" + table, ddl: fmt.Sprintf(`CREATE POLICY workspace_select ON %s
 		FOR SELECT
-		USING (workspace_id = current_setting('tetral.workspace_id', true))`},
-		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_insert ON session_file_attachment_consumptions
+		USING (workspace_id = current_setting('tetral.workspace_id', true))`, quoted)},
+			postgresqlSchemaStep{name: "rls_policy_workspace_insert_" + table, ddl: fmt.Sprintf(`CREATE POLICY workspace_insert ON %s
 		FOR INSERT
-		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
-	)
+		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`, quoted)},
+		)
+	}
 
 	// Only a fixed SECURITY DEFINER function executing as the actual table
 	// owner can use this path. A serving caller setting the same GUC gains
