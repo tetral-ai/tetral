@@ -47,9 +47,13 @@ describe("ProviderGatewayServiceShell", () => {
     const outcome=worker.catch(error=>error);
     await Promise.resolve();
     let completed=false;
-    const shutdown=service.shutdown(new Date(Date.now()+30));
+    // Release the worker only after shutdown has declared the join window expired.
+    let joinExpired!: () => void;
+    const expired=new Promise<void>(resolve=>{joinExpired=resolve;});
+    const shutdown=service.shutdown(new Date(Date.now()+30),undefined,()=>joinExpired());
     const observed=shutdown.then(()=>{completed=true;},error=>{completed=true;return error;});
-    await new Promise(resolve=>setTimeout(resolve,45));expect(completed).toBe(false);
+    // Yield one macrotask so that a shutdown which skipped the join would have settled.
+    await expired;await new Promise(resolve=>setImmediate(resolve));expect(completed).toBe(false);
     release();expect(await observed).toBeInstanceOf(Error);
     expect(await outcome).toMatchObject({code:status.UNAVAILABLE});
     await service.shutdown(new Date(Date.now()+30));
