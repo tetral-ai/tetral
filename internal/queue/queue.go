@@ -281,6 +281,20 @@ const (
 	SandboxMaintenanceBatchLimit = 100
 )
 
+// Job Runner terminal retention removes acknowledged and cancelled rows of the
+// five Job Runner kinds 24 hours after their terminal timestamp and
+// dead-lettered rows after 7 days, at most JobRunnerRetentionStateLimit rows
+// per terminal state per maintenance pass. tetral_prune_job_runner_jobs owns
+// the ages and caps every cutoff at its database clock minus the state's age.
+const (
+	JobRunnerTerminalRetentionAge   = 24 * time.Hour
+	JobRunnerDeadLetterRetentionAge = 7 * 24 * time.Hour
+	JobRunnerRetentionStateLimit    = 256
+)
+
+// JobRunnerTerminalStates are visited in this order by each retention pass.
+var JobRunnerTerminalStates = []string{StatusAcknowledged, StatusCancelled, StatusDeadLettered}
+
 type ValidationError struct {
 	Message string
 }
@@ -572,6 +586,22 @@ type SandboxTerminalSweepRequest struct {
 
 type EmptyPartitionCounterSweepRequest struct {
 	Limit int
+}
+
+type JobRunnerTerminalRetentionRequest struct {
+	Now time.Time
+}
+
+// JobRunnerTerminalRetentionResult aggregates one retention pass. Malformed
+// counts Runner rows in a terminal status whose terminal timestamp is NULL;
+// they are retained, and each state's count is bounded at 256.
+// ExhaustedStates counts states whose 256-row page was full while the probe
+// after it still found an eligible row; the maintenance phase counts budget
+// exhaustion once when it is positive.
+type JobRunnerTerminalRetentionResult struct {
+	Deleted         int
+	Malformed       int
+	ExhaustedStates int
 }
 
 func NewJobID() string {

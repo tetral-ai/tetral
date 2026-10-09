@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// This source guard rejects any database-client call other than the workspace
-// read-only transaction helper. The behavioral guards are
+// This source guard rejects any database-client call other than the two
+// workspace read-only transaction helpers. The behavioral guards are
 // TestPostgreSQLRequestFinalMessagesAndPreviewAdmission and
 // TestPostgreSQLSessionChangeLifecyclePreservesDeletion, which open the reader
 // through the SELECT-only event_stream role.
@@ -33,7 +33,7 @@ func TestPostgreSQLReaderUsesReadOnlyTransactions(t *testing.T) {
 			t.Fatalf("%s uses read-write workspace transactions", name)
 		}
 		for _, call := range clientCall.FindAllStringSubmatch(text, -1) {
-			if call[1] != "WithWorkspaceReadOnlyTx" {
+			if call[1] != "WithWorkspaceReadOnlyTx" && call[1] != "WithWorkspaceReadOnlyRepeatableReadTx" {
 				t.Fatalf("%s calls database client method %s outside a read-only workspace transaction", name, call[1])
 			}
 			count++

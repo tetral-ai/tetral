@@ -1045,6 +1045,52 @@ func (s *PostgreSQLQueueStore) SweepSandboxTerminalJobs(ctx context.Context, req
 	return deleted, nil
 }
 
+// PruneJobRunnerTerminalJobs deletes old terminal rows of the five Job Runner
+// kinds through the Queue-only security-definer tetral_prune_job_runner_jobs,
+// one transaction per terminal state in acknowledged, cancelled,
+// dead_lettered order. A state's error is recorded and the remaining states
+// are still attempted while ctx permits; the returned error joins them. It
+// never touches Sandbox or Environment kinds, nonterminal rows or partition
+// counters.
+func (s *PostgreSQLQueueStore) PruneJobRunnerTerminalJobs(ctx context.Context, request JobRunnerTerminalRetentionRequest) (JobRunnerTerminalRetentionResult, error) {
+	var result JobRunnerTerminalRetentionResult
+	if s == nil || s.client == nil {
+		return result, &ValidationError{Message: "queue store is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	var errs []error
+	for _, state := range JobRunnerTerminalStates {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		age := JobRunnerTerminalRetentionAge
+		if state == StatusDeadLettered {
+			age = JobRunnerDeadLetterRetentionAge
+		}
+		var deleted, malformed int
+		var moreRemaining bool
+		err := s.client.WithTx(ctx, "queue.prune_job_runner_terminal_jobs", nil, func(tx *dbconnect.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT deleted_count, malformed_count, more_remaining FROM public.tetral_prune_job_runner_jobs($1, $2, $3)`,
+				state, request.Now.UTC().Add(-age), JobRunnerRetentionStateLimit,
+			).Scan(&deleted, &malformed, &moreRemaining)
+		})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result.Deleted += deleted
+		result.Malformed += malformed
+		if deleted >= JobRunnerRetentionStateLimit && moreRemaining {
+			result.ExhaustedStates++
+		}
+	}
+	return result, errors.Join(errs...)
+}
+
 // SweepEmptyPartitionCounters removes counters only after every Queue job in
 // the partition has gone. The locked-row recheck prevents deletion from
 // racing a concurrent enqueue that uses the same counter.

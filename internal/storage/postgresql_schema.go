@@ -726,10 +726,12 @@ const (
 		)
 	)`
 
-	// session_event_idempotency_keys stores hashed idempotency state for accepted
-	// event-send responses. It deliberately stores only digests/hashes and
-	// response echo JSON, never raw Idempotency-Key values, auth headers, bearer
-	// tokens, provider credentials, or raw request bodies.
+	// session_event_idempotency_keys stores one receipt per client-supplied
+	// Idempotency-Key: the key's digest, the canonical request hash and the
+	// complete admitted response events a replay returns. It never stores raw
+	// Idempotency-Key values, auth headers, bearer tokens, provider credentials,
+	// or raw request bodies. A request without the header writes no receipt. A
+	// receipt is live for 24 hours after created_at, the database admission time.
 	createPostgreSQLSessionEventIdempotencyKeysTable = `CREATE TABLE IF NOT EXISTS session_event_idempotency_keys (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -738,7 +740,7 @@ const (
 		response_events_json TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		UNIQUE (workspace_id, session_id, idempotency_key_digest),
+		PRIMARY KEY (workspace_id, session_id, idempotency_key_digest),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE
 	)`
 
@@ -2034,6 +2036,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_events", createPostgreSQLSessionEventsTable},
 		{"create_session_event_stream_changes", createPostgreSQLSessionEventStreamChangesTable},
 		{"create_session_event_idempotency_keys", createPostgreSQLSessionEventIdempotencyKeysTable},
+		{"create_session_event_feed_retention", createPostgreSQLSessionEventFeedRetentionTable},
 		{"create_session_messages", createPostgreSQLSessionMessagesTable},
 		{"create_session_message_parts", createPostgreSQLSessionMessagePartsTable},
 		{"create_session_file_attachment_consumptions", createPostgreSQLSessionFileAttachmentConsumptionsTable},
@@ -2166,6 +2169,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_memory_versions_operation", createPostgreSQLMemoryVersionsOperationIndex},
 		{"index_memory_versions_api_key", createPostgreSQLMemoryVersionsAPIKeyIndex},
 	}...)
+	steps = append(steps, postgresqlRetentionIndexSteps()...)
 
 	// RLS: enable + force on every workspace-owned table, then
 	// (re)create the workspace_isolation policy. Each ALTER TABLE is
@@ -2227,6 +2231,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
 	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
 	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
+	steps = append(steps, postgresqlRetentionMaintenanceSteps()...)
 
 	// Narrow git-ticket lookup policy on session_git_tickets: the git
 	// proxy validates a capability ticket before it knows the workspace.

@@ -27,7 +27,7 @@ client pools. A Session created or updated through one replica is visible
 through another after commit; the signed principal and database workspace
 scope determine access on every request. The existing event append
 `Idempotency-Key` contract preserves the same event/inbox/Queue identity after
-a response is lost. It does not add replay rights to ordinary writes such as
+a response is lost, for 24 hours after the original admission. It does not add replay rights to ordinary writes such as
 Session creation. An uncertain ordinary write must be reconciled through its
 existing read surface rather than automatically submitted again.
 
@@ -264,10 +264,21 @@ Target resolution:
 
 | Header state | Behavior |
 | --- | --- |
-| omitted | admission mints a random server-side key (`id.New("idem_")`); the request gets no cross-retry deduplication. |
+| omitted | admission reads and writes no idempotency receipt; every such request is a new admission with no cross-retry deduplication. |
 | supplied | must appear at most once, be non-blank, and be ≤ 255 bytes; a violation is `400 invalid_request_error`. |
-| replay — same key, identical canonical request | `200` with the stored admitted events; no new rows or queue jobs. |
-| same key, different canonical request | `409 invalid_request_error`. |
+| replay — same key, identical canonical request, receipt live | `200` with the stored admitted events; no new rows or queue jobs; the receipt's timestamps do not move. |
+| same key, different canonical request, receipt live | `409 invalid_request_error`. |
+| same key, receipt expired | an ordinary new admission that replaces the receipt in the same transaction. |
+
+A supplied key's receipt is locked `FOR UPDATE` after the Session fences, and
+only then is the database clock read, in a separate statement, as the
+admission time. The receipt is live precisely while admission time <
+`created_at + 24 hours`, whether or not Cleanup has deleted it yet. An expired
+receipt is deleted and the new receipt is written with `created_at =
+updated_at =` that admission time; a failed admission rolls both back. Cleanup
+deletes receipts older than 24 hours in bounded batches; when it holds a
+receipt first, admission waits and then finds none, and when admission holds
+it first, Cleanup skips it (`services/cleanup/README.md`).
 
 `session_event_idempotency_keys` stores the key's SHA-256 digest, never the
 raw key; a separate `canonical_request_hash` over the decoded batch (order,
@@ -627,7 +638,7 @@ the close fence rejects admission without persisting an event or Queue job.
 | `internal/memory/sdk_compatibility_test.go`, `internal/memory/memory_lifecycle_test.go`, `internal/memory/memory_conflict_precedence_test.go` | Memory Stores public surface, content bound, exact-and-prefix path conflict, precondition semantics |
 | `internal/files/postgresql_store_test.go`, `internal/files/postgresql_store_internal_test.go`, `internal/files/staging_test.go`, `internal/httpapi/file_handler_test.go` | upload caps and quotas, PDF page-count tri-state cache, attachment admission lock order, session-file identities, `/v1/files` routing |
 | `internal/skill/frontmatter_test.go`, `internal/skill/package_test.go`, `internal/skill/dependency_test.go`, `internal/httpapi/skill_handler_test.go` | SKILL.md frontmatter rules, normalized-package byte caps, YAML confinement, `/v1/skills` beta-gated routing |
-| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key mint/replay/conflict |
+| `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go`, `internal/sessionevent/idempotency_retention_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key replay/conflict, no receipt access without a key, the exact 24-hour expiry at the post-lock database admission time, rollback of a replacement, and replacement versus Cleanup pruning in either order |
 | `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |
 

@@ -265,6 +265,9 @@ func (*processQueueStore) SweepSandboxTerminalJobs(context.Context, queue.Sandbo
 func (*processQueueStore) SweepEmptyPartitionCounters(context.Context, queue.EmptyPartitionCounterSweepRequest) (int, error) {
 	return 0, nil
 }
+func (*processQueueStore) PruneJobRunnerTerminalJobs(context.Context, queue.JobRunnerTerminalRetentionRequest) (queue.JobRunnerTerminalRetentionResult, error) {
+	return queue.JobRunnerTerminalRetentionResult{}, nil
+}
 
 type processRunnerQueue struct {
 	jobrunner.QueueClient

@@ -195,6 +195,9 @@ func (s *barrierQueueStore) SweepSandboxTerminalJobs(context.Context, queue.Sand
 func (s *barrierQueueStore) SweepEmptyPartitionCounters(context.Context, queue.EmptyPartitionCounterSweepRequest) (int, error) {
 	return 0, nil
 }
+func (s *barrierQueueStore) PruneJobRunnerTerminalJobs(context.Context, queue.JobRunnerTerminalRetentionRequest) (queue.JobRunnerTerminalRetentionResult, error) {
+	return queue.JobRunnerTerminalRetentionResult{}, nil
+}
 
 func TestQueueDrainConfigurationLeavesPodJoinMargin(t *testing.T) {
 	cfg, err := ConfigFromEnv(configEnv{})

@@ -15,10 +15,28 @@ type SchedulerMetrics struct {
 	claimDueRuns     int64
 	claimDueJobs     int64
 	claimDueDuration time.Duration
+	// retentionBudgetExhausted counts, per retention phase, the phases that
+	// stopped on their batch budget with a full last batch.
+	retentionBudgetExhausted map[string]int64
 }
 
 func NewSchedulerMetrics() *SchedulerMetrics {
 	return &SchedulerMetrics{Operations: workload.NewOperationMetrics("cleanup", "claim_due")}
+}
+
+// ObserveRetention records one retention phase. Only a phase that spent its
+// batch budget while its last probe still found an eligible row increments the
+// budget-exhausted counter; running out of candidates or failing does not.
+func (m *SchedulerMetrics) ObserveRetention(result RetentionResult) {
+	if m == nil || !result.BudgetExhausted {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retentionBudgetExhausted == nil {
+		m.retentionBudgetExhausted = map[string]int64{}
+	}
+	m.retentionBudgetExhausted[result.Phase]++
 }
 
 // ObserveClaimDue records one scheduling phase: its outcome and duration in the
@@ -49,6 +67,8 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 		runs := m.claimDueRuns
 		jobs := m.claimDueJobs
 		durationMS := m.claimDueDuration.Milliseconds()
+		idempotencyExhausted := m.retentionBudgetExhausted[RetentionPhaseIdempotency]
+		streamChangesExhausted := m.retentionBudgetExhausted[RetentionPhaseStreamChanges]
 		m.mu.Unlock()
 		samples := []workload.Metric{
 			{
@@ -68,6 +88,20 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 				Help:  "Total cleanup scheduler claim_due duration in milliseconds.",
 				Type:  "counter",
 				Value: float64(durationMS),
+			},
+			{
+				Name:   "tetral_cleanup_retention_budget_exhausted_total",
+				Help:   "Cleanup retention phases that stopped on their batch budget while eligible rows remained.",
+				Type:   "counter",
+				Labels: []workload.MetricLabel{{Name: "phase", Value: RetentionPhaseIdempotency}},
+				Value:  float64(idempotencyExhausted),
+			},
+			{
+				Name:   "tetral_cleanup_retention_budget_exhausted_total",
+				Help:   "Cleanup retention phases that stopped on their batch budget while eligible rows remained.",
+				Type:   "counter",
+				Labels: []workload.MetricLabel{{Name: "phase", Value: RetentionPhaseStreamChanges}},
+				Value:  float64(streamChangesExhausted),
 			},
 		}
 		observations, _ := m.Operations.Collector()(context.Background())

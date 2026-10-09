@@ -3,11 +3,13 @@
 ## Responsibilities
 
 `cleanup` (Go package `tetralcleanup`, binary `cmd/tetral-cleanup`)
-is the TTL scheduler for idle sessions. It runs as a Kubernetes CronJob:
-each tick runs one bounded scheduling phase that discovers sessions, across
-all workspaces, that have sat idle past their cleanup deadline, and enqueues
-one `cleanup_session` queue job per due session. It **produces** cleanup work
-and never **executes** it —
+is the TTL scheduler for idle sessions and the retention pruner for expired
+API idempotency receipts and event-stream change rows. It runs as a Kubernetes
+CronJob: each tick runs three independent bounded phases in order — Session
+scheduling, receipt retention, then change retention (below). Scheduling
+discovers sessions, across all workspaces, that have sat idle past their
+cleanup deadline, and enqueues one `cleanup_session` queue job per due
+session. It **produces** cleanup work and never **executes** it —
 releasing hot Runtime Pod state belongs to Job Runner (`services/job-runner`,
 `runtime_session_cleanup.go`). TTL cleanup does not stop, archive, or delete a
 Sandbox. Provider-native auto-stop, auto-archive, and auto-delete continue on
@@ -15,10 +17,10 @@ their own lifecycle; a later Sandbox tool inspects and normalizes the provider
 resource before execution. Session deletion owns the durable Sandbox release
 request. Every process is a fresh CronJob invocation; the only state carried
 between ticks is the durable scheduling cursor row described below.
-Discovery is the one cross-workspace read and goes through a Cleanup-only
-database function; every claim and enqueue is a transaction scoped by
-`workspace_id` (with `workspace_id` in every primary key and workspace RLS
-isolating tenants).
+Discovery and retention are the only cross-workspace work and each goes
+through a Cleanup-only database function; every claim and enqueue is a
+transaction scoped by `workspace_id` (with `workspace_id` in every primary key
+and workspace RLS isolating tenants).
 
 The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no
@@ -187,6 +189,77 @@ behind the cursor, are picked up by the next cycle, so a failing Session is
 retried once per completed cycle rather than hot-looped. Work per tick is
 bounded by these limits regardless of tenant count.
 
+### Invocation phases and retention
+
+One invocation reads the database clock once, minus 24 hours, as the cutoff
+for both retention phases, then runs:
+
+| Order | Phase | Budget |
+|-------|-------|--------|
+| 1 | Session scheduling (above) | its own 45 s child of the process context |
+| 2 | Receipt retention: `session_event_idempotency_keys` rows with `created_at <= cutoff` | at most 10 transactions of at most 256 rows, each with its own 2 s deadline from the process context |
+| 3 | Change retention: `session_event_stream_changes` rows with `changed_at <= cutoff`, advancing feed watermarks | the same, independently |
+
+A phase failure, or scheduling ending on its own budget, is recorded and the
+next phase still runs; only cancellation of the process context stops the
+remaining phases. Every error is joined and returned after the metrics export,
+so the Cron process exits non-zero. All limits are internal constants. With
+the minute cadence and `concurrencyPolicy: Forbid`, a launch may be skipped
+when all three phases use their full budgets (about 85 s), rather than
+cancelling a later retention phase.
+
+Each retention transaction calls its Cleanup-only `SECURITY DEFINER` function
+with the cutoff, the last examined key of the previous transaction and limit
+256:
+
+- `public.tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)`
+  pages in `(created_at, workspace_id, session_id, idempotency_key_digest)`
+  order over `idx_session_event_idempotency_keys_age`;
+- `public.tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)`
+  pages in `(changed_at, workspace_id, session_id, stream_position)` order over
+  `idx_session_event_stream_changes_age`, and from exactly the rows its DELETE
+  returned raises each eligible feed's `session_event_feed_retention.pruned_through`
+  with `GREATEST`, upserting in `(workspace_id, session_id, feed_key)` order
+  (feed eligibility is in `services/event-stream/README.md`).
+
+Both lock their page `FOR UPDATE SKIP LOCKED`, repeat the age condition in the
+DELETE under the lock, and return deleted count, examined count, the last
+examined key and `more_remaining`, never content. `more_remaining` is one
+indexed `LIMIT 1` probe, with the page's own eligibility predicate, for another
+eligible row after the last examined key (after the caller's continuation when
+the page examined nothing). They cap the cutoff at their own database clock
+minus 24 hours, clamp the limit to 0..256 and reject a `NULL` cutoff or limit
+and a partly `NULL` or empty continuation with SQLSTATE `22023`. A short page
+or `more_remaining = false` ends the phase (candidates ran out). A failed
+transaction rolls back and ends its phase with no continuation. A row locked by
+another transaction is skipped and not revisited in the same phase; the next
+invocation starts again at the oldest eligible row. A phase that spent all 10
+transactions while its last call returned `more_remaining = true` stops as
+successful partial maintenance and increments
+`tetral_cleanup_retention_budget_exhausted_total{phase}`; exactly 2,560
+eligible rows end the phase without counting. Per Cron minute this
+deletes at most 2,560 receipts and 2,560 change rows; sustained creation above
+that accumulates a backlog. Retention ages define eligibility; rows are removed
+after, not at, the boundary.
+
+Receipt pruning and API admission serialize on the receipt row: API admission
+locks a supplied key's receipt before reading its own admission clock and
+replaces an expired receipt in its admission transaction. When the pruner
+holds the row first, admission waits and then finds no receipt; when admission
+holds it first, the pruner skips it, and the replacement's new `created_at`
+keeps it out of the cutoff. The pruner takes no Session lock. Change pruning
+takes no Session arbitration either; only the first watermark INSERT for a
+feed takes the foreign-key `KEY SHARE` locks on its Session and Thread rows,
+bounded by the 2 s transaction deadline.
+
+The functions are owned by the migration role like their tables, run with
+`search_path = pg_catalog` and schema-qualified objects, set the
+transaction-local flag `tetral.retention_maintenance`, and have PUBLIC
+execution revoked; only Cleanup may execute them. The `retention_maintenance_*`
+policies admit rows only when that flag is set **and** `current_user` is the
+table owner, so a serving role that sets the flag itself gains nothing.
+Cleanup has no direct grant on receipts, changes or feed metadata.
+
 ### The tree fence (role-blind busy check)
 
 The `cleanup_after` alarm is only a hint — it is armed by the main run and
@@ -258,6 +331,30 @@ Conformance: `TestSchedulingPhaseClaimsDueSessionsAcrossWorkspaces`,
 `TestCleanupDiscoveryUsesGlobalDueIndex`,
 `TestCleanupWorkloadStaysWithinSchedulerBoundary`.
 
+### Retention phases (`retention.go`, `cmd/tetral-cleanup/main.go`)
+
+`Retention.Cutoff`, `Retention.PruneIdempotencyReceipts` and
+`Retention.PruneStreamChanges` are the retention seam; `runPhases` orders the
+three phases. Contract: retention reads and writes receipts, changes and feed
+watermarks only through the two functions above, one batch per transaction,
+adopting a continuation only from a committed batch; a phase stops on a short
+page, an empty probe, a failed batch or its 10-transaction budget, and only the
+budget with a last probe that still found a row counts as budget exhaustion.
+
+Invariants a replacement must preserve: one database cutoff per invocation;
+independent phases that run after a failure of another; deletion and watermark
+changes in one transaction; no Session lock.
+
+Conformance: `TestIdempotencyRetentionFunctionPagesAtTheExactCutoff`,
+`TestChangeRetentionAdvancesOnlyEligibleFeedWatermarks`,
+`TestOverlappingChangePrunersSkipLockedPagesAndKeepTheGreatestWatermark`,
+`TestChangeRetentionWaitsOnTheSessionParentAndRollsBackAtItsDeadline`,
+`TestRetentionPhasesCountBudgetExhaustionOnlyWithRowsLeft`,
+`TestRetentionPhaseDoesNotRevisitASkippedLockedRow`,
+`TestRetentionFunctionsSecurityBoundary`,
+`TestRetentionPruningReadsTheAgeIndexes`,
+`TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport`.
+
 ### Execution boundary (Job Runner — `job-runner/runtime_session_cleanup.go`)
 
 Everything after enqueue belongs to Job Runner and is a replaceable executor
@@ -284,13 +381,22 @@ Conformance (`integration/runtime_session_cleanup_test.go`):
 `SchedulerMetrics` accumulates three OpenMetrics counters, each updated once
 per scheduling phase —
 `tetral_cleanup_claim_due_runs_total`, `tetral_cleanup_jobs_claimed_total`,
-`tetral_cleanup_claim_due_duration_ms_total` — exposed through
+`tetral_cleanup_claim_due_duration_ms_total` — and
+`tetral_cleanup_retention_budget_exhausted_total` with the fixed label
+`phase="idempotency"` or `phase="stream_changes"`, exposed through
 `SchedulerMetrics.Collector()`. `MetricsExporter` /
 `OpenMetricsHTTPExporter` optionally POST them to
-`TETRAL_CLEANUP_METRICS_EXPORT_URL`. Invariants a replacement must
-preserve: counters carry no per-scope labels; the series names are stable;
-export is off by default and the shipped `k8s/networkpolicy.yaml` (postgres
-+ DNS egress only) blocks it unless deployment opens the path. Conformance:
+`TETRAL_CLEANUP_METRICS_EXPORT_URL`.
+
+Each retention phase also logs `cleanup.retention.completed` with its `phase`,
+`outcome` and aggregate `page.count` (batches), `candidate.count` (examined)
+and `deleted.count` only.
+
+Invariants a replacement must preserve: counters carry no per-scope labels
+(the retention counter's only label is its fixed phase); the series names are
+stable; export is off by default and the shipped `k8s/networkpolicy.yaml`
+(postgres + DNS egress only) blocks it unless deployment opens the path.
+Conformance:
 `TestSchedulerMetricsCollectorReportsSafeCounters`,
 `TestOpenMetricsHTTPExporterPushesSchedulerSeriesWithoutScopeLabels`.
 
@@ -314,13 +420,16 @@ Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 | Suite | Proves |
 |-------|--------|
 | `scheduler_test.go` | with the installed Cleanup role: global discovery order across workspaces; markers stamped and one deduped job enqueued with database time read after arbitration; generation fencing of a replaced owner's checkpoint, cycle start, end-of-cycle reset and next claim; only the phase's own deadline counts as success; a 1000-candidate failing prefix crossed across ticks with pages of one and equal due times; a stop between claim and checkpoint repeated without duplicates; pages capped at 100; generation overflow and a missing cursor row as errors; the workload stays within its read/write boundary; metrics counters stay safe |
+| `retention_test.go` | with the installed Cleanup role: receipt pages in key order across workspaces, the exact cutoff included and a microsecond younger kept, the cutoff cap, limit clamp and argument validation; change pruning advances only eligible feed watermarks, never backward, and rolls back with its deletion; overlapping pruners skip each other's pages; a held Session parent times the batch out atomically; exactly 2,560 eligible rows do not count budget exhaustion while 2,561 count it once, and a skipped locked row is not revisited; the `more_remaining` probe on each page; denied direct access, other-workload execution, spoofed flags, search-path shadowing and non-owner definers; both age indexes serve the locked page under its Limit and the `LIMIT 1` probe |
+| `cmd/tetral-cleanup/main_test.go` | the three phases run in order, a failed receipt batch does not skip change retention, errors return after the metrics export, and cancellation skips the remaining phase |
 | `discovery_boundary_test.go` | the discovery function's real-role pages and continuation boundaries, argument validation, denied direct and spoofed reads, other workloads' denied execution, search-path shadowing, cursor privileges and CHECK, owner-checked policy and catalog posture; the generic plan of both discovery statements reads the global due index under its Limit |
 | `metrics_exporter_test.go` | exported series carry no scope labels; config validation rejects a bad exporter endpoint |
 | `integration/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |
 
 If a PR changes the due predicate, the scheduling phase or its cursor, the
-marker writes, the enqueue shape, or the metrics/config surface in this
-folder, it updates the matching section here. A due-predicate change must
+retention phases or their functions, the marker writes, the enqueue shape, or
+the metrics/config surface in this folder, it updates the matching section
+here. A due-predicate change must
 also move the discovery function and the
 `idx_session_runtime_status_cleanup_global_due` partial index in
 `internal/storage` in lockstep so discovery stays an ordered index range. If it changes the tree fence,

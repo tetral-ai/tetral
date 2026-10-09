@@ -22,7 +22,7 @@ as the request scope. Every query is keyed on that `workspace_id`, and
 `workspace_id` is the leading column of every table's primary key, so one
 workspace never reads another's rows.
 
-This service owns no durable tables. It reads four tables, writes nothing, and
+This service owns no durable tables. It reads five tables, writes nothing, and
 never calls Runtime Pod, Bridge, Gateway, or Sandbox Service. PostgreSQL is its authoritative dependency. Optional Core NATS subscriptions
 carry best-effort Session previews; no NATS payload is persisted. It does not admit events, consume queue jobs, execute
 tools, or drive Runtime — event admission (`POST /events`) and the runtime
@@ -81,7 +81,8 @@ Every writer named here lives outside this package (the append path in
 
 | Key | Read by (this reader) | Rule |
 | --- | --- | --- |
-| `session_event_stream_changes.stream_position` | change feed + `Current*StreamPosition` (via `MAX`) | append-only, strictly increasing per `(workspace_id, session_id)`; rows are never rewritten |
+| `session_event_stream_changes.stream_position` | change feed + `Current*StreamPosition` (head) | append-only, strictly increasing per `(workspace_id, session_id)`; rows are never rewritten; Cleanup deletes rows older than 24 hours (below) |
+| `session_event_feed_retention.pruned_through` | feed head + change-feed gap check | per feed (`session` or `thread:<id>`), the highest deleted position that feed's reader would have returned; written only by Cleanup's change retention, never decreases, kept after its feed's rows expire |
 | `session_events.insert_stream_position` | session list ordering + session cursor | written with the event's one INSERT as its revision-1 change position, immutable thereafter |
 | `session_events.sequence` | thread list ordering + thread cursor | unique and stable per `(workspace_id, session_id, session_thread_id)`; never compared across threads |
 | `session_events.revision` | delivered as a same-`id` update on the stream | starts at 1, bumps when an existing public row's read state changes (e.g. `processed_at` stamped after Runtime commits an accepted input) |
@@ -92,6 +93,29 @@ at a higher `stream_position`. On the stream this re-emits the same-`id` event
 as an update; on a list it is simply the one row at its latest revision. The
 change log exists so that `processed_at`, terminal-state, and revision updates
 cannot be missed by a subscriber that already advanced past the original event.
+
+### Change retention and the feed head
+
+Change rows are eligible for deletion 24 hours after `changed_at`; event
+bodies (`session_events`) are permanent. Cleanup deletes eligible change rows
+and, in the same transaction, raises each affected feed's `pruned_through` to
+the highest deleted position that feed's reader would have returned: both the
+change and its event public; for the Session feed also `session_visible` and no
+Thread or a public non-reviewer Thread; for a Thread feed that exact public
+non-reviewer Thread. Internal, private, reviewer, sibling-Thread and
+other-Session rows never move a feed's watermark.
+
+| Read | Rule |
+| --- | --- |
+| Feed head (`Current*StreamPosition`) | one statement: `GREATEST(newest retained eligible change, pruned_through)`; a feed whose every change expired keeps its head |
+| Change batch | one short `REPEATABLE READ` read-only transaction holds the lifecycle gate, the watermark and the ≤100-row batch, and ends before any socket write; a prune committing after its snapshot hides nothing from that batch |
+| Gap | `pruned_through > actual cursor`: an eligible position the viewer never read is gone. The read returns `ErrRetainedHistoryGap`, the stream closes through the reader-failure path (no error frame), and the service logs `event_stream.feed_closed` with `reason = retained_history_gap` and the scope IDs only. Equality is not a gap; sequence gaps, the oldest retained row, connection age and other viewers' cursors are never evidence of loss |
+
+A connection that keeps reading is never closed by retention, however long it
+lives. A selected End group publishes its bodies from permanent events, so
+pruning its change rows mid-group does not interrupt it; the discarded suffix
+is then requeried from the End's position and a real gap there closes the
+stream.
 
 ### SSE stream loop
 
@@ -104,15 +128,15 @@ main thread. Thinking previews are content-free starts; text previews use the
 SDK's `event_start` and `event_delta` wrappers. They carry no durable envelope,
 internal scope, or private sequence fields.
 
-For a session stream the handler first resolves the current high-water cursor
-(`MAX(stream_position)` over the visible change set), then flushes the SSE
-response headers. Change rows that already existed before that opening mark are
+For a session stream the handler first resolves the current feed head (the
+greater of the newest retained visible change and the feed's
+`pruned_through`), then flushes the SSE response headers. Change rows that already existed before that opening mark are
 never replayed. The thread stream is the same loop scoped to one
 `session_thread_id`.
 
 | State | Trigger | Action |
 | --- | --- | --- |
-| Open | valid principal and `beta=true` | resolve high-water cursor, flush headers (`200`) |
+| Open | valid principal and `beta=true` | resolve the feed head as the opening cursor, flush headers (`200`) |
 | Poll | the poll interval is due; or the previous poll returned rows or an End group; or an admitted preview's Start is not yet behind the cursor; or preview loss was observed | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
 | Emit | ordinary rows present | per row: `event: <event.type>` + `data: <public Event JSON>`, advance the durable cursor only after a successful write |
 | Defer generated text | `agent.message` correlated to a model request | consume its change position without emitting or closing its preview; the SQL change query returns identity metadata with no text payload |
@@ -121,7 +145,7 @@ never replayed. The thread stream is the same loop scoped to one
 | Wait | the poll returned no rows, or no poll was due | wait for the independent poll/heartbeat timers (both initially 1s), a preview wake or cancellation; a preview wake runs the bounded preview slice without a formal change poll. After rows or an End group the loop re-polls without waiting |
 | Close (deleted) | an emitted event's type is `session.deleted` | return; the server closes and sends nothing further |
 | Close (disconnect) | client context done at the wait | return |
-| Close (read/marshal/write error) | error mid-loop, after headers flushed | return silently — the client sees the connection close with no error frame and no further bytes |
+| Close (read/marshal/write error) | error mid-loop, after headers flushed | return silently — the client sees the connection close with no error frame and no further bytes; a retained-history gap additionally logs its fixed reason |
 
 The heartbeat comment frame is required behavior: an idle session produces no
 change rows, and without a periodic byte an intermediary can cut a healthy but
@@ -219,9 +243,11 @@ session reads as `404` when a stream opens, on lists and on every Thread read,
 and never confirms a foreign one (`ensureReadableSessionTx` /
 `ensureReadableThreadTx` gate those reads on `sessions.lifecycle_state`). An
 already-open Session feed is the exception: `ensureReadableSessionFeedTx` keeps
-it readable until its `session.deleted` change is behind the cursor, and its
-End-group expansion applies the same gate at the End's own position, so an End
-committed before the deletion change is still published.
+it readable until the insert position of its permanent public
+`session.deleted` event is behind the cursor, and its End-group expansion
+applies the same gate at the End's own position, so an End committed before the
+deletion is still published. The gate never reads the expiring change row; a
+deleted Session without that event is unreadable.
 
 ### Startup and process lifecycle
 
@@ -261,16 +287,25 @@ ListRequestFinalMessages(ctx, scope, endEventID, afterSequence, 1) ([]RequestFin
   the public non-reviewer thread gate) on the session methods and the
   thread-scoped filter (without `session_visible`) on the thread methods;
   return change rows past `after` ordered by ascending `stream_position`;
-  compute the high-water head as `MAX(stream_position)` over the same visible
-  set; generated model text changes carry no selected payload body; request
-  pages verify their exact database End/Start and preserve endpoint visibility.
-  A request-final page contains at most one complete event.
+  compute the head as `GREATEST(newest retained change of the same visible set,
+  pruned_through)`; read each change batch, its watermark and lifecycle gate in
+  one repeatable-read snapshot and fail with `ErrRetainedHistoryGap` exactly
+  when `pruned_through` exceeds the cursor; generated model text changes carry
+  no selected payload body; request pages verify their exact database End/Start
+  and preserve endpoint visibility. A request-final page contains at most one
+  complete event.
 - **Conformance**: `TestPostgreSQLReaderListsAndStreamsPublicSessionVisibleEvents`,
   `TestEventStreamSessionSSEProjectsAllPublicChildEventVariants`,
   `TestEventStreamThreadSSEProjectsAllPublicChildEventVariants`,
   `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission`,
   `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` (including an End
-  committed before the deletion change on an open Session feed). The
+  committed before the deletion on an open Session feed),
+  `TestFeedHeadKeepsThePrunedThroughWatermark`,
+  `TestChangeFeedGapRuleUsesTheActualCursor`,
+  `TestChangeFeedBatchSnapshotOrdersWithConcurrentPruning`,
+  `TestDeletedSessionReadsUseThePermanentDeletionEvent`,
+  `TestFeedHeadsReadTheHeadIndexes` and
+  `TestEndGroupCompletesBeforeAPrunedSuffixClosesTheStream`. The
   `TestPostgreSQLPublicStreamingIdentity` and
   `TestPostgreSQLPublicStreamingVisibility` integration cases keep private
   reasoning and tool-input markers out of preview frames and thinking events.
@@ -365,6 +400,8 @@ does not implement future per-resource collection filtering.
 | `TestEventStreamRoutesRequire*` | `internal/eventstream/eventstream_test.go` | signed-principal enforcement and the exact-`beta=true` gate |
 | `TestEventStreamBoundaryLogsServerErrorsOnly` | `internal/eventstream/eventstream_test.go` | logging redaction: client errors are not logged as server errors |
 | `TestPostgreSQLRequestFinalMessagesAndPreviewAdmission` / `TestPostgreSQLSessionChangeLifecyclePreservesDeletion` | `internal/eventstream/request_final_messages_test.go` | actual read-only serving role: exact scope/Start/End, metadata-only changes, one-message pages, committed list bodies, cancellation and deletion visibility, and an End group committed before deletion staying expandable only on the open Session feed |
+| `TestFeedHeadKeepsThePrunedThroughWatermark` / `TestChangeFeedGapRuleUsesTheActualCursor` / `TestChangeFeedBatchSnapshotOrdersWithConcurrentPruning` / `TestDeletedSessionReadsUseThePermanentDeletionEvent` / `TestFeedHeadsReadTheHeadIndexes` | `internal/eventstream/retention_test.go` | real Event Stream and Cleanup roles: a fully pruned feed keeps its head on both scopes; a viewer that keeps up survives several retention windows over sparse positions, equality is no gap, a lagging Session or Thread cursor fails, a pruned revision 1 leaves revision 2 readable; a prune after the batch snapshot hides nothing while one before it is a gap and a rolled-back prune changes nothing; deleted-Session continuity and the End-group gate follow the permanent deletion event; both heads read their partial head index under the Limit |
+| `TestEndGroupCompletesBeforeAPrunedSuffixClosesTheStream` | `services/event-stream/retention_test.go` | real reader and writer: an End group pruned while its body write is held still completes; a pruned unread suffix then closes the stream with the fixed gap log, while pruning only through the End delivers the suffix |
 | `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer for Session and Thread: three large complete messages whose change descriptors carry no body; the first End-group body write held at the response sink, where the reader-returned change arrays (including the unconsumed suffix) no longer reference payloads, exactly one End page has been requested and the current encoding is in flight; then exact End/suffix order (with the Session marked deleted at the held write on Session feeds), or cancellation at the held write without a later page |
 | `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: a multi-batch backlog, End group and suffix drain without a poll-interval wait; preview wakes add no formal poll per delta; a formal row committed during a delta flood is still delivered; preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
 | `TestNATSNative*` / `TestNATSSubscriber*` | `services/event-stream/preview_native_queue_test.go` / `preview_nats_test.go` | pinned official client over controlled TCP: shared process queue/reservations, at/over byte and count bounds, unaffected/future healthy controls, oversized frame/broker ceiling rejection, current callback and connection-attempt joins; real broker/TLS/SDK coverage is separate integration evidence |

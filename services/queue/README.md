@@ -16,7 +16,8 @@ admission — a gRPC transition API (`services/queue/proto/tetral/queue/v1`,
 `QueueService`) that consumers drive, one per-process Job Runner scheduler that
 chooses which workspace's Runner work to lease next, and one background
 goroutine that rescues leases their owners abandoned and bounds Sandbox
-notification retention. The store reads and writes only `queue_jobs` and
+notification and Job Runner terminal-row retention. The store reads and writes
+only `queue_jobs` and
 `queue_partition_counters`; it never touches the business tables (`session_events`,
 `session_sandbox_bindings`, `sandbox_lifecycle_operations`, and the rest), never calls Runtime Pod,
 Bridge, Sandbox Service, or any provider, and never infers that referenced work
@@ -222,12 +223,45 @@ batch per scan. This is what unsticks a `runtime_input`,
 consumer. After a successful reclaim pass, the same tick deletes at most 100
 Sandbox-owned terminal notifications whose matching terminal timestamp is at
 least 24 hours old, then in a separate transaction deletes at most 100 partition
-counters that have no job of any status. Other job families have no retention
-change. Both cross-workspace sweeps use the transaction-local
-`tetral.queue_maintenance` RLS policy; a terminal row missing its required status
-timestamp is reported as an integrity error and retained without preventing
-eligible peers in the same bounded pass from being deleted or the subsequent
-empty-partition-counter sweep from running.
+counters that have no job of any status. Both cross-workspace sweeps use the
+transaction-local `tetral.queue_maintenance` RLS policy; a terminal row missing
+its required status timestamp is reported as an integrity error and retained
+without preventing eligible peers in the same bounded pass from being deleted
+or the subsequent empty-partition-counter sweep from running. A reclaim failure
+or a non-integrity Sandbox sweep failure still ends the tick there.
+
+The tick's last phase is Job Runner terminal retention, under its own 2 s
+deadline. It applies only to the five Job Runner kinds — `runtime_input`,
+`runtime_recovery`, `runtime_config_update`, `cleanup_session`,
+`session_delete_cleanup` — and never touches Sandbox or Environment kinds,
+nonterminal rows or partition counters. It visits `acknowledged`, `cancelled`
+and `dead_lettered` in that order, one transaction each through the Queue-only
+`SECURITY DEFINER` `public.tetral_prune_job_runner_jobs(text, timestamptz, integer)`,
+deleting at most 256 rows per state per tick in terminal-timestamp order over
+one partial index per state (`idx_queue_jobs_job_runner_<state>_retention`).
+Acknowledged and cancelled rows expire 24 hours after `acknowledged_at` /
+`cancelled_at`, dead-lettered rows 7 days after `dead_lettered_at`; a row is
+eligible when its timestamp is `<=` the tick time minus that age, and the
+function caps any cutoff at its own database clock minus the age. Selection
+and DELETE both repeat the status, kind allowlist and age under the row lock
+(`FOR UPDATE SKIP LOCKED`). A row whose terminal timestamp is `NULL` is never
+dated by another column: it is retained and counted, at most 256 per state, in
+the phase's `malformed.count` log field. A state's error is
+logged with fixed fields and the remaining states still run while the deadline
+permits. Each call also returns `more_remaining`, one indexed `LIMIT 1` probe
+with the page's eligibility predicate for another eligible row of that state.
+A pass in which at least one state's 256-row page was full while
+`more_remaining` was true increments
+`queue_retention_budget_exhausted_total{phase="job_runner_terminal"}` once, and
+logs the number of such states as `target.count`; exactly 256 eligible rows do
+not count;
+sustained terminal volume above 256 rows per state per tick accumulates a
+backlog. The function is owned by the migration role, runs with
+`search_path = pg_catalog`, sets the transaction-local flag
+`tetral.retention_maintenance` that the owner-checked `retention_maintenance_*`
+policies on `queue_jobs` require together with `current_user` being the table
+owner, has PUBLIC execution revoked and is executable only by Queue. Terminal
+deletion emits no notification.
 
 The serving process owns this loop together with its RPC and HTTP listeners
 and the Job Runner scheduler's cleanup worker.
@@ -281,7 +315,10 @@ per kind: `queue_pending_jobs`, `queue_leased_jobs`, `queue_retry_pending_jobs`,
 `queue_dead_lettered_jobs`, `queue_ready_jobs`, and `queue_ready_lag_seconds`.
 `queue_ready_jobs` counts pending rows with `available_at` at or before the
 observation time; `queue_pending_jobs` includes future Retry/Defer availability.
-`queue_ready_lag_seconds` is the oldest available pending age. These are
+`queue_ready_lag_seconds` is the oldest available pending age.
+`queue_retention_budget_exhausted_total{phase="job_runner_terminal"}` counts
+Job Runner terminal-retention passes that stopped on their batch budget while
+eligible rows remained. These are
 availability gauges, not a claim that every available job is presently leaseable
 under Session/Thread ordering. Per-kind groups absent from the database have no
 series; a failed collector emits its error counter rather than invented zeros.
@@ -481,7 +518,8 @@ the next holder re-leases under a new token.
 | `internal/queue/job_runner_lease_test.go` | direct Job Runner leasing under the real Queue role: future-tenant yield and window resumption, examined-prefix advancement under the transaction budget, per-call visited tenants with interleaved calls, per-process alternation and replica custody, committed tokens after a later failure, the eligibility matrix against `Lease`, discovery query plans on the Runner indexes, idle-aware retry hints, busy-tenant skipping, bounded pass cleanup, quiesce, exact release refunds, post-lock expiry, and provenance cleared by every transition |
 | `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse for both lease methods, the field census matching lease arithmetic, validation → `InvalidArgument`, release `FailedPrecondition` and draining-scheduler `Unavailable` mapping |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
-| `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, then bounded empty-counter cleanup, and logs shared operation/error fields |
+| `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, bounded empty-counter cleanup, then Job Runner terminal retention under its own 2 s deadline at the tick time; the budget counter grows by one per pass with any exhausted state; integrity counts and failures are logged with fixed fields |
+| `internal/queue/job_runner_retention_test.go` | with the installed Queue role: each Runner kind and terminal state expires exactly at its age and survives a microsecond younger, Sandbox and Environment kinds, nonterminal rows and partition counters are untouched, `NULL` terminal timestamps are retained and counted, 256 rows per state per pass with exactly 256 eligible rows not exhausted and 257 exhausted once, the cutoff capped at the database clock minus each state's age, a state error leaves later states running, argument validation, other-workload execution, spoofed flags, search-path shadowing and a non-owner definer are denied, and each state's partial index serves its locked page and its `LIMIT 1` probe |
 | `services/queue/run_test.go` | admitted RPC, maintenance, and HTTP users join under graceful completion and forced cancellation; no later maintenance cycle starts after drain admission closes; the Job Runner scheduler starts once and quiesces before `Run` returns |
 | `integration/replica_queue_test.go` | three independent Queue receivers share lease authority; lost committed Lease/Ack responses, real expiry/reclaim, stale-token rejection on every transition, and Workspace/Session barriers |
 | `integration/replica_queue_maintenance_test.go` | a real reclaim UPDATE is held before commit; normal completion commits the whole batch, forced cancellation rolls it all back, the pool stays alive until join, and a replacement maintenance owner reclaims remaining work |

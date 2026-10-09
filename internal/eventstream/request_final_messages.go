@@ -51,9 +51,11 @@ func (r *PostgreSQLReader) ReadPreviewRequest(ctx context.Context, ws workspace.
 // from the ordinary change feed or changes history-list ordering keys.
 //
 // Session scope is valid only for an already-open Session feed that has just
-// read the End. Its deletion gate is keyed by the End's own stream position,
+// read the End. Its deletion gate is keyed by the End's own insert position,
 // as the change feed keys it by the cursor, so an End ordered before the
-// session's deletion change stays expandable until that deletion is delivered.
+// session's permanent deletion event stays expandable until that deletion is
+// delivered. Bodies come from permanent events, so change retention never
+// interrupts a selected End group; each page is its own short snapshot.
 // Thread scope uses the thread readability gate and closes on deletion.
 func (r *PostgreSQLReader) ListRequestFinalMessages(ctx context.Context, scope ReadScope, endEventID string, afterSequence int64, limit int) ([]RequestFinalMessage, error) {
 	if err := validateReaderScope(scope.WorkspaceID, scope.SessionID); err != nil {

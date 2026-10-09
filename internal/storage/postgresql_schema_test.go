@@ -1858,8 +1858,51 @@ func TestSessionEventIdempotencySchemaShapeAndRLS(t *testing.T) {
 		}
 	}
 	assertTableRLSForced(t, db, schema, "session_event_idempotency_keys")
-	assertUniqueConstraintColumns(t, db, schema, "session_event_idempotency_keys", []string{"workspace_id", "session_id", "idempotency_key_digest"})
+	assertPrimaryKeyColumns(t, db, schema, "session_event_idempotency_keys", []string{"workspace_id", "session_id", "idempotency_key_digest"})
 	assertForeignKeyCascade(t, db, schema, "session_event_idempotency_keys", "sessions")
+}
+
+// A feed watermark row names either the Session feed ('session', no Thread) or
+// exactly one existing Thread of its Session ('thread:<id>'), and only a
+// positive position.
+func TestSessionEventFeedRetentionShape(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_feed", "sesn_feed")
+	if _, err := admin.Exec(`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at)
+		VALUES ('workspace_feed', 'thr_feed', 'sesn_feed', 'main', 'public', 'idle', now(), now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(feedKey string, threadID any, prunedThrough int64) error {
+		_, err := admin.Exec(`INSERT INTO session_event_feed_retention (workspace_id, session_id, feed_key, session_thread_id, pruned_through)
+			VALUES ('workspace_feed', 'sesn_feed', $1, $2, $3)`, feedKey, threadID, prunedThrough)
+		return err
+	}
+	for name, row := range map[string]struct {
+		feedKey string
+		thread  any
+	}{"session": {"session", nil}, "thread": {"thread:thr_feed", "thr_feed"}} {
+		if err := insert(row.feedKey, row.thread, 1); err != nil {
+			t.Fatalf("valid %s watermark: %v", name, err)
+		}
+	}
+	for name, row := range map[string]struct {
+		feedKey  string
+		thread   any
+		position int64
+		code     string
+	}{
+		"session key with thread":  {"session", "thr_feed", 1, "23514"},
+		"thread key without id":    {"thread:thr_feed", nil, 1, "23514"},
+		"thread key of another id": {"thread:thr_other", "thr_feed", 1, "23514"},
+		"empty thread":             {"thread:", "", 1, "23514"},
+		"zero position":            {"thread:thr_none", "thr_none", 0, "23514"},
+		"missing thread":           {"thread:thr_none", "thr_none", 1, "23503"},
+	} {
+		var pgErr *pgconn.PgError
+		if err := insert(row.feedKey, row.thread, row.position); !errors.As(err, &pgErr) || pgErr.Code != row.code {
+			t.Fatalf("%s: %v; want SQLSTATE %s", name, err, row.code)
+		}
+	}
 }
 
 func TestSessionRuntimeBindingsStateInvariants(t *testing.T) {
@@ -2441,6 +2484,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"sandbox_output_capture_operations",
 		"session_background_tasks",
 		"session_bridge_operations",
+		"session_event_feed_retention",
 		"session_event_idempotency_keys",
 		"session_event_stream_changes",
 		"session_events",

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	internaleventstream "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 )
@@ -134,6 +135,9 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 			var err error
 			changes, err = listChanges(r.Context(), cursor)
 			if err != nil {
+				if errors.Is(err, internaleventstream.ErrRetainedHistoryGap) {
+					h.logRetainedHistoryGap(scope)
+				}
 				return
 			}
 			if len(changes) == 0 {
@@ -499,6 +503,17 @@ func (h *handler) sequenceStop(scope ReadScope, requestID string, request *previ
 		request.lossLogged = true
 		h.logPreviewStop(scope, requestID, "sequence_gap")
 	}
+}
+
+// logRetainedHistoryGap records why a feed closed after retention pruned
+// eligible history beyond its cursor: a fixed reason and the scope only, with
+// thread.id only on a Thread feed.
+func (h *handler) logRetainedHistoryGap(scope ReadScope) {
+	fields := []any{"operation", "event_stream.feed", "workspace.id", string(scope.WorkspaceID), "session.id", scope.SessionID}
+	if scope.ThreadID != "" {
+		fields = append(fields, "thread.id", scope.ThreadID)
+	}
+	h.options.logger.Warn("event_stream.feed_closed", append(fields, "reason", "retained_history_gap", "outcome", "closed")...)
 }
 func (h *handler) logPreviewStop(scope ReadScope, requestID, reason string) {
 	h.options.logger.Warn("preview_stopped", "operation", "event_stream.preview", "workspace.id", string(scope.WorkspaceID), "session.id", scope.SessionID, "model_request.id", requestID, "reason", reason, "outcome", "formal_active")

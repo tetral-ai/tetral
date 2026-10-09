@@ -104,10 +104,11 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	defer cancelWork()
 	maintenanceAdmission := &maintenanceAdmission{stop: make(chan struct{}), admissionCtx: serverCtx}
 	maintenanceDone := make(chan struct{})
+	retentionMetrics := NewRetentionMetrics()
 	go func() {
 		defer close(maintenanceDone)
 		runStalledLeaseMaintenance(workCtx, runtime.MaintenanceStore, MaintenanceConfig{
-			Interval: cfg.LeaseReclaimInterval, Limit: cfg.LeaseReclaimBatchLimit, Logger: logger,
+			Interval: cfg.LeaseReclaimInterval, Limit: cfg.LeaseReclaimBatchLimit, Logger: logger, Metrics: retentionMetrics,
 		}, maintenanceAdmission)
 	}()
 	httpUsers := &httpRequestOwner{}
@@ -133,6 +134,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 			workload.WithHTTPMetrics(httpMetrics),
 			workload.WithMetricsCollector("http", httpMetrics.Collector()),
 			workload.WithMetricsCollector("grpc", grpcMetrics.Collector()),
+			workload.WithMetricsCollector("queue_retention", retentionMetrics.Collector()),
 		)
 		if metricsStore, ok := store.(interface {
 			Metrics(context.Context, time.Time) ([]queue.MetricsSnapshot, error)

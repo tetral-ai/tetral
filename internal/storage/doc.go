@@ -51,8 +51,9 @@
 //     functions with a fixed search_path owned by the migration role: the
 //     lock-only runtime process functions, the Job Runner binding-discovery
 //     upper and page functions, the Auth credential lookup, authority lock
-//     and token prune functions, and the Cleanup due-Session discovery
-//     function. The baseline also inserts the Cleanup scheduling cursor's
+//     and token prune functions, the Cleanup due-Session discovery function,
+//     and the Cleanup receipt/change and Queue Job Runner terminal retention
+//     functions. The baseline also inserts the Cleanup scheduling cursor's
 //     singleton row. It stays portable across
 //     self-managed PostgreSQL and managed providers.
 //     The complete database preparation command additionally requires a
@@ -65,6 +66,7 @@
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
+//   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
 //   - postgresql_database.go (connection open)
@@ -85,10 +87,15 @@
 //	                                                        api (public archive admission)                            public Threads API
 //	session_events                                         api (public input admission); Bridge (runtime             api list reads, Event Stream SSE,
 //	                                                        agent/status/span events)                                        Bridge reconcile, Runtime repair
-//	session_event_stream_changes                           internal/sessioneventwrite in the event writer's transaction:    Event Stream cursor / SSE
-//	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner)
-//	                                                        and the processed revision (Bridge commit, Job Runner delivery)
-//	session_event_idempotency_keys                         api event admission                                       api replay/conflict lookup
+//	session_event_stream_changes                           internal/sessioneventwrite in the event writer's transaction:    Event Stream cursor / SSE; cleanup
+//	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner)      retention through its function
+//	                                                        and the processed revision (Bridge commit, Job Runner delivery);
+//	                                                        cleanup deletes rows older than 24 h through its retention
+//	                                                        function
+//	session_event_feed_retention                           cleanup change retention, in the deleting transaction,          Event Stream feed head and gap check
+//	                                                        through its function only
+//	session_event_idempotency_keys                         api event admission with a supplied key (insert, expired-       api replay/conflict lookup; cleanup
+//	                                                        receipt replacement); cleanup deletes receipts older than 24 h  retention through its function
 //	session_messages                                       Runtime declarations persisted by Bridge; Assistant header      Bridge LoadContext and prefix readers,
 //	                                                        counters advanced by Bridge and Job Runner appends               Runtime cold repair
 //	session_message_parts                                  internal/runtimecontrol append primitive (Bridge declaration     Bridge LoadContext and prefix readers;
@@ -130,8 +137,9 @@
 //	                                                                                                                         Bridge LoadContext
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution
 //	                                                       not insert-only); Vault hard-deletes on credential delete
-//	queue_jobs                                             owning services admit atomically; Queue Service transitions      Sandbox Service, Job Runner,
-//	                                                                                                                         cleanup scheduler
+//	queue_jobs                                             owning services admit atomically; Queue Service transitions;    Sandbox Service, Job Runner,
+//	                                                        Queue maintenance deletes old terminal Sandbox and Job Runner   cleanup scheduler
+//	                                                        rows (the latter through its retention function)
 //	queue_partition_counters                               Queue admission and bounded Queue maintenance                    Queue admission and maintenance
 //	platform_provider_keys                                 operator ops CLI (platform credential domain)                    Gateway platform key pool (read-only, cached)
 //	auth_federation_rules / auth_identities /              tetral-auth-policy over the administrative connection            Auth exchange rule and identity reads;
@@ -142,8 +150,8 @@
 //	                                                        through the prune function; tetral-auth-policy revocation       derived-key issuance
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
-// postgresql_runtime_schema.go, postgresql_auth_schema.go and
-// postgresql_cleanup_schema.go; the writer/reader
+// postgresql_runtime_schema.go, postgresql_auth_schema.go,
+// postgresql_cleanup_schema.go and postgresql_retention_schema.go; the writer/reader
 // services under services/bridge, services/job-runner, services/api,
 // services/sandbox, services/queue, services/cleanup, services/event-stream,
 // services/git-proxy, services/gateway and services/auth; the shared writers in

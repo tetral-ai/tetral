@@ -523,6 +523,10 @@ func TestSchedulerMetricsCollectorReportsSafeCounters(t *testing.T) {
 		if sample.Family == "tetral_operation_duration_seconds" {
 			continue
 		}
+		if sample.Name == "tetral_cleanup_retention_budget_exhausted_total" && len(sample.Labels) == 1 && sample.Labels[0].Name == "phase" &&
+			(sample.Labels[0].Value == RetentionPhaseIdempotency || sample.Labels[0].Value == RetentionPhaseStreamChanges) {
+			continue
+		}
 		if len(sample.Labels) != 0 {
 			t.Fatalf("cleanup scheduler metric %s has labels %#v; want no user/session labels", sample.Name, sample.Labels)
 		}

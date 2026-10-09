@@ -198,6 +198,10 @@
         "consumer.class",
         "queue.job.id",
         "queue.jobs.reclaimed",
+        "deleted.count",
+        "malformed.count",
+        "budget.exhausted",
+        "target.count",
         "recovery.event",
         "error.class",
         "error.code",
@@ -205,7 +209,8 @@
       ],
       "emission_policy": "Successful Lease Debug and Heartbeat quiet. Positive maintenance outcomes Info. Initial classified listener failure and bounded summaries; recovery follows owning reconnect callback, does not modify wake/retry authority.",
       "proofs": [
-        "internal/queue/wakeup_test.go"
+        "internal/queue/wakeup_test.go",
+        "services/queue/maintenance_test.go"
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
     },
@@ -257,11 +262,16 @@
         "cleanup.jobs.claimed",
         "outcome",
         "input.count",
-        "cleanup.claim.limit"
+        "cleanup.claim.limit",
+        "phase",
+        "page.count",
+        "candidate.count",
+        "deleted.count"
       ],
       "emission_policy": "Durable admission/receipt/settlement/custody facts and classified failures at owning boundaries; identities optional only where actual context exists. No inference of committed outcome from severity alone.",
       "proofs": [
-        "services/job-runner/config_test.go"
+        "services/job-runner/config_test.go",
+        "services/cleanup/cmd/tetral-cleanup/main_test.go"
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."
     },
@@ -375,11 +385,13 @@
         "reason",
         "workspace.id",
         "model_request.id",
-        "outcome"
+        "outcome",
+        "thread.id"
       ],
-      "emission_policy": "Healthy preview/formal-delivery quiet. Bounded overflow/loss/recovery/writer classification; SSE frames/content are response protocol data, never operational logs.",
+      "emission_policy": "Healthy preview/formal-delivery quiet. Bounded overflow/loss/recovery/writer classification and one fixed-reason record when a retained-history gap closes a feed; SSE frames/content are response protocol data, never operational logs.",
       "proofs": [
         "services/event-stream/preview_hub_test.go",
+        "services/event-stream/retention_test.go",
         "internal/workload/component_logger_test.go"
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."

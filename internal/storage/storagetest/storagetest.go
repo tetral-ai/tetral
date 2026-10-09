@@ -950,6 +950,9 @@ func cloneSchemaGrantStatements(roleName string) []string {
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_lock_authority(text,text,text,text)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_lock_authority(text,text,text,text) TO "+roleName) + "; END IF; END $fixture_grant$",
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_auth_prune_tokens(integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_auth_prune_tokens(integer) TO "+roleName) + "; END IF; END $fixture_grant$",
 		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_cleanup_due_sessions(timestamptz,timestamptz,text,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_event_idempotency(timestamptz,timestamptz,text,text,bytea,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_event_changes(timestamptz,timestamptz,text,text,bigint,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
+		"DO $fixture_grant$ BEGIN IF to_regprocedure('public.tetral_prune_job_runner_jobs(text,timestamptz,integer)') IS NOT NULL THEN EXECUTE " + quoteLiteral("GRANT EXECUTE ON FUNCTION public.tetral_prune_job_runner_jobs(text,timestamptz,integer) TO "+roleName) + "; END IF; END $fixture_grant$",
 	}
 }
 

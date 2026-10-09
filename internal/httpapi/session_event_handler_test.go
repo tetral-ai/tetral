@@ -476,12 +476,14 @@ func TestSessionEventIngressUsesConfiguredBodyCapAndBatchLimit(t *testing.T) {
 	}
 }
 
-func TestSessionEventIngressAllowsMissingIdempotencyKey(t *testing.T) {
+// An omitted header reaches admission as the explicit no-key value, never as a
+// minted key, so admission stores no receipt for it.
+func TestSessionEventIngressPassesMissingIdempotencyKeyAsNoKey(t *testing.T) {
 	service := &recordingSessionEventHTTPService{
-		result: testSessionEventHTTPResult("sevt_http_generated_idem", "sesn_generated_idem"),
+		result: testSessionEventHTTPResult("sevt_http_no_idem", "sesn_no_idem"),
 	}
 	router := newSessionEventHTTPRouter(service)
-	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_generated_idem/events?beta=true", strings.NewReader(`{"events":[{"type":"user.interrupt"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_no_idem/events?beta=true", strings.NewReader(`{"events":[{"type":"user.interrupt"}]}`))
 	request.Header.Set("x-api-key", testAPIKey)
 	recorder := httptest.NewRecorder()
 
@@ -493,8 +495,8 @@ func TestSessionEventIngressAllowsMissingIdempotencyKey(t *testing.T) {
 	if len(service.calls) != 1 {
 		t.Fatalf("service calls = %d; want 1", len(service.calls))
 	}
-	if !strings.HasPrefix(service.calls[0].idempotencyKey, "idem_") || service.calls[0].idempotencyKey == sessionEventHTTPIdempotencyKey {
-		t.Fatalf("generated idempotency key = %q; want internal idem_ key", service.calls[0].idempotencyKey)
+	if service.calls[0].idempotencyKey != sessionevent.NoIdempotencyKey {
+		t.Fatalf("idempotency key = %q; want the explicit no-key value", service.calls[0].idempotencyKey)
 	}
 }
 

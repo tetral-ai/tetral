@@ -69,7 +69,8 @@
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "queue_jobs": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "tetral_schema_migrations": ["SELECT"]
-      }
+      },
+      "functions": ["tetral_prune_job_runner_jobs(text, timestamptz, integer)"]
     },
     "bridge": {
       "tables": {
@@ -129,7 +130,11 @@
         "queue_jobs": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       },
-      "functions": ["tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)"]
+      "functions": [
+        "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)",
+        "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)",
+        "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)"
+      ]
     },
     "provider_gateway": {
       "tables": {
@@ -200,6 +205,7 @@
         "session_threads": ["SELECT"],
         "session_events": ["SELECT"],
         "session_event_stream_changes": ["SELECT"],
+        "session_event_feed_retention": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
