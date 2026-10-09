@@ -128,29 +128,32 @@ main thread. Thinking previews are content-free starts; text previews use the
 SDK's `event_start` and `event_delta` wrappers. They carry no durable envelope,
 internal scope, or private sequence fields.
 
-For a session stream the handler first resolves the current feed head (the
-greater of the newest retained visible change and the feed's
-`pruned_through`), then flushes the SSE response headers. Change rows that already existed before that opening mark are
-never replayed. The thread stream is the same loop scoped to one
+A stream opens in this order: a feed head read that proves the Session or
+Thread is readable, public authorization, registration with the
+[shared idle checks](#shared-idle-checks), the optional preview subscription,
+then a final exact feed head read (the greater of the newest retained visible
+change and the feed's `pruned_through`) as the opening cursor, and only then
+the SSE response headers. Change rows that already existed before that opening
+mark are never replayed. The thread stream is the same loop scoped to one
 `session_thread_id`.
 
 | State | Trigger | Action |
 | --- | --- | --- |
-| Open | valid principal and `beta=true` | resolve the feed head as the opening cursor, flush headers (`200`) |
-| Poll | the poll interval is due; or the previous poll returned rows or an End group; or an admitted preview's Start is not yet behind the cursor; or preview loss was observed | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
+| Open | valid principal and `beta=true` | readability head read, authorization, shared registration, optional preview subscription, final head read as the opening cursor, flush headers (`200`) |
+| Read | at opening; the previous read returned rows or an End group; the shared idle check reported a changed Session; an admitted preview's Start is not yet behind the cursor; or preview loss was observed | fetch change rows past the cursor in bounded batches (≤ `defaultStreamBatchSize` = 100) |
 | Emit | ordinary rows present | per row: `event: <event.type>` + `data: <public Event JSON>`, advance the durable cursor only after a successful write |
 | Defer generated text | `agent.message` correlated to a model request | consume its change position without emitting or closing its preview; the SQL change query returns identity metadata with no text payload |
 | Publish request text | visible durable `span.model_request_end` | release the ordinary batch and suffix; read one complete committed text per page in stored sequence order, emit each full original event, then End; query discarded suffix again after the End cursor |
 | Heartbeat | the heartbeat timer is due (first iteration, then every `TETRAL_EVENT_STREAM_HEARTBEAT_INTERVAL_MS`), independent of rows | write a `: heartbeat` comment frame and flush |
-| Wait | the poll returned no rows, or no poll was due | wait for the independent poll/heartbeat timers (both initially 1s), a preview wake or cancellation; a preview wake runs the bounded preview slice without a formal change poll. After rows or an End group the loop re-polls without waiting |
+| Wait | the read returned no rows | read again at once if the shared generation changed since the sample taken before that read; otherwise wait for a changed shared check, the heartbeat timer, a preview wake or cancellation. A preview wake runs the bounded preview slice without a formal read. After rows or an End group the loop reads again without waiting. There is no per-viewer periodic read |
 | Close (deleted) | an emitted event's type is `session.deleted` | return; the server closes and sends nothing further |
 | Close (disconnect) | client context done at the wait | return |
-| Close (read/marshal/write error) | error mid-loop, after headers flushed | return silently — the client sees the connection close with no error frame and no further bytes; a retained-history gap additionally logs its fixed reason |
+| Close (read/marshal/write error) | error mid-loop, after headers flushed, including a failed shared check of the Session or process shutdown | return silently — the client sees the connection close with no error frame and no further bytes; a retained-history gap additionally logs its fixed reason |
 
 The heartbeat comment frame is required behavior: an idle session produces no
 change rows, and without a periodic byte an intermediary can cut a healthy but
-silent stream. The heartbeat and poll intervals are deployment tuning; the
-heartbeat's existence is not.
+silent stream. The heartbeat and shared-check intervals are deployment tuning;
+the heartbeat's existence is not.
 
 The heartbeat only survives an intermediary that does not buffer. The SSE
 Envoy Gateway routes both SDK stream URLs to Event Stream with no total request
@@ -174,6 +177,29 @@ encoding, and the End descriptor. No later formal event overtakes the group.
 Read or write failure closes the connection; no new durable publication state or
 preview replay cache is introduced. Lists retain their existing keys and
 committed-state semantics.
+
+### Shared idle checks
+
+An idle viewer issues no query of its own. The process owns one
+`IdleCoalescer`: one scheduler goroutine and four database workers, created at
+startup, never a goroutine or timer per feed. Every Session and Thread viewer
+of one Session shares one registration keyed by the principal's workspace and
+the authorized Session. A registration holds a reference count, a generation,
+the latest result and a channel that closes when the generation moves.
+
+| Aspect | Rule |
+| --- | --- |
+| Signal | per Session, in one read-only workspace-scoped statement over at most 128 Session IDs: whether it exists, its `lifecycle_state`, and `GREATEST(newest retained change of any visibility, highest pruned_through of its feeds)`, through the change primary key and `idx_session_event_feed_retention_pruned`. A missing maximum counts as zero; a missing Session is its own result |
+| Wake | a result different from the previous one, including the first one, moves the generation and closes its channel; an unchanged result wakes nobody. The watermark makes a change that was inserted and pruned before a check still a difference; a lifecycle change wakes Thread viewers of a deleted parent. The signal never advances a cursor or proves completeness: each woken viewer runs its own scoped read, and an unrelated private change costs at most one empty read |
+| Rounds | a round-robin deque of workspaces with registrations. A round snapshots the highest registration ID and visits that workspace's registrations up to it in ascending order, at most 128 Sessions per statement, returning the workspace to the back of the deque after each chunk. Registrations created later join the next round; their viewer reads once at opening. A completed round makes its workspace due one `TETRAL_EVENT_STREAM_POLL_INTERVAL_MS` after the round started, at once when overdue |
+| Bounds | at most one statement in flight per workspace and at most four in flight or queued in the process, so a large or slow workspace occupies one worker; a single workspace runs its chunks one after another. Each statement has a 2 s deadline, also cancelled by shutdown. Per completed round a workspace issues `ceil(watched Sessions / 128)` statements, independent of the number of viewers; no registration means no statement |
+| Failure | a failed statement detaches every still-registered Session of its chunk, marks each registration failed for good and closes its channel; their viewers close through the reader-failure path, and the service logs one `event_stream.idle_check_failed` record per chunk with the workspace, `failed.count` and a fixed reason. The next viewer of such a Session gets a new registration that late results or departures of the failed one cannot touch. Other workspaces continue |
+| Release | every exit releases the viewer's reference; the last one removes the registration and an emptied workspace entry, and a result for a removed registration is dropped |
+
+The registry mutex is never held over SQL or a channel send. Shutdown stops new
+registrations, fails every registration so its viewers return, cancels the
+workers' context, joins the scheduler and all four workers, and only then lets
+the command close the database pool.
 
 ### Preview subscription and loss
 
@@ -208,14 +234,14 @@ undetectable and is not counted as detected loss.
 
 One response writer owns formal data, previews and heartbeats. Every write and
 flush gets a ten-second deadline; request cancellation retires an active blocked
-write and joins that cancellation watcher. Formal changes are polled at least
-once per poll interval, and at once after a poll that made progress, when an
-admitted preview's Start is not yet behind the cursor, or after preview loss;
-preview wakes never add a formal change poll per delta. A preview flood
-therefore cannot delay formal lifecycle or End-group delivery beyond one poll
-interval, the same bound formal-only viewers have, and previews of a request
-may continue for up to that interval after its End commits; they remain
-prefixes and the emitted End closes them.
+write and joins that cancellation watcher. A formal read runs when the shared
+idle check reports a changed Session, at once after a read that made progress,
+when an admitted preview's Start is not yet behind the cursor, or after preview
+loss; preview wakes never add a formal read per delta. A preview flood
+therefore cannot delay formal lifecycle or End-group delivery beyond the next
+shared check of the Session, the same bound formal-only viewers have, and
+previews of a request may continue until that check after its End commits;
+they remain prefixes and the emitted End closes them.
 
 Session deletion remains observable on an existing Session feed; deleted
 sessions cannot open new feeds. An End group whose End precedes
@@ -257,6 +283,10 @@ deleted Session without that event is unreadable.
 | `VerifySchema` | database schema matches before serving traffic |
 | `VerifyRuntimeRole` | the connection uses the read-only runtime role |
 | `MarkReady` | readiness is marked only after both verifications pass |
+
+Shutdown cancels long-lived SSE work, drains the HTTP server, closes the
+preview hub and transport, then closes the shared idle checks (joining their
+scheduler and workers) and only then the database pool.
 
 The main port also answers `/health` and `/ready`; `/metrics` is `404` there
 and served on a separate metrics port (`buildHTTPHandler`). The pod mounts no
@@ -309,6 +339,40 @@ ListRequestFinalMessages(ctx, scope, endEventID, afterSequence, 1) ([]RequestFin
   `TestPostgreSQLPublicStreamingIdentity` and
   `TestPostgreSQLPublicStreamingVisibility` integration cases keep private
   reasoning and tool-input markers out of preview frames and thinking events.
+
+### Shared idle checks (`IdleCoalescer`, `idle_checks.go`)
+
+The stream loop depends on the process-owned `IdleCoalescer`, supplied with
+`WithIdleCoalescer`; a router without it fails stream requests. It reads
+signals through one method, implemented by `PostgreSQLReader`:
+
+```go
+ReadSessionSignals(ctx, ws, sessionIDs) ([]SessionSignal, error)
+```
+
+- **Lifecycle**: `NewIdleCoalescer(reader, PollInterval, logger)` once at
+  startup; `Close` after the HTTP drain and before the database pool closes.
+- **Invariants a replacement must preserve**: one statement per workspace chunk
+  of at most `MaxSessionSignalBatch` (128) unique Sessions, one signal per
+  requested Session, a missing Session reported rather than an error; no
+  per-viewer query, goroutine or timer; at most one statement in flight per
+  workspace and four in the process; a changed or failed result moves or
+  fails the shared registration, an unchanged one wakes nobody; `Close`
+  returns only after every worker finished. `WithStreamCompletedCheckLimit` is
+  a test hook that ends a stream after unchanged checks; production never sets
+  it.
+- **Conformance**: `TestSharedIdleCheckStatementsFollowUniqueSessions`,
+  `TestSharedIdleCheckWakesEveryViewerOfASession`,
+  `TestIdleViewerWakesOnTheFirstCheckAfterRegistration`,
+  `TestIdleViewerRereadsWhenACheckChangesDuringItsEmptyRead`,
+  `TestIdleViewerWakesForAChangePrunedBeforeTheCheckRan`,
+  `TestIdleThreadViewerWakesWhenOnlyItsSessionIsDeleted`,
+  `TestFailedIdleCheckClosesItsViewersAndReplacesTheRegistration`,
+  `TestInFlightIdleCheckCannotUpdateAReplacedRegistration`,
+  `TestIdleCheckShutdownCancelsAndJoinsABlockedCheck`,
+  `TestSlowWorkspaceDoesNotStallOtherIdleChecks`,
+  `TestSessionSignalsReportLifecycleAndTheHighestPosition` and
+  `TestSessionSignalsSeekTheChangeKeyAndTheWatermarkIndex`.
 
 ### List reader (`ListReader`, `list.go`, hosted by `api`)
 
@@ -395,7 +459,7 @@ does not implement future per-resource collection filtering.
 | Suite | Location | Proves |
 | --- | --- | --- |
 | `TestPostgreSQLReader*` | `internal/eventstream/eventstream_test.go` | read-only PostgreSQL behavior: public/session-visible filtering, cross-thread ordering by `insert_stream_position`, thread ordering by `sequence`, pagination stable across a revision bump, page-token scope/version rejection, type and `created_at` filters |
-| `TestEventStream*SSE*` / `TestIdleEventStreamEmitsHeartbeat*` / `TestEventStream*StartsAt*HighWater*` | `internal/eventstream/eventstream_test.go` | stream loop: start at current high-water, close on `session.deleted`, heartbeat before the next idle poll, thread-scoped high-water |
+| `TestEventStream*SSE*` / `TestIdleEventStreamEmitsHeartbeat*` / `TestEventStream*StartsAt*HighWater*` | `internal/eventstream/eventstream_test.go` | stream loop: start at current high-water, close on `session.deleted`, heartbeat before the next shared check, thread-scoped high-water |
 | `TestEventStreamList*` / `TestEventStreamServiceRouterDoesNotServeListRoutes` | `internal/eventstream/eventstream_test.go` | list envelope, SDK filter decoding, unknown-parameter rejection, and that this binary serves streams only |
 | `TestEventStreamRoutesRequire*` | `internal/eventstream/eventstream_test.go` | signed-principal enforcement and the exact-`beta=true` gate |
 | `TestEventStreamBoundaryLogsServerErrorsOnly` | `internal/eventstream/eventstream_test.go` | logging redaction: client errors are not logged as server errors |
@@ -403,7 +467,9 @@ does not implement future per-resource collection filtering.
 | `TestFeedHeadKeepsThePrunedThroughWatermark` / `TestChangeFeedGapRuleUsesTheActualCursor` / `TestChangeFeedBatchSnapshotOrdersWithConcurrentPruning` / `TestDeletedSessionReadsUseThePermanentDeletionEvent` / `TestFeedHeadsReadTheHeadIndexes` | `internal/eventstream/retention_test.go` | real Event Stream and Cleanup roles: a fully pruned feed keeps its head on both scopes; a viewer that keeps up survives several retention windows over sparse positions, equality is no gap, a lagging Session or Thread cursor fails, a pruned revision 1 leaves revision 2 readable; a prune after the batch snapshot hides nothing while one before it is a gap and a rolled-back prune changes nothing; deleted-Session continuity and the End-group gate follow the permanent deletion event; both heads read their partial head index under the Limit |
 | `TestEndGroupCompletesBeforeAPrunedSuffixClosesTheStream` | `services/event-stream/retention_test.go` | real reader and writer: an End group pruned while its body write is held still completes; a pruned unread suffix then closes the stream with the fixed gap log, while pruning only through the End delivers the suffix |
 | `TestPostgreSQLRequestEndProjectionResidency` | `services/event-stream/preview_writer_test.go` | real PostgreSQL reader and response writer for Session and Thread: three large complete messages whose change descriptors carry no body; the first End-group body write held at the response sink, where the reader-returned change arrays (including the unconsumed suffix) no longer reference payloads, exactly one End page has been requested and the current encoding is in flight; then exact End/suffix order (with the Session marked deleted at the held write on Session feeds), or cancellation at the held write without a later page |
-| `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: a multi-batch backlog, End group and suffix drain without a poll-interval wait; preview wakes add no formal poll per delta; a formal row committed during a delta flood is still delivered; preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
+| `TestStreamLoop*` | `services/event-stream/preview_writer_test.go` | stream loop with controlled reads: with no shared check running, a multi-batch backlog, End group and suffix drain without a wait, preview wakes add no formal read per delta, and an admitted preview Start past the cursor forces its own read; a formal row committed during a delta flood is delivered once the shared check changes; preview loss after the session became unreadable releases the subscription and still delivers `session.deleted` |
+| `TestSharedIdleCheck*` / `TestIdleViewer*` / `TestIdleThreadViewer*` / `TestFailedIdleCheck*` / `TestInFlightIdleCheck*` / `TestIdleCheckShutdown*` / `TestSlowWorkspace*` | `services/event-stream/idle_checks_test.go` | real Event Stream role, statement tracer and a manual round clock: one statement for 128 watched Sessions, one per round with duplicated viewers, two for 129, none for an empty registry; one registration shared by Session viewers with distinct cursors and a Thread viewer; the first check after registration wakes; a check during an empty read forces another read; an inserted-and-pruned change and a parent-only deletion wake; a failed check closes its viewers, logs safely and leaves a fresh registration; a stale in-flight result cannot touch a replacement; the registry stays free while a check is blocked in PostgreSQL, and `Close` cancels and joins it; a held slow workspace keeps one statement while four others complete rounds |
+| `TestSessionSignals*` | `internal/eventstream/session_signals_test.go` | real Event Stream role: lifecycle, newest change of any visibility, a watermark above the retained changes and a missing Session; both top-one seeks read their indexes under their Limit |
 | `TestNATSNative*` / `TestNATSSubscriber*` | `services/event-stream/preview_native_queue_test.go` / `preview_nats_test.go` | pinned official client over controlled TCP: shared process queue/reservations, at/over byte and count bounds, unaffected/future healthy controls, oversized frame/broker ceiling rejection, current callback and connection-attempt joins; real broker/TLS/SDK coverage is separate integration evidence |
 | `TestPreviewHubExact*` / `TestPreviewViewerExact*` / `TestPreviewHubIngressCount*` / `TestPreviewViewerCount*` | `services/event-stream/preview_bounds_test.go` | independently padded limit−1/exact/+1 encoded byte boundaries for ingress, fanout, viewer queue/current write/encoding and aggregate encoding; independent current-ingress/current-write count limits, unaffected viewers and joined cleanup |
 | `TestNATSNativeExactProcessByteReservationBoundary` / `TestNATSNativeHeartbeatOptionsConsumeTypedEnvironment` / `TestNATSHeartbeatConfigRangesAndFailFast` | `services/event-stream/preview_native_queue_test.go` / `config_test.go` | native byte reservation threshold−1/exact/+1 with frame counts nonbinding; environment defaults/overrides reach real pinned-client ping options; invalid local settings fail before startup |
@@ -473,8 +539,9 @@ when the original seed is down. It never replays old native subscription identit
 | `TETRAL_EVENT_STREAM_SUBSCRIPTION_MAX_BYTES` / `SUBSCRIPTION_MAX_FRAMES` | 8388608 / 2048 |
 | `TETRAL_EVENT_STREAM_ACTIVE_REQUESTS` | 32 |
 
-Timer values are positive milliseconds; poll/heartbeat/write values accept up
-to 60000 and preview setup up to 10000. Byte/count values are positive bounded
+`TETRAL_EVENT_STREAM_POLL_INTERVAL_MS` is the round interval of the shared idle
+checks, not a per-viewer timer. Timer values are positive milliseconds;
+poll/heartbeat/write values accept up to 60000 and preview setup up to 10000. Byte/count values are positive bounded
 integers; viewer limits cannot exceed hub limits. Encoded queued, in-flight and
 preview encoding bytes stay charged until release. The hub budget is one
 process application budget shared by ingress, every viewer queue, in-flight
@@ -542,7 +609,11 @@ for a reason other than a missing or invalid request identity
 Records identify the operation, scoped request where known, bounded reason and
 `formal_active` outcome; they
 contain no text, tool inputs, credentials, provider metadata or raw errors.
-Routine previews and polls do not produce per-fragment records. The process
+Routine previews and reads do not produce per-fragment records. A failed
+shared idle check produces one `event_stream.idle_check_failed` record per
+chunk with `workspace.id`, `failed.count`, a fixed `reason`
+(`query_failed` or `deadline_exceeded`) and `outcome = detached`, never Session
+IDs or the raw error. The process
 logger bounds repeated diagnostics and emits suppression summaries independently
 of business delivery.
 

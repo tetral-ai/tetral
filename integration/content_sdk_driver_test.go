@@ -31,12 +31,14 @@ import (
 // The edge is the existing local SDK topology: Auth signs the principal, then
 // API/Event Stream validate it. Object storage is the actual isolated MinIO.
 func startContentSDKPublicEdge(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
-	return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
-		return eventstream.NewRouter(reader, verifier, eventstream.WithStreamPollInterval(time.Millisecond), eventstream.WithStreamMaxEmptyPolls(1))
+	return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
+		idle := eventstream.NewIdleCoalescer(reader, time.Millisecond, nil)
+		t.Cleanup(idle.Close)
+		return eventstream.NewRouter(reader, verifier, eventstream.WithIdleCoalescer(idle), eventstream.WithStreamCompletedCheckLimit(1))
 	})
 }
 
-func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventsFactory func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string) {
+func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventsFactory func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string) {
 	t.Helper()
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
 	if err != nil {

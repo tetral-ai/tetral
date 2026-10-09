@@ -378,7 +378,8 @@
       "sources": [
         "services/event-stream/preview_hub.go",
         "services/event-stream/eventstream.go",
-        "services/event-stream/preview_writer.go"
+        "services/event-stream/preview_writer.go",
+        "services/event-stream/idle_checks.go"
       ],
       "optional_fields": [
         "session.id",
@@ -386,12 +387,14 @@
         "workspace.id",
         "model_request.id",
         "outcome",
-        "thread.id"
+        "thread.id",
+        "failed.count"
       ],
-      "emission_policy": "Healthy preview/formal-delivery quiet. Bounded overflow/loss/recovery/writer classification and one fixed-reason record when a retained-history gap closes a feed; SSE frames/content are response protocol data, never operational logs.",
+      "emission_policy": "Healthy preview/formal-delivery and unchanged shared idle checks quiet. Bounded overflow/loss/recovery/writer classification, one fixed-reason record when a retained-history gap closes a feed, and one aggregate record per failed shared idle check chunk; SSE frames/content are response protocol data, never operational logs.",
       "proofs": [
         "services/event-stream/preview_hub_test.go",
         "services/event-stream/retention_test.go",
+        "services/event-stream/idle_checks_test.go",
         "internal/workload/component_logger_test.go"
       ],
       "field_presence": "Only names backed by the listed owning emitters/builders are mapped here. Shared failure/resource fields may be added by the common diagnostic sink; canonical permission alone does not imply emission."

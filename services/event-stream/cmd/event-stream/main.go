@@ -140,6 +140,10 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 	readiness := workload.NewReadiness()
 	httpMetrics := workload.NewHTTPMetrics("event-stream")
 	reader := internaleventstream.NewPostgreSQLReader(database.runtimeClient)
+	// Shared idle checks close after the HTTP drain and before the database:
+	// Close joins their scheduler and workers, so no check outlives the pool.
+	idleChecks := eventstream.NewIdleCoalescer(reader, cfg.StreamConfig.PollInterval, logger)
+	defer workload.ProcessCleanup(ctx, idleChecks.Close)
 	previewMetrics := eventstream.NewPreviewMetrics()
 	var previewHub *eventstream.PreviewHub
 	if cfg.NATSConfig.Enabled() {
@@ -154,7 +158,7 @@ func run(ctx context.Context, env envReader, open openStartupFunc) error {
 		}
 		defer workload.ProcessCleanup(ctx, previewHub.Close)
 	}
-	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics), eventstream.WithStreamConfig(cfg.StreamConfig), eventstream.WithStreamShutdownContext(ctx), eventstream.WithPreviewHub(previewHub), eventstream.WithPreviewMetrics(previewMetrics)))
+	handler := buildHTTPHandler(readiness, eventstream.NewRouter(reader, cfg.PrincipalVerifier, eventstream.WithLogger(logger), eventstream.WithRequestMetrics(httpMetrics), eventstream.WithStreamConfig(cfg.StreamConfig), eventstream.WithStreamShutdownContext(ctx), eventstream.WithIdleCoalescer(idleChecks), eventstream.WithPreviewHub(previewHub), eventstream.WithPreviewMetrics(previewMetrics)))
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("previews", previewMetrics.Collector()),

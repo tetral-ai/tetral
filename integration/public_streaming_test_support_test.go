@@ -17,6 +17,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
+	internaleventstream "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
@@ -26,7 +27,9 @@ import (
 )
 
 // Only this adapter controls frame delivery, immediately before the real hub.
-// Its ledger distinguishes broker deliveries from application deliveries.
+// Its ledger distinguishes broker deliveries from application deliveries. A
+// broker frame enters the ledger only after the hub received its deliveries,
+// so a wait that sees the frame also sees the hub's queued bytes for it.
 type publicFrameTap struct {
 	transport  eventstream.PreviewTransport
 	mu         sync.Mutex
@@ -39,9 +42,6 @@ func (p *publicFrameTap) Subscribe(ctx context.Context, subject string, receive 
 	return p.transport.Subscribe(ctx, subject, func(subject string, data []byte) {
 		frame, err := eventwire.DecodePreviewFrame(subject, data)
 		p.mu.Lock()
-		if err == nil && len(p.frames) < 8192 {
-			p.frames = append(p.frames, frame)
-		}
 		batches := [][]byte{data}
 		if p.transform != nil && err == nil {
 			batches = p.transform(frame, subject, data)
@@ -51,6 +51,11 @@ func (p *publicFrameTap) Subscribe(ctx context.Context, subject string, receive 
 		for _, body := range batches {
 			receive(subject, body)
 		}
+		p.mu.Lock()
+		if err == nil && len(p.frames) < 8192 {
+			p.frames = append(p.frames, frame)
+		}
+		p.mu.Unlock()
 	}, lost)
 }
 func (p *publicFrameTap) snapshot() []eventwire.PreviewFrame {
@@ -64,21 +69,45 @@ func (p *publicFrameTap) count() int {
 	return len(p.frames)
 }
 
+// publicReadObserver records the highest cursor any formal change read
+// started from and counts End-group pages. Formal reads run only when a viewer
+// is woken, so a read from cursor P proves that some viewer consumed position
+// P and ran its loop, including the preview slice, again.
 type publicReadObserver struct {
 	eventstream.Reader
-	polls  atomic.Int64
 	finals atomic.Int64
+	cursor atomic.Int64
 }
 
+func (r *publicReadObserver) observe(after int64) {
+	for {
+		current := r.cursor.Load()
+		if after <= current || r.cursor.CompareAndSwap(current, after) {
+			return
+		}
+	}
+}
 func (r *publicReadObserver) ListSessionEventChanges(ctx context.Context, ws workspace.ID, session string, after int64, limit int) ([]eventstream.StreamChange, error) {
-	result, err := r.Reader.ListSessionEventChanges(ctx, ws, session, after, limit)
-	r.polls.Add(1)
-	return result, err
+	r.observe(after)
+	return r.Reader.ListSessionEventChanges(ctx, ws, session, after, limit)
 }
 func (r *publicReadObserver) ListThreadEventChanges(ctx context.Context, ws workspace.ID, session, thread string, after int64, limit int) ([]eventstream.StreamChange, error) {
-	result, err := r.Reader.ListThreadEventChanges(ctx, ws, session, thread, after, limit)
-	r.polls.Add(1)
-	return result, err
+	r.observe(after)
+	return r.Reader.ListThreadEventChanges(ctx, ws, session, thread, after, limit)
+}
+
+// waitFormalReadPast waits until a formal read started from a cursor at or
+// past the newest committed change, in the harness Session, of the event with
+// eventID, or of any event of eventType when eventID is empty.
+func (h *publicStreamingHarness) waitFormalReadPast(t *testing.T, eventType, eventID string) {
+	t.Helper()
+	var position int64
+	if err := h.db.QueryRow(`SELECT COALESCE(max(c.stream_position), 0) FROM session_event_stream_changes c
+		JOIN session_events e ON e.workspace_id = c.workspace_id AND e.event_id = c.event_id
+		WHERE c.session_id = $1 AND e.type = $2 AND ($3 = '' OR e.event_id = $3)`, h.session, eventType, eventID).Scan(&position); err != nil || position == 0 {
+		t.Fatalf("committed %s position = %d", eventType, position)
+	}
+	publicWait(t, "formal read past committed "+eventType, func() bool { return h.reader.cursor.Load() >= position })
 }
 func (r *publicReadObserver) ListRequestFinalMessages(ctx context.Context, scope eventstream.ReadScope, end string, after int64, limit int) ([]eventstream.RequestFinalMessage, error) {
 	r.finals.Add(1)
@@ -154,12 +183,14 @@ func newPublicStreamingHarness(t *testing.T, scenario string, options publicStre
 		runtime["writeEventTimeoutMs"] = options.writeEventTimeoutMs
 	}
 	h.contentE2E = startContentE2EWithOptions(t, scenario, false, false, contentE2EOptions{Budget: 300 * time.Second, Gateway: gateway, Runtime: runtime, Provider: options.provider, ApprovalMode: options.approval, PublicEdge: func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
-		return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
+		return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
 			if options.eventsFactory != nil {
 				return options.eventsFactory(t, pools, reader, verifier, publicKey)
 			}
 			h.reader = &publicReadObserver{Reader: reader}
-			handler := eventstream.NewRouter(h.reader, verifier, eventstream.WithPreviewHub(hub), eventstream.WithPreviewMetrics(h.metrics), eventstream.WithStreamConfig(h.config))
+			idle := eventstream.NewIdleCoalescer(reader, h.config.PollInterval, nil)
+			t.Cleanup(idle.Close)
+			handler := eventstream.NewRouter(h.reader, verifier, eventstream.WithIdleCoalescer(idle), eventstream.WithPreviewHub(hub), eventstream.WithPreviewMetrics(h.metrics), eventstream.WithStreamConfig(h.config))
 			if options.wrapWriter != nil {
 				handler = options.wrapWriter(handler)
 			}

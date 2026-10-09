@@ -158,12 +158,7 @@ func testEventStreamSSEProjectsAllPublicChildEventVariants(t *testing.T, path st
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	request := signedRequest(t, signer, http.MethodGet, path)
 	request.Header.Set("Accept", "text/event-stream")
-	eventstreamservice.NewRouter(
-		reader,
-		verifier,
-		eventstreamservice.WithStreamPollInterval(time.Millisecond),
-		eventstreamservice.WithStreamMaxEmptyPolls(1),
-	).ServeHTTP(recorder, request)
+	streamRouter(t, reader, verifier).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -290,7 +285,7 @@ func TestEventStreamRoutesRequireExactlyOneBetaMarkerBeforeReaderAccess(t *testi
 				reader := &recordingReader{}
 				var router http.Handler
 				if strings.HasSuffix(route, "/stream") {
-					router = eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamMaxEmptyPolls(1))
+					router = eventstreamservice.NewRouter(reader, verifier)
 				} else {
 					router = listRouter(reader, verifier, nil)
 				}
@@ -317,7 +312,7 @@ func TestEventStreamSSEStartsAtCurrentHighWaterAndClosesOnDeleted(t *testing.T) 
 			{StreamPosition: 12, Event: eventstream.Event{ID: "evt_deleted", Type: "session.deleted", SessionID: "sesn_stream", Payload: json.RawMessage(`{"deleted":true}`)}},
 		},
 	}
-	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamPollInterval(time.Millisecond), eventstreamservice.WithStreamMaxEmptyPolls(1))
+	router := streamRouter(t, reader, verifier)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_stream/events/stream?beta=true")
 	request.Header.Set("Accept", "text/event-stream")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -349,15 +344,13 @@ func TestEventStreamSSEStartsAtCurrentHighWaterAndClosesOnDeleted(t *testing.T) 
 	}
 }
 
-func TestIdleEventStreamEmitsHeartbeatBeforeTheNextPoll(t *testing.T) {
+func TestIdleEventStreamEmitsAHeartbeatRightAfterOpening(t *testing.T) {
 	signer, verifier := testInternalPrincipalPair(t)
 	reader := &recordingReader{}
 	pollInterval := 20 * time.Millisecond
-	router := eventstreamservice.NewRouter(
-		reader,
-		verifier,
-		eventstreamservice.WithStreamPollInterval(pollInterval),
-	)
+	idle := eventstreamservice.NewIdleCoalescer(reader, pollInterval, nil)
+	t.Cleanup(idle.Close)
+	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithIdleCoalescer(idle))
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_idle/events/stream?beta=true")
 	ctx, cancel := context.WithCancel(request.Context())
 	request = request.WithContext(ctx)
@@ -384,7 +377,7 @@ func TestIdleEventStreamEmitsHeartbeatBeforeTheNextPoll(t *testing.T) {
 			}
 		case <-deadline.C:
 			cancel()
-			t.Fatal("idle SSE did not flush a heartbeat within one poll interval")
+			t.Fatal("idle SSE did not flush a heartbeat right after opening")
 		}
 	}
 }
@@ -428,7 +421,7 @@ func TestEventStreamThreadSSEStartsAtThreadHighWater(t *testing.T) {
 			{StreamPosition: 22, Event: eventstream.Event{ID: "evt_deleted_thread", Type: "session.deleted", SessionID: "sesn_thread_stream", ThreadID: "thr_child", Payload: json.RawMessage(`{"deleted":true}`)}},
 		},
 	}
-	router := eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithStreamPollInterval(time.Millisecond), eventstreamservice.WithStreamMaxEmptyPolls(1))
+	router := streamRouter(t, reader, verifier)
 	request := signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_thread_stream/threads/thr_child/stream?beta=true")
 	request.Header.Set("Accept", "text/event-stream")
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -882,6 +875,26 @@ func (r *recordingReader) CurrentThreadStreamPosition(_ context.Context, _ works
 
 func (r *recordingReader) ListThreadEventChanges(_ context.Context, _ workspace.ID, _ string, _ string, after int64, _ int) ([]eventstream.StreamChange, error) {
 	return r.ListSessionEventChanges(context.Background(), workspace.DefaultID, "", after, 0)
+}
+
+// ReadSessionSignals reports every Session unchanged. It runs on the shared
+// check workers and touches no recorded field.
+func (*recordingReader) ReadSessionSignals(_ context.Context, _ workspace.ID, sessionIDs []string) ([]eventstream.SessionSignal, error) {
+	signals := make([]eventstream.SessionSignal, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		signals = append(signals, eventstream.SessionSignal{SessionID: sessionID, Exists: true, LifecycleState: "active"})
+	}
+	return signals, nil
+}
+
+// streamRouter mounts the Event Stream router with its own shared idle checks.
+// Its streams return after one completed unchanged check while idle, so a
+// recorder can read the finished body.
+func streamRouter(t *testing.T, reader *recordingReader, verifier *auth.InternalPrincipalVerifier) http.Handler {
+	t.Helper()
+	idle := eventstreamservice.NewIdleCoalescer(reader, time.Millisecond, nil)
+	t.Cleanup(idle.Close)
+	return eventstreamservice.NewRouter(reader, verifier, eventstreamservice.WithIdleCoalescer(idle), eventstreamservice.WithStreamCompletedCheckLimit(1))
 }
 
 func testInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *auth.InternalPrincipalVerifier) {

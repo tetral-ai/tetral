@@ -26,6 +26,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
+	internaleventstream "github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -59,7 +60,7 @@ type publicProjectionOptions struct {
 	transform  func(eventwire.PreviewFrame, string, []byte) [][]byte
 	config     func(*eventstream.StreamConfig)
 	wrapWriter func(http.Handler) http.Handler
-	publicEdge func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string)
+	publicEdge func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string)
 }
 
 type publicProjectionRequest struct {
@@ -135,18 +136,21 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 	t.Cleanup(hub.Close)
 	edgeFactory := options.publicEdge
 	if edgeFactory == nil {
-		edgeFactory = func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, events func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
+		edgeFactory = func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, events func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
 			base, key := startContentSDKPublicEdgeWithEvents(t, pools, objects, events)
 			return base, key, ""
 		}
 	}
-	base, key, caPath := edgeFactory(t, pools, nil, func(reader eventstream.Reader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
-		f.baseReader = reader
+	base, key, caPath := edgeFactory(t, pools, nil, func(base *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
+		f.baseReader = base
+		var reader eventstream.Reader = base
 		if options.reader != nil {
 			reader = options.reader(reader)
 		}
 		h.reader = &publicReadObserver{Reader: reader}
-		handler := eventstream.NewRouter(h.reader, verifier, eventstream.WithPreviewHub(hub), eventstream.WithPreviewMetrics(h.metrics), eventstream.WithStreamConfig(h.config))
+		idle := eventstream.NewIdleCoalescer(base, h.config.PollInterval, nil)
+		t.Cleanup(idle.Close)
+		handler := eventstream.NewRouter(h.reader, verifier, eventstream.WithIdleCoalescer(idle), eventstream.WithPreviewHub(hub), eventstream.WithPreviewMetrics(h.metrics), eventstream.WithStreamConfig(h.config))
 		if options.wrapWriter != nil {
 			handler = options.wrapWriter(handler)
 		}
@@ -401,12 +405,10 @@ func (f *publicProjectionFixture) publish(t *testing.T, frames ...eventwire.Prev
 func (f *publicProjectionFixture) fence(t *testing.T, viewer string, request *publicProjectionRequest) publicSDKSnapshot {
 	t.Helper()
 	before := countPublicEvents(f.snapshot(t, viewer), "agent.thinking")
-	f.thinking(t, request)
+	sentinel := f.thinking(t, request)
 	f.waitEvent(t, viewer, "agent.thinking", before+1)
-	polls := f.reader.polls.Load()
-	publicWait(t, "completed formal poll and drained preview queue", func() bool {
-		return f.reader.polls.Load() > polls+1 && f.metric(t, "event_stream_preview_pending_bytes") == 0
-	})
+	f.waitFormalReadPast(t, "agent.thinking", sentinel)
+	publicWait(t, "drained preview queue", func() bool { return f.metric(t, "event_stream_preview_pending_bytes") == 0 })
 	return f.snapshot(t, viewer)
 }
 

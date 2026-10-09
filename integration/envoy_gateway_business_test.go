@@ -43,7 +43,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	api "github.com/tetral-ai/tetral/services/api"
 	authservice "github.com/tetral-ai/tetral/services/auth"
-	eventstream "github.com/tetral-ai/tetral/services/event-stream"
 	gitproxy "github.com/tetral-ai/tetral/services/git-proxy"
 )
 
@@ -67,8 +66,8 @@ type translatedPublicEdge struct {
 	checkRecords, apiRecords syncBuffer
 }
 
-func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
-	return func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventFactory func(eventstream.Reader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
+func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *storagetest.WorkloadDB, blob.BlobStore, func(*internalevents.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
+	return func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventFactory func(*internalevents.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
 		t.Helper()
 		// testing.T.Context is canceled before registered cleanup runs. Keep
 		// this bounded fixture owner alive until its later-registered SDK,

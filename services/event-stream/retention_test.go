@@ -45,9 +45,7 @@ func TestEndGroupCompletesBeforeAPrunedSuffixClosesTheStream(t *testing.T) {
 			real := readerpkg.NewPostgreSQLReader(dbconnect.NewClientForTesting(role.DB))
 			scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
 			var logs bytes.Buffer
-			config := DefaultStreamConfig()
-			config.PollInterval = time.Millisecond
-			handler := &handler{reader: real, options: newOptions(WithStreamConfig(config), WithLogger(workload.NewLogger(&logs, "event-stream", "test", "unit")))}
+			handler := &handler{reader: real, options: newOptions(WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)), WithLogger(workload.NewLogger(&logs, "event-stream", "test", "unit")))}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			request := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)

@@ -28,13 +28,15 @@ const createPostgreSQLSessionEventFeedRetentionTable = `CREATE TABLE session_eve
 
 // The age indexes serve retention pruning in (age, primary key) order. The
 // head indexes bound each feed's newest-first seek to public changes; Session
-// feed reads additionally require session_visible. Neither replaces a
-// uniqueness constraint.
+// feed reads additionally require session_visible. The pruned index serves
+// Event Stream's shared idle check, one top-one seek for a Session's highest
+// watermark across all of its feeds. None replaces a uniqueness constraint.
 const (
 	createPostgreSQLSessionEventIdempotencyAgeIndex   = `CREATE INDEX idx_session_event_idempotency_keys_age ON session_event_idempotency_keys(created_at, workspace_id, session_id, idempotency_key_digest)`
 	createPostgreSQLSessionEventStreamChangesAgeIndex = `CREATE INDEX idx_session_event_stream_changes_age ON session_event_stream_changes(changed_at, workspace_id, session_id, stream_position)`
 	createPostgreSQLSessionEventStreamThreadHeadIndex = `CREATE INDEX idx_session_event_stream_changes_thread_head ON session_event_stream_changes(workspace_id, session_id, session_thread_id, stream_position DESC) WHERE visibility = 'public'`
 	createPostgreSQLSessionEventStreamSessionHead     = `CREATE INDEX idx_session_event_stream_changes_session_head ON session_event_stream_changes(workspace_id, session_id, stream_position DESC) WHERE visibility = 'public' AND session_visible`
+	createPostgreSQLSessionEventFeedRetentionPruned   = `CREATE INDEX idx_session_event_feed_retention_pruned ON session_event_feed_retention(workspace_id, session_id, pruned_through DESC)`
 )
 
 // jobRunnerKindSQLList is the exact five-kind Job Runner allowlist. Runner
@@ -319,6 +321,7 @@ func postgresqlRetentionIndexSteps() []postgresqlSchemaStep {
 		{"index_session_event_stream_changes_age", createPostgreSQLSessionEventStreamChangesAgeIndex},
 		{"index_session_event_stream_changes_thread_head", createPostgreSQLSessionEventStreamThreadHeadIndex},
 		{"index_session_event_stream_changes_session_head", createPostgreSQLSessionEventStreamSessionHead},
+		{"index_session_event_feed_retention_pruned", createPostgreSQLSessionEventFeedRetentionPruned},
 		{"index_queue_jobs_job_runner_acknowledged_retention", jobRunnerTerminalRetentionIndex("acknowledged", "acknowledged_at")},
 		{"index_queue_jobs_job_runner_cancelled_retention", jobRunnerTerminalRetentionIndex("cancelled", "cancelled_at")},
 		{"index_queue_jobs_job_runner_dead_lettered_retention", jobRunnerTerminalRetentionIndex("dead_lettered", "dead_lettered_at")},

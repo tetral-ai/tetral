@@ -26,7 +26,7 @@ func TestPreviewProcessShutdownCancelsAndJoinsLiveSSEReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer hub.Close()
-			h := &handler{options: newOptions(WithStreamShutdownContext(lifetime), WithPreviewHub(hub), WithPreviewMetrics(metrics))}
+			h := &handler{options: newOptions(WithStreamShutdownContext(lifetime), WithPreviewHub(hub), WithPreviewMetrics(metrics), WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)))}
 			scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
 			var types map[string]bool
 			if mode == "thread" {

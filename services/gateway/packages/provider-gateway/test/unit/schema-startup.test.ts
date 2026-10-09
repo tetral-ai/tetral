@@ -16,7 +16,7 @@ describe("provider-gateway schema verification", () => {
 				{
 					version: 1,
 					checksum:
-						"7bd02f81776abbe8e1f8747703448301aa885feb81bdaab7d9abb6ff53ea3488",
+						"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 				},
 			],
 		]);
@@ -55,12 +55,12 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"7bd02f81776abbe8e1f8747703448301aa885feb81bdaab7d9abb6ff53ea3488",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 					{
 						version: 1,
 						checksum:
-							"7bd02f81776abbe8e1f8747703448301aa885feb81bdaab7d9abb6ff53ea3488",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 				],
 			],
@@ -82,7 +82,7 @@ describe("provider-gateway schema verification", () => {
 					{
 						version: 1,
 						checksum:
-							"7bd02f81776abbe8e1f8747703448301aa885feb81bdaab7d9abb6ff53ea3488",
+							"f600e78f7be8b4262b8317603fc4a3eb4b0fba3ab3602bf0d6575115514c54e0",
 					},
 					{
 						version: 2,

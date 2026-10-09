@@ -354,7 +354,8 @@ preview:
     pingIntervalMs: 120000
     maxPingOut: 2
 
-# Projections of Event Stream's typed defaults, including formal SSE timers.
+# Projections of Event Stream's typed defaults. pollIntervalMs is the round
+# interval of the shared idle checks, not a per-viewer timer.
 eventStream:
   pollIntervalMs: 1000
   heartbeatIntervalMs: 1000

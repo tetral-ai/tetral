@@ -10,13 +10,15 @@
 //	  CurrentStreamPosition / CurrentThreadStreamPosition  exact SSE feed head (retained or pruned)
 //	  ReadPreviewRequest                                   exact scoped Start/thread admission descriptor for a private preview frame
 //	  ListRequestFinalMessages                             database-proven End expansion, one complete agent.message per page
+//	  ReadSessionSignals                                   coarse per-Session idle signal for Event Stream's shared idle checks
 //	Bounds: MaxStreamBatchSize (100) caps rows per change-feed fetch;
+//	  MaxSessionSignalBatch (128) caps Sessions per signal statement;
 //	  defaultListLimit (20) and maxListLimit (100) bound the list page size;
 //	  a request-final page holds exactly one message (limit 1).
 //	Signed session_events page token (resource "session_events", version 3), in pagination.go.
 //	Reads, never writes, five tables:
 //	  session_event_stream_changes  SSE cursor movement (stream_position)
-//	  session_event_feed_retention  per-feed pruned_through watermark (head and gap check)
+//	  session_event_feed_retention  per-feed pruned_through watermark (head, gap check and Session signal)
 //	  session_events                event body (type, payload_json, processed_at) and list paging keys
 //	  session_threads               thread visibility/role gate joined into every public read
 //	  sessions                      lifecycle_state readability guard (deletion rules under INVARIANTS)
@@ -82,6 +84,8 @@
 //     End-group reads.
 //   - services/event-stream/preview_writer.go — the SSE writer that consumes the
 //     deferred-message and End-group contract.
+//   - services/event-stream/idle_checks.go — the shared idle checks that read
+//     ReadSessionSignals and wake viewers on a changed signal.
 //   - internal/eventstream/pagination.go — page-token position/sequence keys.
 //   - internal/eventstream/list.go — list limit bounds and query options.
 //   - internal/storage/postgresql_schema.go — stream_position IDENTITY,

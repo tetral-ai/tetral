@@ -92,8 +92,8 @@
 //	                                                        and the processed revision (Bridge commit, Job Runner delivery);
 //	                                                        cleanup deletes rows older than 24 h through its retention
 //	                                                        function
-//	session_event_feed_retention                           cleanup change retention, in the deleting transaction,          Event Stream feed head and gap check
-//	                                                        through its function only
+//	session_event_feed_retention                           cleanup change retention, in the deleting transaction,          Event Stream feed head, gap check and
+//	                                                        through its function only                                        shared idle signal
 //	session_event_idempotency_keys                         api event admission with a supplied key (insert, expired-       api replay/conflict lookup; cleanup
 //	                                                        receipt replacement); cleanup deletes receipts older than 24 h  retention through its function
 //	session_messages                                       Runtime declarations persisted by Bridge; Assistant header      Bridge LoadContext and prefix readers,

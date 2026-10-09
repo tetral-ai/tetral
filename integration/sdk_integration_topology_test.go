@@ -395,11 +395,13 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 		runtimeClient,
 		internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)),
 	)
+	idle := eventstream.NewIdleCoalescer(eventReader, time.Millisecond, nil)
+	defer idle.Close()
 	eventServer := httptest.NewServer(eventstream.NewRouter(
 		eventReader,
 		verifier,
-		eventstream.WithStreamPollInterval(time.Millisecond),
-		eventstream.WithStreamMaxEmptyPolls(1),
+		eventstream.WithIdleCoalescer(idle),
+		eventstream.WithStreamCompletedCheckLimit(1),
 	))
 	defer eventServer.Close()
 

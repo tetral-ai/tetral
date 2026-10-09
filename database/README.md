@@ -110,7 +110,9 @@ the highest pruned stream position that feed's reader would have returned. Its
 CHECK ties the key to the nullable Thread column, and its composite foreign keys
 cascade only from a future Session or Thread purge, so watermarks outlive the
 change rows they summarize. Event Stream may only SELECT it; only the change
-retention function writes it.
+retention function writes it. Its `(workspace_id, session_id, pruned_through
+DESC)` index serves Event Stream's shared idle check, which reads a Session's
+highest watermark across its feeds.
 
 `session_runtime_handoffs` and `session_runtime_handoff_threads` are internal
 Workspace-RLS receipts retained through Session lifetime. They preserve exact
@@ -227,7 +229,7 @@ These owner tests pin the serving paths repaired after role restriction:
 | job_runner | Lost Runtime closes an open model request | `request_usage_details SELECT/INSERT` (explicit `ON CONFLICT` key target and audit append); `services/job-runner/runtime_pod_loss_role_test.go` uses the installed role for the fenced closeout, verifies one matching zero-token terminal audit, unchanged replay, and whole repair rollback when either privilege is individually revoked |
 | cleanup | Receipt and change retention | `tetral_prune_event_idempotency` and `tetral_prune_event_changes` EXECUTE only, no table grant on receipts, changes or feed metadata; `services/cleanup/retention_test.go` runs the installed role through both functions and checks denied direct access, other roles' denied execution, spoofed flags, search-path shadowing and non-owner definers |
 | queue | Job Runner terminal retention | `tetral_prune_job_runner_jobs` EXECUTE beside its existing `queue_jobs` grants; `internal/queue/job_runner_retention_test.go` runs the installed role and checks the same denials |
-| event_stream | Feed head and retention gap | `session_event_feed_retention SELECT`; `internal/eventstream/retention_test.go` reads heads and gaps through the installed role |
+| event_stream | Feed head, retention gap and shared idle signal | `session_event_feed_retention SELECT`; `internal/eventstream/retention_test.go` reads heads and gaps and `internal/eventstream/session_signals_test.go` reads Session signals through the installed role |
 | job_runner | Session deletion retires output-capture custody after Sandbox release | `sandbox_output_capture_operations SELECT/UPDATE/DELETE` (row lock, cleanup scheduling, terminal retirement), `sandbox_output_capture_blobs SELECT/DELETE` (scoped deletion), with no capture `INSERT`; `services/job-runner/runtime_output_capture_role_test.go` uses the installed role, preserves pending Queue work and foreign custody, and checks rollback when required grants are revoked |
 | cleanup | Global due-Session scheduling | `tetral_cleanup_due_sessions` EXECUTE, `cleanup_schedule_cursor SELECT/UPDATE`, `session_runtime_status SELECT/UPDATE` and Queue admission, with no `workspaces` read; `services/cleanup/scheduler_test.go` runs the installed role through discovery, claims and fenced cursor writes, and `discovery_boundary_test.go` checks its denied direct reads and cursor `INSERT`/`DELETE` and every other role's denied execution |
 

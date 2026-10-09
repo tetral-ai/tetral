@@ -529,8 +529,9 @@ publication queue, batch byte/frame limits, connect/flush deadlines, retry cap,
 credential poll interval, and native NATS heartbeat settings. `preview.subscriber` configures the connect deadline,
 the supervisor's fresh-connection retry interval and its own native NATS
 heartbeat settings. `eventStream`
-configures formal polling/heartbeat/write deadlines, preview setup timeout,
-hub/viewer/subscription byte and frame limits, and active request limit.
+configures the shared idle-check round interval, heartbeat and write
+deadlines, preview setup timeout, hub/viewer/subscription byte and frame
+limits, and active request limit.
 Defaults are projections of the typed service defaults. The chart rejects
 nonpositive/out-of-range values, a viewer larger than its hub, and a publisher
 batch that cannot fit the queue. Values use milliseconds where named `Ms`.

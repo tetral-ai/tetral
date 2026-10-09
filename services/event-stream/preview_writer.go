@@ -55,8 +55,7 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 
 	// This tenant-safe opening read proves session/thread visibility and the
 	// actual parent relation before policy, subscriptions, or SSE headers.
-	openingCursor, err := currentPosition(r.Context())
-	if err != nil {
+	if _, err := currentPosition(r.Context()); err != nil {
 		httpapi.WriteError(w, r, err)
 		return
 	}
@@ -69,9 +68,17 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		httpapi.WriteError(w, r, err)
 		return
 	}
+	// Every Session and Thread viewer of this Session shares one idle check;
+	// the reference is released on every exit.
+	idle, err := h.options.idleChecks.join(scope.WorkspaceID, scope.SessionID, h.options.completedCheckLimit > 0)
+	if err != nil {
+		httpapi.WriteError(w, r, err)
+		return
+	}
+	defer idle.close()
 	var viewer *PreviewViewer
 	if len(types) > 0 && scope.ThreadID == "" && h.options.previewHub != nil {
-		// The next high-water read is the opening mark after subscription flush.
+		// The final head read below is the opening mark after subscription flush.
 		ctx, cancel := context.WithTimeout(r.Context(), h.options.streamConfig.PreviewSetupTimeout)
 		var err error
 		viewer, err = h.options.previewHub.Join(ctx, scope.WorkspaceID, scope.SessionID)
@@ -83,13 +90,17 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 			h.logPreviewStop(scope, "", "setup_unavailable")
 		}
 	}
-	cursor := openingCursor
-	if len(types) > 0 && scope.ThreadID == "" && h.options.previewHub != nil {
-		cursor, err = currentPosition(r.Context())
-		if err != nil {
-			httpapi.WriteError(w, r, err)
-			return
-		}
+	// The generation saved before the final exact head read is the baseline of
+	// the first change read; any check published after it is noticed.
+	generation, err := idle.sample()
+	if err != nil {
+		httpapi.WriteError(w, r, err)
+		return
+	}
+	cursor, err := currentPosition(r.Context())
+	if err != nil {
+		httpapi.WriteError(w, r, err)
+		return
 	}
 	state := streamPreviewState{requests: map[string]*previewRequestState{}, watermark: cursor, types: types}
 	defer h.releasePreviewRequests(&state)
@@ -115,23 +126,32 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		return
 	}
 	nextHeartbeat := time.Now()
-	// Formal changes are polled at least once per poll interval, and at once
-	// after a poll that returned rows, when an admitted preview's Start is not
-	// yet behind the cursor, or after a preview loss. A preview wake alone runs
-	// the bounded preview slice without a formal change poll, so polling never
-	// follows each delta and a delta flood cannot delay lifecycle or End-group
-	// delivery beyond one poll interval.
-	var lastPoll time.Time
-	forcePoll := true
-	emptyPolls := 0
+	// The formal change read runs only when forced: at opening, after a read
+	// that returned rows or an End group, when an admitted preview's Start is
+	// not yet behind the cursor, after preview loss, or when the shared idle
+	// check reports a changed Session. A preview wake alone runs the bounded
+	// preview slice without a formal read, so reads never follow each delta.
+	// There is no per-viewer periodic read.
+	forcePoll, haveSample := true, true
+	var waitFrom idleGeneration
+	completedChecks := 0
 	for {
 		if r.Context().Err() != nil {
 			return
 		}
 		var changes []StreamChange
 		selectedAt := time.Now()
-		if forcePoll || !selectedAt.Before(lastPoll.Add(h.options.streamConfig.PollInterval)) {
-			lastPoll = selectedAt
+		if forcePoll {
+			// Sample the shared generation before the read; an empty read then
+			// waits only while the generation is still unchanged.
+			if !haveSample {
+				next, err := idle.sample()
+				if err != nil {
+					return
+				}
+				generation = next
+			}
+			haveSample = false
 			var err error
 			changes, err = listChanges(r.Context(), cursor)
 			if err != nil {
@@ -141,15 +161,10 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 				return
 			}
 			if len(changes) == 0 {
-				emptyPolls++
-				if h.options.streamMaxEmptyPolls > 0 && emptyPolls >= h.options.streamMaxEmptyPolls {
-					return
-				}
-			} else {
-				emptyPolls = 0
+				waitFrom = generation
 			}
 		}
-		// Rows or an End group were consumed and more may be waiting: poll again
+		// Rows or an End group were consumed and more may be waiting: read again
 		// without waiting once the preview slice and heartbeat check have run.
 		forcePoll = len(changes) > 0
 		for len(changes) > 0 {
@@ -262,16 +277,19 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		if forcePoll {
 			continue
 		}
-		// Wait only after an empty or skipped poll: for the poll timer, the
-		// heartbeat timer, a preview wake or cancellation.
-		delay := time.Until(lastPoll.Add(h.options.streamConfig.PollInterval))
-		if heartbeatDelay := time.Until(nextHeartbeat); heartbeatDelay < delay {
-			delay = heartbeatDelay
+		// After an empty read, read again at once if a check changed or failed
+		// the registration since the sample taken before that read.
+		changed, err := idle.changedSince(waitFrom)
+		if err != nil {
+			return
 		}
-		if delay < 0 {
-			delay = 0
+		if changed {
+			forcePoll = true
+			continue
 		}
-		timer := time.NewTimer(delay)
+		// Otherwise wait for a changed check, the heartbeat timer, a preview
+		// wake or cancellation.
+		timer := time.NewTimer(max(time.Until(nextHeartbeat), 0))
 		var wake <-chan struct{}
 		if viewer != nil {
 			wake = viewer.Wake()
@@ -280,6 +298,23 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request, scope Rea
 		case <-r.Context().Done():
 			timer.Stop()
 			return
+		case <-waitFrom.changed:
+			timer.Stop()
+			forcePoll = true
+		case <-waitFrom.checked:
+			// Test-only completed-check counter; the channel is nil in
+			// production, where an unchanged check wakes no viewer.
+			timer.Stop()
+			next, err := idle.sample()
+			if err != nil {
+				return
+			}
+			if next.value != waitFrom.value {
+				forcePoll = true
+			} else if completedChecks++; completedChecks >= h.options.completedCheckLimit {
+				return
+			}
+			waitFrom.checked = next.checked
 		case <-timer.C:
 		case <-wake:
 			timer.Stop()
@@ -421,7 +456,7 @@ func (h *handler) previewFrame(ctx context.Context, writer *sseWriter, scope Rea
 		return nil
 	}
 	// An admitted request_open whose Start is not yet behind the cursor forces a
-	// formal poll before the next frame is taken. A frame taken while its Start
+	// formal read before the next frame is taken. A frame taken while its Start
 	// is still ahead of the cursor is dropped, so no preview precedes its Start
 	// on this connection's durable cursor.
 	if cursor < request.startPosition {

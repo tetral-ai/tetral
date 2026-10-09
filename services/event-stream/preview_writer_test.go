@@ -146,7 +146,6 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 					scope.ThreadID = "thr_main"
 				}
 				config := DefaultStreamConfig()
-				config.PollInterval = time.Millisecond
 				transport := &fixtureTransport{}
 				hub, err := NewPreviewHub(transport, config, nil)
 				if err != nil {
@@ -159,7 +158,7 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 				firstBody := strings.Repeat("A", 256*1024)
 				response := &fixtureResponse{ResponseRecorder: httptest.NewRecorder(), opened: make(chan struct{}), ctx: ctx, marker: []byte(firstBody), held: make(chan int, 1), release: make(chan struct{})}
 				changesRelease := make(chan struct{})
-				handler := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub))}
+				handler := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)))}
 				done := make(chan struct{})
 				var types map[string]bool
 				if mode == "session_preview" {
@@ -317,7 +316,6 @@ func TestPostgreSQLRequestEndProjectionResidency(t *testing.T) {
 // releases the subscription; formal delivery continues to session.deleted.
 func TestStreamLoopPreviewLossAfterSessionDeletionContinuesFormalDelivery(t *testing.T) {
 	config := DefaultStreamConfig()
-	config.PollInterval = time.Millisecond
 	metrics := NewPreviewMetrics()
 	transport := &fixtureTransport{}
 	hub, err := NewPreviewHub(transport, config, metrics)
@@ -325,7 +323,7 @@ func TestStreamLoopPreviewLossAfterSessionDeletionContinuesFormalDelivery(t *tes
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	h := &handler{options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics))}
+	h := &handler{options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics), WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)))}
 	scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
 	var mu sync.Mutex
 	deleted, unreadableServed := false, false
@@ -441,12 +439,13 @@ func (noFinalMessagesReader) ListRequestFinalMessages(context.Context, ReadScope
 }
 
 // A backlog larger than one batch, an End group and its re-read suffix are
-// delivered back to back; the loop waits for its poll timer only after a poll
-// that returned nothing. The one-minute timers make any intermediate wait fail.
+// delivered back to back; the loop waits only after a read that returned
+// nothing. No shared idle check ever runs and the heartbeat timer is one
+// minute, so any intermediate wait would never end.
 func TestStreamLoopDrainsBacklogAndEndSuffixWithoutPollWait(t *testing.T) {
 	config := DefaultStreamConfig()
-	config.PollInterval, config.HeartbeatInterval = time.Minute, time.Minute
-	h := &handler{reader: noFinalMessagesReader{}, options: newOptions(WithStreamConfig(config))}
+	config.HeartbeatInterval = time.Minute
+	h := &handler{reader: noFinalMessagesReader{}, options: newOptions(WithStreamConfig(config), WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)))}
 	rows := []StreamChange{}
 	want := []string{}
 	for position := int64(1); position <= 150; position++ {
@@ -511,11 +510,12 @@ func TestStreamLoopDrainsBacklogAndEndSuffixWithoutPollWait(t *testing.T) {
 }
 
 // previewLoopFixture opens a preview Session stream whose Start is already
-// visible after the opening mark, then waits until the loop is idle.
-func previewLoopFixture(t *testing.T, pollInterval time.Duration, formal func(after int64) []StreamChange) (*fixtureTransport, *streamSink, func() int) {
+// visible after the opening mark, then waits until the loop is idle. idle
+// supplies the shared checks that wake the stream for formal changes.
+func previewLoopFixture(t *testing.T, idle *IdleCoalescer, formal func(after int64) []StreamChange) (*fixtureTransport, *streamSink, func() int) {
 	t.Helper()
 	config := DefaultStreamConfig()
-	config.PollInterval, config.HeartbeatInterval = pollInterval, time.Minute
+	config.HeartbeatInterval = time.Minute
 	metrics := NewPreviewMetrics()
 	transport := &fixtureTransport{}
 	hub, err := NewPreviewHub(transport, config, metrics)
@@ -523,7 +523,7 @@ func previewLoopFixture(t *testing.T, pollInterval time.Duration, formal func(af
 		t.Fatal(err)
 	}
 	reader := &admissionReader{descriptor: PreviewRequest{StartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main", ThreadVisibility: "public", IsPrimaryThread: true}}
-	h := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics))}
+	h := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithPreviewMetrics(metrics), WithIdleCoalescer(idle))}
 	start := StreamChange{StreamPosition: 11, Event: Event{ID: "evt_start", ThreadID: "thr_main", Type: "span.model_request_start", Payload: json.RawMessage(`{}`)}, ModelRequestID: "mreq_preview", RequestStartEventID: "evt_start", RequestStartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main"}
 	var mu sync.Mutex
 	polls := 0
@@ -569,11 +569,11 @@ func previewLoopFixture(t *testing.T, pollInterval time.Duration, formal func(af
 	return transport, sink, pollCount
 }
 
-// Each preview wake runs the preview slice without a formal database poll.
-// With a one-minute poll interval, fifty separately woken deltas leave only
-// the opening poll and the empty poll that followed its progress.
+// Each preview wake runs the preview slice without a formal database read.
+// With no shared check running, fifty separately woken deltas leave only the
+// opening read and the empty read that followed its progress.
 func TestStreamLoopPreviewWakesDoNotPollPerDelta(t *testing.T) {
-	transport, sink, pollCount := previewLoopFixture(t, time.Minute, func(int64) []StreamChange { return nil })
+	transport, sink, pollCount := previewLoopFixture(t, idleChecksForTest(t, unchangedSignals{}, false), func(int64) []StreamChange { return nil })
 	for sequence := int64(1); sequence <= 50; sequence++ {
 		transport.publish(t, fixtureFrame("event_delta", "evt_message", sequence, "x"))
 		waitCondition(t, func() bool { return sink.count("event: event_delta\n") == int(sequence) })
@@ -584,12 +584,22 @@ func TestStreamLoopPreviewWakesDoNotPollPerDelta(t *testing.T) {
 }
 
 // A continuous delta flood cannot starve formal delivery: a row committed
-// mid-flood is written within the poll interval while deltas keep arriving.
+// mid-flood changes the shared Session signal, and the woken stream writes it
+// while deltas keep arriving.
 func TestStreamLoopDeliversFormalRowDuringPreviewFlood(t *testing.T) {
 	var mu sync.Mutex
 	committed := false
 	formalRow := StreamChange{StreamPosition: 12, Event: Event{ID: "evt_formal", Type: "session.status_idle", Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}}
-	transport, sink, _ := previewLoopFixture(t, 50*time.Millisecond, func(after int64) []StreamChange {
+	signals := signalFunc(func(sessionID string) SessionSignal {
+		mu.Lock()
+		defer mu.Unlock()
+		signal := SessionSignal{SessionID: sessionID, Exists: true, LifecycleState: "active", Position: 11}
+		if committed {
+			signal.Position = formalRow.StreamPosition
+		}
+		return signal
+	})
+	transport, sink, _ := previewLoopFixture(t, idleChecksForTest(t, signals, true), func(after int64) []StreamChange {
 		mu.Lock()
 		defer mu.Unlock()
 		if committed && after < formalRow.StreamPosition {
@@ -609,6 +619,64 @@ func TestStreamLoopDeliversFormalRowDuringPreviewFlood(t *testing.T) {
 		}
 		transport.publish(t, fixtureFrame("event_delta", "evt_message", sequence, "x"))
 		waitCondition(t, func() bool { return sink.count("event: event_delta\n") == int(sequence) })
+	}
+}
+
+// An admitted preview request whose Start is past the cursor forces a formal
+// read by itself: no shared check ever runs here, yet the Start committed
+// after the opening read is read and the request's preview starts.
+func TestStreamLoopPreviewStartForcesAFormalRead(t *testing.T) {
+	config := DefaultStreamConfig()
+	config.HeartbeatInterval = time.Minute
+	transport := &fixtureTransport{}
+	hub, err := NewPreviewHub(transport, config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	reader := &admissionReader{descriptor: PreviewRequest{StartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main", ThreadVisibility: "public", IsPrimaryThread: true}}
+	h := &handler{reader: reader, options: newOptions(WithStreamConfig(config), WithPreviewHub(hub), WithIdleCoalescer(idleChecksForTest(t, unchangedSignals{}, false)))}
+	start := StreamChange{StreamPosition: 11, Event: Event{ID: "evt_start", ThreadID: "thr_main", Type: "span.model_request_start", Payload: json.RawMessage(`{}`)}, ModelRequestID: "mreq_preview", RequestStartEventID: "evt_start", RequestStartStreamPosition: 11, RequestKind: "agent_provider_request", ThreadRole: "main"}
+	var mu sync.Mutex
+	committed, reads := false, 0
+	listChanges := func(_ context.Context, after int64) ([]StreamChange, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reads++
+		if committed && after < start.StreamPosition {
+			return []StreamChange{start}, nil
+		}
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sink := newStreamSink()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scope := ReadScope{WorkspaceID: workspace.DefaultID, SessionID: "sesn_preview"}
+		serveDeclaredStream(sink, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), scope, func(w http.ResponseWriter, r *http.Request) {
+			h.streamEvents(w, r, scope, map[string]bool{"agent.message": true}, func(context.Context) (int64, error) { return 10, nil }, listChanges)
+		})
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	select {
+	case <-sink.opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not open")
+	}
+	waitCondition(t, func() bool { mu.Lock(); defer mu.Unlock(); return reads == 1 })
+	mu.Lock()
+	committed = true
+	mu.Unlock()
+	transport.publish(t, fixtureFrame("request_open", "", 0, ""))
+	transport.publish(t, fixtureFrame("event_start", "evt_message", 0, ""))
+	waitCondition(t, func() bool { return sink.count("event: event_start\n") == 1 })
+	if got := sseDataIDs(t, sink.String()); len(got) != 2 || got[0] != "evt_start" {
+		t.Fatalf("delivered %v; want the formal Start before its preview", got)
 	}
 }
 

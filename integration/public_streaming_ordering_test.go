@@ -96,8 +96,9 @@ func TestPostgreSQLPublicStreamingOrdering(t *testing.T) {
 			}
 			h.releaseFragments(t, 3)
 			publicWait(t, "drained real broker batch through final text fragment", func() bool { return publicTappedDelta(h, "second\n") })
-			before := h.reader.polls.Load()
-			publicWait(t, "formal poll after controlled frame batch", func() bool { return h.reader.polls.Load() > before })
+			publicWait(t, "controlled frame batch drained by the viewer", func() bool {
+				return h.metric(t, "event_stream_preview_pending_bytes") == 0
+			})
 			h.finish(t)
 			snapshot := h.waitEvent(t, "fault", "span.model_request_end", 1)
 			h.assertFormal(t, snapshot, []string{"alpha βeta omega\n", "second\n"})

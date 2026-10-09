@@ -54,8 +54,7 @@ func TestPostgreSQLPublicStreamingIdentity(t *testing.T) {
 				}
 			}
 		}
-		before := h.reader.polls.Load()
-		publicWait(t, "formal poll after committed texts", func() bool { return h.reader.polls.Load() > before })
+		h.waitFormalReadPast(t, "agent.message", "")
 		h.finish(t)
 		expected := []string{"alpha βeta omega\n", "second\n"}
 		for _, option := range options {

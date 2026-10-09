@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -39,12 +38,33 @@ type Option func(*options)
 type options struct {
 	logger                *slog.Logger
 	streamBatchSize       int
-	streamMaxEmptyPolls   int
 	requestMetrics        httpapi.RequestMetricsRecorder
 	streamConfig          StreamConfig
 	previewHub            *PreviewHub
 	previewMetrics        *PreviewMetrics
 	streamShutdownContext context.Context
+	idleChecks            *IdleCoalescer
+	completedCheckLimit   int
+}
+
+// WithIdleCoalescer supplies the process's shared idle checks. Every stream
+// registers its Session with them and waits on them when idle; a router
+// without them fails stream requests. The caller owns their lifetime.
+func WithIdleCoalescer(idleChecks *IdleCoalescer) Option {
+	return func(o *options) { o.idleChecks = idleChecks }
+}
+
+// WithStreamCompletedCheckLimit is a test hook for finite streams: a stream
+// returns once limit completed shared checks found its Session unchanged
+// while it waited with nothing to read. Production leaves it at zero, so an
+// unchanged check wakes no viewer and the connection stays open until the
+// client disconnects or session.deleted is emitted.
+func WithStreamCompletedCheckLimit(limit int) Option {
+	return func(o *options) {
+		if limit > 0 {
+			o.completedCheckLimit = limit
+		}
+	}
 }
 
 // WithStreamShutdownContext cancels long-lived SSE work when its process begins
@@ -66,25 +86,6 @@ func WithLogger(logger *slog.Logger) Option {
 
 func WithRequestMetrics(metrics httpapi.RequestMetricsRecorder) Option {
 	return func(o *options) { o.requestMetrics = metrics }
-}
-
-func WithStreamPollInterval(interval time.Duration) Option {
-	return func(o *options) {
-		if interval > 0 {
-			o.streamConfig.PollInterval = interval
-		}
-	}
-}
-
-// WithStreamMaxEmptyPolls is a test hook. Production streams leave this at zero
-// so the connection stays open until the client disconnects or session.deleted
-// is emitted.
-func WithStreamMaxEmptyPolls(max int) Option {
-	return func(o *options) {
-		if max > 0 {
-			o.streamMaxEmptyPolls = max
-		}
-	}
 }
 
 func NewRouter(reader Reader, verifier *auth.InternalPrincipalVerifier, opts ...Option) http.Handler {

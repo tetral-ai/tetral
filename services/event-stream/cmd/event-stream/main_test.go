@@ -25,11 +25,14 @@ import (
 func TestEventStreamCommandHealthReadyAndScopedRoutes(t *testing.T) {
 	signer, verifier, _ := commandInternalPrincipalPair(t)
 	readiness := workload.NewReadiness()
+	reader := &commandEventReader{}
+	idle := eventstream.NewIdleCoalescer(reader, time.Millisecond, nil)
+	t.Cleanup(idle.Close)
 	handler := buildHTTPHandler(readiness, eventstream.NewRouter(
-		&commandEventReader{},
+		reader,
 		verifier,
-		eventstream.WithStreamPollInterval(time.Millisecond),
-		eventstream.WithStreamMaxEmptyPolls(1),
+		eventstream.WithIdleCoalescer(idle),
+		eventstream.WithStreamCompletedCheckLimit(1),
 	))
 
 	assertProbe(t, handler, "/health", http.StatusOK, "ok")
@@ -334,6 +337,14 @@ func (*commandEventReader) ListSessionEventChanges(context.Context, workspace.ID
 
 func (*commandEventReader) ListThreadEventChanges(context.Context, workspace.ID, string, string, int64, int) ([]eventstream.StreamChange, error) {
 	return nil, nil
+}
+
+func (*commandEventReader) ReadSessionSignals(_ context.Context, _ workspace.ID, sessionIDs []string) ([]eventstream.SessionSignal, error) {
+	signals := make([]eventstream.SessionSignal, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		signals = append(signals, eventstream.SessionSignal{SessionID: sessionID, Exists: true, LifecycleState: "active"})
+	}
+	return signals, nil
 }
 
 func commandInternalPrincipalPair(t *testing.T) (*auth.InternalPrincipalSigner, *auth.InternalPrincipalVerifier, string) {
