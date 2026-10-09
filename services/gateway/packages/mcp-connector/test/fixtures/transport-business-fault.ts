@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, rename, writeFile } from "node:fs/promises";
 import { credentials, Metadata } from "@grpc/grpc-js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { AgentRuntimeBridgeServiceClient } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -10,6 +10,14 @@ import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.
 import { McpSDKClient } from "../../src/client.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import { McpConnectorServiceShell } from "../../src/service.js";
+
+// The Go side polls these handoff files, so each appears complete or not at all.
+let handoffWrites = 0;
+const writeHandoffFile = async (path: string, contents: string) => {
+  const temporary = `${path}.${process.pid}.${++handoffWrites}.tmp`;
+  await writeFile(temporary, contents);
+  await rename(temporary, path);
+};
 
 const input = JSON.parse(await readFile(process.argv[2]!, "utf8")) as {
   directory: string;
@@ -135,7 +143,7 @@ const caller = new McpConnectorServiceClient(
   `127.0.0.1:${port}`,
   credentials.createInsecure(),
 );
-await writeFile(
+await writeHandoffFile(
   `${input.directory}/ready.json`,
   JSON.stringify({ port, pid: process.pid, bootID: input.bootID }),
 );
@@ -168,7 +176,7 @@ try {
   const watcher = (async () => {
     while (!stopped.signal.aborted) {
       if (await exists(`${input.directory}/shutdown`)) {
-        await writeFile(
+        await writeHandoffFile(
           `${input.directory}/draining.json`,
           JSON.stringify({ bootID: input.bootID }),
         );
@@ -179,7 +187,7 @@ try {
     }
   })();
   const result = await call;
-  await writeFile(
+  await writeHandoffFile(
     `${input.directory}/result.json`,
     JSON.stringify({
       result,
@@ -193,7 +201,7 @@ try {
   await watcher;
   await wait("shutdown");
   await close();
-  await writeFile(
+  await writeHandoffFile(
     `${input.directory}/closed.json`,
     JSON.stringify({
       bootID: input.bootID,
