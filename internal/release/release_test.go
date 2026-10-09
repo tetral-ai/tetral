@@ -462,7 +462,7 @@ func validCandidate(t *testing.T) CandidateManifest {
 		Schema: CandidateSchema, Version: version, SourceCommit: "0123456789abcdef0123456789abcdef01234567", Platform: PlatformLinuxAMD64,
 		Images: images, Chart: ChartIdentity{CandidateManifestDigest: testDigest("chart-manifest"), PackageDigest: testDigest("chart"), RenderDigest: testDigest("render"), ValuesDigest: testDigest("values"), RenderCommand: "helm template tetral dist/tetral-0.1.0-alpha.1.tgz -f release-values.json"},
 		SchemaVersion: int(CurrentDatabaseIdentity().Version), SchemaChecksum: CurrentDatabaseIdentity().Checksum, CreatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
-		Bases: []BaseIdentity{{Reference: "docker.io/library/golang:1.25.13-alpine", TopLevelDigest: testDigest("base-top"), ChildDigest: testDigest("base-child"), Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		Bases: []BaseIdentity{{Reference: "docker.io/library/golang:1.26.9-alpine", TopLevelDigest: testDigest("base-top"), ChildDigest: testDigest("base-child"), Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 	}
 }
 
