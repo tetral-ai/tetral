@@ -185,7 +185,7 @@ func (m *dependencyManager) prepareEGCTL(ctx context.Context) error {
 	m.environment = append(withoutEnvironmentVariable(m.environment, EnvTestEGCTL), EnvTestEGCTL+"="+path)
 	m.evidence = append(m.evidence, DependencyEvidence{Name: "egctl", Source: "canonical-pinned-archive", Identity: "v" + tool.Version + "/" + tool.OS + "/" + tool.Arch + "@sha256:" + tool.SHA256})
 	helper := lock.Gateway.SecretHelper
-	if helper.Directory != "integration/envoy-gateway-secret-helper" || helper.Module != "github.com/envoyproxy/gateway" || helper.Version != "v"+lock.Gateway.Version || helper.Toolchain != "go1.26.8" {
+	if helper.Directory != "integration/envoy-gateway-secret-helper" || helper.Module != "github.com/envoyproxy/gateway" || helper.Version != "v"+lock.Gateway.Version || helper.Toolchain != "go1.26.9" {
 		return errors.New("unsupported egctl SecretType helper lock")
 	}
 	helperDirectory := filepath.Join(m.root, helper.Directory)

@@ -126,8 +126,9 @@ compares every original listener, route, cluster and endpoint with the official
 translator, rejects conflicting duplicate or missing/unexpected Secret references,
 and supplies only the omitted upstream-generated Secrets. It never constructs
 replacement proxy policy or changes the checksum-verified CLI. The helper uses
-Go 1.26.8 required by upstream; Engine remains on Go 1.25.13. Separate module and
-symbol vulnerability scans cover this test-only dependency graph. This repairs
+Go 1.26.9, the Engine module's toolchain, which also satisfies upstream's Go
+1.26.8 minimum. Separate module and symbol vulnerability scans cover this
+test-only dependency graph. This repairs
 local serialization; it does not establish controller Secret propagation.
 The architecture guard allows only its entry point's three protobuf serialization
 imports; other helper files and gRPC transport imports remain prohibited.

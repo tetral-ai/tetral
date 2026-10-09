@@ -12,7 +12,7 @@ if lock != {
     'module_directory': 'integration/envoy-gateway-secret-helper',
     'upstream_module': 'github.com/envoyproxy/gateway',
     'upstream_version': 'v1.9.2',
-    'go_toolchain': 'go1.26.8',
+    'go_toolchain': 'go1.26.9',
 }:
     raise SystemExit('unsupported SecretType helper dependency lock')
 helper = root / lock['module_directory']

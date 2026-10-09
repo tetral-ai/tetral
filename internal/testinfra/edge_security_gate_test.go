@@ -73,7 +73,7 @@ func TestSecretHelperSecurityGatePreservesInventoryAndRejectsScannerErrors(t *te
 				if err := json.Unmarshal([]byte(line), &call); err != nil {
 					t.Fatal(err)
 				}
-				if call.Toolchain != "go1.26.8" {
+				if call.Toolchain != "go1.26.9" {
 					t.Fatal("gate changed the selected scanner toolchain")
 				}
 				if call.Kind == "build" {
